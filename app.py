@@ -221,6 +221,7 @@ def _parse_deploy_request(body):
 
 def _with_final_result(events, model_name, success_message, failure_message):
     """Passes progress events through and ends with exactly one {"done": True, ...} result event."""
+    last_status = None
     for event in events:
         if event.get("cancelled"):
             yield {"done": True, "success": False, "cancelled": True, "error": "Cancelled by user"}
@@ -228,11 +229,15 @@ def _with_final_result(events, model_name, success_message, failure_message):
         if event.get("error"):
             yield {"done": True, "success": False, "error": event["error"]}
             return
-        if event.get("status") == "success":
-            yield {"done": True, "success": True, "model_name": model_name, "message": success_message}
-            return
-        yield event
-    yield {"done": True, "success": False, "error": failure_message}
+        last_status = event.get("status") or last_status
+        # /api/create forwards the pull's own "success" before it creates the model, so only the
+        # last status of the whole stream counts; stopping early would disconnect mid-create
+        if last_status != "success":
+            yield event
+    if last_status == "success":
+        yield {"done": True, "success": True, "model_name": model_name, "message": success_message}
+    else:
+        yield {"done": True, "success": False, "error": failure_message}
 
 
 def _unregister_operation(operation_id):
