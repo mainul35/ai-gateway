@@ -72,17 +72,29 @@ newline-delimited JSON, and an optional `"operation_id"` that can be passed to `
 
 ## Configuration
 
+Settings live in [`config/config.properties`](config/config.properties) (`key=value`, `#` for comments).
+The file is re-read when it changes, so no restart is needed. A value in the file takes precedence over
+the matching environment variable; the variable is used when the property is empty or missing.
+
+| Property | Environment variable | Default | Description |
+|----------|----------------------|---------|-------------|
+| `ollama.host` | `OLLAMA_HOST` | `http://localhost:11434` | Ollama server that models are deployed to, pulled into, listed from and deleted from |
+| `hf.token` | `HF_TOKEN` | - | HuggingFace token, needed to read gated or private models (e.g. Llama) |
+| `ollama.server.vram.gb` | `OLLAMA_SERVER_VRAM_GB` | detected | GPU memory of the Ollama server, for recommendations. Use `0` for a CPU-only server |
+| `ollama.server.ram.gb` | `OLLAMA_SERVER_RAM_GB` | detected | RAM of the Ollama server, for recommendations |
+
+Set the two hardware properties when the app does not run on the Ollama server itself (for example in
+Docker, where only the container's resources are visible); otherwise the recommendations describe the
+wrong machine.
+
+These are environment variables only:
+
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `OLLAMA_HOST` | `http://localhost:11434` | Ollama server address (`0.0.0.0` / missing scheme or port are handled) |
-| `HF_TOKEN` | - | HuggingFace token, needed to read gated or private models (e.g. Llama) |
-| `HOST` | `0.0.0.0` | Address the web app binds to |
-| `PORT` | `5000` | Port the web app listens on |
+| `CONFIG_FILE` | `config/config.properties` | Path of the properties file |
+| `HOST` | `0.0.0.0` | Address the web app binds to (`python app.py` only) |
+| `PORT` | `5000` | Port the web app listens on (`python app.py` only) |
 | `FLASK_DEBUG` | off | Set to `1` to enable Flask debug mode (never on an exposed server) |
-
-```bash
-export OLLAMA_HOST=http://your-server:11434
-```
 
 ## Requirements
 

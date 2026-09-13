@@ -1,10 +1,10 @@
 import os
 import re
 import requests
+from utils import config
 
 HF_API_BASE = "https://huggingface.co/api"
 HF_BASE = "https://huggingface.co"
-HF_TOKEN = os.getenv("HF_TOKEN")
 TIMEOUT = 15
 
 MODEL_ID_PATTERN = re.compile(r"^[A-Za-z0-9][\w.-]*(/[\w.-]+)?$")
@@ -27,7 +27,8 @@ def is_valid_model_id(model_id):
 
 
 def _headers():
-    return {"Authorization": f"Bearer {HF_TOKEN}"} if HF_TOKEN else {}
+    token = config.get("hf.token", "HF_TOKEN")
+    return {"Authorization": f"Bearer {token}"} if token else {}
 
 
 def get_model_info(model_id):
@@ -43,7 +44,7 @@ def get_model_info(model_id):
         )
         # HuggingFace answers 401 for both missing repos and private repos without a token
         if response.status_code in (401, 404):
-            return {"error": "Model not found (or it is private and HF_TOKEN is not set)", "status_code": 404}
+            return {"error": "Model not found (or it is private and no HuggingFace token is configured)", "status_code": 404}
         response.raise_for_status()
         data = response.json()
         return {

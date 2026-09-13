@@ -1,14 +1,19 @@
 import json
-import os
 import queue
 import threading
 import requests
+from utils import config
+
+DEFAULT_OLLAMA_HOST = "http://localhost:11434"
+
+# How often a waiting stream checks whether it was cancelled
+CANCEL_POLL_SECONDS = 0.2
 
 
 def _normalize_host(host):
     # OLLAMA_HOST is shared with the Ollama server itself, where values like "0.0.0.0" or
     # "127.0.0.1:11434" (no scheme) are valid. Turn them into a URL a client can connect to.
-    host = (host or "").strip().rstrip("/") or "http://localhost:11434"
+    host = (host or "").strip().rstrip("/") or DEFAULT_OLLAMA_HOST
     if "://" not in host:
         # Without a scheme Ollama assumes plain HTTP on its default port
         host_part, _, path = host.partition("/")
@@ -21,14 +26,13 @@ def _normalize_host(host):
     return f"{scheme}://{rest}"
 
 
-OLLAMA_HOST = _normalize_host(os.getenv("OLLAMA_HOST"))
+def ollama_host():
+    """Looked up on every request, so changing ollama.host in the properties file applies immediately."""
+    return _normalize_host(config.get("ollama.host", "OLLAMA_HOST", DEFAULT_OLLAMA_HOST))
 
-# How often a waiting stream checks whether it was cancelled
-CANCEL_POLL_SECONDS = 0.2
 
-
-def _connection_error():
-    return f"Cannot connect to Ollama at {OLLAMA_HOST}. Is it running?"
+def _connection_error(host):
+    return f"Cannot connect to Ollama at {host}. Is it running?"
 
 
 def _response_error(response):
@@ -39,24 +43,26 @@ def _response_error(response):
 
 
 def check_ollama_status():
+    host = ollama_host()
     try:
-        response = requests.get(f"{OLLAMA_HOST}/api/version", timeout=5)
+        response = requests.get(f"{host}/api/version", timeout=5)
         response.raise_for_status()
-        return {"status": "running", "version": response.json().get("version", "unknown"), "host": OLLAMA_HOST}
+        return {"status": "running", "version": response.json().get("version", "unknown"), "host": host}
     except requests.exceptions.ConnectionError:
-        return {"status": "offline", "version": None, "host": OLLAMA_HOST}
+        return {"status": "offline", "version": None, "host": host}
     except Exception as e:
-        return {"status": "error", "version": None, "host": OLLAMA_HOST, "message": str(e)}
+        return {"status": "error", "version": None, "host": host, "message": str(e)}
 
 
 def list_models():
+    host = ollama_host()
     try:
-        response = requests.get(f"{OLLAMA_HOST}/api/tags", timeout=10)
+        response = requests.get(f"{host}/api/tags", timeout=10)
         response.raise_for_status()
         models = response.json().get("models") or []
         return [{"name": m["name"], "size": m.get("size", 0), "modified": m.get("modified_at", "")} for m in models]
     except requests.exceptions.ConnectionError:
-        return {"error": _connection_error()}
+        return {"error": _connection_error(host)}
     except Exception as e:
         return {"error": str(e)}
 
@@ -78,10 +84,10 @@ class StreamCancellation:
 _STREAM_END = object()
 
 
-def _read_stream(path, payload, events, cancellation):
+def _read_stream(host, path, payload, events, cancellation):
     """Worker thread: puts Ollama's progress events on the queue until the stream ends or is cancelled."""
     try:
-        with requests.post(f"{OLLAMA_HOST}{path}", json=payload, stream=True, timeout=(10, 3600)) as response:
+        with requests.post(f"{host}{path}", json=payload, stream=True, timeout=(10, 3600)) as response:
             if response.status_code >= 400:
                 events.put({"error": _response_error(response)})
                 return
@@ -93,7 +99,7 @@ def _read_stream(path, payload, events, cancellation):
                     # Ollama reports failures as {"error": ...} lines inside a 200 stream
                     events.put(json.loads(line))
     except requests.exceptions.ConnectionError:
-        events.put({"error": _connection_error()})
+        events.put({"error": _connection_error(host)})
     except Exception as e:
         events.put({"error": str(e)})
     finally:
@@ -114,7 +120,8 @@ def _iter_stream(path, payload, cancellation=None):
     # Ollama can go quiet for minutes (e.g. "verifying sha256 digest"). Waiting on a queue instead lets a
     # cancel take effect right away; the worker disconnects from Ollama as soon as its read returns.
     events = queue.Queue()
-    threading.Thread(target=_read_stream, args=(path, payload, events, cancellation), daemon=True).start()
+    worker_args = (ollama_host(), path, payload, events, cancellation)
+    threading.Thread(target=_read_stream, args=worker_args, daemon=True).start()
     try:
         while True:
             try:
@@ -145,12 +152,13 @@ def stream_pull_model(name, cancellation=None):
 
 
 def delete_model(name):
+    host = ollama_host()
     try:
-        response = requests.delete(f"{OLLAMA_HOST}/api/delete", json={"model": name}, timeout=10)
+        response = requests.delete(f"{host}/api/delete", json={"model": name}, timeout=10)
         if response.status_code >= 400:
             return {"success": False, "error": _response_error(response)}
         return {"success": True}
     except requests.exceptions.ConnectionError:
-        return {"success": False, "error": _connection_error()}
+        return {"success": False, "error": _connection_error(host)}
     except Exception as e:
         return {"success": False, "error": str(e)}

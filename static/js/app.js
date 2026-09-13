@@ -82,10 +82,18 @@ document.addEventListener('DOMContentLoaded', function() {
         fetch('/api/system-info')
             .then(res => res.json())
             .then(info => {
-                $('gpuInfo').textContent = info.gpu_info.length
-                    ? info.gpu_info.map(gpu => `${gpu.name} (${formatBytes(gpu.vram_free)} free / ${formatBytes(gpu.vram_total)})`).join(', ')
-                    : 'No GPU detected (CPU only)';
-                $('ramInfo').textContent = `RAM: ${formatBytes(info.available_ram)} free / ${formatBytes(info.total_ram)}`;
+                if (info.gpu_source === 'config') {
+                    $('gpuInfo').textContent = info.total_vram
+                        ? `Ollama server GPU: ${formatBytes(info.total_vram)} VRAM (configured)`
+                        : 'Ollama server: no GPU (configured)';
+                } else {
+                    $('gpuInfo').textContent = info.gpu_info.length
+                        ? info.gpu_info.map(gpu => `${gpu.name} (${formatBytes(gpu.vram_free)} free / ${formatBytes(gpu.vram_total)})`).join(', ')
+                        : 'No GPU detected (CPU only)';
+                }
+                $('ramInfo').textContent = info.ram_source === 'config'
+                    ? `Ollama server RAM: ${formatBytes(info.total_ram)} (configured)`
+                    : `RAM: ${formatBytes(info.available_ram)} free / ${formatBytes(info.total_ram)}`;
             })
             .catch(() => {
                 $('gpuInfo').textContent = 'GPU info unavailable';
