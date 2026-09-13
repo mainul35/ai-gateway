@@ -1,5 +1,6 @@
 import json
 import os
+import queue
 import threading
 import requests
 
@@ -21,6 +22,9 @@ def _normalize_host(host):
 
 
 OLLAMA_HOST = _normalize_host(os.getenv("OLLAMA_HOST"))
+
+# How often a waiting stream checks whether it was cancelled
+CANCEL_POLL_SECONDS = 0.2
 
 
 def _connection_error():
@@ -58,15 +62,10 @@ def list_models():
 
 
 class StreamCancellation:
-    """Lets another thread stop a streaming Ollama request.
-
-    Closing the connection is what makes Ollama abort the pull; it keeps the partial download for next time.
-    """
+    """Lets another thread (e.g. the /api/cancel request) stop a streaming Ollama request."""
 
     def __init__(self):
         self._event = threading.Event()
-        self._lock = threading.Lock()
-        self._response = None
 
     @property
     def cancelled(self):
@@ -74,16 +73,31 @@ class StreamCancellation:
 
     def cancel(self):
         self._event.set()
-        with self._lock:
-            if self._response is not None:
-                # Also unblocks a read that is waiting for Ollama's next progress line
-                self._response.close()
 
-    def attach(self, response):
-        with self._lock:
-            self._response = response
-        if self.cancelled:
-            response.close()
+
+_STREAM_END = object()
+
+
+def _read_stream(path, payload, events, cancellation):
+    """Worker thread: puts Ollama's progress events on the queue until the stream ends or is cancelled."""
+    try:
+        with requests.post(f"{OLLAMA_HOST}{path}", json=payload, stream=True, timeout=(10, 3600)) as response:
+            if response.status_code >= 400:
+                events.put({"error": _response_error(response)})
+                return
+            for line in response.iter_lines(decode_unicode=True):
+                if cancellation.cancelled:
+                    # Leaving the with block closes the connection, which is what makes Ollama stop the pull
+                    return
+                if line:
+                    # Ollama reports failures as {"error": ...} lines inside a 200 stream
+                    events.put(json.loads(line))
+    except requests.exceptions.ConnectionError:
+        events.put({"error": _connection_error()})
+    except Exception as e:
+        events.put({"error": str(e)})
+    finally:
+        events.put(_STREAM_END)
 
 
 def _iter_stream(path, payload, cancellation=None):
@@ -91,30 +105,32 @@ def _iter_stream(path, payload, cancellation=None):
 
     Failures are yielded as {"error": ...} and a cancellation as {"cancelled": True}.
     """
-    is_cancelled = lambda: cancellation is not None and cancellation.cancelled
-    if is_cancelled():
+    cancellation = cancellation or StreamCancellation()
+    if cancellation.cancelled:
         yield {"cancelled": True}
         return
+
+    # Reading happens in a worker thread because a blocked socket read can't be interrupted portably, and
+    # Ollama can go quiet for minutes (e.g. "verifying sha256 digest"). Waiting on a queue instead lets a
+    # cancel take effect right away; the worker disconnects from Ollama as soon as its read returns.
+    events = queue.Queue()
+    threading.Thread(target=_read_stream, args=(path, payload, events, cancellation), daemon=True).start()
     try:
-        with requests.post(f"{OLLAMA_HOST}{path}", json=payload, stream=True, timeout=(10, 3600)) as response:
-            if cancellation is not None:
-                cancellation.attach(response)
-            if response.status_code >= 400:
-                yield {"error": _response_error(response)}
+        while True:
+            try:
+                event = events.get(timeout=CANCEL_POLL_SECONDS)
+            except queue.Empty:
+                event = None
+            if cancellation.cancelled:
+                yield {"cancelled": True}
                 return
-            for line in response.iter_lines(decode_unicode=True):
-                if is_cancelled():
-                    break
-                if line:
-                    # Ollama reports failures as {"error": ...} lines inside a 200 stream
-                    yield json.loads(line)
-        if is_cancelled():
-            yield {"cancelled": True}
-    except requests.exceptions.ConnectionError:
-        yield {"cancelled": True} if is_cancelled() else {"error": _connection_error()}
-    except Exception as e:
-        # Closing the response from another thread surfaces here as a read error
-        yield {"cancelled": True} if is_cancelled() else {"error": str(e)}
+            if event is _STREAM_END:
+                return
+            if event is not None:
+                yield event
+    finally:
+        # Also covers the consumer stopping early (e.g. the browser disconnected): tell the worker to disconnect
+        cancellation.cancel()
 
 
 def stream_create_model(name, source, parameters=None, cancellation=None):
