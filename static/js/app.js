@@ -352,10 +352,11 @@ document.addEventListener('DOMContentLoaded', function() {
         state.busy = true;
         updateDeployInfo();
         setStatus('', '');
-        const progress = createProgressTracker(title);
+        let progress = null;
         let result = null;
 
         try {
+            progress = createProgressTracker(title);
             const response = await fetch(url, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
@@ -381,7 +382,7 @@ document.addEventListener('DOMContentLoaded', function() {
         } catch (err) {
             setStatus('error', `✗ Error: ${err.message}`);
         } finally {
-            progress.stop();
+            if (progress) progress.stop();
             state.busy = false;
             updateDeployInfo();
         }
@@ -409,6 +410,12 @@ document.addEventListener('DOMContentLoaded', function() {
         const layers = new Map();  // digest -> { total, completed, startCompleted }
         const samples = [];        // [timestamp ms, bytes downloaded] over the last few seconds
         const fill = $('progressFill');
+
+        if (!$('deployProgress') || !fill) {
+            // The page HTML is older than this script (server not restarted); deploy without the progress panel
+            console.warn('Progress panel not found in page; reload the page after restarting the server.');
+            return { update() {}, stop() {} };
+        }
 
         $('progressTitle').textContent = title;
         $('progressStep').textContent = 'Starting...';

@@ -17,6 +17,8 @@ from utils.hf_client import (
 )
 
 app = Flask(__name__)
+# Static JS/CSS are always read from disk; reload templates too so the page and its scripts never mismatch
+app.config["TEMPLATES_AUTO_RELOAD"] = True
 
 # "bpw" is the approximate effective bits per weight of each llama.cpp GGUF quantization
 QUANTIZATION_LEVELS = {
