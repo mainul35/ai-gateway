@@ -1,71 +1,105 @@
-import requests
+import json
 import os
+import requests
 
-OLLAMA_HOST = os.getenv("OLLAMA_HOST", "http://localhost:11434")
+
+def _normalize_host(host):
+    # OLLAMA_HOST is shared with the Ollama server itself, where values like "0.0.0.0" or
+    # "127.0.0.1:11434" (no scheme) are valid. Turn them into a URL a client can connect to.
+    host = (host or "").strip().rstrip("/") or "http://localhost:11434"
+    if "://" not in host:
+        # Without a scheme Ollama assumes plain HTTP on its default port
+        host_part, _, path = host.partition("/")
+        if ":" not in host_part:
+            host_part = f"{host_part}:11434"
+        host = f"http://{host_part}" + (f"/{path}" if path else "")
+    scheme, rest = host.split("://", 1)
+    if rest.startswith("0.0.0.0"):
+        rest = "127.0.0.1" + rest[len("0.0.0.0"):]
+    return f"{scheme}://{rest}"
+
+
+OLLAMA_HOST = _normalize_host(os.getenv("OLLAMA_HOST"))
+
+
+def _connection_error():
+    return f"Cannot connect to Ollama at {OLLAMA_HOST}. Is it running?"
+
+
+def _response_error(response):
+    try:
+        return response.json().get("error") or response.text
+    except ValueError:
+        return response.text or f"HTTP {response.status_code}"
+
 
 def check_ollama_status():
     try:
         response = requests.get(f"{OLLAMA_HOST}/api/version", timeout=5)
         response.raise_for_status()
-        return {"status": "running", "version": response.json().get("version", "unknown")}
+        return {"status": "running", "version": response.json().get("version", "unknown"), "host": OLLAMA_HOST}
     except requests.exceptions.ConnectionError:
-        return {"status": "offline", "version": None}
+        return {"status": "offline", "version": None, "host": OLLAMA_HOST}
     except Exception as e:
-        return {"status": "error", "version": None, "message": str(e)}
+        return {"status": "error", "version": None, "host": OLLAMA_HOST, "message": str(e)}
+
 
 def list_models():
     try:
         response = requests.get(f"{OLLAMA_HOST}/api/tags", timeout=10)
         response.raise_for_status()
-        models = response.json().get("models", [])
+        models = response.json().get("models") or []
         return [{"name": m["name"], "size": m.get("size", 0), "modified": m.get("modified_at", "")} for m in models]
+    except requests.exceptions.ConnectionError:
+        return {"error": _connection_error()}
     except Exception as e:
         return {"error": str(e)}
 
-def create_model(name, modelfile_content):
+
+def _stream_request(path, payload, incomplete_error):
+    progress = []
     try:
-        response = requests.post(
-            f"{OLLAMA_HOST}/api/create",
-            json={"name": name, "modelfile": modelfile_content},
-            stream=True,
-            timeout=3600
-        )
-        response.raise_for_status()
-        progress = []
-        for line in response.iter_lines(decode_unicode=True):
-            if line:
-                data = __import__('json').loads(line)
-                progress.append(data.get("status", ""))
-                if data.get("status") == "success":
+        with requests.post(f"{OLLAMA_HOST}{path}", json=payload, stream=True, timeout=(10, 3600)) as response:
+            if response.status_code >= 400:
+                return {"success": False, "error": _response_error(response), "progress": progress}
+            for line in response.iter_lines(decode_unicode=True):
+                if not line:
+                    continue
+                data = json.loads(line)
+                # Ollama reports failures as {"error": ...} lines inside a 200 stream
+                if data.get("error"):
+                    return {"success": False, "error": data["error"], "progress": progress}
+                status = data.get("status", "")
+                # Download progress repeats the same status many times; keep one entry per step
+                if status and (not progress or progress[-1] != status):
+                    progress.append(status)
+                if status == "success":
                     return {"success": True, "progress": progress}
-        return {"success": False, "progress": progress, "error": "Upload did not complete successfully"}
+        return {"success": False, "error": incomplete_error, "progress": progress}
+    except requests.exceptions.ConnectionError:
+        return {"success": False, "error": _connection_error(), "progress": progress}
     except Exception as e:
-        return {"success": False, "error": str(e)}
+        return {"success": False, "error": str(e), "progress": progress}
+
+
+def create_model(name, source, parameters=None):
+    payload = {"model": name, "from": source}
+    if parameters:
+        payload["parameters"] = parameters
+    return _stream_request("/api/create", payload, "Model creation did not complete successfully")
+
+
+def pull_model(name):
+    return _stream_request("/api/pull", {"model": name, "stream": True}, "Pull did not complete successfully")
+
 
 def delete_model(name):
     try:
-        response = requests.delete(f"{OLLAMA_HOST}/api/delete", json={"name": name}, timeout=10)
-        response.raise_for_status()
+        response = requests.delete(f"{OLLAMA_HOST}/api/delete", json={"model": name}, timeout=10)
+        if response.status_code >= 400:
+            return {"success": False, "error": _response_error(response)}
         return {"success": True}
-    except Exception as e:
-        return {"success": False, "error": str(e)}
-
-def pull_model(name, stream=True):
-    try:
-        response = requests.post(
-            f"{OLLAMA_HOST}/api/pull",
-            json={"name": name, "stream": stream},
-            stream=True,
-            timeout=3600
-        )
-        response.raise_for_status()
-        progress = []
-        for line in response.iter_lines(decode_unicode=True):
-            if line:
-                data = __import__('json').loads(line)
-                progress.append(data.get("status", ""))
-                if data.get("status") == "success":
-                    return {"success": True, "progress": progress}
-        return {"success": False, "progress": progress, "error": "Pull did not complete successfully"}
+    except requests.exceptions.ConnectionError:
+        return {"success": False, "error": _connection_error()}
     except Exception as e:
         return {"success": False, "error": str(e)}
