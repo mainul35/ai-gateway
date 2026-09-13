@@ -56,41 +56,32 @@ def list_models():
         return {"error": str(e)}
 
 
-def _stream_request(path, payload, incomplete_error):
-    progress = []
+def _iter_stream(path, payload):
+    """Yields Ollama's progress events as they arrive. Failures are yielded as {"error": ...}."""
     try:
         with requests.post(f"{OLLAMA_HOST}{path}", json=payload, stream=True, timeout=(10, 3600)) as response:
             if response.status_code >= 400:
-                return {"success": False, "error": _response_error(response), "progress": progress}
+                yield {"error": _response_error(response)}
+                return
             for line in response.iter_lines(decode_unicode=True):
-                if not line:
-                    continue
-                data = json.loads(line)
-                # Ollama reports failures as {"error": ...} lines inside a 200 stream
-                if data.get("error"):
-                    return {"success": False, "error": data["error"], "progress": progress}
-                status = data.get("status", "")
-                # Download progress repeats the same status many times; keep one entry per step
-                if status and (not progress or progress[-1] != status):
-                    progress.append(status)
-                if status == "success":
-                    return {"success": True, "progress": progress}
-        return {"success": False, "error": incomplete_error, "progress": progress}
+                if line:
+                    # Ollama reports failures as {"error": ...} lines inside a 200 stream
+                    yield json.loads(line)
     except requests.exceptions.ConnectionError:
-        return {"success": False, "error": _connection_error(), "progress": progress}
+        yield {"error": _connection_error()}
     except Exception as e:
-        return {"success": False, "error": str(e), "progress": progress}
+        yield {"error": str(e)}
 
 
-def create_model(name, source, parameters=None):
+def stream_create_model(name, source, parameters=None):
     payload = {"model": name, "from": source}
     if parameters:
         payload["parameters"] = parameters
-    return _stream_request("/api/create", payload, "Model creation did not complete successfully")
+    return _iter_stream("/api/create", payload)
 
 
-def pull_model(name):
-    return _stream_request("/api/pull", {"model": name, "stream": True}, "Pull did not complete successfully")
+def stream_pull_model(name):
+    return _iter_stream("/api/pull", {"model": name, "stream": True})
 
 
 def delete_model(name):

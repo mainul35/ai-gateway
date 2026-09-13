@@ -324,7 +324,7 @@ document.addEventListener('DOMContentLoaded', function() {
         }
 
         runOllamaAction(
-            `${verb} ${state.data.model_info.id} (${rec.name})... large models can take a long time to download.`,
+            `${verb} ${state.data.model_info.id} (${rec.name})`,
             '/api/deploy',
             { model_id: state.data.model_info.id, quantization: rec.quantization, context_length: Number(contextLength.value) },
             'deployed',
@@ -340,7 +340,7 @@ document.addEventListener('DOMContentLoaded', function() {
         }
 
         runOllamaAction(
-            `Pulling ${state.data.model_info.id} (${rec.name}) into Ollama...`,
+            `Pulling ${state.data.model_info.id} (${rec.name}) into Ollama`,
             '/api/pull-model',
             { model_id: state.data.model_info.id, quantization: rec.quantization },
             'pulled',
@@ -348,32 +348,126 @@ document.addEventListener('DOMContentLoaded', function() {
         );
     }
 
-    async function runOllamaAction(loadingText, url, body, successVerb, failureLabel) {
+    async function runOllamaAction(title, url, body, successVerb, failureLabel) {
         state.busy = true;
         updateDeployInfo();
-        setStatus('loading', loadingText);
+        setStatus('', '');
+        let progress = null;
+        let result = null;
 
         try {
+            progress = createProgressTracker(title);
             const response = await fetch(url, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(body)
+                body: JSON.stringify({ ...body, stream: true })
             });
 
-            const data = await response.json();
+            // Validation errors come back as plain JSON; progress comes back as NDJSON
+            if ((response.headers.get('Content-Type') || '').includes('application/x-ndjson')) {
+                await readNdjson(response, event => {
+                    if (event.done) result = event;
+                    else progress.update(event);
+                });
+            } else {
+                result = await response.json();
+            }
 
-            if (data.success) {
-                setStatus('success', `✓ Model ${successVerb} successfully as ${data.model_name}`);
+            if (result && result.success) {
+                setStatus('success', `✓ Model ${successVerb} successfully as ${result.model_name}`);
                 loadExistingModels();
             } else {
-                setStatus('error', `✗ ${failureLabel} failed: ${data.error}`);
+                setStatus('error', `✗ ${failureLabel} failed: ${result ? result.error : 'the server closed the connection before finishing'}`);
             }
         } catch (err) {
             setStatus('error', `✗ Error: ${err.message}`);
         } finally {
+            if (progress) progress.stop();
             state.busy = false;
             updateDeployInfo();
         }
+    }
+
+    async function readNdjson(response, onEvent) {
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '';
+
+        while (true) {
+            const { value, done } = await reader.read();
+            if (done) break;
+            buffer += decoder.decode(value, { stream: true });
+            const lines = buffer.split('\n');
+            buffer = lines.pop();  // keep the incomplete last line for the next chunk
+            lines.filter(line => line.trim()).forEach(line => onEvent(JSON.parse(line)));
+        }
+
+        buffer += decoder.decode();
+        if (buffer.trim()) onEvent(JSON.parse(buffer));
+    }
+
+    function createProgressTracker(title) {
+        const layers = new Map();  // digest -> { total, completed, startCompleted }
+        const samples = [];        // [timestamp ms, bytes downloaded] over the last few seconds
+        const fill = $('progressFill');
+
+        if (!$('deployProgress') || !fill) {
+            // The page HTML is older than this script (server not restarted); deploy without the progress panel
+            console.warn('Progress panel not found in page; reload the page after restarting the server.');
+            return { update() {}, stop() {} };
+        }
+
+        $('progressTitle').textContent = title;
+        $('progressStep').textContent = 'Starting...';
+        $('progressPercent').textContent = '';
+        $('progressSize').textContent = '';
+        $('progressSpeed').textContent = '';
+        $('progressEta').textContent = '';
+        fill.style.width = '';
+        fill.classList.add('indeterminate');
+        $('deployProgress').hidden = false;
+
+        function renderDownload() {
+            let total = 0, completed = 0, downloaded = 0;
+            for (const layer of layers.values()) {
+                total += layer.total;
+                completed += layer.completed;
+                // Layers that already existed locally report as complete immediately; don't count them as speed
+                downloaded += layer.completed - layer.startCompleted;
+            }
+
+            const now = performance.now();
+            samples.push([now, downloaded]);
+            while (samples.length > 2 && now - samples[0][0] > 5000) samples.shift();
+            const elapsedSeconds = (now - samples[0][0]) / 1000;
+            const speed = elapsedSeconds > 0.5 ? (downloaded - samples[0][1]) / elapsedSeconds : 0;
+            const percent = total ? Math.min(completed / total * 100, 100) : 0;
+
+            fill.classList.remove('indeterminate');
+            fill.style.width = `${percent.toFixed(1)}%`;
+            $('progressPercent').textContent = `${percent.toFixed(1)}%`;
+            $('progressSize').textContent = `${formatBytes(completed)} / ${formatBytes(total)}`;
+            $('progressSpeed').textContent = speed > 0 ? `${formatBytes(speed)}/s` : '';
+            $('progressEta').textContent = speed > 0 && completed < total
+                ? `${formatDuration((total - completed) / speed)} remaining`
+                : '';
+        }
+
+        return {
+            update(event) {
+                if (event.status) $('progressStep').textContent = event.status;
+                if (event.digest && event.total) {
+                    const layer = layers.get(event.digest) || { startCompleted: event.completed || 0 };
+                    layer.total = event.total;
+                    layer.completed = event.completed || 0;
+                    layers.set(event.digest, layer);
+                    renderDownload();
+                }
+            },
+            stop() {
+                $('deployProgress').hidden = true;
+            }
+        };
     }
 
     async function deleteModel(modelName) {
@@ -415,6 +509,16 @@ document.addEventListener('DOMContentLoaded', function() {
         if (count >= 1e9) return `${parseFloat((count / 1e9).toFixed(2))}B`;
         if (count >= 1e6) return `${parseFloat((count / 1e6).toFixed(1))}M`;
         return count.toLocaleString();
+    }
+
+    function formatDuration(seconds) {
+        seconds = Math.ceil(seconds);
+        const h = Math.floor(seconds / 3600);
+        const m = Math.floor((seconds % 3600) / 60);
+        const s = seconds % 60;
+        if (h) return `${h}h ${m}m`;
+        if (m) return `${m}m ${s}s`;
+        return `${s}s`;
     }
 
     function escapeHtml(value) {
