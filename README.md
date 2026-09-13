@@ -96,6 +96,31 @@ These are environment variables only:
 | `PORT` | `5000` | Port the web app listens on (`python app.py` only) |
 | `FLASK_DEBUG` | off | Set to `1` to enable Flask debug mode (never on an exposed server) |
 
+## Docker
+
+1. Set `ollama.host` (and ideally the server hardware) in `config/config.properties`.
+   - Ollama on another machine: `http://<server-ip>:11434`
+   - Ollama on the machine running Docker: `http://host.docker.internal:11434`
+
+   The Ollama server must accept connections from other machines: start it with `OLLAMA_HOST=0.0.0.0`.
+
+2. Build and start:
+```bash
+docker compose up -d --build
+```
+
+3. Open http://localhost:5000
+
+The `config` folder is mounted into the container, so edits to `config/config.properties` apply to the
+running container without a rebuild or restart. To run without Compose:
+```bash
+docker build -t ollama-model-checker .
+docker run -d -p 5000:5000 -v "$(pwd)/config:/app/config:ro" --add-host host.docker.internal:host-gateway ollama-model-checker
+```
+
+The container serves the app with gunicorn using one worker process (required for cancelling deploys)
+and multiple threads.
+
 ## Requirements
 
 - Python 3.8+
