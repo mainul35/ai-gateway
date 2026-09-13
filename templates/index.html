@@ -37,6 +37,8 @@
         </section>
 
         <section class="results-section" id="resultsSection" style="display: none;">
+            <div class="notice" id="modelNotice" hidden></div>
+
             <div class="model-info">
                 <h2>Model Information</h2>
                 <div class="info-grid">
@@ -97,7 +99,15 @@
                     <div class="info-card">
                         <h3>Model Size</h3>
                         <div class="info-item">
-                            <span class="label">Total Size:</span>
+                            <span class="label">Parameters:</span>
+                            <span class="value" id="modelParams"></span>
+                        </div>
+                        <div class="info-item">
+                            <span class="label">Format:</span>
+                            <span class="value" id="modelFormat"></span>
+                        </div>
+                        <div class="info-item">
+                            <span class="label">Repo Size:</span>
                             <span class="value" id="modelTotalSize"></span>
                         </div>
                         <div class="info-item">
@@ -110,7 +120,7 @@
 
             <div class="recommendations-section">
                 <h2>Recommended Quantizations</h2>
-                <p class="section-description">Based on your server's available resources, here are the recommended quantization levels:</p>
+                <p class="section-description">Quantization levels that fit your server's available memory (including the KV cache at the recommended context length). Click a card to select it.</p>
                 <div class="recommendations-grid" id="recommendationsGrid"></div>
             </div>
 
@@ -140,17 +150,18 @@
                         <p>Context Length: <strong id="deployContextLength"></strong></p>
                     </div>
                     <div class="deploy-buttons">
-                        <button id="deployBtn" class="btn btn-success">Deploy Model</button>
-                        <button id="pullBtn" class="btn btn-secondary">Pull from Ollama</button>
+                        <button id="deployBtn" class="btn btn-success" disabled>Deploy Model</button>
+                        <button id="pullBtn" class="btn btn-secondary" disabled>Pull into Ollama</button>
                     </div>
                 </div>
+                <p class="section-description deploy-hint">Deploy creates a local model with your chosen context length from the GGUF on HuggingFace. Pull downloads the GGUF as <code>hf.co/owner/model:QUANT</code> with default settings.</p>
                 <div class="deploy-status" id="deployStatus"></div>
             </div>
         </section>
 
         <section class="existing-models-section">
             <h2>Existing Models on Ollama</h2>
-            <div class="models-list" id="modelsList"></div>
+            <div class="models-list" id="modelsList"><p class="loading">Loading models</p></div>
         </section>
     </div>
 

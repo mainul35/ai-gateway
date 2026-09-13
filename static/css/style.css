@@ -288,6 +288,13 @@ header h1 {
     border-color: var(--warning);
 }
 
+/* Must come after .recommended so a selected recommended card still shows as selected */
+.quant-card.selected,
+.quant-card.recommended.selected {
+    border-color: var(--success);
+    background: rgba(16, 185, 129, 0.1);
+}
+
 .quant-card.recommended::before {
     content: '⭐ Recommended';
     position: absolute;
@@ -480,6 +487,8 @@ header h1 {
     border-radius: 12px;
     padding: 1rem 1.5rem;
     margin-bottom: 1.5rem;
+    flex-wrap: wrap;
+    gap: 1rem;
 }
 
 .quick-deploy-label {
@@ -584,6 +593,30 @@ header h1 {
 .model-size {
     color: var(--text-secondary);
     font-size: 0.9rem;
+}
+
+.notice {
+    background: rgba(245, 158, 11, 0.1);
+    border: 1px solid var(--warning);
+    color: var(--warning);
+    border-radius: 8px;
+    padding: 1rem 1.5rem;
+    margin-bottom: 2rem;
+}
+
+.notice p + p {
+    margin-top: 0.5rem;
+}
+
+.deploy-hint {
+    margin: 1rem 0 0;
+    font-size: 0.9rem;
+}
+
+.empty-state {
+    text-align: center;
+    padding: 2rem;
+    color: var(--text-secondary);
 }
 
 .loading {
