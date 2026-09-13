@@ -158,7 +158,10 @@
                 <div class="deploy-progress" id="deployProgress" hidden>
                     <div class="progress-header">
                         <span id="progressTitle"></span>
-                        <span class="progress-percent" id="progressPercent"></span>
+                        <div class="progress-actions">
+                            <span class="progress-percent" id="progressPercent"></span>
+                            <button type="button" id="cancelDeployBtn" class="btn btn-cancel">Cancel</button>
+                        </div>
                     </div>
                     <div class="progress-step" id="progressStep"></div>
                     <div class="progress-track">

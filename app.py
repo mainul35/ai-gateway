@@ -5,7 +5,16 @@ import os
 import re
 import subprocess
 import sys
-from utils.ollama_client import check_ollama_status, list_models, stream_create_model, delete_model, stream_pull_model
+import threading
+import uuid
+from utils.ollama_client import (
+    StreamCancellation,
+    check_ollama_status,
+    list_models,
+    stream_create_model,
+    delete_model,
+    stream_pull_model,
+)
 from utils.hf_client import (
     is_valid_model_id,
     get_model_info,
@@ -41,6 +50,11 @@ KV_CACHE_BYTES_PER_ELEMENT = 2  # Ollama keeps the KV cache in f16 by default
 MEMORY_OVERHEAD = 1.1  # compute buffers and runtime overhead on top of the weights
 MEMORY_HEADROOM = 0.9  # keep some memory free for the OS and other processes
 RUN_MODE_ORDER = {"GPU": 0, "GPU + CPU": 1, "CPU": 2}
+
+# Running deploy/pull operations, so /api/cancel can stop them
+OPERATION_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+_active_operations = {}
+_active_operations_lock = threading.Lock()
 
 
 def get_system_info():
@@ -207,37 +221,68 @@ def _parse_deploy_request(body):
 
 def _with_final_result(events, model_name, success_message, failure_message):
     """Passes progress events through and ends with exactly one {"done": True, ...} result event."""
+    last_status = None
     for event in events:
+        if event.get("cancelled"):
+            yield {"done": True, "success": False, "cancelled": True, "error": "Cancelled by user"}
+            return
         if event.get("error"):
             yield {"done": True, "success": False, "error": event["error"]}
             return
-        if event.get("status") == "success":
-            yield {"done": True, "success": True, "model_name": model_name, "message": success_message}
-            return
-        yield event
-    yield {"done": True, "success": False, "error": failure_message}
+        last_status = event.get("status") or last_status
+        # /api/create forwards the pull's own "success" before it creates the model, so only the
+        # last status of the whole stream counts; stopping early would disconnect mid-create
+        if last_status != "success":
+            yield event
+    if last_status == "success":
+        yield {"done": True, "success": True, "model_name": model_name, "message": success_message}
+    else:
+        yield {"done": True, "success": False, "error": failure_message}
 
 
-def _ollama_action_response(events, model_name, success_message, failure_message, stream):
-    results = _with_final_result(events, model_name, success_message, failure_message)
+def _unregister_operation(operation_id):
+    with _active_operations_lock:
+        _active_operations.pop(operation_id, None)
 
-    if stream:
+
+def _ollama_action_response(body, start_stream, model_name, success_message, failure_message):
+    """Runs a cancellable Ollama operation. start_stream(cancellation) must return its event generator."""
+    # The client picks the ID so it can cancel before the first progress event arrives
+    operation_id = str(body.get("operation_id") or uuid.uuid4().hex)
+    if not OPERATION_ID_PATTERN.match(operation_id):
+        return jsonify({"error": "Invalid operation ID"}), 400
+    cancellation = StreamCancellation()
+    with _active_operations_lock:
+        if operation_id in _active_operations:
+            return jsonify({"error": "An operation with this ID is already running"}), 409
+        _active_operations[operation_id] = cancellation
+
+    results = _with_final_result(start_stream(cancellation), model_name, success_message, failure_message)
+
+    if body.get("stream"):
         # Newline-delimited JSON so the browser can show download progress live
-        return Response(
+        response = Response(
             (json.dumps(event) + "\n" for event in results),
             mimetype="application/x-ndjson",
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
+        # Runs when the stream finishes or the client disconnects
+        response.call_on_close(lambda: _unregister_operation(operation_id))
+        return response
 
     progress = []
     final = {}
-    for event in results:
-        if event.get("done"):
-            final = {k: v for k, v in event.items() if k != "done"}
-        # Download progress repeats the same status many times; keep one entry per step
-        elif event.get("status") and (not progress or progress[-1] != event["status"]):
-            progress.append(event["status"])
-    return jsonify({**final, "progress": progress}), 200 if final["success"] else 502
+    try:
+        for event in results:
+            if event.get("done"):
+                final = {k: v for k, v in event.items() if k != "done"}
+            # Download progress repeats the same status many times; keep one entry per step
+            elif event.get("status") and (not progress or progress[-1] != event["status"]):
+                progress.append(event["status"])
+    finally:
+        _unregister_operation(operation_id)
+    status_code = 200 if final["success"] else 409 if final.get("cancelled") else 502
+    return jsonify({**final, "operation_id": operation_id, "progress": progress}), status_code
 
 
 @app.route("/")
@@ -306,11 +351,12 @@ def api_deploy():
     context_length = max(MIN_CONTEXT_LENGTH, min(context_length, MAX_CONTEXT_LENGTH))
 
     ollama_model = ollama_model_name(model_id, quantization)
-    # Ollama pulls the GGUF from HuggingFace (if needed) and creates a model with our context length
-    events = stream_create_model(ollama_model, hf_reference(model_id, quantization), {"num_ctx": context_length})
+    source = hf_reference(model_id, quantization)
     return _ollama_action_response(
-        events, ollama_model, "Model created successfully",
-        "Model creation did not complete successfully", bool(body.get("stream")),
+        body,
+        # Ollama pulls the GGUF from HuggingFace (if needed) and creates a model with our context length
+        lambda cancellation: stream_create_model(ollama_model, source, {"num_ctx": context_length}, cancellation),
+        ollama_model, "Model created successfully", "Model creation did not complete successfully",
     )
 
 
@@ -324,9 +370,21 @@ def api_pull_model():
 
     ollama_model = hf_reference(model_id, quantization)
     return _ollama_action_response(
-        stream_pull_model(ollama_model), ollama_model, "Model pulled successfully",
-        "Pull did not complete successfully", bool(body.get("stream")),
+        body,
+        lambda cancellation: stream_pull_model(ollama_model, cancellation),
+        ollama_model, "Model pulled successfully", "Pull did not complete successfully",
     )
+
+
+@app.route("/api/cancel", methods=["POST"])
+def api_cancel():
+    operation_id = str(_json_body().get("operation_id", ""))
+    with _active_operations_lock:
+        cancellation = _active_operations.get(operation_id)
+    if cancellation is None:
+        return jsonify({"success": False, "error": "No running operation with this ID"}), 404
+    cancellation.cancel()
+    return jsonify({"success": True, "message": "Cancellation requested"})
 
 
 @app.route("/api/list-models")

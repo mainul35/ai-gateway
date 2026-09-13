@@ -564,8 +564,35 @@ header h1 {
 .progress-header {
     display: flex;
     justify-content: space-between;
+    align-items: center;
     gap: 1rem;
     font-weight: 600;
+}
+
+.progress-actions {
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+}
+
+.btn-cancel {
+    padding: 0.35rem 0.9rem;
+    font-size: 0.85rem;
+    border-radius: 8px;
+    background: transparent;
+    color: var(--danger);
+    border: 1px solid var(--danger);
+}
+
+.btn-cancel:hover:not(:disabled) {
+    background: rgba(239, 68, 68, 0.15);
+}
+
+.deploy-status.cancelled {
+    display: block;
+    background: rgba(245, 158, 11, 0.1);
+    border: 1px solid var(--warning);
+    color: var(--warning);
 }
 
 .progress-percent {
