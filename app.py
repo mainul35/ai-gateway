@@ -7,8 +7,10 @@ import subprocess
 import sys
 import threading
 import uuid
+from utils import config
 from utils.ollama_client import (
     StreamCancellation,
+    ollama_host,
     check_ollama_status,
     list_models,
     stream_create_model,
@@ -57,7 +59,7 @@ _active_operations = {}
 _active_operations_lock = threading.Lock()
 
 
-def get_system_info():
+def _detect_gpus():
     gpu_info = []
 
     try:
@@ -94,14 +96,32 @@ def get_system_info():
         except (subprocess.SubprocessError, OSError):
             pass
 
+    return gpu_info
+
+
+def get_system_info():
+    # When the app runs somewhere other than the Ollama server (e.g. in Docker), the server's hardware
+    # can't be detected, so it can be set in the properties file instead
+    configured_vram_gb = config.get_float("ollama.server.vram.gb", "OLLAMA_SERVER_VRAM_GB")
+    configured_ram_gb = config.get_float("ollama.server.ram.gb", "OLLAMA_SERVER_RAM_GB")
+
+    if configured_vram_gb is not None:
+        vram = int(configured_vram_gb * 1024**3)
+        gpu_info = [{"name": "Ollama server GPU", "vram_total": vram, "vram_free": vram, "index": 0}] if vram > 0 else []
+    else:
+        gpu_info = _detect_gpus()
+
     mem = psutil.virtual_memory()
     swap = psutil.swap_memory()
+    configured_ram = int(configured_ram_gb * 1024**3) if configured_ram_gb is not None else None
 
     return {
         "gpu_info": gpu_info,
+        "gpu_source": "config" if configured_vram_gb is not None else "detected",
         "total_vram": sum(gpu["vram_total"] for gpu in gpu_info),
-        "total_ram": mem.total,
-        "available_ram": mem.available,
+        "total_ram": configured_ram if configured_ram is not None else mem.total,
+        "available_ram": configured_ram if configured_ram is not None else mem.available,
+        "ram_source": "config" if configured_ram is not None else "detected",
         "used_ram_percent": mem.percent,
         "swap_total": swap.total,
         "swap_used": swap.used,
@@ -416,7 +436,10 @@ if __name__ == "__main__":
     print("=" * 60)
     print("  Ollama Model Checker - Starting Server")
     print("=" * 60)
+    config_file = config.config_file_path()
     print(f"  Server URL: http://localhost:{port}")
+    print(f"  Config file: {config_file}{'' if os.path.isfile(config_file) else ' (not found, using defaults)'}")
+    print(f"  Ollama host: {ollama_host()}")
     print(f"  Press Ctrl+C to stop")
     print("=" * 60)
     app.run(debug=debug, host=host, port=port)
