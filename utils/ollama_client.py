@@ -1,5 +1,6 @@
 import json
 import os
+import threading
 import requests
 
 
@@ -56,32 +57,75 @@ def list_models():
         return {"error": str(e)}
 
 
-def _iter_stream(path, payload):
-    """Yields Ollama's progress events as they arrive. Failures are yielded as {"error": ...}."""
+class StreamCancellation:
+    """Lets another thread stop a streaming Ollama request.
+
+    Closing the connection is what makes Ollama abort the pull; it keeps the partial download for next time.
+    """
+
+    def __init__(self):
+        self._event = threading.Event()
+        self._lock = threading.Lock()
+        self._response = None
+
+    @property
+    def cancelled(self):
+        return self._event.is_set()
+
+    def cancel(self):
+        self._event.set()
+        with self._lock:
+            if self._response is not None:
+                # Also unblocks a read that is waiting for Ollama's next progress line
+                self._response.close()
+
+    def attach(self, response):
+        with self._lock:
+            self._response = response
+        if self.cancelled:
+            response.close()
+
+
+def _iter_stream(path, payload, cancellation=None):
+    """Yields Ollama's progress events as they arrive.
+
+    Failures are yielded as {"error": ...} and a cancellation as {"cancelled": True}.
+    """
+    is_cancelled = lambda: cancellation is not None and cancellation.cancelled
+    if is_cancelled():
+        yield {"cancelled": True}
+        return
     try:
         with requests.post(f"{OLLAMA_HOST}{path}", json=payload, stream=True, timeout=(10, 3600)) as response:
+            if cancellation is not None:
+                cancellation.attach(response)
             if response.status_code >= 400:
                 yield {"error": _response_error(response)}
                 return
             for line in response.iter_lines(decode_unicode=True):
+                if is_cancelled():
+                    break
                 if line:
                     # Ollama reports failures as {"error": ...} lines inside a 200 stream
                     yield json.loads(line)
+        if is_cancelled():
+            yield {"cancelled": True}
     except requests.exceptions.ConnectionError:
-        yield {"error": _connection_error()}
+        yield {"cancelled": True} if is_cancelled() else {"error": _connection_error()}
     except Exception as e:
-        yield {"error": str(e)}
+        # Closing the response from another thread surfaces here as a read error
+        yield {"cancelled": True} if is_cancelled() else {"error": str(e)}
 
 
-def stream_create_model(name, source, parameters=None):
+def stream_create_model(name, source, parameters=None, cancellation=None):
     payload = {"model": name, "from": source}
     if parameters:
         payload["parameters"] = parameters
-    return _iter_stream("/api/create", payload)
+    return _iter_stream("/api/create", payload, cancellation)
 
 
-def stream_pull_model(name):
-    return _iter_stream("/api/pull", {"model": name, "stream": True})
+def stream_pull_model(name, cancellation=None):
+    return _iter_stream("/api/pull", {"model": name, "stream": True}, cancellation)
 
 
 def delete_model(name):

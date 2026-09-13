@@ -20,6 +20,7 @@ document.addEventListener('DOMContentLoaded', function() {
         selected: null,   // quantization chosen by the user
         best: null,       // best deployable quantization, used by Quick Deploy
         busy: false,
+        operation: null,  // running deploy/pull: { id, controller, cancelling }
     };
 
     checkOllamaStatus();
@@ -50,6 +51,7 @@ document.addEventListener('DOMContentLoaded', function() {
     deployBtn.addEventListener('click', () => deployModel(state.selected, 'Deploying'));
     quickDeployBtn.addEventListener('click', () => deployModel(state.best, 'Quick deploying'));
     pullBtn.addEventListener('click', pullModel);
+    if ($('cancelDeployBtn')) $('cancelDeployBtn').addEventListener('click', cancelOperation);
 
     function checkOllamaStatus() {
         const dot = $('ollamaStatusDot');
@@ -349,9 +351,13 @@ document.addEventListener('DOMContentLoaded', function() {
     }
 
     async function runOllamaAction(title, url, body, successVerb, failureLabel) {
+        const operation = { id: newOperationId(), controller: new AbortController(), cancelling: false };
+        const cancelledMessage = `${failureLabel} cancelled. Ollama keeps the partial download, so trying again resumes it.`;
+        state.operation = operation;
         state.busy = true;
         updateDeployInfo();
         setStatus('', '');
+        resetCancelButton();
         let progress = null;
         let result = null;
 
@@ -360,7 +366,8 @@ document.addEventListener('DOMContentLoaded', function() {
             const response = await fetch(url, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ ...body, stream: true })
+                body: JSON.stringify({ ...body, stream: true, operation_id: operation.id }),
+                signal: operation.controller.signal
             });
 
             // Validation errors come back as plain JSON; progress comes back as NDJSON
@@ -376,15 +383,60 @@ document.addEventListener('DOMContentLoaded', function() {
             if (result && result.success) {
                 setStatus('success', `✓ Model ${successVerb} successfully as ${result.model_name}`);
                 loadExistingModels();
+            } else if (operation.cancelling || (result && result.cancelled)) {
+                setStatus('cancelled', cancelledMessage);
             } else {
                 setStatus('error', `✗ ${failureLabel} failed: ${result ? result.error : 'the server closed the connection before finishing'}`);
             }
         } catch (err) {
-            setStatus('error', `✗ Error: ${err.message}`);
+            if (err.name === 'AbortError' || operation.cancelling) {
+                setStatus('cancelled', cancelledMessage);
+            } else {
+                setStatus('error', `✗ Error: ${err.message}`);
+            }
         } finally {
             if (progress) progress.stop();
+            state.operation = null;
             state.busy = false;
             updateDeployInfo();
+        }
+    }
+
+    function newOperationId() {
+        // crypto.randomUUID is unavailable on plain-HTTP LAN addresses, so build the ID by hand
+        return Date.now().toString(36) + Math.random().toString(36).slice(2, 10);
+    }
+
+    function resetCancelButton() {
+        const button = $('cancelDeployBtn');
+        if (button) {
+            button.disabled = false;
+            button.textContent = 'Cancel';
+        }
+    }
+
+    async function cancelOperation() {
+        const operation = state.operation;
+        if (!operation || operation.cancelling) return;
+        operation.cancelling = true;
+
+        const button = $('cancelDeployBtn');
+        if (button) {
+            button.disabled = true;
+            button.textContent = 'Cancelling...';
+        }
+
+        // Fallback: dropping the connection also stops the download, since Ollama aborts when its client disconnects
+        setTimeout(() => operation.controller.abort(), 5000);
+        try {
+            const response = await fetch('/api/cancel', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ operation_id: operation.id })
+            });
+            if (!response.ok) operation.controller.abort();
+        } catch (err) {
+            operation.controller.abort();
         }
     }
 

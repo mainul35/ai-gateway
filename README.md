@@ -63,6 +63,10 @@ HuggingFace for a GGUF version of the model (e.g. `bartowski/...-GGUF`) to deplo
 - `POST /api/check-model` - Check HuggingFace model compatibility
 - `POST /api/deploy` - Deploy model to Ollama
 - `POST /api/pull-model` - Pull a GGUF model from HuggingFace into Ollama
+- `POST /api/cancel` - Cancel a running deploy or pull (`{"operation_id": "..."}`)
+
+`/api/deploy` and `/api/pull-model` accept `"stream": true` to receive live progress as
+newline-delimited JSON, and an optional `"operation_id"` that can be passed to `/api/cancel`.
 - `GET /api/list-models` - List existing models
 - `POST /api/delete-model` - Delete a model
 
