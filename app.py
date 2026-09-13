@@ -1,10 +1,11 @@
-from flask import Flask, render_template, request, jsonify
+from flask import Flask, Response, render_template, request, jsonify
+import json
 import psutil
 import os
 import re
 import subprocess
 import sys
-from utils.ollama_client import check_ollama_status, list_models, create_model, delete_model, pull_model
+from utils.ollama_client import check_ollama_status, list_models, stream_create_model, delete_model, stream_pull_model
 from utils.hf_client import (
     is_valid_model_id,
     get_model_info,
@@ -202,6 +203,41 @@ def _parse_deploy_request(body):
     return (model_id, quantization), None
 
 
+def _with_final_result(events, model_name, success_message, failure_message):
+    """Passes progress events through and ends with exactly one {"done": True, ...} result event."""
+    for event in events:
+        if event.get("error"):
+            yield {"done": True, "success": False, "error": event["error"]}
+            return
+        if event.get("status") == "success":
+            yield {"done": True, "success": True, "model_name": model_name, "message": success_message}
+            return
+        yield event
+    yield {"done": True, "success": False, "error": failure_message}
+
+
+def _ollama_action_response(events, model_name, success_message, failure_message, stream):
+    results = _with_final_result(events, model_name, success_message, failure_message)
+
+    if stream:
+        # Newline-delimited JSON so the browser can show download progress live
+        return Response(
+            (json.dumps(event) + "\n" for event in results),
+            mimetype="application/x-ndjson",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
+
+    progress = []
+    final = {}
+    for event in results:
+        if event.get("done"):
+            final = {k: v for k, v in event.items() if k != "done"}
+        # Download progress repeats the same status many times; keep one entry per step
+        elif event.get("status") and (not progress or progress[-1] != event["status"]):
+            progress.append(event["status"])
+    return jsonify({**final, "progress": progress}), 200 if final["success"] else 502
+
+
 @app.route("/")
 def index():
     return render_template("index.html")
@@ -269,46 +305,26 @@ def api_deploy():
 
     ollama_model = ollama_model_name(model_id, quantization)
     # Ollama pulls the GGUF from HuggingFace (if needed) and creates a model with our context length
-    result = create_model(ollama_model, hf_reference(model_id, quantization), {"num_ctx": context_length})
-
-    if result.get("success"):
-        return jsonify({
-            "success": True,
-            "model_name": ollama_model,
-            "message": "Model created successfully",
-            "progress": result.get("progress", [])
-        })
-    else:
-        return jsonify({
-            "success": False,
-            "error": result.get("error", "Deployment failed"),
-            "progress": result.get("progress", [])
-        }), 502
+    events = stream_create_model(ollama_model, hf_reference(model_id, quantization), {"num_ctx": context_length})
+    return _ollama_action_response(
+        events, ollama_model, "Model created successfully",
+        "Model creation did not complete successfully", bool(body.get("stream")),
+    )
 
 
 @app.route("/api/pull-model", methods=["POST"])
 def api_pull_model():
-    parsed, error = _parse_deploy_request(_json_body())
+    body = _json_body()
+    parsed, error = _parse_deploy_request(body)
     if error:
         return error
     model_id, quantization = parsed
 
     ollama_model = hf_reference(model_id, quantization)
-    result = pull_model(ollama_model)
-
-    if result.get("success"):
-        return jsonify({
-            "success": True,
-            "model_name": ollama_model,
-            "message": "Model pulled successfully",
-            "progress": result.get("progress", [])
-        })
-    else:
-        return jsonify({
-            "success": False,
-            "error": result.get("error", "Pull failed"),
-            "progress": result.get("progress", [])
-        }), 502
+    return _ollama_action_response(
+        stream_pull_model(ollama_model), ollama_model, "Model pulled successfully",
+        "Pull did not complete successfully", bool(body.get("stream")),
+    )
 
 
 @app.route("/api/list-models")

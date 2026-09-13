@@ -553,11 +553,67 @@ header h1 {
     color: var(--danger);
 }
 
-.deploy-status.loading {
-    display: block;
+.deploy-progress {
+    margin-top: 1rem;
+    padding: 1rem 1.5rem;
     background: rgba(99, 102, 241, 0.1);
     border: 1px solid var(--primary);
+    border-radius: 8px;
+}
+
+.progress-header {
+    display: flex;
+    justify-content: space-between;
+    gap: 1rem;
+    font-weight: 600;
+}
+
+.progress-percent {
     color: var(--primary);
+    font-variant-numeric: tabular-nums;
+}
+
+.progress-step {
+    color: var(--text-secondary);
+    font-size: 0.9rem;
+    margin: 0.25rem 0 0.75rem;
+}
+
+.progress-track {
+    height: 10px;
+    background: var(--bg-input);
+    border-radius: 5px;
+    overflow: hidden;
+}
+
+.progress-fill {
+    height: 100%;
+    width: 0;
+    background: linear-gradient(90deg, var(--primary), #8b5cf6);
+    border-radius: 5px;
+    transition: width 0.3s ease;
+}
+
+/* Shown until Ollama reports download sizes */
+.progress-fill.indeterminate {
+    width: 30%;
+    transition: none;
+    animation: indeterminate 1.2s ease-in-out infinite;
+}
+
+@keyframes indeterminate {
+    from { transform: translateX(-100%); }
+    to { transform: translateX(350%); }
+}
+
+.progress-stats {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 1.5rem;
+    margin-top: 0.5rem;
+    font-size: 0.85rem;
+    color: var(--text-secondary);
+    font-variant-numeric: tabular-nums;
 }
 
 .existing-models-section {

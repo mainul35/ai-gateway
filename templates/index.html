@@ -155,6 +155,21 @@
                     </div>
                 </div>
                 <p class="section-description deploy-hint">Deploy creates a local model with your chosen context length from the GGUF on HuggingFace. Pull downloads the GGUF as <code>hf.co/owner/model:QUANT</code> with default settings.</p>
+                <div class="deploy-progress" id="deployProgress" hidden>
+                    <div class="progress-header">
+                        <span id="progressTitle"></span>
+                        <span class="progress-percent" id="progressPercent"></span>
+                    </div>
+                    <div class="progress-step" id="progressStep"></div>
+                    <div class="progress-track">
+                        <div class="progress-fill" id="progressFill"></div>
+                    </div>
+                    <div class="progress-stats">
+                        <span id="progressSize"></span>
+                        <span id="progressSpeed"></span>
+                        <span id="progressEta"></span>
+                    </div>
+                </div>
                 <div class="deploy-status" id="deployStatus"></div>
             </div>
         </section>
