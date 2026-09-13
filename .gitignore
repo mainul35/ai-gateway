@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+.venv/
+logs/
+.deploy-backup/
+.deploy-state/
+.env
+.cloudflared.env
+.cf-access.env
+.claude/

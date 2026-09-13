@@ -1,0 +1,159 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Ollama Model Checker</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>🤖 Ollama Model Checker</h1>
+            <p class="subtitle">Check HuggingFace model compatibility and deploy to Ollama</p>
+        </header>
+
+        <div class="status-bar">
+            <div class="status-item">
+                <span class="status-dot" id="ollamaStatusDot"></span>
+                <span id="ollamaStatus">Checking Ollama...</span>
+            </div>
+            <div class="status-item">
+                <span class="status-icon">🖥️</span>
+                <span id="gpuInfo">No GPU detected</span>
+            </div>
+            <div class="status-item">
+                <span class="status-icon">💾</span>
+                <span id="ramInfo">Loading...</span>
+            </div>
+        </div>
+
+        <section class="search-section">
+            <h2>Check Model Compatibility</h2>
+            <div class="search-box">
+                <input type="text" id="modelInput" placeholder="Enter HuggingFace model ID (e.g., meta-llama/Llama-2-7b-chat-hf)">
+                <button id="checkBtn" class="btn btn-primary">Check Compatibility</button>
+            </div>
+        </section>
+
+        <section class="results-section" id="resultsSection" style="display: none;">
+            <div class="model-info">
+                <h2>Model Information</h2>
+                <div class="info-grid">
+                    <div class="info-card">
+                        <h3>Model Details</h3>
+                        <div class="info-item">
+                            <span class="label">Model ID:</span>
+                            <span class="value" id="modelId"></span>
+                        </div>
+                        <div class="info-item">
+                            <span class="label">Author:</span>
+                            <span class="value" id="modelAuthor"></span>
+                        </div>
+                        <div class="info-item">
+                            <span class="label">Pipeline:</span>
+                            <span class="value" id="modelPipeline"></span>
+                        </div>
+                        <div class="info-item">
+                            <span class="label">Likes:</span>
+                            <span class="value" id="modelLikes"></span>
+                        </div>
+                        <div class="info-item">
+                            <span class="label">Downloads:</span>
+                            <span class="value" id="modelDownloads"></span>
+                        </div>
+                    </div>
+                    <div class="info-card">
+                        <h3>Model Architecture</h3>
+                        <div class="info-item">
+                            <span class="label">Type:</span>
+                            <span class="value" id="modelType"></span>
+                        </div>
+                        <div class="info-item">
+                            <span class="label">Architectures:</span>
+                            <span class="value" id="modelArchitectures"></span>
+                        </div>
+                        <div class="info-item">
+                            <span class="label">Hidden Size:</span>
+                            <span class="value" id="modelHiddenSize"></span>
+                        </div>
+                        <div class="info-item">
+                            <span class="label">Layers:</span>
+                            <span class="value" id="modelLayers"></span>
+                        </div>
+                        <div class="info-item">
+                            <span class="label">Attention Heads:</span>
+                            <span class="value" id="modelHeads"></span>
+                        </div>
+                        <div class="info-item">
+                            <span class="label">Vocab Size:</span>
+                            <span class="value" id="modelVocab"></span>
+                        </div>
+                        <div class="info-item">
+                            <span class="label">Max Position:</span>
+                            <span class="value" id="modelMaxPos"></span>
+                        </div>
+                    </div>
+                    <div class="info-card">
+                        <h3>Model Size</h3>
+                        <div class="info-item">
+                            <span class="label">Total Size:</span>
+                            <span class="value" id="modelTotalSize"></span>
+                        </div>
+                        <div class="info-item">
+                            <span class="label">Files:</span>
+                            <span class="value" id="modelFileCount"></span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="recommendations-section">
+                <h2>Recommended Quantizations</h2>
+                <p class="section-description">Based on your server's available resources, here are the recommended quantization levels:</p>
+                <div class="recommendations-grid" id="recommendationsGrid"></div>
+            </div>
+
+            <div class="kv-cache-section">
+                <h2>KV Cache Analysis</h2>
+                <div class="kv-cache-info" id="kvCacheInfo"></div>
+                <div class="context-slider">
+                    <label for="contextLength">Context Length:</label>
+                    <input type="range" id="contextLength" min="256" max="8192" value="4096" step="256">
+                    <span class="slider-value" id="contextValue">4096</span>
+                </div>
+            </div>
+
+            <div class="deploy-section">
+                <h2>Deploy to Ollama</h2>
+                <div class="quick-deploy-bar">
+                    <div class="quick-deploy-info">
+                        <span class="quick-deploy-label">Quick Deploy:</span>
+                        <span id="quickDeployModel">No model selected</span>
+                    </div>
+                    <button id="quickDeployBtn" class="btn btn-success" disabled>⚡ Deploy Best Option</button>
+                </div>
+                <div class="deploy-controls">
+                    <div class="deploy-info">
+                        <p>Selected Model: <strong id="deployModelName"></strong></p>
+                        <p>Quantization: <strong id="deployQuantName"></strong></p>
+                        <p>Context Length: <strong id="deployContextLength"></strong></p>
+                    </div>
+                    <div class="deploy-buttons">
+                        <button id="deployBtn" class="btn btn-success">Deploy Model</button>
+                        <button id="pullBtn" class="btn btn-secondary">Pull from Ollama</button>
+                    </div>
+                </div>
+                <div class="deploy-status" id="deployStatus"></div>
+            </div>
+        </section>
+
+        <section class="existing-models-section">
+            <h2>Existing Models on Ollama</h2>
+            <div class="models-list" id="modelsList"></div>
+        </section>
+    </div>
+
+    <script src="{{ url_for('static', filename='js/app.js') }}"></script>
+</body>
+</html>
