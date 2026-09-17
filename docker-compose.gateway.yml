@@ -5,6 +5,9 @@ services:
       dockerfile: Dockerfile.gateway
     image: model-gateway
     container_name: model-gateway
+    # Runs as the host user that owns config/config.properties, so that file can stay non-world-readable.
+    # Set GATEWAY_UID/GATEWAY_GID in .env (see README); defaults to the image's own appuser.
+    user: "${GATEWAY_UID:-10001}:${GATEWAY_GID:-10001}"
     ports:
       - "9000:9000"
     volumes:
