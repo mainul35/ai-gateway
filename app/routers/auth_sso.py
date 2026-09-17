@@ -91,7 +91,7 @@ async def callback(request: Request, code: str | None = None, state: str | None 
     await session.commit()
     await session.refresh(user)
 
-    response = RedirectResponse("/auth/me")
+    response = RedirectResponse("/dashboard")
     response.set_cookie(sso.SESSION_COOKIE, sso.issue_session(user), max_age=sso.SESSION_MAX_AGE,
                         httponly=True, samesite="lax", path="/")
     response.delete_cookie(sso.STATE_COOKIE, path="/auth")
