@@ -6,7 +6,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app import db, settings
-from app.routers import admin, openai_v1
+from app.routers import admin, auth_sso, openai_v1
 from utils.ollama_client import ollama_host
 
 log = logging.getLogger("gateway")
@@ -26,11 +26,13 @@ app = FastAPI(title="Model Gateway", version="0.1.0", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],  # homelab: the API key is the access control, not the origin
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 app.include_router(openai_v1.router)
 app.include_router(admin.router)
+app.include_router(auth_sso.router)
 
 
 @app.get("/health")
