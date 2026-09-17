@@ -1,0 +1,110 @@
+{% extends "base.html" %}
+{% block title %}Users &middot; Model Gateway{% endblock %}
+{% block content %}
+<h1>Users</h1>
+<p class="sub">Everyone who can call the API. There is no seat limit.</p>
+
+<div id="error" class="note err" hidden></div>
+<div id="created" class="note ok" hidden></div>
+
+<div class="card" style="margin-bottom:1.5rem">
+  <h2>Add a user</h2>
+  <div class="row">
+    <label style="flex:2;min-width:12rem;margin:0">
+      <span class="lbl">Name</span>
+      <input id="newName" placeholder="jane">
+    </label>
+    <label style="flex:2;min-width:12rem;margin:0">
+      <span class="lbl">Email (optional)</span>
+      <input id="newEmail" placeholder="jane@example.com">
+    </label>
+    <label style="flex:1;min-width:8rem;margin:0">
+      <span class="lbl">Role</span>
+      <select id="newRole"><option value="user">user</option><option value="admin">admin</option></select>
+    </label>
+    <button class="btn" id="addUser">Add</button>
+  </div>
+  <p class="muted" style="margin:.75rem 0 0;font-size:.85rem">
+    People who sign in through SSO are added automatically the first time they log in.
+  </p>
+</div>
+
+<div class="card">
+  <h2>All users</h2>
+  <div id="users" class="muted">Loading&hellip;</div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+function showError(message){
+  const box = document.getElementById('error');
+  box.textContent = message; box.hidden = false;
+}
+function showCreated(html){
+  const box = document.getElementById('created');
+  box.innerHTML = html; box.hidden = false;
+}
+
+async function loadUsers(){
+  const target = document.getElementById('users');
+  try{
+    const users = await api('/admin/users');
+    target.innerHTML = `<table>
+      <tr><th>User</th><th>Role</th><th>Keys</th><th>Status</th><th></th></tr>` + users.map(u => `
+      <tr>
+        <td>${escapeHtml(u.name)}${u.email ? `<br><span class="muted" style="font-size:.82rem">${escapeHtml(u.email)}</span>` : ''}</td>
+        <td>${escapeHtml(u.role)}</td>
+        <td>${u.keys.filter(k => k.is_active).length
+              ? u.keys.filter(k => k.is_active).map(k =>
+                  `<code>${escapeHtml(k.prefix)}&hellip;</code> <button class="btn btn-danger btn-sm"
+                    data-revoke="${k.id}" title="Revoke ${escapeHtml(k.name)}">&times;</button>`).join('<br>')
+              : '<span class="muted">none</span>'}</td>
+        <td>${u.is_active ? '<span class="pill on">active</span>' : '<span class="pill off">disabled</span>'}</td>
+        <td style="text-align:right;white-space:nowrap">
+          <button class="btn btn-sm btn-secondary" data-newkey="${escapeHtml(u.name)}">New key</button>
+          ${u.is_active ? `<button class="btn btn-sm btn-danger" data-disable="${escapeHtml(u.name)}">Disable</button>` : ''}
+        </td>
+      </tr>`).join('') + `</table>`;
+  }catch(e){ target.textContent = 'Could not load users: ' + e.message; }
+}
+
+document.getElementById('addUser').addEventListener('click', async () => {
+  const name = document.getElementById('newName').value.trim();
+  if(!name) return showError('A user needs a name');
+  try{
+    await api('/admin/users', {method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({name, email: document.getElementById('newEmail').value.trim() || null,
+                            role: document.getElementById('newRole').value})});
+    document.getElementById('newName').value = '';
+    document.getElementById('newEmail').value = '';
+    document.getElementById('error').hidden = true;
+    loadUsers();
+  }catch(e){ showError(e.message); }
+});
+
+document.addEventListener('click', async e => {
+  const newKey = e.target.closest('[data-newkey]');
+  const revoke = e.target.closest('[data-revoke]');
+  const disable = e.target.closest('[data-disable]');
+  try{
+    if(newKey){
+      const created = await api('/admin/keys', {method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({user: newKey.dataset.newkey, name: 'default'})});
+      showCreated(`Key for <strong>${escapeHtml(created.user)}</strong>, shown only once:<br><code>${escapeHtml(created.key)}</code>`);
+      loadUsers();
+    }else if(revoke){
+      if(!confirm('Revoke this key?')) return;
+      await api(`/admin/keys/${revoke.dataset.revoke}`, {method:'DELETE'});
+      loadUsers();
+    }else if(disable){
+      if(!confirm(`Disable ${disable.dataset.disable}? Their keys stop working.`)) return;
+      await api(`/admin/users/${encodeURIComponent(disable.dataset.disable)}`, {method:'DELETE'});
+      loadUsers();
+    }
+  }catch(err){ showError(err.message); }
+});
+
+loadUsers();
+</script>
+{% endblock %}

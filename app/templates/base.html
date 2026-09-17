@@ -1,0 +1,101 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{% block title %}Model Gateway{% endblock %}</title>
+<style>
+:root{
+  color-scheme: dark;
+  --bg:#0f172a; --card:#1e293b; --input:#334155; --border:#475569;
+  --text:#f1f5f9; --muted:#94a3b8; --primary:#6366f1; --primary-dark:#4f46e5;
+  --success:#10b981; --warning:#f59e0b; --danger:#ef4444;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);line-height:1.6;
+     font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif}
+a{color:#818cf8}
+header.nav{display:flex;align-items:center;gap:1.5rem;flex-wrap:wrap;
+     padding:1rem 2rem;background:var(--card);border-bottom:1px solid var(--border)}
+.brand{font-weight:700;font-size:1.1rem;background:linear-gradient(135deg,var(--primary),#8b5cf6);
+     -webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent}
+.nav a{color:var(--muted);text-decoration:none;font-weight:600;font-size:.95rem}
+.nav a:hover,.nav a.active{color:var(--text)}
+.nav .spacer{margin-left:auto}
+.who{color:var(--muted);font-size:.9rem}
+main{max-width:70rem;margin:0 auto;padding:2rem 1.5rem}
+h1{font-size:1.6rem;margin:0 0 .3rem}
+p.sub{color:var(--muted);margin:0 0 1.75rem}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(15rem,1fr));gap:1rem;margin-bottom:1.5rem}
+.card{background:var(--card);border-radius:12px;padding:1.25rem 1.5rem}
+.card h2{font-size:1rem;margin:0 0 .75rem;color:#a5b4fc}
+.stat{font-size:1.6rem;font-weight:700}
+.stat-label{color:var(--muted);font-size:.85rem}
+table{width:100%;border-collapse:collapse;font-size:.92rem}
+th{text-align:left;color:var(--muted);font-weight:600;padding:.5rem .6rem;border-bottom:1px solid var(--border)}
+td{padding:.55rem .6rem;border-bottom:1px solid var(--input)}
+tr:last-child td{border-bottom:none}
+code{background:var(--input);padding:.12rem .4rem;border-radius:5px;font-size:.88em;word-break:break-all}
+pre{background:#0b1220;padding:.9rem 1rem;border-radius:8px;overflow-x:auto;margin:.5rem 0 0}
+input,select{background:var(--input);border:1px solid var(--border);border-radius:8px;color:var(--text);
+     padding:.55rem .7rem;font-size:.95rem;width:100%;font-family:inherit}
+input:focus,select:focus{outline:none;border-color:var(--primary)}
+label{display:block;margin-bottom:1rem}
+label span.lbl{display:block;font-size:.85rem;color:var(--muted);margin-bottom:.25rem}
+label span.hint{display:block;font-size:.8rem;color:var(--muted);margin-top:.2rem}
+.btn{background:var(--primary);color:#fff;border:none;border-radius:8px;padding:.55rem 1.1rem;
+     font-weight:600;font-size:.92rem;cursor:pointer;font-family:inherit}
+.btn:hover:not(:disabled){background:var(--primary-dark)}
+.btn:disabled{opacity:.5;cursor:not-allowed}
+.btn-sm{padding:.3rem .7rem;font-size:.82rem}
+.btn-danger{background:var(--danger)}
+.btn-danger:hover:not(:disabled){background:#dc2626}
+.btn-secondary{background:var(--input);border:1px solid var(--border)}
+.btn-secondary:hover:not(:disabled){background:var(--border)}
+.row{display:flex;gap:.75rem;flex-wrap:wrap;align-items:flex-end}
+.pill{display:inline-block;padding:.12rem .6rem;border-radius:20px;font-size:.78rem;font-weight:600}
+.pill.on{background:rgba(16,185,129,.2);color:var(--success)}
+.pill.off{background:rgba(245,158,11,.2);color:var(--warning)}
+.pill.err{background:rgba(239,68,68,.2);color:var(--danger)}
+.note{border-radius:8px;padding:.8rem 1rem;margin-bottom:1rem;font-size:.92rem}
+.note.ok{background:rgba(16,185,129,.1);border:1px solid var(--success);color:var(--success)}
+.note.warn{background:rgba(245,158,11,.1);border:1px solid var(--warning);color:var(--warning)}
+.note.err{background:rgba(239,68,68,.1);border:1px solid var(--danger);color:var(--danger)}
+.muted{color:var(--muted)}
+[hidden]{display:none !important}
+</style>
+</head>
+<body>
+{% if user %}
+<header class="nav">
+  <span class="brand">Model Gateway</span>
+  <a href="/dashboard">Dashboard</a>
+  {% if user.role == 'admin' %}<a href="/users">Users</a><a href="/settings/sso">SSO</a>{% endif %}
+  <a href="/docs">API</a>
+  <span class="spacer"></span>
+  <span class="who">{{ user.name }}{% if user.role == 'admin' %} &middot; admin{% endif %}</span>
+  <a href="/logout">Sign out</a>
+</header>
+{% endif %}
+<main>{% block content %}{% endblock %}</main>
+<script>
+function escapeHtml(value){
+  return String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+function formatBytes(bytes){
+  if(!bytes || bytes < 0) return '0 B';
+  const units = ['B','KB','MB','GB','TB'];
+  const i = Math.min(Math.floor(Math.log(bytes)/Math.log(1024)), units.length-1);
+  return parseFloat((bytes/Math.pow(1024,i)).toFixed(1)) + ' ' + units[i];
+}
+async function api(path, options){
+  const response = await fetch(path, options);
+  if(response.status === 401){ location.href = '/login'; throw new Error('signed out'); }
+  const body = response.headers.get('content-type')?.includes('json') ? await response.json() : null;
+  if(!response.ok) throw new Error((body && (body.detail || body.error)) || `HTTP ${response.status}`);
+  return body;
+}
+</script>
+{% block scripts %}{% endblock %}
+</body>
+</html>

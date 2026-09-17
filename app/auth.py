@@ -2,12 +2,12 @@
 import hashlib
 import secrets
 
-from fastapi import Depends, Header, HTTPException, status
+from fastapi import Cookie, Depends, Header, HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from app import settings
+from app import settings, sso
 from app.db import get_session
 from app.models import ApiKey, User, utcnow
 
@@ -50,10 +50,17 @@ class Principal:
 async def authenticate(
     authorization: str | None = Header(default=None),
     x_api_key: str | None = Header(default=None, alias="X-API-Key"),
+    gateway_session: str | None = Cookie(default=None, alias=sso.SESSION_COOKIE),
     session: AsyncSession = Depends(get_session),
 ) -> Principal:
     token = _bearer_token(authorization, x_api_key)
     if not token:
+        # The web UI calls these same endpoints with its login cookie instead of a key
+        data = sso.read_session(gateway_session)
+        if data:
+            user = await session.get(User, data["user_id"])
+            if user and user.is_active:
+                return Principal(user=user)
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Missing API key")
 
     if secrets.compare_digest(token, settings.master_key()):

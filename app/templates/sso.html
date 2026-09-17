@@ -1,0 +1,128 @@
+{% extends "base.html" %}
+{% block title %}SSO &middot; Model Gateway{% endblock %}
+{% block content %}
+<h1>Single sign-on</h1>
+<p class="sub">OAuth2 authorization code flow with PKCE. Anyone your auth server accepts gets an account here &mdash; no seat limit.</p>
+
+<div id="error" class="note err" hidden></div>
+<div id="saved" class="note ok" hidden></div>
+
+<div class="note warn">
+  Register this redirect URI with your auth server:<br><code>{{ redirect_uri }}</code>
+  <br><span style="font-size:.85rem">It follows the public URL below; set that first if it looks wrong.</span>
+</div>
+
+<div class="card">
+  <h2>Configuration <span id="status" class="pill off">unknown</span></h2>
+  <form id="ssoForm">
+    <label>
+      <span class="lbl">Public URL of this gateway</span>
+      <input name="gateway.public.url" placeholder="https://gateway.example.com">
+      <span class="hint">Used to build the redirect URI. Leave empty to use whatever address the browser used.</span>
+    </label>
+    <label>
+      <span class="lbl">Client ID</span>
+      <input name="sso.client.id" autocomplete="off">
+    </label>
+    <label>
+      <span class="lbl">Client secret</span>
+      <input name="sso.client.secret" type="password" autocomplete="new-password" placeholder="unchanged">
+      <span class="hint" id="secretHint">Leave blank to keep the stored secret.</span>
+    </label>
+    <label>
+      <span class="lbl">Authorization endpoint</span>
+      <input name="sso.authorize.url" placeholder="https://auth.example.com/oauth2/authorize">
+    </label>
+    <label>
+      <span class="lbl">Token endpoint</span>
+      <input name="sso.token.url" placeholder="https://auth.example.com/oauth2/token">
+    </label>
+    <label>
+      <span class="lbl">Userinfo endpoint</span>
+      <input name="sso.userinfo.url" placeholder="https://auth.example.com/userinfo">
+    </label>
+    <label>
+      <span class="lbl">Scope</span>
+      <input name="sso.scope" placeholder="openid profile email">
+    </label>
+    <div class="row" style="gap:1rem">
+      <label style="flex:1;min-width:9rem">
+        <span class="lbl">ID claim</span>
+        <input name="sso.claim.id" placeholder="sub">
+      </label>
+      <label style="flex:1;min-width:9rem">
+        <span class="lbl">Email claim</span>
+        <input name="sso.claim.email" placeholder="email">
+      </label>
+      <label style="flex:1;min-width:9rem">
+        <span class="lbl">Name claim</span>
+        <input name="sso.claim.name" placeholder="name">
+      </label>
+    </div>
+    <label>
+      <span class="lbl">Admin emails</span>
+      <input name="sso.admin.emails" placeholder="you@example.com, colleague@example.com">
+      <span class="hint">Comma separated. These accounts get the admin role when they sign in.</span>
+    </label>
+    <div class="row">
+      <button class="btn" type="submit">Save</button>
+      <a class="btn btn-secondary" href="/auth/login" style="text-decoration:none">Test sign-in</a>
+    </div>
+    <p class="muted" style="margin:.9rem 0 0;font-size:.85rem">
+      Saved to <code id="configFile"></code>. Changes apply immediately, no restart.
+    </p>
+  </form>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+const form = document.getElementById('ssoForm');
+
+function showError(message){
+  const box = document.getElementById('error');
+  box.textContent = message; box.hidden = false;
+}
+
+async function load(){
+  try{
+    const data = await api('/admin/settings');
+    document.getElementById('configFile').textContent = data.config_file;
+    for(const [key, info] of Object.entries(data.values)){
+      const field = form.elements[key];
+      if(!field) continue;
+      if(info.is_secret){
+        field.placeholder = info.is_set ? 'unchanged (a secret is stored)' : 'not set';
+      }else{
+        field.value = info.value || '';
+      }
+    }
+    const configured = data.values['sso.client.id'].is_set && data.values['sso.authorize.url'].is_set
+                       && data.values['sso.token.url'].is_set;
+    const badge = document.getElementById('status');
+    badge.textContent = configured ? 'configured' : 'not configured';
+    badge.className = 'pill ' + (configured ? 'on' : 'off');
+  }catch(e){ showError('Could not load settings: ' + e.message); }
+}
+
+form.addEventListener('submit', async event => {
+  event.preventDefault();
+  const payload = {};
+  for(const field of form.elements){
+    if(field.name) payload[field.name] = field.value;
+  }
+  try{
+    const result = await api('/admin/settings', {method:'POST', headers:{'Content-Type':'application/json'},
+                                                 body: JSON.stringify(payload)});
+    document.getElementById('error').hidden = true;
+    const box = document.getElementById('saved');
+    box.textContent = `Saved ${result.saved.length} setting${result.saved.length === 1 ? '' : 's'}. Try the sign-in to check it works.`;
+    box.hidden = false;
+    form.elements['sso.client.secret'].value = '';
+    load();
+  }catch(e){ showError(e.message); }
+});
+
+load();
+</script>
+{% endblock %}
