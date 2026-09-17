@@ -23,8 +23,13 @@ defaults:
   exclusive: true
 
 models:
+  # Measured on a 24 GB RTX 3090 (2026-09-17), all layers on GPU:
+  #   ctx 8192 -> 17.4 GB | ctx 65536 -> 19.5 GB | ctx 131072 -> 22.0 GB | ctx 65536 f16 KV -> 21.3 GB
+  #   generation 42.5 t/s, prefill ~1340 t/s at pp512/pp2048. Ollama matches the speed but cannot
+  #   set context or KV type per model, which is what this profile buys.
   - name: qwen3.8-27b-tuned
     model_path: /usr/share/ollama/.ollama/models/blobs/sha256-3e020514545c310dfc511dc8d3ddc23482b645189cb9287816d84bed6eddd4ac
     n_gpu_layers: 999
-    # Set n_cpu_ffn only if the model does not fit fully; measure before and after.
-    # n_cpu_ffn: 8
+    ctx_size: 65536
+    # Headroom left over: ~4 GB. For 128k context set ctx_size 131072 (22.0 GB, tight).
+    # For better KV quality at 64k use cache_type_k/v f16 (21.3 GB).
