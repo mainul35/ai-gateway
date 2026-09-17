@@ -1,0 +1,10 @@
+# Optional. Every model on the Ollama server is exposed automatically; entries here add extra
+# upstreams (any OpenAI-compatible API) or override a discovered model of the same name.
+#
+# models:
+#   - name: gpt-4o-mini              # name clients request
+#     backend: openai                # "openai" for any OpenAI-compatible API, "ollama" for Ollama
+#     base_url: https://api.openai.com/v1
+#     upstream_model: gpt-4o-mini    # name the upstream knows it by
+#     api_key: env:OPENAI_API_KEY    # "env:NAME" reads the value from that environment variable
+models: []

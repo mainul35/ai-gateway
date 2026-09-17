@@ -1,0 +1,40 @@
+services:
+  gateway:
+    build:
+      context: .
+      dockerfile: Dockerfile.gateway
+    image: model-gateway
+    container_name: model-gateway
+    ports:
+      - "9000:9000"
+    volumes:
+      - ./config:/app/config:ro
+    depends_on:
+      gateway-db:
+        condition: service_healthy
+    environment:
+      # Overridden by config/config.properties when the same key is set there
+      GATEWAY_DATABASE_URL: postgresql+asyncpg://gateway:${GATEWAY_DB_PASSWORD}@gateway-db:5432/gateway
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
+
+  gateway-db:
+    # pgvector rather than plain postgres, so retrieval features can use the same database later
+    image: pgvector/pgvector:pg18
+    container_name: model-gateway-db
+    environment:
+      POSTGRES_USER: gateway
+      POSTGRES_PASSWORD: ${GATEWAY_DB_PASSWORD}
+      POSTGRES_DB: gateway
+    volumes:
+      - gateway-db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U gateway"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    restart: unless-stopped
+
+volumes:
+  gateway-db-data:
