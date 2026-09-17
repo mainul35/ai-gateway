@@ -8,6 +8,7 @@ DEFAULTS = {
     "gateway.models.file": "config/models.yaml",
     "gateway.discovery.ttl.seconds": "30",
     "gateway.request.timeout.seconds": "600",
+    "engine.profiles.file": "config/engines.yaml",
     "sso.scope": "openid profile email",
     "sso.claim.id": "sub",
     "sso.claim.email": "email",

@@ -1,0 +1,30 @@
+# llama.cpp engine profiles: one llama-server process per entry, started on demand.
+#
+# These are the knobs Ollama does not expose. The important ones for a 24 GB card:
+#   n_gpu_layers  999 puts every layer on the GPU; lower it only if nothing else fits
+#   n_cpu_ffn     keeps the dense FFN weights of the first N layers on the CPU (llama.cpp b10645+).
+#                 Prefer this over lowering n_gpu_layers: attention and the KV cache stay on the GPU,
+#                 and only the big FFN matmuls move, which costs far less speed per GB freed.
+#   n_cpu_moe     same idea for MoE expert weights
+#   cache_type_k/v  q8_0 roughly halves KV cache VRAM versus f16 (needs flash_attn)
+#   ctx_size      the KV cache grows linearly with this; it is usually what pushes a model off the GPU
+#   ttl_seconds   unload after this long idle; exclusive models stop each other to free VRAM
+#
+# model_path can point straight at Ollama's blob files, so no model is downloaded twice.
+
+start_port: 8090
+
+defaults:
+  ctx_size: 16384
+  cache_type_k: q8_0
+  cache_type_v: q8_0
+  flash_attn: true
+  ttl_seconds: 900
+  exclusive: true
+
+models:
+  - name: qwen3.8-27b-tuned
+    model_path: /usr/share/ollama/.ollama/models/blobs/sha256-3e020514545c310dfc511dc8d3ddc23482b645189cb9287816d84bed6eddd4ac
+    n_gpu_layers: 999
+    # Set n_cpu_ffn only if the model does not fit fully; measure before and after.
+    # n_cpu_ffn: 8

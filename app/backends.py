@@ -11,6 +11,7 @@ import httpx
 import yaml
 
 from app import settings
+from app.engine.profiles import load_profiles
 from utils.ollama_client import ollama_host
 
 _cache = {"expires_at": 0.0, "models": {}}
@@ -82,12 +83,22 @@ async def _discover_ollama():
     return discovered
 
 
+def _engine_models():
+    """Models served by our own llama-server processes; started on demand when first requested."""
+    return {
+        name: Backend(name="llamacpp", kind="llamacpp",
+                      base_url=f"http://127.0.0.1:{profile.port}/v1", upstream_model=name)
+        for name, profile in load_profiles().items()
+    }
+
+
 async def available_models(force_refresh=False):
     now = time.monotonic()
     if not force_refresh and now < _cache["expires_at"]:
         return _cache["models"]
 
     models = await _discover_ollama()
+    models.update(_engine_models())  # our tuned llama.cpp profiles win over the Ollama copy
     models.update(_load_model_file())  # explicit config wins over discovery
     _cache.update(expires_at=now + settings.discovery_ttl(), models=models)
     return models

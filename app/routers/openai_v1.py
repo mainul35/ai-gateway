@@ -6,6 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from app import backends, settings, usage as usage_log
+from app.engine.supervisor import supervisor
 from app.auth import Principal, authenticate
 
 router = APIRouter(prefix="/v1", tags=["openai"])
@@ -43,6 +44,16 @@ async def _proxy(request: Request, principal: Principal, endpoint: str, path: st
     if backend is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, f"Model '{model}' is not available")
 
+    running = None
+    if backend.kind == "llamacpp":
+        # Loads the model (and frees VRAM by stopping another) before the request is forwarded
+        running, problem = await supervisor.ensure_running(model)
+        if problem:
+            raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, problem)
+        backend = backends.Backend(name="llamacpp", kind="llamacpp",
+                                   base_url=f"{running.base_url}/v1", upstream_model=model)
+        running.in_flight += 1
+
     upstream_body = dict(body, model=backend.upstream_model)
     streamed = bool(body.get("stream"))
     if streamed:
@@ -57,10 +68,14 @@ async def _proxy(request: Request, principal: Principal, endpoint: str, path: st
             response = await client.post(backend.url(path), json=upstream_body, headers=backend.headers())
         except httpx.HTTPError as e:
             await client.aclose()
+            if running:
+                running.in_flight = max(0, running.in_flight - 1)
             await usage_log.record(principal, model, backend.name, endpoint, False, 502,
                                    None, (time.monotonic() - started) * 1000, str(e))
             raise HTTPException(status.HTTP_502_BAD_GATEWAY, f"Upstream error: {e}")
         await client.aclose()
+        if running:
+            running.in_flight = max(0, running.in_flight - 1)
         payload = response.json() if response.headers.get("content-type", "").startswith("application/json") else None
         await usage_log.record(principal, model, backend.name, endpoint, False, response.status_code,
                                (payload or {}).get("usage"), (time.monotonic() - started) * 1000,
@@ -90,6 +105,8 @@ async def _proxy(request: Request, principal: Principal, endpoint: str, path: st
             yield b"data: {\"error\": {\"message\": \"upstream connection failed\"}}\n\n"
         finally:
             await client.aclose()
+            if running:
+                running.in_flight = max(0, running.in_flight - 1)
             await usage_log.record(principal, model, backend.name, endpoint, True, status_code,
                                    captured_usage, (time.monotonic() - started) * 1000, error)
 
