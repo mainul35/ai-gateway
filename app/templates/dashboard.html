@@ -36,6 +36,30 @@
 </div>
 {% endif %}
 
+<div class="grid">
+  <div class="card">
+    <h2>Signed in as</h2>
+    <p style="margin:.2rem 0"><strong>{{ user.name }}</strong><br>
+      <span class="muted" style="font-size:.88rem">{{ user.email or 'no email on file' }}</span></p>
+    <p style="margin:.6rem 0 0">
+      <span class="pill {{ 'on' if user.role == 'admin' else 'off' }}">{{ user.role }}</span>
+      <span class="muted" style="font-size:.85rem">
+        &middot; {{ 'single sign-on' if not user.password_hash else 'local password' }}</span></p>
+  </div>
+  <div class="card">
+    <h2>Endpoint</h2>
+    <p class="muted" style="margin:.2rem 0;font-size:.9rem">OpenAI-compatible base URL</p>
+    <code id="baseUrlCard"></code>
+  </div>
+</div>
+
+{% if user.role == 'admin' %}
+<div class="card" style="margin-bottom:1.5rem">
+  <h2>Models</h2>
+  <div id="models" class="muted">Loading&hellip;</div>
+</div>
+{% endif %}
+
 <div class="card">
   <h2>Your API keys</h2>
   <p class="muted" style="margin-top:0;font-size:.9rem">
@@ -57,6 +81,7 @@
 <script>
 const isAdmin = {{ 'true' if user.role == 'admin' else 'false' }};
 document.getElementById('baseUrl').textContent = location.origin + '/v1';
+document.getElementById('baseUrlCard').textContent = location.origin + '/v1';
 
 function showError(message){
   const box = document.getElementById('error');
@@ -104,6 +129,15 @@ async function loadAdmin(){
     ]);
 
     document.getElementById('statModels').textContent = models.data.length;
+
+    const byBackend = {};
+    for(const m of models.data){ (byBackend[m.owned_by] ||= []).push(m.id); }
+    document.getElementById('models').innerHTML = Object.entries(byBackend).map(([backend, names]) => `
+      <p style="margin:.35rem 0 .15rem"><strong>${escapeHtml(backend)}</strong>
+        <span class="muted">&middot; ${names.length}</span></p>
+      <div style="display:flex;flex-wrap:wrap;gap:.35rem;margin-bottom:.5rem">
+        ${names.map(n => `<code>${escapeHtml(n)}</code>`).join('')}
+      </div>`).join('') || '<span class="muted">No models available.</span>';
     document.getElementById('statUsers').textContent = system.counts.users;
     document.getElementById('statRequests').textContent = system.counts.requests_24h;
     document.getElementById('statTokens').textContent = system.counts.tokens_24h.toLocaleString();
