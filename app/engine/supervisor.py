@@ -14,6 +14,7 @@ import httpx
 
 from app import settings
 from app.engine.profiles import load_profiles
+from utils.ollama_client import ollama_host
 
 log = logging.getLogger("engine")
 
@@ -107,6 +108,9 @@ class Supervisor:
             if existing:
                 self._running.pop(name, None)
 
+            if profile.exclusive and settings.get_bool("engine.unload_ollama_first", "ENGINE_UNLOAD_OLLAMA_FIRST"):
+                await self._unload_ollama_models()
+
             if profile.exclusive:
                 for other_name, other in list(self._running.items()):
                     if other.profile.exclusive and other_name != name:
@@ -115,6 +119,34 @@ class Supervisor:
 
             model, problem = await self._start_locked(profile)
             return model, problem
+
+    async def _unload_ollama_models(self):
+        """Asks Ollama to drop its loaded models; they otherwise keep the GPU full (OLLAMA_KEEP_ALIVE=-1)."""
+        host = ollama_host()
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                response = await client.get(f"{host}/api/ps")
+                response.raise_for_status()
+                loaded = [e.get("model") or e.get("name") for e in response.json().get("models") or []]
+                for name in filter(None, loaded):
+                    log.info("Asking Ollama to unload %s", name)
+                    # keep_alive 0 unloads immediately. Ollama reports failures in the body with HTTP 200.
+                    result = await client.post(f"{host}/api/generate", json={"model": name, "keep_alive": 0})
+                    body = {}
+                    if result.headers.get("content-type", "").startswith("application/json"):
+                        body = result.json()
+                    if result.status_code >= 400 or body.get("error"):
+                        log.warning("Ollama would not unload %s: %s", name, body.get("error") or result.text[:200])
+
+                for _ in range(15):
+                    await asyncio.sleep(1)
+                    still_loaded = (await client.get(f"{host}/api/ps")).json().get("models") or []
+                    if not still_loaded:
+                        log.info("Ollama released its models")
+                        return
+                log.warning("Ollama still holds %s after the unload request", [m.get("model") for m in still_loaded])
+        except (httpx.HTTPError, ValueError) as e:
+            log.warning("Could not reach Ollama to unload models: %s", e)
 
     async def _start_locked(self, profile):
         if not os.path.isfile(profile.model_path):
@@ -146,11 +178,7 @@ class Supervisor:
         async with httpx.AsyncClient(timeout=5) as client:
             while time.monotonic() < deadline:
                 if model.process.returncode is not None:
-                    stderr = b""
-                    if model.process.stderr:
-                        with contextlib.suppress(Exception):
-                            stderr = await asyncio.wait_for(model.process.stderr.read(2000), timeout=2)
-                    return False, f"llama-server exited ({model.process.returncode}): {stderr.decode(errors='replace')[-400:]}"
+                    return False, f"llama-server exited ({model.process.returncode}): {await self._stderr_tail(model)}"
                 try:
                     response = await client.get(f"{model.base_url}/health")
                     if response.status_code == 200:
@@ -159,6 +187,23 @@ class Supervisor:
                     pass
                 await asyncio.sleep(1)
         return False, f"llama-server did not become ready within {STARTUP_TIMEOUT}s"
+
+    @staticmethod
+    async def _stderr_tail(model, limit=500):
+        """llama-server prints pages of warnings before the fatal error, so keep the end."""
+        if not model.process.stderr:
+            return "(no output)"
+        chunks = []
+        with contextlib.suppress(Exception):
+            while True:
+                chunk = await asyncio.wait_for(model.process.stderr.read(65536), timeout=2)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+        text = b"".join(chunks).decode(errors="replace").strip()
+        interesting = [line for line in text.splitlines()
+                       if any(word in line.lower() for word in ("error", "failed", "cannot", "out of memory", "unable"))]
+        return (interesting[-1] if interesting else text.splitlines()[-1] if text.splitlines() else "(no output)")[-limit:]
 
     async def stop(self, name):
         async with self._lock:

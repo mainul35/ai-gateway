@@ -11,6 +11,8 @@ from app.engine.supervisor import supervisor
 from app.routers import admin, auth_sso, openai_v1
 from utils.ollama_client import ollama_host
 
+# Without this our own INFO logs never reach the console; uvicorn only configures its own loggers
+logging.basicConfig(level=logging.INFO, format="%(levelname)s:     %(name)s: %(message)s")
 log = logging.getLogger("gateway")
 
 

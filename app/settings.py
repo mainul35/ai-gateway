@@ -23,6 +23,13 @@ def get(key, env_var=None):
     return config.get(key, env_var, DEFAULTS.get(key))
 
 
+def get_bool(key, env_var=None, default=False):
+    value = get(key, env_var)
+    if value is None:
+        return default
+    return str(value).strip().lower() in ("1", "true", "yes", "on")
+
+
 def database_url():
     return get("gateway.database.url", "GATEWAY_DATABASE_URL")
 
