@@ -30,6 +30,11 @@ class EngineProfile:
     parallel: int | None = None      # -np: server slots
     threads: int | None = None       # -t
     override_tensor: str | None = None  # -ot: per-tensor placement regex
+    # Thinking models spend most of their output on reasoning; 0 turns that phase off entirely
+    reasoning_budget: int | None = None      # --reasoning-budget (0 = no thinking, -1 = unlimited)
+    cache_reuse: int | None = None           # --cache-reuse: reuse a matching prompt prefix between turns
+    n_predict: int | None = None             # --n-predict: hard cap on generated tokens
+    chat_template_kwargs: str | None = None  # --chat-template-kwargs: JSON passed to the chat template
     extra_args: list[str] = field(default_factory=list)
     ttl_seconds: int = 900           # unload after this long idle; 0 = keep loaded
     exclusive: bool = True           # stop other exclusive models first (one big model fits in 24 GB)
@@ -58,6 +63,15 @@ class EngineProfile:
             args += ["--threads", str(self.threads)]
         if self.override_tensor:
             args += ["--override-tensor", self.override_tensor]
+        if self.reasoning_budget is not None:
+            args += ["--reasoning-budget", str(self.reasoning_budget)]
+        if self.cache_reuse is not None:
+            # Long chats re-send the whole history; reusing the cached prefix avoids re-reading it
+            args += ["--cache-reuse", str(self.cache_reuse)]
+        if self.n_predict is not None:
+            args += ["--n-predict", str(self.n_predict)]
+        if self.chat_template_kwargs:
+            args += ["--chat-template-kwargs", self.chat_template_kwargs]
         return args + list(self.extra_args)
 
 

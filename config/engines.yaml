@@ -19,7 +19,7 @@ defaults:
   cache_type_k: q8_0
   cache_type_v: q8_0
   flash_attn: true
-  ttl_seconds: 900
+  ttl_seconds: 3600   # keep loaded for an hour; a cold start costs ~15s
   exclusive: true
 
 models:
@@ -31,5 +31,11 @@ models:
     model_path: /usr/share/ollama/.ollama/models/blobs/sha256-3e020514545c310dfc511dc8d3ddc23482b645189cb9287816d84bed6eddd4ac
     n_gpu_layers: 999
     ctx_size: 65536
+    # Chat clients resend the whole conversation each turn; reusing the cached prefix saves the re-read
+    cache_reuse: 256
+    # Qwen3.8 is a thinking model: by default it emits reasoning tokens before any visible answer,
+    # which looks like a hang in clients that only render "content". Off by default; a client can
+    # re-enable it per request with chat_template_kwargs {"enable_thinking": true}.
+    chat_template_kwargs: '{"enable_thinking": false}' 
     # Headroom left over: ~4 GB. For 128k context set ctx_size 131072 (22.0 GB, tight).
     # For better KV quality at 64k use cache_type_k/v f16 (21.3 GB).
