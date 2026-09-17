@@ -7,7 +7,7 @@ from fastapi.templating import Jinja2Templates
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app import settings, sso
+from app import settings, sso, throttle
 from app.db import get_session
 from app.models import User
 from app.security import verify_password
@@ -57,11 +57,25 @@ async def login_page(request: Request, next: str = "/dashboard", error: str | No
 @router.post("/login")
 async def login_submit(request: Request, username: str = Form(...), password: str = Form(...),
                        next: str = Form("/dashboard"), session: AsyncSession = Depends(get_session)):
+    # Tunnelled traffic arrives from Cloudflare, so trust its client-IP header when present
+    client_ip = request.headers.get("cf-connecting-ip") or (request.client.host if request.client else "unknown")
+    throttle_key = f"{client_ip}:{username}"
+
+    def login_failed(message):
+        return _page(request, "login.html", None, next=next, error=message,
+                     sso_configured=sso.is_configured(),
+                     sso_name=settings.get("sso.display.name") or "single sign-on")
+
+    if throttle.is_blocked(throttle_key):
+        wait = throttle.seconds_until_unblocked(throttle_key)
+        return login_failed(f"Too many failed attempts. Try again in {wait // 60 + 1} minute(s).")
+
     result = await session.execute(select(User).where(User.name == username))
     user = result.scalar_one_or_none()
     if user is None or not user.is_active or not verify_password(password, user.password_hash or ""):
-        return _page(request, "login.html", None, next=next, error="Wrong username or password",
-                     sso_configured=sso.is_configured(), sso_name=settings.get("sso.display.name") or "single sign-on")
+        throttle.record_failure(throttle_key)
+        return login_failed("Wrong username or password")
+    throttle.clear(throttle_key)
     response = RedirectResponse(next if next.startswith("/") else "/dashboard", status_code=303)
     response.set_cookie(sso.SESSION_COOKIE, sso.issue_session(user), max_age=sso.SESSION_MAX_AGE,
                         httponly=True, samesite="lax", path="/")
