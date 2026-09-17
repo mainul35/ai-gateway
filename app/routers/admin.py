@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.auth import Principal, generate_key, hash_key, require_admin
+from app.engine.supervisor import supervisor
 from app.db import get_session
 from app.models import ApiKey, UsageRecord, User, utcnow
 
@@ -119,3 +120,21 @@ async def usage_summary(days: int = 7, _: Principal = Depends(require_admin),
             for name, model, requests, prompt, completion in result.all()
         ],
     }
+
+
+@router.get("/engines")
+async def engine_status(_: Principal = Depends(require_admin)):
+    return supervisor.status()
+
+
+@router.post("/engines/{name}/start")
+async def engine_start(name: str, _: Principal = Depends(require_admin)):
+    model, problem = await supervisor.ensure_running(name)
+    if problem:
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, problem)
+    return model.status()
+
+
+@router.post("/engines/{name}/stop")
+async def engine_stop(name: str, _: Principal = Depends(require_admin)):
+    return {"stopped": await supervisor.stop(name)}

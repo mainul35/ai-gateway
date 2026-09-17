@@ -1,7 +1,9 @@
-fastapi==0.115.6
-uvicorn[standard]==0.34.0
-httpx==0.28.1
-sqlalchemy[asyncio]==2.0.36
-asyncpg==0.30.0
-pydantic==2.10.4
-PyYAML==6.0.2
+# Minimum versions that provide wheels for Python 3.12 (Docker image) and 3.14 (homelab host)
+fastapi>=0.141.1
+uvicorn[standard]>=0.34.0
+httpx>=0.28.1
+sqlalchemy[asyncio]>=2.0.54
+asyncpg>=0.31.0
+pydantic>=2.13.5
+PyYAML>=6.0.2
+itsdangerous>=2.2.0

@@ -7,9 +7,12 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
 
 from app import db, settings, sso
+from app.engine.supervisor import supervisor
 from app.routers import admin, auth_sso, openai_v1
 from utils.ollama_client import ollama_host
 
+# Without this our own INFO logs never reach the console; uvicorn only configures its own loggers
+logging.basicConfig(level=logging.INFO, format="%(levelname)s:     %(name)s: %(message)s")
 log = logging.getLogger("gateway")
 
 
@@ -19,7 +22,10 @@ async def lifespan(_: FastAPI):
     log.info("Ollama backend: %s", ollama_host())
     if settings.master_key_is_generated():
         log.warning("No gateway.master.key configured; generated for this run: %s", settings.master_key())
+    await supervisor.start_reaper()
+    log.info("llama.cpp engine available: %s", supervisor.is_available())
     yield
+    await supervisor.shutdown()
     await db.dispose()
 
 
