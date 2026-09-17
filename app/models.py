@@ -20,6 +20,8 @@ class User(Base):
     name: Mapped[str] = mapped_column(String(128), unique=True, index=True)
     email: Mapped[str | None] = mapped_column(String(256), nullable=True)
     role: Mapped[str] = mapped_column(String(32), default="user")  # "user" or "admin"
+    # Only the built-in admin has one; SSO accounts authenticate against the auth server
+    password_hash: Mapped[str | None] = mapped_column(String(256), nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 

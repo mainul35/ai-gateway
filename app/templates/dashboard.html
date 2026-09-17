@@ -1,0 +1,164 @@
+{% extends "base.html" %}
+{% block title %}Dashboard &middot; Model Gateway{% endblock %}
+{% block content %}
+<h1>Dashboard</h1>
+<p class="sub">Status of the gateway, its models and its backends.</p>
+
+<div id="error" class="note err" hidden></div>
+
+{% if user.role == 'admin' %}
+<div class="grid" id="stats">
+  <div class="card"><div class="stat" id="statModels">&mdash;</div><div class="stat-label">Models served</div></div>
+  <div class="card"><div class="stat" id="statUsers">&mdash;</div><div class="stat-label">Users</div></div>
+  <div class="card"><div class="stat" id="statRequests">&mdash;</div><div class="stat-label">Requests (24h)</div></div>
+  <div class="card"><div class="stat" id="statTokens">&mdash;</div><div class="stat-label">Tokens (24h)</div></div>
+</div>
+
+<div class="grid">
+  <div class="card">
+    <h2>Backends</h2>
+    <div id="backends" class="muted">Loading&hellip;</div>
+  </div>
+  <div class="card">
+    <h2>Hardware</h2>
+    <div id="hardware" class="muted">Loading&hellip;</div>
+  </div>
+</div>
+
+<div class="card" style="margin-bottom:1.5rem">
+  <h2>llama.cpp engine</h2>
+  <div id="engine" class="muted">Loading&hellip;</div>
+</div>
+
+<div class="card" style="margin-bottom:1.5rem">
+  <h2>Usage, last 7 days</h2>
+  <div id="usage" class="muted">Loading&hellip;</div>
+</div>
+{% endif %}
+
+<div class="card">
+  <h2>Your API keys</h2>
+  <p class="muted" style="margin-top:0;font-size:.9rem">
+    Use these with any OpenAI-compatible client. Base URL: <code id="baseUrl"></code>
+  </p>
+  <div id="keyCreated" class="note ok" hidden></div>
+  <div id="myKeys" class="muted">Loading&hellip;</div>
+  <div class="row" style="margin-top:1rem">
+    <label style="flex:1;min-width:12rem;margin:0">
+      <span class="lbl">New key name</span>
+      <input id="newKeyName" placeholder="laptop, open-webui, agent&hellip;">
+    </label>
+    <button class="btn" id="createKey">Create key</button>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+const isAdmin = {{ 'true' if user.role == 'admin' else 'false' }};
+document.getElementById('baseUrl').textContent = location.origin + '/v1';
+
+function showError(message){
+  const box = document.getElementById('error');
+  box.textContent = message;
+  box.hidden = false;
+}
+
+async function loadMyKeys(){
+  const target = document.getElementById('myKeys');
+  try{
+    const me = await api('/auth/me');
+    target.innerHTML = me.keys.length
+      ? `<table><tr><th>Name</th><th>Key</th><th></th></tr>` + me.keys.map(k => `
+          <tr><td>${escapeHtml(k.name)}</td><td><code>${escapeHtml(k.prefix)}&hellip;</code></td>
+          <td style="text-align:right"><button class="btn btn-danger btn-sm" data-revoke="${k.id}">Revoke</button></td></tr>`).join('') + `</table>`
+      : '<span class="muted">No keys yet.</span>';
+  }catch(e){ target.textContent = 'Could not load keys: ' + e.message; }
+}
+
+document.getElementById('createKey').addEventListener('click', async () => {
+  const name = document.getElementById('newKeyName').value.trim() || 'default';
+  try{
+    const created = await api('/auth/keys', {method:'POST', headers:{'Content-Type':'application/json'},
+                                             body: JSON.stringify({name})});
+    const box = document.getElementById('keyCreated');
+    box.innerHTML = `Copy this now, it is shown only once:<br><code>${escapeHtml(created.key)}</code>`;
+    box.hidden = false;
+    document.getElementById('newKeyName').value = '';
+    loadMyKeys();
+  }catch(e){ showError(e.message); }
+});
+
+document.addEventListener('click', async e => {
+  const button = e.target.closest('[data-revoke]');
+  if(!button) return;
+  if(!confirm('Revoke this key? Clients using it stop working immediately.')) return;
+  try{ await api(`/auth/keys/${button.dataset.revoke}`, {method:'DELETE'}); loadMyKeys(); }
+  catch(err){ showError(err.message); }
+});
+
+async function loadAdmin(){
+  try{
+    const [system, models, usage] = await Promise.all([
+      api('/admin/system'), api('/v1/models'), api('/admin/usage?days=7'),
+    ]);
+
+    document.getElementById('statModels').textContent = models.data.length;
+    document.getElementById('statUsers').textContent = system.counts.users;
+    document.getElementById('statRequests').textContent = system.counts.requests_24h;
+    document.getElementById('statTokens').textContent = system.counts.tokens_24h.toLocaleString();
+
+    const ollama = system.ollama;
+    document.getElementById('backends').innerHTML = `
+      <p style="margin:.2rem 0">Ollama <span class="pill ${ollama.status === 'running' ? 'on' : 'err'}">${escapeHtml(ollama.status)}</span>
+        ${ollama.version ? 'v' + escapeHtml(ollama.version) : ''}<br>
+        <span class="muted" style="font-size:.85rem">${escapeHtml(ollama.host)}</span></p>
+      <p style="margin:.6rem 0 .2rem">llama.cpp <span class="pill ${system.engine.available ? 'on' : 'off'}">
+        ${system.engine.available ? 'available' : 'not installed'}</span><br>
+        <span class="muted" style="font-size:.85rem">${escapeHtml(system.engine.binary || 'no binary configured')}</span></p>`;
+
+    document.getElementById('hardware').innerHTML = (system.gpus.length
+        ? system.gpus.map(g => `<p style="margin:.2rem 0">${escapeHtml(g.name)}<br>
+            <span class="muted" style="font-size:.85rem">${formatBytes(g.vram_free)} free of ${formatBytes(g.vram_total)}</span></p>`).join('')
+        : '<p class="muted" style="margin:.2rem 0">No GPU detected</p>')
+      + `<p style="margin:.6rem 0 .2rem">RAM<br><span class="muted" style="font-size:.85rem">
+         ${formatBytes(system.available_ram)} free of ${formatBytes(system.total_ram)}</span></p>`;
+
+    const engine = system.engine;
+    const running = new Map(engine.running.map(r => [r.name, r]));
+    document.getElementById('engine').innerHTML = engine.profiles.length
+      ? `<table><tr><th>Profile</th><th>State</th><th>Idle</th><th></th></tr>` + engine.profiles.map(name => {
+          const r = running.get(name);
+          return `<tr><td>${escapeHtml(name)}</td>
+            <td>${r ? `<span class="pill on">loaded</span> <span class="muted">pid ${r.pid}</span>` : '<span class="pill off">not loaded</span>'}</td>
+            <td class="muted">${r ? r.idle_seconds + 's of ' + r.ttl_seconds + 's' : '&mdash;'}</td>
+            <td style="text-align:right">
+              <button class="btn btn-sm ${r ? 'btn-danger' : ''}" data-engine="${escapeHtml(name)}"
+                      data-action="${r ? 'stop' : 'start'}">${r ? 'Unload' : 'Load'}</button></td></tr>`;
+        }).join('') + `</table>`
+      : '<span class="muted">No profiles defined in config/engines.yaml.</span>';
+
+    document.getElementById('usage').innerHTML = usage.rows.length
+      ? `<table><tr><th>User</th><th>Model</th><th>Requests</th><th>Prompt</th><th>Completion</th></tr>` +
+        usage.rows.map(r => `<tr><td>${escapeHtml(r.user)}</td><td>${escapeHtml(r.model)}</td>
+          <td>${r.requests}</td><td>${r.prompt_tokens.toLocaleString()}</td>
+          <td>${r.completion_tokens.toLocaleString()}</td></tr>`).join('') + `</table>`
+      : '<span class="muted">No requests recorded yet.</span>';
+  }catch(e){ showError('Could not load dashboard: ' + e.message); }
+}
+
+document.addEventListener('click', async e => {
+  const button = e.target.closest('[data-engine]');
+  if(!button) return;
+  const {engine: name, action} = button.dataset;
+  button.disabled = true;
+  button.textContent = action === 'start' ? 'Loading, this can take a minute…' : 'Unloading…';
+  try{ await api(`/admin/engines/${encodeURIComponent(name)}/${action}`, {method:'POST'}); }
+  catch(err){ showError(err.message); }
+  finally{ loadAdmin(); }
+});
+
+loadMyKeys();
+if(isAdmin){ loadAdmin(); setInterval(loadAdmin, 15000); }
+</script>
+{% endblock %}

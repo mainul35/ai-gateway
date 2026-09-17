@@ -8,7 +8,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.auth import Principal, generate_key, hash_key, require_admin
+from app import config_writer
 from app.engine.supervisor import supervisor
+from utils.ollama_client import check_ollama_status, ollama_host
+from utils.system_info import get_system_info
 from app.db import get_session
 from app.models import ApiKey, UsageRecord, User, utcnow
 
@@ -138,3 +141,41 @@ async def engine_start(name: str, _: Principal = Depends(require_admin)):
 @router.post("/engines/{name}/stop")
 async def engine_stop(name: str, _: Principal = Depends(require_admin)):
     return {"stopped": await supervisor.stop(name)}
+
+
+@router.get("/settings")
+async def read_settings(_: Principal = Depends(require_admin)):
+    return {"config_file": config_writer.config.config_file_path(), "values": config_writer.read_settings()}
+
+
+@router.post("/settings")
+async def write_settings(payload: dict, _: Principal = Depends(require_admin)):
+    try:
+        written = config_writer.write_settings(payload)
+    except ValueError as e:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(e))
+    # The config file is re-read when it changes, so the new values are live immediately
+    return {"saved": written}
+
+
+@router.get("/system")
+async def system_overview(_: Principal = Depends(require_admin), session: AsyncSession = Depends(get_session)):
+    info = get_system_info()
+    users = (await session.execute(select(func.count(User.id)))).scalar() or 0
+    keys = (await session.execute(select(func.count(ApiKey.id)).where(ApiKey.is_active.is_(True)))).scalar() or 0
+    requests_today = (await session.execute(
+        select(func.count(UsageRecord.id)).where(UsageRecord.created_at >= utcnow() - timedelta(days=1))
+    )).scalar() or 0
+    tokens_today = (await session.execute(
+        select(func.coalesce(func.sum(UsageRecord.total_tokens), 0)).where(UsageRecord.created_at >= utcnow() - timedelta(days=1))
+    )).scalar() or 0
+    return {
+        "ollama": {**check_ollama_status(), "host": ollama_host()},
+        "engine": supervisor.status(),
+        "gpus": info["gpu_info"],
+        "total_vram": info["total_vram"],
+        "total_ram": info["total_ram"],
+        "available_ram": info["available_ram"],
+        "counts": {"users": users, "active_keys": keys,
+                   "requests_24h": requests_today, "tokens_24h": int(tokens_today)},
+    }

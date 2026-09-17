@@ -1,0 +1,91 @@
+"""The web interface: login, dashboard, user management and SSO settings."""
+import os
+
+from fastapi import APIRouter, Cookie, Depends, Form, Request
+from fastapi.responses import RedirectResponse
+from fastapi.templating import Jinja2Templates
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app import settings, sso
+from app.db import get_session
+from app.models import User
+from app.security import verify_password
+
+TEMPLATES_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "templates")
+
+router = APIRouter(tags=["ui"], include_in_schema=False)
+templates = Jinja2Templates(directory=TEMPLATES_DIR)
+
+
+async def signed_in_user(session: AsyncSession, cookie_value):
+    data = sso.read_session(cookie_value)
+    if not data:
+        return None
+    user = await session.get(User, data["user_id"])
+    return user if user and user.is_active else None
+
+
+async def current_user(session: AsyncSession = Depends(get_session),
+                       gateway_session: str | None = Cookie(default=None, alias=sso.SESSION_COOKIE)):
+    return await signed_in_user(session, gateway_session)
+
+
+def _page(request, name, user, **context):
+    return templates.TemplateResponse(request, name, {"user": user, **context})
+
+
+def _require_login(user, path):
+    """Pages redirect to the login screen instead of returning 401 like the API does."""
+    return None if user else RedirectResponse(f"/login?next={path}", status_code=303)
+
+
+@router.get("/")
+async def root(user: User | None = Depends(current_user)):
+    return RedirectResponse("/dashboard" if user else "/login", status_code=303)
+
+
+@router.get("/login")
+async def login_page(request: Request, next: str = "/dashboard", error: str | None = None,
+                     user: User | None = Depends(current_user)):
+    if user:
+        return RedirectResponse(next, status_code=303)
+    return _page(request, "login.html", None, next=next, error=error,
+                 sso_configured=sso.is_configured(), sso_name=settings.get("sso.display.name") or "single sign-on")
+
+
+@router.post("/login")
+async def login_submit(request: Request, username: str = Form(...), password: str = Form(...),
+                       next: str = Form("/dashboard"), session: AsyncSession = Depends(get_session)):
+    result = await session.execute(select(User).where(User.name == username))
+    user = result.scalar_one_or_none()
+    if user is None or not user.is_active or not verify_password(password, user.password_hash or ""):
+        return _page(request, "login.html", None, next=next, error="Wrong username or password",
+                     sso_configured=sso.is_configured(), sso_name=settings.get("sso.display.name") or "single sign-on")
+    response = RedirectResponse(next if next.startswith("/") else "/dashboard", status_code=303)
+    response.set_cookie(sso.SESSION_COOKIE, sso.issue_session(user), max_age=sso.SESSION_MAX_AGE,
+                        httponly=True, samesite="lax", path="/")
+    return response
+
+
+@router.get("/logout")
+async def logout():
+    response = RedirectResponse("/login", status_code=303)
+    response.delete_cookie(sso.SESSION_COOKIE, path="/")
+    return response
+
+
+@router.get("/dashboard")
+async def dashboard(request: Request, user: User | None = Depends(current_user)):
+    return _require_login(user, "/dashboard") or _page(request, "dashboard.html", user)
+
+
+@router.get("/users")
+async def users_page(request: Request, user: User | None = Depends(current_user)):
+    return _require_login(user, "/users") or _page(request, "users.html", user)
+
+
+@router.get("/settings/sso")
+async def sso_settings_page(request: Request, user: User | None = Depends(current_user)):
+    redirect_uri = f"{settings.public_base_url() or str(request.base_url).rstrip('/')}/auth/callback"
+    return _require_login(user, "/settings/sso") or _page(request, "sso.html", user, redirect_uri=redirect_uri)
