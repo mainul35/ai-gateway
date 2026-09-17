@@ -66,7 +66,7 @@
     </label>
     <div class="row">
       <button class="btn" type="submit">Save</button>
-      <a class="btn btn-secondary" href="/auth/login" style="text-decoration:none">Test sign-in</a>
+      <button class="btn btn-secondary" type="button" id="testSignIn">Save &amp; test sign-in</button>
     </div>
     <p class="muted" style="margin:.9rem 0 0;font-size:.85rem">
       Saved to <code id="configFile"></code>. Changes apply immediately, no restart.
@@ -105,22 +105,42 @@ async function load(){
   }catch(e){ showError('Could not load settings: ' + e.message); }
 }
 
-form.addEventListener('submit', async event => {
-  event.preventDefault();
+async function save(){
   const payload = {};
   for(const field of form.elements){
     if(field.name) payload[field.name] = field.value;
   }
+  const result = await api('/admin/settings', {method:'POST', headers:{'Content-Type':'application/json'},
+                                               body: JSON.stringify(payload)});
+  document.getElementById('error').hidden = true;
+  form.elements['sso.client.secret'].value = '';
+  return result;
+}
+
+form.addEventListener('submit', async event => {
+  event.preventDefault();
   try{
-    const result = await api('/admin/settings', {method:'POST', headers:{'Content-Type':'application/json'},
-                                                 body: JSON.stringify(payload)});
-    document.getElementById('error').hidden = true;
+    const result = await save();
     const box = document.getElementById('saved');
-    box.textContent = `Saved ${result.saved.length} setting${result.saved.length === 1 ? '' : 's'}. Try the sign-in to check it works.`;
+    box.textContent = `Saved ${result.saved.length} setting${result.saved.length === 1 ? '' : 's'}.`;
     box.hidden = false;
-    form.elements['sso.client.secret'].value = '';
     load();
   }catch(e){ showError(e.message); }
+});
+
+// Saving first matters: otherwise the test uses whatever was stored before you edited the form
+document.getElementById('testSignIn').addEventListener('click', async event => {
+  const button = event.currentTarget;
+  button.disabled = true;
+  button.textContent = 'Saving…';
+  try{
+    await save();
+    location.href = '/auth/login';
+  }catch(e){
+    showError(e.message);
+    button.disabled = false;
+    button.textContent = 'Save & test sign-in';
+  }
 });
 
 load();
