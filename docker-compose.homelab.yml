@@ -1,0 +1,18 @@
+# Linux/homelab overlay: run the gateway in the host's network namespace.
+#
+# Why: with the default bridge network, UFW drops traffic from the Docker subnet to the host, so the
+# container cannot reach Ollama on 11434. Host networking also means port 9000 is a real host port that
+# UFW governs; a Docker-published port bypasses UFW's rules entirely.
+#
+# Usage: docker compose -f docker-compose.gateway.yml -f docker-compose.homelab.yml up -d
+services:
+  gateway:
+    network_mode: host
+    ports: !reset []
+    extra_hosts: !reset []
+    environment:
+      GATEWAY_DATABASE_URL: postgresql+asyncpg://gateway:${GATEWAY_DB_PASSWORD}@127.0.0.1:5433/gateway
+
+  gateway-db:
+    ports:
+      - "127.0.0.1:5433:5432"
