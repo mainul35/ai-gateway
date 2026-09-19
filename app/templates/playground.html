@@ -1,0 +1,224 @@
+{% extends "base.html" %}
+{% block title %}Playground &middot; Model Gateway{% endblock %}
+{% block content %}
+<style>
+.pg{display:grid;grid-template-columns:18rem 1fr;gap:1.25rem;align-items:start}
+@media (max-width: 800px){ .pg{grid-template-columns:1fr} }
+.chat{min-height:22rem;max-height:60vh;overflow-y:auto;display:flex;flex-direction:column;gap:.9rem}
+.msg{border-radius:10px;padding:.7rem .9rem;white-space:pre-wrap;word-wrap:break-word;line-height:1.55}
+.msg.user{background:var(--input);align-self:flex-end;max-width:85%}
+.msg.assistant{background:#0b1220;border:1px solid var(--border)}
+.msg .who{font-size:.75rem;color:var(--muted);margin-bottom:.25rem;font-weight:600}
+details.think{margin-bottom:.5rem;font-size:.85rem;color:var(--muted)}
+details.think summary{cursor:pointer}
+.stats{font-size:.78rem;color:var(--muted);margin-top:.4rem}
+textarea{background:var(--input);border:1px solid var(--border);border-radius:8px;color:var(--text);
+         padding:.6rem .7rem;font-size:.95rem;width:100%;font-family:inherit;resize:vertical}
+textarea:focus{outline:none;border-color:var(--primary)}
+</style>
+
+<h1>Playground</h1>
+<p class="sub">Chat with the models you have access to. Requests count toward your usage like any API call.</p>
+<div id="error" class="note err" hidden></div>
+
+<div class="pg">
+  <div class="card">
+    <label>
+      <span class="lbl">Model</span>
+      <select id="model"></select>
+    </label>
+    <label>
+      <span class="lbl">System prompt (optional)</span>
+      <textarea id="system" rows="4" placeholder="You are a helpful assistant."></textarea>
+    </label>
+    <label>
+      <span class="lbl">Temperature <span id="tempValue" class="muted">0.7</span></span>
+      <input type="range" id="temperature" min="0" max="2" step="0.1" value="0.7" style="padding:0">
+    </label>
+    <label>
+      <span class="lbl">Max tokens</span>
+      <input type="number" id="maxTokens" value="2048" min="1" max="32768">
+    </label>
+    <label id="thinkingRow" style="display:flex;gap:.5rem;align-items:center" hidden>
+      <input type="checkbox" id="thinking" style="width:auto">
+      <span style="font-size:.9rem">Enable thinking <span class="muted">(slower, better reasoning)</span></span>
+    </label>
+    <button class="btn btn-secondary" id="clear" style="width:100%">New conversation</button>
+  </div>
+
+  <div class="card">
+    <div class="chat" id="chat"><p class="muted" id="empty">Pick a model and say something.</p></div>
+    <div style="margin-top:1rem">
+      <textarea id="prompt" rows="3" placeholder="Message&hellip;  (Enter to send, Shift+Enter for a new line)"></textarea>
+      <div class="row" style="margin-top:.6rem;justify-content:flex-end">
+        <button class="btn btn-danger" id="stop" hidden>Stop</button>
+        <button class="btn" id="send">Send</button>
+      </div>
+    </div>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+const chat = document.getElementById('chat');
+const modelSelect = document.getElementById('model');
+let history = [];
+let owners = {};
+let controller = null;
+
+function showError(message){
+  const box = document.getElementById('error');
+  box.textContent = message; box.hidden = !message;
+}
+
+async function loadModels(){
+  try{
+    const data = (await api('/v1/models')).data;
+    owners = Object.fromEntries(data.map(m => [m.id, m.owned_by]));
+    if(!data.length){
+      modelSelect.innerHTML = '<option value="">no models available</option>';
+      showError('You do not have access to any models yet. Ask a manager or admin to grant you some.');
+      document.getElementById('send').disabled = true;
+      return;
+    }
+    modelSelect.innerHTML = data.map(m => `<option value="${escapeHtml(m.id)}">${escapeHtml(m.id)}</option>`).join('');
+    const remembered = localStorage.getItem('pg.model');
+    if(remembered && owners[remembered]) modelSelect.value = remembered;
+    syncThinking();
+  }catch(e){ showError('Could not load models: ' + e.message); }
+}
+
+function syncThinking(){
+  // Only our llama.cpp profiles honour the thinking switch
+  document.getElementById('thinkingRow').hidden = owners[modelSelect.value] !== 'llamacpp';
+}
+modelSelect.addEventListener('change', () => {
+  try{ localStorage.setItem('pg.model', modelSelect.value); }catch(e){}
+  syncThinking();
+});
+document.getElementById('temperature').addEventListener('input', e =>
+  document.getElementById('tempValue').textContent = e.target.value);
+
+function addMessage(role, text){
+  document.getElementById('empty')?.remove();
+  const box = document.createElement('div');
+  box.className = `msg ${role}`;
+  box.innerHTML = `<div class="who">${role === 'user' ? 'You' : escapeHtml(modelSelect.value)}</div><div class="body"></div>`;
+  box.querySelector('.body').textContent = text;
+  chat.appendChild(box);
+  chat.scrollTop = chat.scrollHeight;
+  return box;
+}
+
+async function send(){
+  const promptBox = document.getElementById('prompt');
+  const text = promptBox.value.trim();
+  if(!text || controller) return;
+  showError('');
+  promptBox.value = '';
+  history.push({role: 'user', content: text});
+  addMessage('user', text);
+
+  const box = addMessage('assistant', '');
+  const body = box.querySelector('.body');
+  body.textContent = '…';
+  let thinkBlock = null, thinking = '', answer = '', firstTokenAt = null, usage = null;
+  const started = performance.now();
+
+  const messages = [];
+  const system = document.getElementById('system').value.trim();
+  if(system) messages.push({role: 'system', content: system});
+  messages.push(...history);
+
+  const payload = {model: modelSelect.value, messages, stream: true,
+                   temperature: parseFloat(document.getElementById('temperature').value),
+                   max_tokens: parseInt(document.getElementById('maxTokens').value, 10) || 2048};
+  if(owners[modelSelect.value] === 'llamacpp'){
+    payload.chat_template_kwargs = {enable_thinking: document.getElementById('thinking').checked};
+  }
+
+  controller = new AbortController();
+  document.getElementById('send').hidden = true;
+  document.getElementById('stop').hidden = false;
+  try{
+    const response = await fetch('/v1/chat/completions', {method: 'POST', signal: controller.signal,
+      headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload)});
+    if(!response.ok){
+      const err = await response.json().catch(() => ({}));
+      throw new Error(err.detail || err.error?.message || `HTTP ${response.status}`);
+    }
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    while(true){
+      const {value, done} = await reader.read();
+      if(done) break;
+      buffer += decoder.decode(value, {stream: true});
+      const lines = buffer.split('\n');
+      buffer = lines.pop();
+      for(const line of lines){
+        if(!line.startsWith('data:')) continue;
+        const data = line.slice(5).trim();
+        if(!data || data === '[DONE]') continue;
+        let chunk;
+        try{ chunk = JSON.parse(data); }catch(e){ continue; }
+        if(chunk.error) throw new Error(chunk.error.message || 'model error');
+        if(chunk.usage) usage = chunk.usage;
+        const delta = chunk.choices?.[0]?.delta || {};
+        if(delta.reasoning_content){
+          firstTokenAt ??= performance.now();
+          thinking += delta.reasoning_content;
+          if(!thinkBlock){
+            thinkBlock = document.createElement('details');
+            thinkBlock.className = 'think';
+            thinkBlock.innerHTML = '<summary>Thinking&hellip;</summary><div style="white-space:pre-wrap"></div>';
+            box.insertBefore(thinkBlock, body);
+          }
+          thinkBlock.querySelector('div').textContent = thinking;
+        }
+        if(delta.content){
+          firstTokenAt ??= performance.now();
+          answer += delta.content;
+          body.textContent = answer;
+        }
+        chat.scrollTop = chat.scrollHeight;
+      }
+    }
+  }catch(e){
+    if(e.name !== 'AbortError') showError(e.message);
+  }finally{
+    controller = null;
+    document.getElementById('send').hidden = false;
+    document.getElementById('stop').hidden = true;
+  }
+
+  if(thinkBlock) thinkBlock.querySelector('summary').textContent = 'Thought for a while — show reasoning';
+  if(!answer) body.textContent = thinking ? '(the model only produced reasoning; raise max tokens)' : '(no answer)';
+  history.push({role: 'assistant', content: answer});
+
+  const total = (performance.now() - started) / 1000;
+  const ttft = firstTokenAt ? ((firstTokenAt - started) / 1000).toFixed(1) + 's to first token' : '';
+  const tokens = usage?.completion_tokens;
+  const genSeconds = firstTokenAt ? (performance.now() - firstTokenAt) / 1000 : total;
+  const stats = document.createElement('div');
+  stats.className = 'stats';
+  stats.textContent = [ttft, tokens ? `${tokens} tokens` : '',
+                       tokens && genSeconds > 0 ? `${(tokens / genSeconds).toFixed(1)} tok/s` : '',
+                       `${total.toFixed(1)}s total`].filter(Boolean).join(' · ');
+  box.appendChild(stats);
+}
+
+document.getElementById('send').addEventListener('click', send);
+document.getElementById('stop').addEventListener('click', () => controller?.abort());
+document.getElementById('prompt').addEventListener('keydown', e => {
+  if(e.key === 'Enter' && !e.shiftKey){ e.preventDefault(); send(); }
+});
+document.getElementById('clear').addEventListener('click', () => {
+  history = [];
+  chat.innerHTML = '<p class="muted" id="empty">New conversation. Say something.</p>';
+});
+
+loadModels();
+</script>
+{% endblock %}
