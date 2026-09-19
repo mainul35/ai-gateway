@@ -12,7 +12,14 @@ services:
     extra_hosts: !reset []
     environment:
       GATEWAY_DATABASE_URL: postgresql+asyncpg://gateway:${GATEWAY_DB_PASSWORD:?set GATEWAY_DB_PASSWORD in .env, see .env.example}@127.0.0.1:5433/gateway
+      SEARXNG_URL: http://127.0.0.1:8888
+      COMFYUI_URL: http://127.0.0.1:8188
 
   gateway-db:
     ports:
       - "127.0.0.1:5433:5432"
+
+  searxng:
+    # Loopback only: the gateway runs on the host and is the one client
+    ports:
+      - "127.0.0.1:8888:8080"

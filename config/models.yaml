@@ -7,4 +7,5 @@
 #     base_url: https://api.openai.com/v1
 #     upstream_model: gpt-4o-mini    # name the upstream knows it by
 #     api_key: env:OPENAI_API_KEY    # "env:NAME" reads the value from that environment variable
+#     capabilities: [vision]         # optional; "vision" lets the playground attach images
 models: []

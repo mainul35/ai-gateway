@@ -15,16 +15,54 @@
 .conv:hover .del{visibility:visible}
 .conv .del:hover{color:var(--danger)}
 .chat{min-height:22rem;max-height:60vh;overflow-y:auto;display:flex;flex-direction:column;gap:.9rem}
-.msg{border-radius:10px;padding:.7rem .9rem;white-space:pre-wrap;word-wrap:break-word;line-height:1.55}
+.msg{border-radius:10px;padding:.7rem .9rem;word-wrap:break-word;line-height:1.55}
+.msg .body{white-space:pre-wrap}
 .msg.user{background:var(--input);align-self:flex-end;max-width:85%}
 .msg.assistant{background:#0b1220;border:1px solid var(--border)}
 .msg .who{font-size:.75rem;color:var(--muted);margin-bottom:.25rem;font-weight:600}
-details.think{margin-bottom:.5rem;font-size:.85rem;color:var(--muted)}
-details.think summary{cursor:pointer}
+details.think,details.sources{margin-bottom:.5rem;font-size:.85rem;color:var(--muted)}
+details.think summary,details.sources summary{cursor:pointer}
+details.sources ol{margin:.35rem 0 0;padding-left:1.4rem}
+details.sources li{margin:.15rem 0}
+details.sources a{word-break:break-all}
+a.cite{font-size:.75em;vertical-align:super;text-decoration:none;padding:0 .1rem}
 .stats{font-size:.78rem;color:var(--muted);margin-top:.4rem}
+.status{font-size:.85rem;color:var(--muted);display:flex;align-items:center;gap:.5rem}
+.spinner{width:.8rem;height:.8rem;border:2px solid var(--border);border-top-color:var(--primary);border-radius:50%;
+         animation:spin .8s linear infinite;flex:none}
+@keyframes spin{to{transform:rotate(360deg)}}
+.bar{height:6px;background:var(--input);border-radius:3px;overflow:hidden;margin-top:.4rem}
+.bar div{height:100%;background:var(--primary);width:0;transition:width .3s}
+.thumbs{display:flex;gap:.5rem;flex-wrap:wrap;margin-bottom:.4rem}
+.thumbs img{height:5.5rem;max-width:9rem;object-fit:cover;border-radius:8px;border:1px solid var(--border);cursor:zoom-in}
+.pending{position:relative}
+.pending button{position:absolute;top:-.4rem;right:-.4rem;width:1.3rem;height:1.3rem;border-radius:50%;border:none;
+                background:var(--danger);color:#fff;cursor:pointer;font-size:.8rem;line-height:1;padding:0}
+.pending .tag{position:absolute;left:.3rem;bottom:.3rem;font-size:.65rem;background:rgba(0,0,0,.7);padding:0 .3rem;border-radius:4px}
+.generated img{max-width:100%;max-height:32rem;border-radius:8px;display:block;cursor:zoom-in}
+.generated .caption{font-size:.82rem;color:var(--muted);margin-top:.4rem}
+.generated .actions{display:flex;gap:.5rem;margin-top:.5rem}
 textarea{background:var(--input);border:1px solid var(--border);border-radius:8px;color:var(--text);
          padding:.6rem .7rem;font-size:.95rem;width:100%;font-family:inherit;resize:vertical}
 textarea:focus{outline:none;border-color:var(--primary)}
+.composer.drop textarea{border-color:var(--primary);border-style:dashed}
+.tools{display:flex;gap:.5rem;flex-wrap:wrap;align-items:center;margin-top:.6rem}
+.chip{display:inline-flex;align-items:center;gap:.35rem;border:1px solid var(--border);background:transparent;
+      color:var(--muted);border-radius:20px;padding:.3rem .75rem;font-size:.83rem;font-weight:600;cursor:pointer;font-family:inherit}
+.chip:hover{color:var(--text)}
+.chip[aria-pressed="true"]{background:rgba(99,102,241,.22);border-color:var(--primary);color:var(--text)}
+.chip .dot{width:.5rem;height:.5rem;border-radius:50%;background:var(--border)}
+.chip[aria-pressed="true"] .dot{background:var(--success)}
+.icon-btn{background:var(--input);border:1px solid var(--border);color:var(--text);border-radius:8px;
+          padding:.45rem .7rem;cursor:pointer;font-size:.9rem;font-family:inherit}
+.icon-btn:hover{background:var(--border)}
+.inline{display:inline-flex;gap:.4rem;align-items:center;font-size:.83rem;color:var(--muted)}
+.inline select,.inline input{width:auto;padding:.3rem .5rem;font-size:.83rem}
+.hint{font-size:.8rem;color:var(--muted);margin-top:.45rem;min-height:1.1rem}
+.hint.warn{color:var(--warning)}
+.lightbox{position:fixed;inset:0;background:rgba(0,0,0,.85);display:flex;align-items:center;justify-content:center;
+          z-index:50;cursor:zoom-out;padding:1rem}
+.lightbox img{max-width:100%;max-height:100%;border-radius:8px}
 </style>
 
 <h1>Playground</h1>
@@ -46,6 +84,7 @@ textarea:focus{outline:none;border-color:var(--primary)}
       <label>
         <span class="lbl">Model</span>
         <select id="model"></select>
+        <span class="hint" id="modelHint"></span>
       </label>
       <label>
         <span class="lbl">System prompt (optional)</span>
@@ -69,12 +108,31 @@ textarea:focus{outline:none;border-color:var(--primary)}
   <div class="card">
     <h2 id="chatTitle" style="margin-bottom:1rem">New conversation</h2>
     <div class="chat" id="chat"><p class="muted" id="empty">Pick a model and say something.</p></div>
-    <div style="margin-top:1rem">
+    <div class="composer" id="composer" style="margin-top:1rem">
+      <div class="thumbs" id="pending"></div>
       <textarea id="prompt" rows="3" placeholder="Message&hellip;  (Enter to send, Shift+Enter for a new line)"></textarea>
-      <div class="row" style="margin-top:.6rem;justify-content:flex-end">
-        <button class="btn btn-danger" id="stop" hidden>Stop</button>
-        <button class="btn" id="send">Send</button>
+      <div class="tools">
+        <button class="chip" id="toolSearch" data-tool="web_search" aria-pressed="false" hidden
+                title="Search the web and answer from the results, with sources"><span class="dot"></span>Web search</button>
+        <button class="chip" id="toolVision" data-tool="vision" aria-pressed="false" hidden
+                title="Attach images for the model to look at"><span class="dot"></span>Image understanding</button>
+        <button class="chip" id="toolImage" data-tool="image_generation" aria-pressed="false" hidden
+                title="Create a new image, or edit an attached one, instead of chatting"><span class="dot"></span>Image generation</button>
+        <button class="icon-btn" id="attach" title="Attach images (you can also paste or drop them)" hidden>&#128206; Attach</button>
+        <input type="file" id="fileInput" accept="image/png,image/jpeg,image/webp,image/gif" multiple hidden>
+        <span class="inline" id="sizeRow" hidden>Shape
+          <select id="imageSize"></select>
+        </span>
+        <span class="inline" id="strengthRow" hidden title="How far the edit may move away from the original">Change
+          <input type="range" id="strength" min="0.2" max="1" step="0.05" value="0.8" style="width:6rem">
+          <span id="strengthValue">0.80</span>
+        </span>
+        <span style="margin-left:auto" class="row">
+          <button class="btn btn-danger" id="stop" hidden>Stop</button>
+          <button class="btn" id="send">Send</button>
+        </span>
       </div>
+      <div class="hint" id="modeHint"></div>
     </div>
   </div>
 </div>
@@ -85,17 +143,25 @@ textarea:focus{outline:none;border-color:var(--primary)}
 const chat = document.getElementById('chat');
 const modelSelect = document.getElementById('model');
 const systemBox = document.getElementById('system');
+const promptBox = document.getElementById('prompt');
 const JSON_HEADERS = {'Content-Type': 'application/json'};
-let history = [];        // messages sent to the model: [{role, content}]
-let owners = {};         // model id -> backend, from /v1/models
+let history = [];        // turns sent to the model: [{role, content, images: [file ids]}]
+let models = {};         // model id -> {owned_by, capabilities}
 let conversations = [];
 let currentId = null;    // saved conversation being continued, if any
 let savedSystem = '';    // system prompt stored with the current conversation
 let controller = null;
+let caps = {web_search: false, vision: false, image_generation: false, image_sizes: [], max_upload_mb: 10};
+let tools = {web_search: false, vision: false, image_generation: false};
+let pending = [];        // images attached to the next message: [{id, url, name, kind}]
 
 function showError(message){
   const box = document.getElementById('error');
   box.textContent = message || ''; box.hidden = !message;
+}
+
+function errorText(e){
+  return typeof e === 'string' ? e : (e && e.message) || 'something went wrong';
 }
 
 function relativeTime(iso){
@@ -107,36 +173,171 @@ function relativeTime(iso){
   return new Date(iso).toLocaleDateString();
 }
 
+const canSee = id => (models[id]?.capabilities || []).includes('vision');
+
 // --- models -------------------------------------------------------------
 
 async function loadModels(){
   try{
     const data = (await api('/v1/models')).data;
-    owners = Object.fromEntries(data.map(m => [m.id, m.owned_by]));
+    models = Object.fromEntries(data.map(m => [m.id, m]));
     if(!data.length){
       modelSelect.innerHTML = '<option value="">no models available</option>';
       showError('You do not have access to any models yet. Ask a manager or admin to grant you some.');
       document.getElementById('send').disabled = true;
       return;
     }
-    modelSelect.innerHTML = data.map(m => `<option value="${escapeHtml(m.id)}">${escapeHtml(m.id)}</option>`).join('');
+    modelSelect.innerHTML = data.map(m =>
+      `<option value="${escapeHtml(m.id)}">${escapeHtml(m.id)}${canSee(m.id) ? '  · sees images' : ''}</option>`).join('');
     let remembered = null;
     try{ remembered = localStorage.getItem('pg.model'); }catch(e){}
-    if(remembered && owners[remembered]) modelSelect.value = remembered;
-    syncThinking();
-  }catch(e){ showError('Could not load models: ' + e.message); }
+    if(remembered && models[remembered]) modelSelect.value = remembered;
+    syncModel();
+  }catch(e){ showError('Could not load models: ' + errorText(e)); }
 }
 
-function syncThinking(){
+function syncModel(){
   // Only our llama.cpp profiles honour the thinking switch
-  document.getElementById('thinkingRow').hidden = owners[modelSelect.value] !== 'llamacpp';
+  document.getElementById('thinkingRow').hidden = models[modelSelect.value]?.owned_by !== 'llamacpp';
+  syncTools();
 }
 modelSelect.addEventListener('change', () => {
   try{ localStorage.setItem('pg.model', modelSelect.value); }catch(e){}
-  syncThinking();
+  syncModel();
 });
 document.getElementById('temperature').addEventListener('input', e =>
   document.getElementById('tempValue').textContent = e.target.value);
+
+// --- tools ----------------------------------------------------------------
+
+async function loadCapabilities(){
+  try{ caps = await api('/chat/capabilities'); }catch(e){ return; }
+  let saved = {};
+  try{ saved = JSON.parse(localStorage.getItem('pg.tools') || '{}'); }catch(e){}
+  for(const name of Object.keys(tools)) tools[name] = !!(caps[name] && saved[name]);
+  document.getElementById('toolSearch').hidden = !caps.web_search;
+  document.getElementById('toolVision').hidden = !caps.vision;
+  document.getElementById('toolImage').hidden = !caps.image_generation;
+  document.getElementById('imageSize').innerHTML = caps.image_sizes.map(s =>
+    `<option value="${s}">${s[0].toUpperCase() + s.slice(1)}</option>`).join('');
+  syncTools();
+}
+
+function setTool(name, on){
+  tools[name] = on;
+  try{ localStorage.setItem('pg.tools', JSON.stringify(tools)); }catch(e){}
+  syncTools();
+}
+
+document.querySelectorAll('.chip[data-tool]').forEach(chip =>
+  chip.addEventListener('click', () => setTool(chip.dataset.tool, !tools[chip.dataset.tool])));
+
+function imageMode(){ return tools.image_generation && caps.image_generation; }
+function canAttach(){ return (tools.vision && caps.vision) || imageMode(); }
+
+function syncTools(){
+  document.querySelectorAll('.chip[data-tool]').forEach(chip =>
+    chip.setAttribute('aria-pressed', String(!!tools[chip.dataset.tool])));
+  document.getElementById('attach').hidden = !canAttach();
+  document.getElementById('sizeRow').hidden = !imageMode() || pending.length > 0;
+  document.getElementById('strengthRow').hidden = !imageMode() || pending.length === 0;
+  if(!canAttach() && pending.length){ pending = []; renderPending(); }
+
+  const hint = document.getElementById('modeHint');
+  const model = modelSelect.value;
+  hint.className = 'hint';
+  if(imageMode()){
+    promptBox.placeholder = pending.length ? 'Describe how to change the attached image…' : 'Describe the image to create…';
+    hint.textContent = pending.length
+      ? 'Sending edits the attached image with Flux. Lower "Change" keeps more of the original.'
+      : 'Sending creates an image with Flux instead of chatting. Attach an image (or press Edit on one) to change it.'
+        + (tools.web_search ? ' Web search does not apply to images.' : '');
+    document.getElementById('modelHint').textContent = '';
+    return;
+  }
+  promptBox.placeholder = 'Message…  (Enter to send, Shift+Enter for a new line)';
+  const notes = [];
+  if(tools.web_search) notes.push('Answers will search the web first and cite their sources.');
+  if(tools.vision && caps.vision){
+    if(model && !canSee(model)){
+      hint.className = 'hint warn';
+      notes.push(`${model} cannot see images; pick a model marked "sees images" to send pictures.`);
+    }else{
+      notes.push('Attach, paste or drop images for the model to look at.');
+    }
+  }
+  hint.textContent = notes.join(' ');
+  document.getElementById('modelHint').textContent = model && canSee(model) ? 'This model can read images.' : '';
+}
+
+document.getElementById('strength').addEventListener('input', e =>
+  document.getElementById('strengthValue').textContent = parseFloat(e.target.value).toFixed(2));
+
+// --- attachments ------------------------------------------------------------
+
+function renderPending(){
+  document.getElementById('pending').innerHTML = pending.map((f, i) => `
+    <div class="pending">
+      <img src="${f.url}" alt="${escapeHtml(f.name || 'image')}" data-zoom="${f.url}">
+      ${f.kind === 'generated' ? '<span class="tag">to edit</span>' : ''}
+      <button data-unattach="${i}" title="Remove">&times;</button>
+    </div>`).join('');
+  syncTools();
+}
+
+document.getElementById('pending').addEventListener('click', e => {
+  const button = e.target.closest('[data-unattach]');
+  if(button){ pending.splice(Number(button.dataset.unattach), 1); renderPending(); }
+});
+
+async function uploadImages(files){
+  if(!canAttach()){
+    showError('Turn on "Image understanding" or "Image generation" to attach images.');
+    return;
+  }
+  for(const file of files){
+    if(!file.type.startsWith('image/')) continue;
+    if(file.size > caps.max_upload_mb * 1024 * 1024){
+      showError(`${file.name} is larger than ${caps.max_upload_mb} MB.`);
+      continue;
+    }
+    const form = new FormData();
+    form.append('file', file, file.name || 'pasted.png');
+    try{
+      const stored = await api('/chat/files', {method: 'POST', body: form});
+      // Editing works on one image; understanding can take several
+      if(imageMode()) pending = [];
+      pending.push(stored);
+      renderPending();
+    }catch(e){ showError('Could not attach image: ' + errorText(e)); }
+  }
+}
+
+document.getElementById('attach').addEventListener('click', () => document.getElementById('fileInput').click());
+document.getElementById('fileInput').addEventListener('change', e => { uploadImages([...e.target.files]); e.target.value = ''; });
+promptBox.addEventListener('paste', e => {
+  const files = [...(e.clipboardData?.files || [])].filter(f => f.type.startsWith('image/'));
+  if(files.length){ e.preventDefault(); uploadImages(files); }
+});
+const composer = document.getElementById('composer');
+composer.addEventListener('dragover', e => { e.preventDefault(); composer.classList.add('drop'); });
+composer.addEventListener('dragleave', () => composer.classList.remove('drop'));
+composer.addEventListener('drop', e => {
+  e.preventDefault(); composer.classList.remove('drop');
+  uploadImages([...e.dataTransfer.files]);
+});
+
+// Full-size view for any thumbnail or generated image
+document.addEventListener('click', e => {
+  const zoom = e.target.closest('[data-zoom]');
+  if(!zoom) return;
+  const box = document.createElement('div');
+  box.className = 'lightbox';
+  box.innerHTML = `<img src="${zoom.dataset.zoom}" alt="">`;
+  box.addEventListener('click', () => box.remove());
+  document.body.appendChild(box);
+});
+document.addEventListener('keydown', e => { if(e.key === 'Escape') document.querySelector('.lightbox')?.remove(); });
 
 // --- conversation list ----------------------------------------------------
 
@@ -153,7 +354,7 @@ async function loadConversations(){
         <button class="del" data-delete="${c.id}" title="Delete">&times;</button>
       </div>`).join('')
       : '<span class="muted" style="padding:0 .5rem;font-size:.88rem">No saved conversations yet.</span>';
-  }catch(e){ target.innerHTML = `<span class="muted">Could not load: ${escapeHtml(e.message)}</span>`; }
+  }catch(e){ target.innerHTML = `<span class="muted">Could not load: ${escapeHtml(errorText(e))}</span>`; }
 }
 
 function resetChat(){
@@ -161,6 +362,7 @@ function resetChat(){
   history = [];
   savedSystem = '';
   systemBox.value = '';
+  pending = []; renderPending();
   document.getElementById('chatTitle').textContent = 'New conversation';
   chat.innerHTML = '<p class="muted" id="empty">Pick a model and say something.</p>';
   loadConversations();
@@ -173,30 +375,36 @@ async function openConversation(id){
     currentId = conversation.id;
     savedSystem = conversation.system_prompt || '';
     systemBox.value = savedSystem;
-    if(conversation.model && owners[conversation.model]){
+    if(conversation.model && models[conversation.model]){
       modelSelect.value = conversation.model;
-      syncThinking();
+      syncModel();
     }
     document.getElementById('chatTitle').textContent = conversation.title;
     chat.innerHTML = '';
     history = [];
     for(const m of conversation.messages){
+      const extra = m.attachments || {};
+      const imageIds = (extra.images || []).map(i => i.file_id);
       if(m.role === 'user'){
-        addMessage('user', m.content);
+        addUserMessage(m.content, imageIds.map(fileUrl));
+        history.push({role: 'user', content: m.content, images: extra.mode === 'image' ? [] : imageIds});
+      }else if(extra.generated){
+        renderGenerated(addMessage('assistant', '', m.model), extra.generated, m.stats);
+        history.push({role: 'assistant', content: m.content});
       }else{
         const box = addMessage('assistant', '', m.model);
-        renderAssistant(box, m.content, m.reasoning, m.stats);
+        renderAssistant(box, m.content, m.reasoning, m.stats, extra.sources);
+        history.push({role: 'assistant', content: m.content});
       }
-      history.push({role: m.role, content: m.content});
     }
     if(!conversation.messages.length) chat.innerHTML = '<p class="muted" id="empty">Empty conversation.</p>';
-    if(conversation.model && !owners[conversation.model]){
+    if(conversation.model && !models[conversation.model]){
       showError(`This conversation used ${conversation.model}, which you no longer have access to. Pick another model to continue.`);
     }else{
       showError('');
     }
     loadConversations();
-  }catch(e){ showError('Could not open conversation: ' + e.message); }
+  }catch(e){ showError('Could not open conversation: ' + errorText(e)); }
 }
 
 document.getElementById('convs').addEventListener('click', async e => {
@@ -207,7 +415,7 @@ document.getElementById('convs').addEventListener('click', async e => {
     try{
       await api(`/chat/conversations/${del.dataset.delete}`, {method: 'DELETE'});
       if(Number(del.dataset.delete) === currentId) resetChat(); else loadConversations();
-    }catch(err){ showError(err.message); }
+    }catch(err){ showError(errorText(err)); }
     return;
   }
   const open = e.target.closest('[data-open]');
@@ -225,12 +433,14 @@ document.getElementById('convs').addEventListener('dblclick', async e => {
                                                          body: JSON.stringify({title: title.trim()})});
     if(Number(item.dataset.open) === currentId) document.getElementById('chatTitle').textContent = title.trim();
     loadConversations();
-  }catch(err){ showError(err.message); }
+  }catch(err){ showError(errorText(err)); }
 });
 
 document.getElementById('newChat').addEventListener('click', () => { if(!controller) resetChat(); });
 
 // --- rendering --------------------------------------------------------------
+
+const fileUrl = id => `/chat/files/${id}`;
 
 function addMessage(role, text, model){
   document.getElementById('empty')?.remove();
@@ -243,6 +453,17 @@ function addMessage(role, text, model){
   return box;
 }
 
+function addUserMessage(text, imageUrls){
+  const box = addMessage('user', text);
+  if(imageUrls.length){
+    const strip = document.createElement('div');
+    strip.className = 'thumbs';
+    strip.innerHTML = imageUrls.map(u => `<img src="${u}" alt="attached image" data-zoom="${u}">`).join('');
+    box.insertBefore(strip, box.querySelector('.body'));
+  }
+  return box;
+}
+
 function statsText(stats){
   if(!stats) return '';
   return [stats.ttft != null ? `${stats.ttft}s to first token` : '',
@@ -251,8 +472,57 @@ function statsText(stats){
           stats.total != null ? `${stats.total}s total` : ''].filter(Boolean).join(' · ');
 }
 
-function renderAssistant(box, content, reasoning, stats){
+function setStatus(box, text, fraction){
+  let line = box.querySelector('.status');
+  if(!text){ line?.remove(); box.querySelector('.bar')?.remove(); return; }
+  if(!line){
+    line = document.createElement('div');
+    line.className = 'status';
+    line.innerHTML = '<span class="spinner"></span><span class="text"></span>';
+    box.insertBefore(line, box.querySelector('.body'));
+  }
+  line.querySelector('.text').textContent = text;
+  let bar = box.querySelector('.bar');
+  if(fraction != null){
+    if(!bar){
+      bar = document.createElement('div');
+      bar.className = 'bar';
+      bar.innerHTML = '<div></div>';
+      line.after(bar);
+    }
+    bar.firstElementChild.style.width = Math.round(fraction * 100) + '%';
+  }
+}
+
+function renderSources(box, sources){
+  if(!sources?.length) return;
+  const block = document.createElement('details');
+  block.className = 'sources';
+  block.innerHTML = `<summary>${sources.length} web source${sources.length > 1 ? 's' : ''}</summary><ol></ol>`;
+  block.querySelector('ol').innerHTML = sources.map(s =>
+    `<li><a href="${escapeHtml(s.url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(s.title)}</a></li>`).join('');
+  box.insertBefore(block, box.querySelector('.body'));
+}
+
+// Turns [1], [2] in an answer into links to the matching source
+function fillWithCitations(target, text, sources){
+  target.textContent = '';
+  if(!sources?.length){ target.textContent = text; return; }
+  const parts = text.split(/\[(\d{1,2})\]/);
+  parts.forEach((part, i) => {
+    if(i % 2 === 0){ target.appendChild(document.createTextNode(part)); return; }
+    const source = sources[Number(part) - 1];
+    if(!source){ target.appendChild(document.createTextNode(`[${part}]`)); return; }
+    const link = document.createElement('a');
+    link.className = 'cite'; link.href = source.url; link.target = '_blank'; link.rel = 'noopener noreferrer';
+    link.title = source.title; link.textContent = `[${part}]`;
+    target.appendChild(link);
+  });
+}
+
+function renderAssistant(box, content, reasoning, stats, sources){
   const body = box.querySelector('.body');
+  renderSources(box, sources);
   if(reasoning){
     const think = document.createElement('details');
     think.className = 'think';
@@ -260,19 +530,50 @@ function renderAssistant(box, content, reasoning, stats){
     think.querySelector('div').textContent = reasoning;
     box.insertBefore(think, body);
   }
-  body.textContent = content || (reasoning ? '(the model only produced reasoning; raise max tokens)' : '(no answer)');
-  const text = statsText(stats);
-  if(text){
-    const line = document.createElement('div');
-    line.className = 'stats';
-    line.textContent = text;
-    box.appendChild(line);
-  }
+  fillWithCitations(body, content || (reasoning ? '(the model only produced reasoning; raise max tokens)' : '(no answer)'), sources);
+  appendStats(box, stats);
 }
+
+function appendStats(box, stats){
+  const text = typeof stats === 'string' ? stats : statsText(stats);
+  if(!text) return;
+  const line = document.createElement('div');
+  line.className = 'stats';
+  line.textContent = text;
+  box.appendChild(line);
+}
+
+function renderGenerated(box, generated, stats){
+  box.querySelector('.who').textContent = generated.source_file_id ? 'Image edit' : 'Image generation';
+  const body = box.querySelector('.body');
+  body.className = 'body generated';
+  body.innerHTML = `
+    <img src="${fileUrl(generated.file_id)}" alt="${escapeHtml(generated.prompt)}" data-zoom="${fileUrl(generated.file_id)}">
+    <div class="caption"></div>
+    <div class="actions">
+      <button class="btn btn-sm btn-secondary" data-edit="${generated.file_id}">Edit this image</button>
+      <a class="btn btn-sm btn-secondary" style="text-decoration:none" href="${fileUrl(generated.file_id)}"
+         download="image-${generated.seed || generated.file_id}.png">Download</a>
+    </div>`;
+  body.querySelector('.caption').textContent = generated.prompt;
+  if(stats) appendStats(box, stats.total != null ? `${stats.total}s` + (generated.seed ? ` · seed ${generated.seed}` : '') : '');
+}
+
+// "Edit this image" puts a generated image into the composer as the one to change
+chat.addEventListener('click', e => {
+  const edit = e.target.closest('[data-edit]');
+  if(!edit || controller) return;
+  if(!caps.image_generation){ showError('Image generation is turned off on this server.'); return; }
+  const id = Number(edit.dataset.edit);
+  pending = [{id, url: fileUrl(id), name: 'image', kind: 'generated'}];
+  if(!tools.image_generation) setTool('image_generation', true);
+  renderPending();
+  promptBox.focus();
+});
 
 // --- saving -----------------------------------------------------------------
 
-async function ensureConversation(firstMessage){
+async function ensureConversation(firstMessage, model){
   const system = systemBox.value.trim();
   if(currentId){
     if(system !== savedSystem){
@@ -283,7 +584,7 @@ async function ensureConversation(firstMessage){
     return;
   }
   const created = await api('/chat/conversations', {method: 'POST', headers: JSON_HEADERS,
-    body: JSON.stringify({title: firstMessage.slice(0, 80), model: modelSelect.value, system_prompt: system || null})});
+    body: JSON.stringify({title: firstMessage.slice(0, 80) || 'Images', model, system_prompt: system || null})});
   currentId = created.id;
   savedSystem = system;
   document.getElementById('chatTitle').textContent = created.title;
@@ -294,103 +595,139 @@ async function saveMessage(message){
   try{
     await api(`/chat/conversations/${currentId}/messages`, {method: 'POST', headers: JSON_HEADERS,
                                                            body: JSON.stringify(message)});
-  }catch(e){ showError('Reply shown but not saved: ' + e.message); }
+  }catch(e){ showError('Reply shown but not saved: ' + errorText(e)); }
+}
+
+// Reads an SSE response, calling onData for each JSON payload
+async function readEvents(response, onData){
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  while(true){
+    const {value, done} = await reader.read();
+    if(done) break;
+    buffer += decoder.decode(value, {stream: true});
+    const lines = buffer.split('\n');
+    buffer = lines.pop();
+    for(const line of lines){
+      if(!line.startsWith('data:')) continue;
+      const data = line.slice(5).trim();
+      if(!data || data === '[DONE]') continue;
+      let chunk;
+      try{ chunk = JSON.parse(data); }catch(e){ continue; }
+      if(chunk.error) throw new Error(chunk.error.message || 'model error');
+      onData(chunk);
+    }
+  }
+}
+
+async function postStream(path, payload){
+  const response = await fetch(path, {method: 'POST', signal: controller.signal,
+                                      headers: JSON_HEADERS, body: JSON.stringify(payload)});
+  if(response.status === 401){ location.href = '/login'; throw new Error('signed out'); }
+  if(!response.ok){
+    const err = await response.json().catch(() => ({}));
+    const detail = Array.isArray(err.detail) ? err.detail.map(d => d.msg).join('; ') : err.detail;
+    throw new Error(detail || err.error?.message || `HTTP ${response.status}`);
+  }
+  return response;
+}
+
+function busy(on){
+  document.getElementById('send').hidden = on;
+  document.getElementById('stop').hidden = !on;
 }
 
 // --- sending ----------------------------------------------------------------
 
 async function send(){
-  const promptBox = document.getElementById('prompt');
   const text = promptBox.value.trim();
-  if(!text || controller) return;
-  showError('');
+  if(controller) return;
+  if(imageMode()) return sendImage(text);
+  if(!text && !pending.length) return;
   const model = modelSelect.value;
-
-  try{
-    await ensureConversation(text);
-  }catch(e){
-    showError('Could not save the conversation: ' + e.message);
+  if(pending.length && !canSee(model)){
+    showError(`${model} cannot see images. Pick a model marked "sees images", or remove the attachment.`);
     return;
   }
+  showError('');
+
+  try{
+    await ensureConversation(text || 'Image question', model);
+  }catch(e){
+    showError('Could not save the conversation: ' + errorText(e));
+    return;
+  }
+  const images = pending.map(f => f.id);
+  pending = []; renderPending();
   promptBox.value = '';
-  history.push({role: 'user', content: text});
-  addMessage('user', text);
-  await saveMessage({role: 'user', content: text});
+  history.push({role: 'user', content: text, images});
+  addUserMessage(text, images.map(fileUrl));
+  await saveMessage({role: 'user', content: text,
+                     attachments: images.length ? {images: images.map(id => ({file_id: id}))} : null});
 
   const box = addMessage('assistant', '', model);
   const body = box.querySelector('.body');
   body.textContent = '…';
-  let thinkBlock = null, thinking = '', answer = '', firstTokenAt = null, usage = null;
+  let thinkBlock = null, thinking = '', answer = '', firstTokenAt = null, usage = null, sources = null;
   const started = performance.now();
 
   const messages = [];
   if(savedSystem) messages.push({role: 'system', content: savedSystem});
-  messages.push(...history);
+  messages.push(...history.map(h => ({role: h.role, content: h.content, images: h.images || []})));
 
-  const payload = {model, messages, stream: true,
+  const payload = {model, messages,
                    temperature: parseFloat(document.getElementById('temperature').value),
-                   max_tokens: parseInt(document.getElementById('maxTokens').value, 10) || 2048};
-  if(owners[model] === 'llamacpp'){
-    payload.chat_template_kwargs = {enable_thinking: document.getElementById('thinking').checked};
-  }
+                   max_tokens: parseInt(document.getElementById('maxTokens').value, 10) || 2048,
+                   web_search: tools.web_search && caps.web_search,
+                   vision: tools.vision && caps.vision};
+  if(models[model]?.owned_by === 'llamacpp') payload.thinking = document.getElementById('thinking').checked;
 
   controller = new AbortController();
-  document.getElementById('send').hidden = true;
-  document.getElementById('stop').hidden = false;
+  busy(true);
   try{
-    const response = await fetch('/v1/chat/completions', {method: 'POST', signal: controller.signal,
-                                                          headers: JSON_HEADERS, body: JSON.stringify(payload)});
-    if(!response.ok){
-      const err = await response.json().catch(() => ({}));
-      throw new Error(err.detail || err.error?.message || `HTTP ${response.status}`);
-    }
-    const reader = response.body.getReader();
-    const decoder = new TextDecoder();
-    let buffer = '';
-    while(true){
-      const {value, done} = await reader.read();
-      if(done) break;
-      buffer += decoder.decode(value, {stream: true});
-      const lines = buffer.split('\n');
-      buffer = lines.pop();
-      for(const line of lines){
-        if(!line.startsWith('data:')) continue;
-        const data = line.slice(5).trim();
-        if(!data || data === '[DONE]') continue;
-        let chunk;
-        try{ chunk = JSON.parse(data); }catch(e){ continue; }
-        if(chunk.error) throw new Error(chunk.error.message || 'model error');
-        if(chunk.usage) usage = chunk.usage;
-        const delta = chunk.choices?.[0]?.delta || {};
-        if(delta.reasoning_content){
-          firstTokenAt ??= performance.now();
-          thinking += delta.reasoning_content;
-          if(!thinkBlock){
-            thinkBlock = document.createElement('details');
-            thinkBlock.className = 'think';
-            thinkBlock.innerHTML = '<summary>Thinking&hellip;</summary><div style="white-space:pre-wrap"></div>';
-            box.insertBefore(thinkBlock, body);
-          }
-          thinkBlock.querySelector('div').textContent = thinking;
-        }
-        if(delta.content){
-          firstTokenAt ??= performance.now();
-          answer += delta.content;
-          body.textContent = answer;
-        }
-        chat.scrollTop = chat.scrollHeight;
+    const response = await postStream('/chat/complete', payload);
+    await readEvents(response, chunk => {
+      if(chunk.gateway){
+        const event = chunk.gateway;
+        if(event.type === 'status') setStatus(box, event.text);
+        else if(event.type === 'notice') showError(event.text);
+        else if(event.type === 'sources'){ sources = event.sources; renderSources(box, sources); }
+        return;
       }
-    }
+      if(chunk.usage) usage = chunk.usage;
+      const delta = chunk.choices?.[0]?.delta || {};
+      if(delta.reasoning_content){
+        firstTokenAt ??= performance.now();
+        setStatus(box, null);
+        thinking += delta.reasoning_content;
+        if(!thinkBlock){
+          thinkBlock = document.createElement('details');
+          thinkBlock.className = 'think';
+          thinkBlock.innerHTML = '<summary>Thinking&hellip;</summary><div style="white-space:pre-wrap"></div>';
+          box.insertBefore(thinkBlock, body);
+        }
+        thinkBlock.querySelector('div').textContent = thinking;
+      }
+      if(delta.content){
+        firstTokenAt ??= performance.now();
+        setStatus(box, null);
+        answer += delta.content;
+        body.textContent = answer;
+      }
+      chat.scrollTop = chat.scrollHeight;
+    });
   }catch(e){
-    if(e.name !== 'AbortError') showError(e.message);
+    if(e.name !== 'AbortError') showError(errorText(e));
   }finally{
     controller = null;
-    document.getElementById('send').hidden = false;
-    document.getElementById('stop').hidden = true;
+    busy(false);
   }
 
   // Replace the live rendering with the final one, so saved and live messages look the same
+  setStatus(box, null);
   thinkBlock?.remove();
+  box.querySelector('details.sources')?.remove();
   const total = (performance.now() - started) / 1000;
   const genSeconds = firstTokenAt ? (performance.now() - firstTokenAt) / 1000 : total;
   const tokens = usage?.completion_tokens;
@@ -400,21 +737,85 @@ async function send(){
     tps: tokens && genSeconds > 0 ? +(tokens / genSeconds).toFixed(1) : null,
     total: +total.toFixed(1),
   };
-  renderAssistant(box, answer, thinking, stats);
+  renderAssistant(box, answer, thinking, stats, sources);
 
   history.push({role: 'assistant', content: answer});
   if(answer || thinking){
-    await saveMessage({role: 'assistant', content: answer, reasoning: thinking || null, model, stats});
+    await saveMessage({role: 'assistant', content: answer, reasoning: thinking || null, model, stats,
+                       attachments: sources ? {sources} : null});
   }
+  loadConversations();
+}
+
+async function sendImage(text){
+  if(!text){ showError('Describe the image you want.'); return; }
+  showError('');
+  const source = pending[0] || null;
+  const size = document.getElementById('imageSize').value;
+  const strength = parseFloat(document.getElementById('strength').value);
+  try{
+    await ensureConversation(text, modelSelect.value);
+  }catch(e){
+    showError('Could not save the conversation: ' + errorText(e));
+    return;
+  }
+  pending = []; renderPending();
+  promptBox.value = '';
+  addUserMessage(text, source ? [source.url] : []);
+  // Image turns are kept in the transcript as text only, so a chat model later knows what was made
+  history.push({role: 'user', content: text, images: []});
+  await saveMessage({role: 'user', content: text,
+                     attachments: {mode: 'image', images: source ? [{file_id: source.id}] : []}});
+
+  const box = addMessage('assistant', '', source ? 'Image edit' : 'Image generation');
+  setStatus(box, 'Starting');
+  const started = performance.now();
+  let result = null;
+  controller = new AbortController();
+  busy(true);
+  try{
+    const response = await postStream('/chat/images', {prompt: text, size, strength,
+                                                       source_file_id: source ? source.id : null});
+    await readEvents(response, chunk => {
+      const event = chunk.gateway;
+      if(!event) return;
+      if(event.type === 'progress'){
+        setStatus(box, event.fraction != null ? `${event.stage} · ${Math.round(event.fraction * 100)}%` : event.stage,
+                  event.fraction);
+      }else if(event.type === 'image'){
+        result = event;
+      }
+      chat.scrollTop = chat.scrollHeight;
+    });
+  }catch(e){
+    if(e.name !== 'AbortError') showError(errorText(e));
+  }finally{
+    controller = null;
+    busy(false);
+  }
+  setStatus(box, null);
+  if(!result){
+    box.querySelector('.body').textContent = '(no image)';
+    history.push({role: 'assistant', content: '(image generation did not finish)'});
+    return;
+  }
+  const generated = {file_id: result.file.id, prompt: text, seed: result.seed, size,
+                     source_file_id: source ? source.id : null, strength: source ? strength : null};
+  const stats = {total: +((performance.now() - started) / 1000).toFixed(1)};
+  renderGenerated(box, generated, stats);
+  chat.scrollTop = chat.scrollHeight;
+  const summary = `(${source ? 'edited the image' : 'generated an image'}: ${text})`;
+  history.push({role: 'assistant', content: summary});
+  await saveMessage({role: 'assistant', content: summary, stats, attachments: {generated}});
   loadConversations();
 }
 
 document.getElementById('send').addEventListener('click', send);
 document.getElementById('stop').addEventListener('click', () => controller?.abort());
-document.getElementById('prompt').addEventListener('keydown', e => {
+promptBox.addEventListener('keydown', e => {
   if(e.key === 'Enter' && !e.shiftKey){ e.preventDefault(); send(); }
 });
 
-loadModels().then(loadConversations);
+Promise.all([loadModels(), loadCapabilities()]).then(loadConversations);
 </script>
 {% endblock %}

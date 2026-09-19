@@ -1,7 +1,7 @@
 """Database tables: users, API keys and per-request usage."""
 from datetime import datetime, timezone
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text, func
+from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, LargeBinary, String, Text, func
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 
@@ -94,6 +94,23 @@ class ConversationMessage(Base):
     model: Mapped[str | None] = mapped_column(String(256), nullable=True)
     # JSON with tokens, speed and time to first token, shown again when the chat is reopened
     stats: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # JSON: attached or generated images ([{"file_id", "kind"}]) and web sources ([{"title", "url"}])
+    attachments: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
     conversation: Mapped[Conversation] = relationship(back_populates="messages")
+
+
+class ChatFile(Base):
+    """An image a user uploaded to the playground or generated there. Only its owner can read it."""
+    __tablename__ = "chat_files"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    kind: Mapped[str] = mapped_column(String(16))  # "upload" or "generated"
+    mime_type: Mapped[str] = mapped_column(String(64))
+    name: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    # The prompt an image was generated from, shown under it
+    prompt: Mapped[str | None] = mapped_column(Text, nullable=True)
+    data: Mapped[bytes] = mapped_column(LargeBinary)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)

@@ -1,0 +1,14 @@
+# SearXNG for the playground's web search. Only the gateway talks to it (JSON API on localhost).
+# The secret key comes from SEARXNG_SECRET in .env; it is never written here.
+use_default_settings: true
+
+server:
+  limiter: false          # a single trusted client; the limiter would need Valkey
+  image_proxy: false
+  public_instance: false
+
+search:
+  safe_search: 1
+  formats:
+    - html
+    - json
