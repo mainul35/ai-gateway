@@ -5,7 +5,7 @@ import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import JSONResponse, StreamingResponse
 
-from app import backends, settings, usage as usage_log
+from app import access, backends, settings, usage as usage_log
 from app.engine.supervisor import supervisor
 from app.auth import Principal, authenticate
 
@@ -26,6 +26,7 @@ async def list_models(principal: Principal = Depends(authenticate)):
         "data": [
             {"id": name, "object": "model", "created": 0, "owned_by": backend.name}
             for name, backend in sorted(models.items())
+            if access.can_use_model(principal, name)
         ],
     }
 
@@ -39,6 +40,9 @@ async def _proxy(request: Request, principal: Principal, endpoint: str, path: st
     model = body.get("model")
     if not model:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Field 'model' is required")
+
+    if not access.can_use_model(principal, model):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, f"You do not have access to model '{model}'")
 
     backend = await backends.resolve(model)
     if backend is None:

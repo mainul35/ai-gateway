@@ -41,6 +41,10 @@ class Principal:
         return self.is_master or (self.user is not None and self.user.role == "admin")
 
     @property
+    def is_manager(self):
+        return self.is_admin or (self.user is not None and self.user.role == "manager")
+
+    @property
     def label(self):
         if self.is_master:
             return "master-key"
@@ -81,4 +85,10 @@ async def authenticate(
 async def require_admin(principal: Principal = Depends(authenticate)) -> Principal:
     if not principal.is_admin:
         raise HTTPException(status.HTTP_403_FORBIDDEN, "Admin access required")
+    return principal
+
+
+async def require_manager(principal: Principal = Depends(authenticate)) -> Principal:
+    if not principal.is_manager:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Manager or admin access required")
     return principal

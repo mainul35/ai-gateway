@@ -2,14 +2,16 @@
 from fastapi import APIRouter, Cookie, Depends, HTTPException, Request, status
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from pydantic import BaseModel, Field
-from sqlalchemy import select
+from datetime import timedelta
+
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from app import settings, sso
+from app import access, settings, sso
 from app.auth import generate_key, hash_key
 from app.db import get_session
-from app.models import ApiKey, User
+from app.models import ApiKey, UsageRecord, User, utcnow
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
@@ -82,12 +84,17 @@ async def callback(request: Request, code: str | None = None, state: str | None 
     user = result.scalar_one_or_none()
     if user is None:
         # No seat limit: everyone the auth server accepts gets an account
-        user = User(name=identity["name"], email=identity["email"], role=sso.role_for(identity["email"]))
+        user = User(name=identity["name"], email=identity["email"], role=sso.role_for(identity["email"]),
+                    model_access=access.default_access())
         session.add(user)
     else:
+        if not user.is_active:
+            # Signing in again must not undo an admin disabling the account
+            raise HTTPException(status.HTTP_403_FORBIDDEN, "This account has been disabled")
         user.email = identity["email"] or user.email
-        user.role = sso.role_for(identity["email"]) or user.role
-        user.is_active = True
+        # Listed admin emails are always promoted; otherwise keep the role assigned in the UI
+        if sso.role_for(identity["email"]) == "admin":
+            user.role = "admin"
     await session.commit()
     await session.refresh(user)
 
@@ -102,6 +109,8 @@ async def callback(request: Request, code: str | None = None, state: str | None 
 async def me(user: User = Depends(current_user)):
     return {
         "name": user.name, "email": user.email, "role": user.role,
+        "model_access": "all" if user.role == "admin" else (user.model_access or "all"),
+        "allowed_models": access.parse_patterns(user.allowed_models),
         "keys": [{"id": k.id, "name": k.name, "prefix": k.key_prefix, "is_active": k.is_active}
                  for k in user.api_keys if k.is_active],
     }
@@ -143,3 +152,19 @@ async def logout():
 @router.get("/status")
 async def sso_status():
     return {"sso_configured": sso.is_configured(), "authorize_url": settings.sso_authorize_url()}
+
+
+@router.get("/usage")
+async def own_usage(days: int = 7, user: User = Depends(current_user),
+                    session: AsyncSession = Depends(get_session)):
+    """The signed-in user's own usage, so everyone can see what they have consumed."""
+    since = utcnow() - timedelta(days=days)
+    result = await session.execute(
+        select(UsageRecord.model, func.count(UsageRecord.id),
+               func.sum(UsageRecord.prompt_tokens), func.sum(UsageRecord.completion_tokens))
+        .where(UsageRecord.user_id == user.id, UsageRecord.created_at >= since)
+        .group_by(UsageRecord.model).order_by(func.count(UsageRecord.id).desc())
+    )
+    return {"since": since.isoformat(), "rows": [
+        {"model": model, "requests": requests, "prompt_tokens": int(prompt or 0),
+         "completion_tokens": int(completion or 0)} for model, requests, prompt, completion in result.all()]}

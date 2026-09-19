@@ -22,6 +22,10 @@ class User(Base):
     role: Mapped[str] = mapped_column(String(32), default="user")  # "user" or "admin"
     # Only the built-in admin has one; SSO accounts authenticate against the auth server
     password_hash: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    # "all", "selected" or "none"; admins always have every model regardless
+    model_access: Mapped[str] = mapped_column(String(16), default="all")
+    # JSON list of model names or patterns, used when model_access is "selected"
+    allowed_models: Mapped[str | None] = mapped_column(Text, nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 

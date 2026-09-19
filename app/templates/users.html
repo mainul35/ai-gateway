@@ -2,31 +2,81 @@
 {% block title %}Users &middot; Model Gateway{% endblock %}
 {% block content %}
 <h1>Users</h1>
-<p class="sub">Everyone who can call the API. There is no seat limit.</p>
+<p class="sub">
+  {% if user.role == 'admin' %}Manage roles, model access and keys. There is no seat limit.
+  {% else %}Grant model access and manage keys for accounts with the <strong>user</strong> role.{% endif %}
+</p>
 
 <div id="error" class="note err" hidden></div>
 <div id="created" class="note ok" hidden></div>
 
 <div class="card" style="margin-bottom:1.5rem">
+  <h2>Roles</h2>
+  <table>
+    <tr><th>Role</th><th>Can do</th></tr>
+    <tr><td><span class="pill off">user</span></td><td>Use the models they are granted, the playground, and their own keys and usage.</td></tr>
+    <tr><td><span class="pill on" style="background:rgba(99,102,241,.2);color:#a5b4fc">manager</span></td>
+        <td>Everything a user can, plus grant or remove model access and keys for accounts with the user role.</td></tr>
+    <tr><td><span class="pill on">admin</span></td><td>Everything, including roles, SSO settings and the llama.cpp engine. Always has every model.</td></tr>
+  </table>
+</div>
+
+<div class="card" style="margin-bottom:1.5rem">
   <h2>Add a user</h2>
   <div class="row">
-    <label style="flex:2;min-width:12rem;margin:0">
+    <label style="flex:2;min-width:11rem;margin:0">
       <span class="lbl">Name</span>
       <input id="newName" placeholder="jane">
     </label>
-    <label style="flex:2;min-width:12rem;margin:0">
+    <label style="flex:2;min-width:11rem;margin:0">
       <span class="lbl">Email (optional)</span>
       <input id="newEmail" placeholder="jane@example.com">
     </label>
     <label style="flex:1;min-width:8rem;margin:0">
       <span class="lbl">Role</span>
-      <select id="newRole"><option value="user">user</option><option value="admin">admin</option></select>
+      <select id="newRole">
+        <option value="user">user</option>
+        {% if user.role == 'admin' %}<option value="manager">manager</option><option value="admin">admin</option>{% endif %}
+      </select>
+    </label>
+    <label style="flex:1;min-width:8rem;margin:0">
+      <span class="lbl">Model access</span>
+      <select id="newAccess">
+        <option value="">default</option><option value="all">all</option>
+        <option value="none">none</option>
+      </select>
     </label>
     <button class="btn" id="addUser">Add</button>
   </div>
   <p class="muted" style="margin:.75rem 0 0;font-size:.85rem">
-    People who sign in through SSO are added automatically the first time they log in.
+    People who sign in through SSO are added automatically on first login. To give someone only certain
+    models, add them with <em>none</em> and then use <em>Edit access</em>.
   </p>
+</div>
+
+<div class="card" id="accessEditor" hidden style="margin-bottom:1.5rem;border:1px solid var(--primary)">
+  <h2>Model access for <span id="editName"></span></h2>
+  <div class="row" style="gap:1.25rem;margin-bottom:1rem">
+    <label style="margin:0"><input type="radio" name="mode" value="all" style="width:auto"> All models</label>
+    <label style="margin:0"><input type="radio" name="mode" value="selected" style="width:auto"> Selected models</label>
+    <label style="margin:0"><input type="radio" name="mode" value="none" style="width:auto"> No models</label>
+  </div>
+  <div id="selectedPanel">
+    <div class="row" style="margin-bottom:.5rem">
+      <button class="btn btn-sm btn-secondary" type="button" id="checkAll">Select all</button>
+      <button class="btn btn-sm btn-secondary" type="button" id="checkNone">Clear</button>
+    </div>
+    <div id="modelChecks" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(19rem,1fr));gap:.3rem .9rem;margin-bottom:1rem"></div>
+    <label>
+      <span class="lbl">Extra patterns (optional, comma separated)</span>
+      <input id="patterns" placeholder="qwen*, hf.co/unsloth/*">
+      <span class="hint">Patterns also cover models added later that match. Admins only, or managers who have every model.</span>
+    </label>
+  </div>
+  <div class="row">
+    <button class="btn" id="saveAccess">Save access</button>
+    <button class="btn btn-secondary" id="cancelAccess">Cancel</button>
+  </div>
 </div>
 
 <div class="card">
@@ -37,45 +87,131 @@
 
 {% block scripts %}
 <script>
+const me = {name: {{ user.name | tojson }}, role: {{ user.role | tojson }}};
+let users = [];
+let models = [];
+let editing = null;
+
 function showError(message){
   const box = document.getElementById('error');
   box.textContent = message; box.hidden = false;
+  window.scrollTo({top: 0, behavior: 'smooth'});
 }
 function showCreated(html){
   const box = document.getElementById('created');
   box.innerHTML = html; box.hidden = false;
 }
+function canManage(target){ return me.role === 'admin' || (me.role === 'manager' && target.role === 'user'); }
+
+function accessSummary(u){
+  if(u.role === 'admin') return '<span class="muted">all (admin)</span>';
+  if(u.model_access === 'all') return 'all models';
+  if(u.model_access === 'none') return '<span class="pill err">none</span>';
+  const list = u.allowed_models;
+  if(!list.length) return '<span class="pill err">none selected</span>';
+  const shown = list.slice(0, 3).map(m => `<code>${escapeHtml(m)}</code>`).join(' ');
+  return shown + (list.length > 3 ? ` <span class="muted">+${list.length - 3} more</span>` : '');
+}
+
+function roleCell(u){
+  if(me.role !== 'admin') return escapeHtml(u.role);
+  return `<select data-role="${escapeHtml(u.name)}" style="width:auto;padding:.3rem .5rem">
+    ${['user','manager','admin'].map(r => `<option ${r === u.role ? 'selected' : ''}>${r}</option>`).join('')}
+  </select>`;
+}
 
 async function loadUsers(){
   const target = document.getElementById('users');
   try{
-    const users = await api('/admin/users');
-    target.innerHTML = `<table>
-      <tr><th>User</th><th>Role</th><th>Keys</th><th>Status</th><th></th></tr>` + users.map(u => `
-      <tr>
-        <td>${escapeHtml(u.name)}${u.email ? `<br><span class="muted" style="font-size:.82rem">${escapeHtml(u.email)}</span>` : ''}</td>
-        <td>${escapeHtml(u.role)}</td>
-        <td>${u.keys.filter(k => k.is_active).length
-              ? u.keys.filter(k => k.is_active).map(k =>
-                  `<code>${escapeHtml(k.prefix)}&hellip;</code> <button class="btn btn-danger btn-sm"
-                    data-revoke="${k.id}" title="Revoke ${escapeHtml(k.name)}">&times;</button>`).join('<br>')
+    users = await api('/admin/users');
+    target.innerHTML = `<div style="overflow-x:auto"><table>
+      <tr><th>User</th><th>Role</th><th>Model access</th><th>Keys</th><th>Status</th><th></th></tr>` + users.map(u => {
+        const manageable = canManage(u);
+        const keys = u.keys.filter(k => k.is_active);
+        return `<tr>
+          <td>${escapeHtml(u.name)}${u.email && u.email !== u.name ? `<br><span class="muted" style="font-size:.82rem">${escapeHtml(u.email)}</span>` : ''}
+              <br><span class="muted" style="font-size:.78rem">${escapeHtml(u.sign_in)}</span></td>
+          <td>${roleCell(u)}</td>
+          <td>${accessSummary(u)}</td>
+          <td>${keys.length ? keys.map(k => `<code>${escapeHtml(k.prefix)}&hellip;</code>${manageable
+                ? ` <button class="btn btn-danger btn-sm" data-revoke="${k.id}" title="Revoke">&times;</button>` : ''}`).join('<br>')
               : '<span class="muted">none</span>'}</td>
-        <td>${u.is_active ? '<span class="pill on">active</span>' : '<span class="pill off">disabled</span>'}</td>
-        <td style="text-align:right;white-space:nowrap">
-          <button class="btn btn-sm btn-secondary" data-newkey="${escapeHtml(u.name)}">New key</button>
-          ${u.is_active ? `<button class="btn btn-sm btn-danger" data-disable="${escapeHtml(u.name)}">Disable</button>` : ''}
-        </td>
-      </tr>`).join('') + `</table>`;
+          <td>${u.is_active ? '<span class="pill on">active</span>' : '<span class="pill off">disabled</span>'}</td>
+          <td style="text-align:right;white-space:nowrap">${manageable ? `
+            ${u.role !== 'admin' ? `<button class="btn btn-sm btn-secondary" data-access="${escapeHtml(u.name)}">Edit access</button>` : ''}
+            ${u.is_active ? `<button class="btn btn-sm btn-secondary" data-newkey="${escapeHtml(u.name)}">New key</button>` : ''}
+            ${u.name === me.name ? '' : u.is_active
+                ? `<button class="btn btn-sm btn-danger" data-active="${escapeHtml(u.name)}" data-value="false">Disable</button>`
+                : `<button class="btn btn-sm" data-active="${escapeHtml(u.name)}" data-value="true">Enable</button>`}`
+            : '<span class="muted" style="font-size:.82rem">admin only</span>'}</td>
+        </tr>`;
+      }).join('') + `</table></div>`;
   }catch(e){ target.textContent = 'Could not load users: ' + e.message; }
 }
+
+async function loadModels(){
+  try{ models = (await api('/v1/models')).data.map(m => m.id); }
+  catch(e){ models = []; }
+}
+
+function openEditor(name){
+  editing = users.find(u => u.name === name);
+  if(!editing) return;
+  document.getElementById('editName').textContent = editing.name;
+  const exact = new Set(editing.allowed_models.filter(m => !/[*?[]/.test(m)));
+  const patterns = editing.allowed_models.filter(m => /[*?[]/.test(m));
+  document.getElementById('modelChecks').innerHTML = models.length
+    ? models.map(m => `<label style="margin:0;font-size:.88rem;display:flex;gap:.4rem;align-items:center">
+        <input type="checkbox" value="${escapeHtml(m)}" ${exact.has(m) ? 'checked' : ''} style="width:auto">
+        <code style="background:none;padding:0">${escapeHtml(m)}</code></label>`).join('')
+    : '<span class="muted">No models visible to you.</span>';
+  document.getElementById('patterns').value = patterns.join(', ');
+  document.querySelector(`input[name=mode][value=${editing.model_access}]`).checked = true;
+  syncMode();
+  const editor = document.getElementById('accessEditor');
+  editor.hidden = false;
+  editor.scrollIntoView({behavior: 'smooth', block: 'start'});
+}
+
+function syncMode(){
+  const mode = document.querySelector('input[name=mode]:checked')?.value;
+  document.getElementById('selectedPanel').hidden = mode !== 'selected';
+}
+document.querySelectorAll('input[name=mode]').forEach(r => r.addEventListener('change', syncMode));
+document.getElementById('checkAll').addEventListener('click', () =>
+  document.querySelectorAll('#modelChecks input').forEach(c => c.checked = true));
+document.getElementById('checkNone').addEventListener('click', () =>
+  document.querySelectorAll('#modelChecks input').forEach(c => c.checked = false));
+document.getElementById('cancelAccess').addEventListener('click', () => {
+  document.getElementById('accessEditor').hidden = true; editing = null;
+});
+
+document.getElementById('saveAccess').addEventListener('click', async () => {
+  if(!editing) return;
+  const mode = document.querySelector('input[name=mode]:checked').value;
+  const chosen = [...document.querySelectorAll('#modelChecks input:checked')].map(c => c.value);
+  const patterns = document.getElementById('patterns').value.split(',').map(s => s.trim()).filter(Boolean);
+  try{
+    await api(`/admin/users/${encodeURIComponent(editing.name)}`, {method:'PATCH',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({model_access: mode, allowed_models: mode === 'selected' ? [...chosen, ...patterns] : []})});
+    showCreated(`Model access for <strong>${escapeHtml(editing.name)}</strong> saved.`);
+    document.getElementById('error').hidden = true;
+    document.getElementById('accessEditor').hidden = true;
+    editing = null;
+    loadUsers();
+  }catch(e){ showError(e.message); }
+});
 
 document.getElementById('addUser').addEventListener('click', async () => {
   const name = document.getElementById('newName').value.trim();
   if(!name) return showError('A user needs a name');
+  const body = {name, email: document.getElementById('newEmail').value.trim() || null,
+                role: document.getElementById('newRole').value};
+  const modelAccess = document.getElementById('newAccess').value;
+  if(modelAccess) body.model_access = modelAccess;
   try{
-    await api('/admin/users', {method:'POST', headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({name, email: document.getElementById('newEmail').value.trim() || null,
-                            role: document.getElementById('newRole').value})});
+    await api('/admin/users', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
     document.getElementById('newName').value = '';
     document.getElementById('newEmail').value = '';
     document.getElementById('error').hidden = true;
@@ -83,12 +219,28 @@ document.getElementById('addUser').addEventListener('click', async () => {
   }catch(e){ showError(e.message); }
 });
 
+document.addEventListener('change', async e => {
+  const select = e.target.closest('[data-role]');
+  if(!select) return;
+  const name = select.dataset.role, role = select.value;
+  if(!confirm(`Change ${name} to ${role}?`)){ loadUsers(); return; }
+  try{
+    await api(`/admin/users/${encodeURIComponent(name)}`, {method:'PATCH',
+      headers:{'Content-Type':'application/json'}, body: JSON.stringify({role})});
+    showCreated(`<strong>${escapeHtml(name)}</strong> is now ${escapeHtml(role)}.`);
+  }catch(err){ showError(err.message); }
+  loadUsers();
+});
+
 document.addEventListener('click', async e => {
+  const accessBtn = e.target.closest('[data-access]');
   const newKey = e.target.closest('[data-newkey]');
   const revoke = e.target.closest('[data-revoke]');
-  const disable = e.target.closest('[data-disable]');
+  const active = e.target.closest('[data-active]');
   try{
-    if(newKey){
+    if(accessBtn){
+      openEditor(accessBtn.dataset.access);
+    }else if(newKey){
       const created = await api('/admin/keys', {method:'POST', headers:{'Content-Type':'application/json'},
         body: JSON.stringify({user: newKey.dataset.newkey, name: 'default'})});
       showCreated(`Key for <strong>${escapeHtml(created.user)}</strong>, shown only once:<br><code>${escapeHtml(created.key)}</code>`);
@@ -97,14 +249,16 @@ document.addEventListener('click', async e => {
       if(!confirm('Revoke this key?')) return;
       await api(`/admin/keys/${revoke.dataset.revoke}`, {method:'DELETE'});
       loadUsers();
-    }else if(disable){
-      if(!confirm(`Disable ${disable.dataset.disable}? Their keys stop working.`)) return;
-      await api(`/admin/users/${encodeURIComponent(disable.dataset.disable)}`, {method:'DELETE'});
+    }else if(active){
+      const enable = active.dataset.value === 'true';
+      if(!enable && !confirm(`Disable ${active.dataset.active}? Their keys stop working and SSO sign-in is refused.`)) return;
+      await api(`/admin/users/${encodeURIComponent(active.dataset.active)}`, {method:'PATCH',
+        headers:{'Content-Type':'application/json'}, body: JSON.stringify({is_active: enable})});
       loadUsers();
     }
   }catch(err){ showError(err.message); }
 });
 
-loadUsers();
+loadModels().then(loadUsers);
 </script>
 {% endblock %}

@@ -53,12 +53,16 @@
   </div>
 </div>
 
-{% if user.role == 'admin' %}
 <div class="card" style="margin-bottom:1.5rem">
-  <h2>Models</h2>
+  <h2>{{ 'Models' if user.role == 'admin' else 'Models you can use' }}</h2>
+  <p id="accessNote" class="muted" style="margin:0 0 .6rem;font-size:.88rem" hidden></p>
   <div id="models" class="muted">Loading&hellip;</div>
 </div>
-{% endif %}
+
+<div class="card" style="margin-bottom:1.5rem">
+  <h2>Your usage, last 7 days</h2>
+  <div id="myUsage" class="muted">Loading&hellip;</div>
+</div>
 
 <div class="card">
   <h2>Your API keys</h2>
@@ -130,14 +134,7 @@ async function loadAdmin(){
 
     document.getElementById('statModels').textContent = models.data.length;
 
-    const byBackend = {};
-    for(const m of models.data){ (byBackend[m.owned_by] ||= []).push(m.id); }
-    document.getElementById('models').innerHTML = Object.entries(byBackend).map(([backend, names]) => `
-      <p style="margin:.35rem 0 .15rem"><strong>${escapeHtml(backend)}</strong>
-        <span class="muted">&middot; ${names.length}</span></p>
-      <div style="display:flex;flex-wrap:wrap;gap:.35rem;margin-bottom:.5rem">
-        ${names.map(n => `<code>${escapeHtml(n)}</code>`).join('')}
-      </div>`).join('') || '<span class="muted">No models available.</span>';
+
     document.getElementById('statUsers').textContent = system.counts.users;
     document.getElementById('statRequests').textContent = system.counts.requests_24h;
     document.getElementById('statTokens').textContent = system.counts.tokens_24h.toLocaleString();
@@ -192,7 +189,43 @@ document.addEventListener('click', async e => {
   finally{ loadAdmin(); }
 });
 
+async function loadMyModels(){
+  const target = document.getElementById('models');
+  try{
+    const [models, me] = await Promise.all([api('/v1/models'), api('/auth/me')]);
+    const note = document.getElementById('accessNote');
+    if(me.role !== 'admin'){
+      note.textContent = me.model_access === 'all' ? 'You have access to every model.'
+        : me.model_access === 'none' ? 'You have not been granted any models yet. Ask a manager or admin.'
+        : `You have access to ${models.data.length} selected model${models.data.length === 1 ? '' : 's'}.`;
+      note.hidden = false;
+    }
+    const byBackend = {};
+    for(const m of models.data){ (byBackend[m.owned_by] ||= []).push(m.id); }
+    target.innerHTML = Object.entries(byBackend).map(([backend, names]) => `
+      <p style="margin:.35rem 0 .15rem"><strong>${escapeHtml(backend)}</strong>
+        <span class="muted">&middot; ${names.length}</span></p>
+      <div style="display:flex;flex-wrap:wrap;gap:.35rem;margin-bottom:.5rem">
+        ${names.map(n => `<code>${escapeHtml(n)}</code>`).join('')}
+      </div>`).join('') || '<span class="muted">No models available to you.</span>';
+  }catch(e){ target.textContent = 'Could not load models: ' + e.message; }
+}
+
+async function loadMyUsage(){
+  const target = document.getElementById('myUsage');
+  try{
+    const usage = await api('/auth/usage?days=7');
+    target.innerHTML = usage.rows.length
+      ? `<table><tr><th>Model</th><th>Requests</th><th>Prompt tokens</th><th>Completion tokens</th></tr>` +
+        usage.rows.map(r => `<tr><td>${escapeHtml(r.model)}</td><td>${r.requests}</td>
+          <td>${r.prompt_tokens.toLocaleString()}</td><td>${r.completion_tokens.toLocaleString()}</td></tr>`).join('') + `</table>`
+      : '<span class="muted">No requests yet.</span>';
+  }catch(e){ target.textContent = 'Could not load usage: ' + e.message; }
+}
+
 loadMyKeys();
+loadMyModels();
+loadMyUsage();
 if(isAdmin){ loadAdmin(); setInterval(loadAdmin, 15000); }
 </script>
 {% endblock %}

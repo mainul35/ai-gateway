@@ -94,12 +94,20 @@ async def dashboard(request: Request, user: User | None = Depends(current_user))
     return _require_login(user, "/dashboard") or _page(request, "dashboard.html", user)
 
 
+def _require_role(user, path, roles):
+    """Signed out goes to login; signed in without the role goes back to the dashboard."""
+    if not user:
+        return _require_login(user, path)
+    return None if user.role in roles else RedirectResponse("/dashboard", status_code=303)
+
+
 @router.get("/users")
 async def users_page(request: Request, user: User | None = Depends(current_user)):
-    return _require_login(user, "/users") or _page(request, "users.html", user)
+    return _require_role(user, "/users", ("manager", "admin")) or _page(request, "users.html", user)
 
 
 @router.get("/settings/sso")
 async def sso_settings_page(request: Request, user: User | None = Depends(current_user)):
     redirect_uri = f"{settings.public_base_url() or str(request.base_url).rstrip('/')}/auth/callback"
-    return _require_login(user, "/settings/sso") or _page(request, "sso.html", user, redirect_uri=redirect_uri)
+    return _require_role(user, "/settings/sso", ("admin",)) or \
+        _page(request, "sso.html", user, redirect_uri=redirect_uri)
