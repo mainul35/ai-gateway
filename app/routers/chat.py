@@ -177,6 +177,9 @@ async def capabilities(principal: Principal = Depends(authenticate)):
         "vision": settings.feature_enabled("vision"),
         "image_generation": images.is_available() and access.can_generate_images(principal),
         "image_sizes": list(images.SIZES),
+        # "qwen" follows edit instructions and takes up to 3 images; "flux" re-renders one image
+        "edit_engine": await images.edit_engine() if images.is_available() else None,
+        "max_edit_images": images.MAX_EDIT_IMAGES,
         "max_upload_mb": settings.max_upload_bytes() // (1024 * 1024),
     }
 
@@ -365,7 +368,8 @@ async def complete(payload: CompleteIn, principal: Principal = Depends(authentic
 class ImageIn(BaseModel):
     prompt: str = Field(min_length=1, max_length=4000)
     size: str = "square"
-    source_file_id: int | None = None
+    source_file_id: int | None = None      # the picture to edit
+    reference_file_ids: list[int] = Field(default_factory=list, max_length=2)  # extra pictures it may use
     strength: float = Field(default=0.75, ge=0.05, le=1.0)
 
 
@@ -378,12 +382,15 @@ async def generate_image(payload: ImageIn, principal: Principal = Depends(authen
         raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "Image generation is turned off on this server")
     if not access.can_generate_images(principal):
         raise HTTPException(status.HTTP_403_FORBIDDEN, "You do not have access to image generation")
-    source = None
+    sources = []
     if payload.source_file_id is not None:
-        found = (await _load_files(session, user, [payload.source_file_id])).get(payload.source_file_id)
-        if found is None:
+        wanted = [payload.source_file_id, *payload.reference_file_ids]
+        found = await _load_files(session, user, wanted)
+        if any(i not in found for i in wanted):
             raise HTTPException(status.HTTP_404_NOT_FOUND, "Source image not found")
-        source = (found.data, found.mime_type)
+        sources = [(found[i].data, found[i].mime_type) for i in wanted]
+    elif payload.reference_file_ids:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Reference images need an image to edit")
     user_id = user.id
 
     async def stream():
@@ -393,8 +400,8 @@ async def generate_image(payload: ImageIn, principal: Principal = Depends(authen
             await events.put(_event("progress", stage=stage, fraction=fraction))
 
         started = time.monotonic()
-        endpoint = "image_edits" if source else "image_generations"
-        job = asyncio.create_task(images.generate(payload.prompt, payload.size, source, payload.strength, progress))
+        endpoint = "image_edits" if sources else "image_generations"
+        job = asyncio.create_task(images.generate(payload.prompt, payload.size, sources, payload.strength, progress))
         try:
             # Relay progress while the job runs
             while not job.done() or not events.empty():

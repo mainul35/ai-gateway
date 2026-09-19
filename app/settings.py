@@ -24,6 +24,11 @@ DEFAULTS = {
     "images.steps": "20",
     "images.guidance": "3.5",
     "images.max_upload_mb": "10",
+    # Instruction-based editing; when these files are not in ComfyUI, edits fall back to Flux image-to-image
+    "images.edit.model": "qwen_image_edit_2511_fp8mixed.safetensors",
+    "images.edit.text_encoder": "qwen_2.5_vl_7b_fp8_scaled.safetensors",
+    "images.edit.vae": "qwen_image_vae.safetensors",
+    "images.edit.lora": "Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors",
 }
 
 # Generated once per process when no master key is configured, so a fresh install still works
@@ -170,6 +175,23 @@ def image_steps():
 
 def image_guidance():
     return float(get("images.guidance", "IMAGES_GUIDANCE"))
+
+
+def edit_model():
+    return get("images.edit.model", "IMAGES_EDIT_MODEL")
+
+
+def edit_text_encoder():
+    return get("images.edit.text_encoder", "IMAGES_EDIT_TEXT_ENCODER")
+
+
+def edit_vae():
+    return get("images.edit.vae", "IMAGES_EDIT_VAE")
+
+
+def edit_lora():
+    """Lightning LoRA: 4 steps instead of 40. Empty runs the full model."""
+    return get("images.edit.lora", "IMAGES_EDIT_LORA")
 
 
 def max_upload_bytes():

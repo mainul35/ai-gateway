@@ -234,13 +234,16 @@ document.querySelectorAll('.chip[data-tool]').forEach(chip =>
 
 function imageMode(){ return tools.image_generation && caps.image_generation; }
 function canAttach(){ return (tools.vision && caps.vision) || imageMode(); }
+// Qwen-Image-Edit follows instructions and can use extra reference images; the Flux fallback re-renders one
+const qwenEdits = () => caps.edit_engine === 'qwen';
+const editLimit = () => qwenEdits() ? (caps.max_edit_images || 3) : 1;
 
 function syncTools(){
   document.querySelectorAll('.chip[data-tool]').forEach(chip =>
     chip.setAttribute('aria-pressed', String(!!tools[chip.dataset.tool])));
   document.getElementById('attach').hidden = !canAttach();
   document.getElementById('sizeRow').hidden = !imageMode() || pending.length > 0;
-  document.getElementById('strengthRow').hidden = !imageMode() || pending.length === 0;
+  document.getElementById('strengthRow').hidden = !imageMode() || pending.length === 0 || qwenEdits();
   if(!canAttach() && pending.length){ pending = []; renderPending(); }
 
   const hint = document.getElementById('modeHint');
@@ -248,10 +251,16 @@ function syncTools(){
   hint.className = 'hint';
   if(imageMode()){
     promptBox.placeholder = pending.length ? 'Describe how to change the attached image…' : 'Describe the image to create…';
-    hint.textContent = pending.length
-      ? 'Sending edits the attached image with Flux. Lower "Change" keeps more of the original.'
-      : 'Sending creates an image with Flux instead of chatting. Attach an image (or press Edit on one) to change it.'
+    if(!pending.length){
+      hint.textContent = 'Sending creates an image with Flux instead of chatting. Attach an image (or press Edit on one) to change it.'
         + (tools.web_search ? ' Web search does not apply to images.' : '');
+    }else if(qwenEdits()){
+      hint.textContent = 'Say what to change, e.g. "make it night" or "remove the car"; everything else stays as it is.'
+        + (pending.length > 1 ? ' Refer to the pictures as image 1 (the one edited), image 2 and image 3.'
+                              : ` You can attach up to ${editLimit() - 1} more picture(s) to use, e.g. "put the hat from image 2 on the person in image 1".`);
+    }else{
+      hint.textContent = 'Sending re-renders the attached image with Flux. Lower "Change" keeps more of the original.';
+    }
     document.getElementById('modelHint').textContent = '';
     return;
   }
@@ -279,7 +288,7 @@ function renderPending(){
   document.getElementById('pending').innerHTML = pending.map((f, i) => `
     <div class="pending">
       <img src="${f.url}" alt="${escapeHtml(f.name || 'image')}" data-zoom="${f.url}">
-      ${f.kind === 'generated' ? '<span class="tag">to edit</span>' : ''}
+      ${imageMode() ? `<span class="tag">${i === 0 ? 'edit' : 'image ' + (i + 1)}</span>` : ''}
       <button data-unattach="${i}" title="Remove">&times;</button>
     </div>`).join('');
   syncTools();
@@ -305,8 +314,8 @@ async function uploadImages(files){
     form.append('file', file, file.name || 'pasted.png');
     try{
       const stored = await api('/chat/files', {method: 'POST', body: form});
-      // Editing works on one image; understanding can take several
-      if(imageMode()) pending = [];
+      // Understanding takes several images; editing takes as many as the edit model can use
+      if(imageMode() && pending.length >= editLimit()) pending = pending.slice(0, editLimit() - 1);
       pending.push(stored);
       renderPending();
     }catch(e){ showError('Could not attach image: ' + errorText(e)); }
@@ -751,6 +760,7 @@ async function sendImage(text){
   if(!text){ showError('Describe the image you want.'); return; }
   showError('');
   const source = pending[0] || null;
+  const references = pending.slice(1, editLimit());
   const size = document.getElementById('imageSize').value;
   const strength = parseFloat(document.getElementById('strength').value);
   try{
@@ -761,11 +771,11 @@ async function sendImage(text){
   }
   pending = []; renderPending();
   promptBox.value = '';
-  addUserMessage(text, source ? [source.url] : []);
+  addUserMessage(text, source ? [source, ...references].map(f => f.url) : []);
   // Image turns are kept in the transcript as text only, so a chat model later knows what was made
   history.push({role: 'user', content: text, images: []});
   await saveMessage({role: 'user', content: text,
-                     attachments: {mode: 'image', images: source ? [{file_id: source.id}] : []}});
+                     attachments: {mode: 'image', images: source ? [source, ...references].map(f => ({file_id: f.id})) : []}});
 
   const box = addMessage('assistant', '', source ? 'Image edit' : 'Image generation');
   setStatus(box, 'Starting');
@@ -775,7 +785,8 @@ async function sendImage(text){
   busy(true);
   try{
     const response = await postStream('/chat/images', {prompt: text, size, strength,
-                                                       source_file_id: source ? source.id : null});
+                                                       source_file_id: source ? source.id : null,
+                                                       reference_file_ids: references.map(f => f.id)});
     await readEvents(response, chunk => {
       const event = chunk.gateway;
       if(!event) return;
@@ -800,7 +811,8 @@ async function sendImage(text){
     return;
   }
   const generated = {file_id: result.file.id, prompt: text, seed: result.seed, size,
-                     source_file_id: source ? source.id : null, strength: source ? strength : null};
+                     source_file_id: source ? source.id : null, reference_file_ids: references.map(f => f.id),
+                     strength: source && !qwenEdits() ? strength : null};
   const stats = {total: +((performance.now() - started) / 1000).toFixed(1)};
   renderGenerated(box, generated, stats);
   chat.scrollTop = chat.scrollHeight;
