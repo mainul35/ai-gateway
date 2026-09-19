@@ -16,6 +16,9 @@ async def ensure_schema():
     """Adds columns introduced after the first release; create_all does not alter existing tables."""
     async with engine().begin() as connection:
         await connection.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS password_hash VARCHAR(256)"))
+        # Existing accounts keep the access they effectively had before access control existed
+        await connection.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS model_access VARCHAR(16) DEFAULT 'all'"))
+        await connection.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS allowed_models TEXT"))
 
 
 async def ensure_default_admin():

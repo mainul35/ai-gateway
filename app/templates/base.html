@@ -70,10 +70,10 @@ label span.hint{display:block;font-size:.8rem;color:var(--muted);margin-top:.2re
 <header class="nav">
   <span class="brand">Model Gateway</span>
   <a href="/dashboard">Dashboard</a>
-  {% if user.role == 'admin' %}<a href="/users">Users</a><a href="/settings/sso">SSO</a>{% endif %}
-  <a href="/docs">API</a>
+  {% if user.role in ('manager', 'admin') %}<a href="/users">Users</a>{% endif %}
+  {% if user.role == 'admin' %}<a href="/settings/sso">SSO</a><a href="/docs">API</a>{% endif %}
   <span class="spacer"></span>
-  <span class="who">{{ user.name }}{% if user.role == 'admin' %} &middot; admin{% endif %}</span>
+  <span class="who">{{ user.name }} &middot; {{ user.role }}</span>
   <a href="/logout">Sign out</a>
 </header>
 {% endif %}
