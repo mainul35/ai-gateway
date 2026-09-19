@@ -131,6 +131,25 @@ and multiple threads.
 
 MIT
 
+## Secrets
+
+Credentials never go in tracked files, not even development defaults. Keep them in files git ignores:
+
+- `.env` (copy `.env.example`): `GATEWAY_DB_PASSWORD`, which both compose files require
+- `config/config.properties` on the server: `gateway.database.url` (with that password),
+  `gateway.master.key`, `gateway.session.secret`, `sso.client.secret`
+
+There is deliberately no default database URL; the gateway refuses to start without one.
+
+`scripts/git-hooks/pre-push` scans every commit being pushed and refuses the push if it finds something
+that looks like a credential. Enable it once per clone:
+
+```bash
+git config core.hooksPath scripts/git-hooks
+```
+
+Run the same scan by hand with `python scripts/check_secrets.py --all`.
+
 ## Deploying
 
 From your machine:

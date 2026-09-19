@@ -1,0 +1,5 @@
+#!/bin/sh
+# Refuses a push that would add credentials to the remote.
+# Enable once per clone:  git config core.hooksPath scripts/git-hooks
+PY=python3; command -v python3 >/dev/null 2>&1 || PY=python
+exec "$PY" "$(git rev-parse --show-toplevel)/scripts/check_secrets.py" --pre-push "$@"
