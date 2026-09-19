@@ -4,7 +4,6 @@ import secrets
 from utils import config
 
 DEFAULTS = {
-    "gateway.database.url": "postgresql+asyncpg://gateway@localhost:5433/gateway",
     "gateway.models.file": "config/models.yaml",
     "gateway.discovery.ttl.seconds": "30",
     "gateway.request.timeout.seconds": "600",
@@ -31,7 +30,11 @@ def get_bool(key, env_var=None, default=False):
 
 
 def database_url():
-    return get("gateway.database.url", "GATEWAY_DATABASE_URL")
+    url = get("gateway.database.url", "GATEWAY_DATABASE_URL")
+    if not url:
+        # Deliberately no default: it would have to contain a password, and credentials never go in the repo
+        raise RuntimeError("Set gateway.database.url in config/config.properties or GATEWAY_DATABASE_URL")
+    return url
 
 
 def models_file():

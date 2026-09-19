@@ -16,8 +16,9 @@ services:
       gateway-db:
         condition: service_healthy
     environment:
-      # Overridden by config/config.properties when the same key is set there
-      GATEWAY_DATABASE_URL: postgresql+asyncpg://gateway:${GATEWAY_DB_PASSWORD}@gateway-db:5432/gateway
+      # Overridden by config/config.properties when the same key is set there.
+      # The password comes from .env, which git ignores; credentials never go in this file.
+      GATEWAY_DATABASE_URL: postgresql+asyncpg://gateway:${GATEWAY_DB_PASSWORD:?set GATEWAY_DB_PASSWORD in .env, see .env.example}@gateway-db:5432/gateway
     extra_hosts:
       - "host.docker.internal:host-gateway"
     restart: unless-stopped
@@ -28,7 +29,7 @@ services:
     container_name: model-gateway-db
     environment:
       POSTGRES_USER: gateway
-      POSTGRES_PASSWORD: ${GATEWAY_DB_PASSWORD}
+      POSTGRES_PASSWORD: ${GATEWAY_DB_PASSWORD:?set GATEWAY_DB_PASSWORD in .env, see .env.example}
       POSTGRES_DB: gateway
     volumes:
       - gateway-db-data:/var/lib/postgresql
