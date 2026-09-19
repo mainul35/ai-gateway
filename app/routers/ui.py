@@ -106,6 +106,11 @@ async def users_page(request: Request, user: User | None = Depends(current_user)
     return _require_role(user, "/users", ("manager", "admin")) or _page(request, "users.html", user)
 
 
+@router.get("/playground")
+async def playground_page(request: Request, user: User | None = Depends(current_user)):
+    return _require_login(user, "/playground") or _page(request, "playground.html", user)
+
+
 @router.get("/settings/sso")
 async def sso_settings_page(request: Request, user: User | None = Depends(current_user)):
     redirect_uri = f"{settings.public_base_url() or str(request.base_url).rstrip('/')}/auth/callback"
