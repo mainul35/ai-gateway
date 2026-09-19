@@ -130,3 +130,22 @@ and multiple threads.
 ## License
 
 MIT
+
+## Deploying
+
+From your machine:
+
+```bash
+bin/deploy.sh
+```
+
+It checks that the code compiles, backs up the server's current code (last 5 kept in
+`.deploy-backup/`), syncs the project, reinstalls dependencies only when a requirements file
+changed, restarts the gateway, and rolls back to the backup automatically if it does not come up
+healthy. `config/config.properties` on the server is never overwritten, so secrets and SSO
+settings survive every deploy.
+
+Override the target with `DEPLOY_HOST`, `DEPLOY_DIR` and `DEPLOY_PUBLIC_URL`.
+
+On the server the gateway is kept running by cron (`bin/gateway-start.sh` at boot and every
+minute as a watchdog).
