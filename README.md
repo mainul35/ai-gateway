@@ -160,7 +160,7 @@ remembered per browser.
 |---|---|---|
 | **Web search** | The model writes a search query from the conversation. The gateway searches with SearXNG, reads the top pages, and the model answers with numbered citations that link to the sources. | the `searxng` compose service |
 | **Image understanding** | Attach, paste or drop images for the model to look at. Models that can see images are marked in the model list, from Ollama's reported capabilities, an engine profile's `mmproj`, or `capabilities: [vision]` in `models.yaml`. | a vision model (e.g. `gemma4:31b`, `llava:13b`) |
-| **Image generation** | Sending creates an image with Flux on ComfyUI instead of chatting. With an image attached, or after pressing **Edit this image**, it re-renders that image towards the prompt; **Change** sets how far it may move. | ComfyUI with the Flux checkpoint |
+| **Image generation** | Sending creates an image with Flux on ComfyUI instead of chatting. With an image attached, or after pressing **Edit this image**, it edits that image by instruction with Qwen-Image-Edit ("make it night", "remove the car"), keeping everything else. Up to two more pictures can be attached as references ("put the hat from image 2 on the person in image 1"). | ComfyUI with the Flux checkpoint and the Qwen-Image-Edit files below |
 
 Generating an image first unloads the language models, since Flux needs most of the 24 GB card, and
 frees ComfyUI's VRAM afterwards. Images are stored in the database, and only their owner can open them.
@@ -179,7 +179,24 @@ search.searxng.url=http://127.0.0.1:8888
 images.comfyui.url=http://127.0.0.1:8188
 images.checkpoint=flux1CompactCLIPAnd_Flux1DevFp16.safetensors
 images.steps=20
+images.edit.model=qwen_image_edit_2511_fp8mixed.safetensors
+images.edit.text_encoder=qwen_2.5_vl_7b_fp8_scaled.safetensors
+images.edit.vae=qwen_image_vae.safetensors
+images.edit.lora=Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors
 ```
+
+Image editing uses Qwen-Image-Edit-2511 (Apache-2.0) with the Lightning LoRA, which needs 4 steps
+instead of 40. The files go in ComfyUI's `models/` folders:
+
+| File | Folder | From |
+|---|---|---|
+| `qwen_image_edit_2511_fp8mixed.safetensors` (20.5 GB) | `diffusion_models` | Comfy-Org/Qwen-Image-Edit_ComfyUI |
+| `qwen_2.5_vl_7b_fp8_scaled.safetensors` (9.4 GB) | `text_encoders` | Comfy-Org/Qwen-Image_ComfyUI |
+| `qwen_image_vae.safetensors` | `vae` | Comfy-Org/Qwen-Image_ComfyUI |
+| `Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors` | `loras` | lightx2v/Qwen-Image-Edit-2511-Lightning |
+
+If they are missing, edits fall back to Flux image-to-image, which re-renders the picture towards the
+prompt. A **Change** slider then sets how far it may move from the original.
 
 Start the search container on the server with:
 

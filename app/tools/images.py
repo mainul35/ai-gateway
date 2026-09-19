@@ -1,7 +1,9 @@
-"""Image generation and editing through ComfyUI (Flux Dev on the homelab).
+"""Image generation and editing through ComfyUI on the homelab.
 
-A new image is text-to-image; an edit is image-to-image: the source picture is encoded and re-rendered
-towards the prompt, with `strength` deciding how far it may move from the original.
+New images come from Flux Dev (text-to-image). Edits use Qwen-Image-Edit, which follows instructions
+such as "make it night" or "put the hat from image 2 on the person in image 1" and keeps everything
+else as it was. Without the Qwen files, edits fall back to Flux image-to-image: the picture is
+re-rendered towards the prompt, with `strength` deciding how far it may move from the original.
 
 The LLMs and Flux cannot share the 24 GB card, so every job first unloads the language models and
 afterwards asks ComfyUI to release its VRAM again.
@@ -22,6 +24,7 @@ from app.engine.supervisor import supervisor
 log = logging.getLogger("tools.images")
 
 JOB_TIMEOUT = 900
+MAX_EDIT_IMAGES = 3  # Qwen-Image-Edit takes up to three reference pictures
 SIZES = {"square": (1024, 1024), "portrait": (832, 1216), "landscape": (1216, 832), "wide": (1344, 768)}
 
 # One job at a time: two would fight over the GPU, and ComfyUI runs them one by one anyway
@@ -34,6 +37,64 @@ class ImageError(Exception):
 
 def is_available():
     return settings.feature_enabled("image_generation") and bool(settings.comfyui_url())
+
+
+async def edit_engine():
+    """ "qwen" when ComfyUI has the Qwen-Image-Edit model files, otherwise "flux" (image-to-image)."""
+    wanted = {"UNETLoader": ("unet_name", settings.edit_model()),
+              "CLIPLoader": ("clip_name", settings.edit_text_encoder()),
+              "VAELoader": ("vae_name", settings.edit_vae())}
+    if not all(name for _, name in wanted.values()):
+        return "flux"
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            for node, (field, name) in wanted.items():
+                info = (await client.get(f"{settings.comfyui_url()}/object_info/{node}")).json()
+                if name not in info[node]["input"]["required"][field][0]:
+                    return "flux"
+    except (httpx.HTTPError, ValueError, KeyError, IndexError):
+        return "flux"
+    return "qwen"
+
+
+def _qwen_edit_workflow(prompt, seed, source_names):
+    """ComfyUI's own Qwen-Image-Edit-2511 template, flattened: the first image is the one edited."""
+    lora = settings.edit_lora()
+    nodes = {
+        "unet": {"class_type": "UNETLoader", "inputs": {"unet_name": settings.edit_model(), "weight_dtype": "default"}},
+        "shift": {"class_type": "ModelSamplingAuraFlow", "inputs": {"model": ["unet", 0], "shift": 3.1}},
+        "norm": {"class_type": "CFGNorm", "inputs": {"model": ["shift", 0], "strength": 1.0}},
+        "clip": {"class_type": "CLIPLoader", "inputs": {"clip_name": settings.edit_text_encoder(),
+                                                         "type": "qwen_image", "device": "default"}},
+        "vae": {"class_type": "VAELoader", "inputs": {"vae_name": settings.edit_vae()}},
+        "decode": {"class_type": "VAEDecode", "inputs": {"samples": ["sampler", 0], "vae": ["vae", 0]}},
+        "save": {"class_type": "PreviewImage", "inputs": {"images": ["decode", 0]}},
+    }
+    references = {}
+    for index, name in enumerate(source_names[:MAX_EDIT_IMAGES], 1):
+        nodes[f"load{index}"] = {"class_type": "LoadImage", "inputs": {"image": name}}
+        # The edited picture is scaled to a size the model handles well; references are used as they are
+        if index == 1:
+            nodes["scale"] = {"class_type": "FluxKontextImageScale", "inputs": {"image": ["load1", 0]}}
+            references["image1"] = ["scale", 0]
+        else:
+            references[f"image{index}"] = [f"load{index}", 0]
+    for key, text in (("positive", prompt), ("negative", "")):
+        nodes[f"{key}_text"] = {"class_type": "TextEncodeQwenImageEditPlus",
+                                "inputs": {"clip": ["clip", 0], "vae": ["vae", 0], "prompt": text, **references}}
+        nodes[key] = {"class_type": "FluxKontextMultiReferenceLatentMethod",
+                      "inputs": {"conditioning": [f"{key}_text", 0], "reference_latents_method": "index_timestep_zero"}}
+    nodes["latent"] = {"class_type": "VAEEncode", "inputs": {"pixels": ["scale", 0], "vae": ["vae", 0]}}
+    if lora:
+        nodes["lora"] = {"class_type": "LoraLoaderModelOnly",
+                         "inputs": {"model": ["norm", 0], "lora_name": lora, "strength_model": 1.0}}
+    steps, cfg = (4, 1.0) if lora else (40, 4.0)
+    nodes["sampler"] = {"class_type": "KSampler", "inputs": {
+        "model": ["lora" if lora else "norm", 0], "positive": ["positive", 0], "negative": ["negative", 0],
+        "latent_image": ["latent", 0], "seed": seed, "steps": steps, "cfg": cfg,
+        "sampler_name": "euler", "scheduler": "simple", "denoise": 1.0,
+    }}
+    return nodes
 
 
 def _workflow(prompt, width, height, seed, source_name=None, strength=0.75):
@@ -83,10 +144,11 @@ async def _release_comfy(client):
         await client.post(f"{settings.comfyui_url()}/free", json={"unload_models": True, "free_memory": True})
 
 
-async def generate(prompt, size="square", source=None, strength=0.75, on_progress=None):
+async def generate(prompt, size="square", sources=(), strength=0.75, on_progress=None):
     """Runs one job and returns (png_bytes, seed).
 
-    source is (bytes, mime_type) for an edit. on_progress(stage, fraction) is awaited as the job runs.
+    sources is a list of (bytes, mime_type) for an edit: the picture to change first, then up to two
+    references. on_progress(stage, fraction) is awaited as the job runs.
     """
     if not is_available():
         raise ImageError("Image generation is turned off on this server")
@@ -103,23 +165,27 @@ async def generate(prompt, size="square", source=None, strength=0.75, on_progres
         await report("Waiting for another image to finish")
     async with _job_lock:
         async with httpx.AsyncClient(timeout=60) as client:
-            source_name = None
-            if source:
-                data, mime = source
-                extension = {"image/jpeg": "jpg", "image/webp": "webp"}.get(mime, "png")
+            source_names = []
+            for index, (data, mime) in enumerate(list(sources)[:MAX_EDIT_IMAGES]):
+                extension = {"image/jpeg": "jpg", "image/webp": "webp", "image/gif": "gif"}.get(mime, "png")
                 try:
-                    uploaded = await client.post(f"{base}/upload/image",
-                                                 files={"image": (f"gateway-{client_id}.{extension}", data, mime)},
-                                                 data={"overwrite": "true"})
+                    # Into ComfyUI's temp folder, which it clears itself, rather than its input library
+                    uploaded = await client.post(
+                        f"{base}/upload/image", data={"overwrite": "true", "type": "temp"},
+                        files={"image": (f"gateway-{client_id}-{index}.{extension}", data, mime)})
                     uploaded.raise_for_status()
-                    source_name = uploaded.json()["name"]
+                    source_names.append(f"{uploaded.json()['name']} [temp]")
                 except (httpx.HTTPError, ValueError, KeyError) as e:
                     raise ImageError(f"Could not reach the image server ({e.__class__.__name__})") from e
 
+            engine = await edit_engine() if source_names else None
             await report("Freeing GPU memory from the language models")
             await _free_vram_for_images()
 
-            workflow = _workflow(prompt, width, height, seed, source_name, strength)
+            if engine == "qwen":
+                workflow = _qwen_edit_workflow(prompt, seed, source_names)
+            else:
+                workflow = _workflow(prompt, width, height, seed, source_names[0] if source_names else None, strength)
             ws_url = base.replace("http://", "ws://").replace("https://", "wss://") + f"/ws?clientId={client_id}"
             try:
                 async with websockets.connect(ws_url, max_size=None, open_timeout=10) as ws:
@@ -127,7 +193,7 @@ async def generate(prompt, size="square", source=None, strength=0.75, on_progres
                     if queued.status_code >= 400:
                         raise ImageError(f"The image server rejected the job: {queued.text[:300]}")
                     prompt_id = queued.json()["prompt_id"]
-                    await report("Loading the image model")
+                    await report("Loading the image model" if engine != "qwen" else "Loading the image editing model")
                     await asyncio.wait_for(_follow_progress(ws, prompt_id, report), JOB_TIMEOUT)
 
                 history = (await client.get(f"{base}/history/{prompt_id}")).json().get(prompt_id) or {}

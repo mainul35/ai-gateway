@@ -160,7 +160,8 @@ async def _run_image_job(principal, prompt, size, source=None, strength=0.75):
     started = time.monotonic()
     endpoint = "image_edits" if source else "image_generations"
     try:
-        png, _seed = await images.generate(prompt, _OPENAI_SIZES.get(size or "auto", size), source, strength)
+        png, _seed = await images.generate(prompt, _OPENAI_SIZES.get(size or "auto", size),
+                                           [source] if source else [], strength)
     except images.ImageError as e:
         await usage_log.record(principal, settings.image_model_name(), "comfyui", endpoint, False, 502,
                                None, (time.monotonic() - started) * 1000, str(e))
