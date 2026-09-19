@@ -7,7 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app import bootstrap, db, settings, sso
 from app.engine.supervisor import supervisor
-from app.routers import admin, auth_sso, openai_v1, ui
+from app.routers import admin, auth_sso, chat, openai_v1, ui
 from utils.ollama_client import ollama_host
 
 # Without this our own INFO logs never reach the console; uvicorn only configures its own loggers
@@ -41,6 +41,7 @@ app.add_middleware(
 app.include_router(openai_v1.router)
 app.include_router(admin.router)
 app.include_router(auth_sso.router)
+app.include_router(chat.router)
 app.include_router(ui.router)
 
 
