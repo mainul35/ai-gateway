@@ -58,6 +58,13 @@ def can_use_model(principal, model):
     return any(fnmatch.fnmatchcase(model, pattern) for pattern in parse_patterns(user.allowed_models))
 
 
+def can_generate_images(principal):
+    """Image generation is not a model in the list; anyone granted any model may use it."""
+    if principal.is_admin:
+        return True
+    return principal.user is not None and (principal.user.model_access or "all") != "none"
+
+
 def can_manage(principal, target):
     """Admins manage everyone; managers manage plain users only."""
     if principal.is_admin:

@@ -4,6 +4,7 @@ Models come from two places:
   * automatic discovery of every model on the configured Ollama server
   * config/models.yaml, for explicit entries and for overrides of discovered ones
 """
+import asyncio
 import os
 import time
 
@@ -15,17 +16,21 @@ from app.engine.profiles import load_profiles
 from utils.ollama_client import ollama_host
 
 _cache = {"expires_at": 0.0, "models": {}}
+# Ollama model digest -> capabilities; a digest never changes what it can do
+_capabilities_by_digest = {}
 
 
 class Backend:
     """An upstream that speaks the OpenAI API."""
 
-    def __init__(self, name, kind, base_url, upstream_model, api_key=None):
+    def __init__(self, name, kind, base_url, upstream_model, api_key=None, capabilities=()):
         self.name = name
-        self.kind = kind  # "ollama" or "openai"
+        self.kind = kind  # "ollama", "llamacpp" or "openai"
         self.base_url = base_url.rstrip("/")
         self.upstream_model = upstream_model
         self.api_key = api_key
+        # What the model can take or do beyond text, e.g. "vision"; shown to clients in /v1/models
+        self.capabilities = set(capabilities)
 
     def url(self, path):
         return f"{self.base_url}{path}"
@@ -60,6 +65,7 @@ def _load_model_file():
             base_url=base_url,
             upstream_model=entry.get("upstream_model", name),
             api_key=api_key,
+            capabilities=entry.get("capabilities") or (),
         )
     return models
 
@@ -80,14 +86,35 @@ async def _discover_ollama():
         if name:
             # Ollama exposes an OpenAI-compatible API at /v1
             discovered[name] = Backend(name="ollama", kind="ollama", base_url=f"{host}/v1", upstream_model=name)
+    await _add_ollama_capabilities(host, tags, discovered)
     return discovered
+
+
+async def _add_ollama_capabilities(host, tags, discovered):
+    """Asks Ollama what each model supports (vision, tools, thinking); cached per digest."""
+    unknown = [t for t in tags if t.get("name") and t.get("digest") not in _capabilities_by_digest]
+    if unknown:
+        async with httpx.AsyncClient(timeout=10) as client:
+            async def show(tag):
+                try:
+                    response = await client.post(f"{host}/api/show", json={"model": tag["name"]})
+                    response.raise_for_status()
+                    _capabilities_by_digest[tag.get("digest")] = set(response.json().get("capabilities") or ())
+                except (httpx.HTTPError, ValueError):
+                    pass  # tried again at the next discovery
+            await asyncio.gather(*(show(t) for t in unknown))
+    for tag in tags:
+        if tag.get("name") in discovered:
+            discovered[tag["name"]].capabilities = set(_capabilities_by_digest.get(tag.get("digest"), ()))
 
 
 def _engine_models():
     """Models served by our own llama-server processes; started on demand when first requested."""
     return {
         name: Backend(name="llamacpp", kind="llamacpp",
-                      base_url=f"http://127.0.0.1:{profile.port}/v1", upstream_model=name)
+                      base_url=f"http://127.0.0.1:{profile.port}/v1", upstream_model=name,
+                      # llama-server only sees images when it is given the model's vision projector
+                      capabilities={"completion", "thinking"} | ({"vision"} if profile.mmproj else set()))
         for name, profile in load_profiles().items()
     }
 

@@ -19,6 +19,9 @@ services:
       # Overridden by config/config.properties when the same key is set there.
       # The password comes from .env, which git ignores; credentials never go in this file.
       GATEWAY_DATABASE_URL: postgresql+asyncpg://gateway:${GATEWAY_DB_PASSWORD:?set GATEWAY_DB_PASSWORD in .env, see .env.example}@gateway-db:5432/gateway
+      # Playground tools: web search through the searxng service, images through ComfyUI on the host
+      SEARXNG_URL: http://searxng:8080
+      COMFYUI_URL: http://host.docker.internal:8188
     extra_hosts:
       - "host.docker.internal:host-gateway"
     restart: unless-stopped
@@ -38,6 +41,16 @@ services:
       interval: 5s
       timeout: 5s
       retries: 20
+    restart: unless-stopped
+
+  searxng:
+    # Metasearch for the playground's web search; not published, only the gateway queries it
+    image: searxng/searxng:latest
+    container_name: model-gateway-searxng
+    environment:
+      SEARXNG_SECRET: ${SEARXNG_SECRET:?set SEARXNG_SECRET in .env, see .env.example}
+    volumes:
+      - ./config/searxng/settings.yml:/etc/searxng/settings.yml:ro
     restart: unless-stopped
 
 volumes:

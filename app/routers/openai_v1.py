@@ -1,13 +1,15 @@
 """OpenAI-compatible endpoints: what clients like Open WebUI and the OpenAI SDKs talk to."""
+import base64
 import time
 
 import httpx
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile, status
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from app import access, backends, settings, usage as usage_log
 from app.engine.supervisor import supervisor
 from app.auth import Principal, authenticate
+from app.tools import images
 
 router = APIRouter(prefix="/v1", tags=["openai"])
 
@@ -24,7 +26,8 @@ async def list_models(principal: Principal = Depends(authenticate)):
     return {
         "object": "list",
         "data": [
-            {"id": name, "object": "model", "created": 0, "owned_by": backend.name}
+            {"id": name, "object": "model", "created": 0, "owned_by": backend.name,
+             "capabilities": sorted(backend.capabilities)}
             for name, backend in sorted(models.items())
             if access.can_use_model(principal, name)
         ],
@@ -36,7 +39,14 @@ async def _proxy(request: Request, principal: Principal, endpoint: str, path: st
         body = await request.json()
     except ValueError:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Request body must be JSON")
+    return await forward(principal, endpoint, path, body)
 
+
+async def forward(principal: Principal, endpoint: str, path: str, body: dict):
+    """Sends an OpenAI request to the model's upstream, with access checks and usage accounting.
+
+    Returns a JSONResponse, or a StreamingResponse when body["stream"] is set.
+    """
     model = body.get("model")
     if not model:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Field 'model' is required")
@@ -131,3 +141,56 @@ async def completions(request: Request, principal: Principal = Depends(authentic
 @router.post("/embeddings")
 async def embeddings(request: Request, principal: Principal = Depends(authenticate)):
     return await _proxy(request, principal, "embeddings", PROXY_PATHS["embeddings"])
+
+
+# --- images -------------------------------------------------------------------------
+
+# OpenAI sizes mapped onto the shapes Flux renders well
+_OPENAI_SIZES = {"1024x1024": "square", "1024x1536": "portrait", "1024x1792": "portrait",
+                 "1536x1024": "landscape", "1792x1024": "wide", "auto": "square"}
+
+
+async def _run_image_job(principal, prompt, size, source=None, strength=0.75):
+    if not images.is_available():
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "Image generation is turned off on this server")
+    if not access.can_generate_images(principal):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "You do not have access to image generation")
+    if not (prompt or "").strip():
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Field 'prompt' is required")
+    started = time.monotonic()
+    endpoint = "image_edits" if source else "image_generations"
+    try:
+        png, _seed = await images.generate(prompt, _OPENAI_SIZES.get(size or "auto", size), source, strength)
+    except images.ImageError as e:
+        await usage_log.record(principal, settings.image_model_name(), "comfyui", endpoint, False, 502,
+                               None, (time.monotonic() - started) * 1000, str(e))
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(e))
+    await usage_log.record(principal, settings.image_model_name(), "comfyui", endpoint, False, 200,
+                           None, (time.monotonic() - started) * 1000)
+    return {"created": int(time.time()), "data": [{"b64_json": base64.b64encode(png).decode(),
+                                                   "revised_prompt": prompt}]}
+
+
+@router.post("/images/generations")
+async def image_generations(request: Request, principal: Principal = Depends(authenticate)):
+    try:
+        body = await request.json()
+    except ValueError:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Request body must be JSON")
+    if int(body.get("n") or 1) != 1:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Only n=1 is supported")
+    if body.get("response_format") == "url":
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Only response_format=b64_json is supported")
+    return await _run_image_job(principal, body.get("prompt"), body.get("size"))
+
+
+@router.post("/images/edits")
+async def image_edits(image: UploadFile = File(...), prompt: str = Form(...), size: str | None = Form(None),
+                      strength: float = Form(0.75), principal: Principal = Depends(authenticate)):
+    data = await image.read(settings.max_upload_bytes() + 1)
+    if len(data) > settings.max_upload_bytes():
+        raise HTTPException(status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, "Image is too large")
+    mime = image.content_type or "image/png"
+    if not mime.startswith("image/"):
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "The upload must be an image")
+    return await _run_image_job(principal, prompt, size, (data, mime), strength)

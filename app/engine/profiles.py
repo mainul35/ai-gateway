@@ -35,6 +35,7 @@ class EngineProfile:
     cache_reuse: int | None = None           # --cache-reuse: reuse a matching prompt prefix between turns
     n_predict: int | None = None             # --n-predict: hard cap on generated tokens
     chat_template_kwargs: str | None = None  # --chat-template-kwargs: JSON passed to the chat template
+    mmproj: str | None = None                # --mmproj: vision projector GGUF; lets the model read images
     extra_args: list[str] = field(default_factory=list)
     ttl_seconds: int = 900           # unload after this long idle; 0 = keep loaded
     exclusive: bool = True           # stop other exclusive models first (one big model fits in 24 GB)
@@ -72,6 +73,8 @@ class EngineProfile:
             args += ["--n-predict", str(self.n_predict)]
         if self.chat_template_kwargs:
             args += ["--chat-template-kwargs", self.chat_template_kwargs]
+        if self.mmproj:
+            args += ["--mmproj", self.mmproj]
         return args + list(self.extra_args)
 
 

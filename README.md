@@ -135,7 +135,8 @@ MIT
 
 Credentials never go in tracked files, not even development defaults. Keep them in files git ignores:
 
-- `.env` (copy `.env.example`): `GATEWAY_DB_PASSWORD`, which both compose files require
+- `.env` (copy `.env.example`): `GATEWAY_DB_PASSWORD`, which both compose files require, and
+  `SEARXNG_SECRET` for the web-search container
 - `config/config.properties` on the server: `gateway.database.url` (with that password),
   `gateway.master.key`, `gateway.session.secret`, `sso.client.secret`
 
@@ -149,6 +150,42 @@ git config core.hooksPath scripts/git-hooks
 ```
 
 Run the same scan by hand with `python scripts/check_secrets.py --all`.
+
+## Playground tools
+
+The playground has three tools, each with an on/off toggle under the message box. The choice is
+remembered per browser.
+
+| Tool | What it does | Needs |
+|---|---|---|
+| **Web search** | The model writes a search query from the conversation. The gateway searches with SearXNG, reads the top pages, and the model answers with numbered citations that link to the sources. | the `searxng` compose service |
+| **Image understanding** | Attach, paste or drop images for the model to look at. Models that can see images are marked in the model list, from Ollama's reported capabilities, an engine profile's `mmproj`, or `capabilities: [vision]` in `models.yaml`. | a vision model (e.g. `gemma4:31b`, `llava:13b`) |
+| **Image generation** | Sending creates an image with Flux on ComfyUI instead of chatting. With an image attached, or after pressing **Edit this image**, it re-renders that image towards the prompt; **Change** sets how far it may move. | ComfyUI with the Flux checkpoint |
+
+Generating an image first unloads the language models, since Flux needs most of the 24 GB card, and
+frees ComfyUI's VRAM afterwards. Images are stored in the database, and only their owner can open them.
+
+The same image engine is available to API clients, such as Open WebUI and the OpenAI SDKs, at
+`POST /v1/images/generations` and `POST /v1/images/edits` (multipart, with `strength`), which return
+`b64_json`. Anyone with access to at least one model may generate images.
+
+Admins can switch a tool off for everyone in `config/config.properties`:
+
+```properties
+features.web_search.enabled=true
+features.vision.enabled=true
+features.image_generation.enabled=true
+search.searxng.url=http://127.0.0.1:8888
+images.comfyui.url=http://127.0.0.1:8188
+images.checkpoint=flux1CompactCLIPAnd_Flux1DevFp16.safetensors
+images.steps=20
+```
+
+Start the search container on the server with:
+
+```bash
+docker compose -f docker-compose.gateway.yml -f docker-compose.homelab.yml up -d searxng
+```
 
 ## Deploying
 

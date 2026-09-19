@@ -12,6 +12,18 @@ DEFAULTS = {
     "sso.claim.id": "sub",
     "sso.claim.email": "email",
     "sso.claim.name": "name",
+    "features.web_search.enabled": "true",
+    "features.vision.enabled": "true",
+    "features.image_generation.enabled": "true",
+    "search.searxng.url": "http://127.0.0.1:8888",
+    "search.results": "5",
+    "search.fetch_pages": "3",
+    "images.comfyui.url": "http://127.0.0.1:8188",
+    "images.checkpoint": "flux1CompactCLIPAnd_Flux1DevFp16.safetensors",
+    "images.model_name": "flux-dev",
+    "images.steps": "20",
+    "images.guidance": "3.5",
+    "images.max_upload_mb": "10",
 }
 
 # Generated once per process when no master key is configured, so a fresh install still works
@@ -118,6 +130,50 @@ def sso_claim_name():
 
 def sso_admin_emails():
     return get("sso.admin.emails", "SSO_ADMIN_EMAILS")
+
+
+# --- Playground tools: web search, image understanding, image generation ---
+
+def feature_enabled(name):
+    """Server-wide switch for a playground tool; users toggle enabled tools per chat."""
+    return get_bool(f"features.{name}.enabled", f"FEATURE_{name.upper()}")
+
+
+def searxng_url():
+    return (get("search.searxng.url", "SEARXNG_URL") or "").rstrip("/")
+
+
+def search_results():
+    return int(get("search.results", "SEARCH_RESULTS"))
+
+
+def search_fetch_pages():
+    return int(get("search.fetch_pages", "SEARCH_FETCH_PAGES"))
+
+
+def comfyui_url():
+    return (get("images.comfyui.url", "COMFYUI_URL") or "").rstrip("/")
+
+
+def image_checkpoint():
+    return get("images.checkpoint", "IMAGES_CHECKPOINT")
+
+
+def image_model_name():
+    """Name image requests are recorded under in usage, and accepted as `model` in /v1/images."""
+    return get("images.model_name", "IMAGES_MODEL_NAME")
+
+
+def image_steps():
+    return int(get("images.steps", "IMAGES_STEPS"))
+
+
+def image_guidance():
+    return float(get("images.guidance", "IMAGES_GUIDANCE"))
+
+
+def max_upload_bytes():
+    return int(float(get("images.max_upload_mb", "IMAGES_MAX_UPLOAD_MB")) * 1024 * 1024)
 
 
 def public_base_url():
