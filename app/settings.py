@@ -16,8 +16,9 @@ DEFAULTS = {
     "features.vision.enabled": "true",
     "features.image_generation.enabled": "true",
     "search.searxng.url": "http://127.0.0.1:8888",
-    "search.results": "5",
-    "search.fetch_pages": "3",
+    "search.results": "6",
+    "search.fetch_pages": "4",
+    "search.language": "en",
     "images.comfyui.url": "http://127.0.0.1:8188",
     "images.checkpoint": "flux1CompactCLIPAnd_Flux1DevFp16.safetensors",
     "images.model_name": "flux-dev",
@@ -169,6 +170,11 @@ def search_results():
 
 def search_fetch_pages():
     return int(get("search.fetch_pages", "SEARCH_FETCH_PAGES"))
+
+
+def search_language():
+    """Language asked of the search engines; "all" to take whatever comes back."""
+    return get("search.language", "SEARCH_LANGUAGE")
 
 
 def comfyui_url():

@@ -30,6 +30,7 @@ EDITABLE_KEYS = [
     "search.searxng.url",
     "search.results",
     "search.fetch_pages",
+    "search.language",
     "images.comfyui.url",
     "images.checkpoint",
     "images.steps",
