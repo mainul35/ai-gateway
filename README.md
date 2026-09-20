@@ -222,6 +222,12 @@ science fiction and refuses to answer: the same Java question came back saying t
 the future".
 
 ## Photographs
+Pictures are attached with the paperclip, by pasting, or by dropping one anywhere on the page. JPEG,
+PNG, HEIC, WebP, TIFF, GIF and BMP are accepted, up to `images.max_upload_mb` (25 by default); what a
+browser cannot display is converted to JPEG on arrival, keeping its orientation. Camera raw files are
+refused with a message saying so rather than a generic error: developing ORF, RW2, ARW and the rest
+would need a raw library, and the exported JPEG is what the tools work on today.
+
 
 Attaching a photograph and asking in plain words gets one of two jobs, never both at once. The router
 decides from what you type, so "remove the noise" and "blur the background" go to different places.

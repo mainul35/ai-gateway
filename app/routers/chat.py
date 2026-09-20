@@ -4,6 +4,7 @@ Every user only ever sees their own conversations and files.
 """
 import asyncio
 import base64
+import io
 import json
 import logging
 import time
@@ -196,7 +197,12 @@ async def capabilities(principal: Principal = Depends(authenticate)):
 
 # Checked against the bytes, not the type the browser claims
 _IMAGE_SIGNATURES = ((b"\x89PNG\r\n\x1a\n", "image/png"), (b"\xff\xd8\xff", "image/jpeg"),
-                     (b"GIF87a", "image/gif"), (b"GIF89a", "image/gif"))
+                     (b"GIF87a", "image/gif"), (b"GIF89a", "image/gif"), (b"BM", "image/bmp"))
+# What phones and cameras produce besides JPEG. A browser cannot show most of them, so they are
+# converted on the way in rather than refused.
+_CONVERTED = {"image/heic", "image/avif", "image/tiff", "image/bmp"}
+# A raw file is a TIFF underneath, so the bytes alone do not tell one from an ordinary TIFF
+_RAW_SUFFIXES = (".orf", ".rw2", ".arw", ".cr2", ".cr3", ".nef", ".raf", ".dng", ".pef", ".srw")
 
 
 def _image_type(data):
@@ -205,6 +211,14 @@ def _image_type(data):
             return mime
     if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
         return "image/webp"
+    if data[4:8] == b"ftyp":
+        brand = data[8:12]
+        if brand in (b"heic", b"heix", b"hevc", b"heim", b"heis", b"mif1", b"msf1"):
+            return "image/heic"
+        if brand in (b"avif", b"avis"):
+            return "image/avif"
+    if data[:4] in (b"II*\x00", b"MM\x00*"):
+        return "image/tiff"
     return None
 
 
@@ -213,19 +227,49 @@ def _file_json(file):
             "kind": file.kind, "prompt": file.prompt}
 
 
+def _to_browser_format(data, mime, name):
+    """Turns what a browser cannot display into JPEG, leaving the picture itself alone."""
+    try:
+        from PIL import Image, ImageOps
+        if mime == "image/heic":
+            import pillow_heif
+            pillow_heif.register_heif_opener()
+    except ImportError as e:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST,
+                            f"{name} is a {mime.split('/')[1].upper()} file and this server cannot "
+                            f"read it ({e.name} is not installed)")
+    try:
+        picture = ImageOps.exif_transpose(Image.open(io.BytesIO(data))).convert("RGB")
+        out = io.BytesIO()
+        picture.save(out, format="JPEG", quality=92)
+    except Exception as e:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST,
+                            f"{name} could not be read ({e.__class__.__name__})")
+    return out.getvalue(), "image/jpeg"
+
+
 @router.post("/files", status_code=status.HTTP_201_CREATED)
 async def upload_file(file: UploadFile = File(...), principal: Principal = Depends(authenticate),
                       session: AsyncSession = Depends(get_session)):
     user = _require_user(principal)
     limit = settings.max_upload_bytes()
     data = await file.read(limit + 1)
+    name = (file.filename or "image")[:256]
     if len(data) > limit:
         raise HTTPException(status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
-                            f"Images can be at most {limit // (1024 * 1024)} MB")
+                            f"{name} is larger than {limit // (1024 * 1024)} MB")
     mime = _image_type(data)
+    if name.lower().endswith(_RAW_SUFFIXES):
+        raise HTTPException(status.HTTP_400_BAD_REQUEST,
+                            f"{name} is a camera raw file, which this server cannot develop yet. "
+                            "Export it as JPEG or HEIC and attach that.")
     if mime is None:
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Only PNG, JPEG, WebP and GIF images can be attached")
-    stored = ChatFile(user_id=user.id, kind="upload", mime_type=mime, name=(file.filename or "image")[:256], data=data)
+        raise HTTPException(status.HTTP_400_BAD_REQUEST,
+                            f"{name} is not a picture this server recognises. JPEG, PNG, HEIC, WebP, "
+                            "TIFF, GIF and BMP all work.")
+    if mime in _CONVERTED:
+        data, mime = await asyncio.to_thread(_to_browser_format, data, mime, name)
+    stored = ChatFile(user_id=user.id, kind="upload", mime_type=mime, name=name, data=data)
     session.add(stored)
     await session.commit()
     await session.refresh(stored)

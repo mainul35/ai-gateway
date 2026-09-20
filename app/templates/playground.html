@@ -73,6 +73,7 @@ textarea:focus{outline:none;border-color:var(--primary)}
 .tools .spacer{margin-left:auto}
 .composer select{background:none;border:none;color:var(--muted);font-size:.8rem;padding:.2rem .2rem;width:auto;cursor:pointer}
 .composer select:hover{color:var(--text)}
+#composerError{margin:.5rem 0 0;padding:.5rem .7rem;font-size:.82rem}
 .foot{display:flex;align-items:center;gap:.75rem;justify-content:space-between;margin-top:.45rem;
       font-size:.78rem;color:var(--muted);min-height:1.1rem}
 .foot > *{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
@@ -210,7 +211,8 @@ a.cite{font-size:.75em;vertical-align:super;text-decoration:none;padding:0 .1rem
             <button class="chip" id="toolImage" data-tool="image_generation" aria-pressed="false" hidden
                     title="Create a new image, or edit an attached one, instead of chatting"><span class="dot"></span>Image generation</button>
             <button class="icon-btn" id="attach" title="Attach an image (you can also paste or drop one)" hidden>+</button>
-            <input type="file" id="fileInput" accept="image/png,image/jpeg,image/webp,image/gif" multiple hidden>
+            <input type="file" id="fileInput" multiple hidden
+                   accept="image/*,.heic,.heif,.avif,.tif,.tiff,.bmp">
             <span class="inline" id="sizeRow" hidden>Shape
               <select id="imageSize"></select>
             </span>
@@ -227,6 +229,7 @@ a.cite{font-size:.75em;vertical-align:super;text-decoration:none;padding:0 .1rem
             <button class="btn btn-sm" id="send">Send</button>
           </div>
         </div>
+        <div class="note err" id="composerError" hidden></div>
         <div class="foot">
           <span class="hint" id="modeHint"></span>
           <span class="status" id="deciding" hidden>
@@ -287,8 +290,16 @@ let tools = {web_search: false, vision: false, image_generation: false};
 let pending = [];        // images attached to the next message: [{id, url, name, kind}]
 
 function showError(message){
-  const box = document.getElementById('error');
-  box.textContent = message || ''; box.hidden = !message;
+  for(const id of ['error', 'composerError']){
+    const box = document.getElementById(id);
+    box.textContent = message || '';
+    box.hidden = !message;
+  }
+  // The one by the message box is the one that gets seen; it goes away on its own
+  clearTimeout(showError.timer);
+  if(message) showError.timer = setTimeout(() => {
+    document.getElementById('composerError').hidden = true;
+  }, 12000);
 }
 
 function errorText(e){
@@ -439,10 +450,15 @@ async function uploadImages(files){
     showError('Turn on "Image understanding" or "Image generation" to attach images.');
     return;
   }
-  for(const file of files){
-    if(!file.type.startsWith('image/')) continue;
+  const pictures = files.filter(f => f.type.startsWith('image/') || /\.(heic|heif|avif|tiff?|bmp)$/i.test(f.name));
+  if(!pictures.length && files.length){
+    showError(files.length === 1 ? `${files[0].name} is not a picture.` : 'Those are not pictures.');
+    return;
+  }
+  for(const file of pictures){
     if(file.size > caps.max_upload_mb * 1024 * 1024){
-      showError(`${file.name} is larger than ${caps.max_upload_mb} MB.`);
+      showError(`${file.name} is ${(file.size / 1048576).toFixed(0)} MB; the limit is `
+                + `${caps.max_upload_mb} MB. Export it smaller and try again.`);
       continue;
     }
     const form = new FormData();
@@ -463,11 +479,23 @@ promptBox.addEventListener('paste', e => {
   const files = [...(e.clipboardData?.files || [])].filter(f => f.type.startsWith('image/'));
   if(files.length){ e.preventDefault(); uploadImages(files); }
 });
+// Anywhere on the page, not only on the message box: a file dropped elsewhere used to be opened by
+// the browser, which navigated away from the playground and looked like the upload failing.
 const composer = document.getElementById('composer');
-composer.addEventListener('dragover', e => { e.preventDefault(); composer.classList.add('drop'); });
-composer.addEventListener('dragleave', () => composer.classList.remove('drop'));
-composer.addEventListener('drop', e => {
-  e.preventDefault(); composer.classList.remove('drop');
+let dragDepth = 0;
+document.addEventListener('dragenter', e => {
+  if(![...(e.dataTransfer?.types || [])].includes('Files')) return;
+  e.preventDefault();
+  if(dragDepth++ === 0) composer.classList.add('drop');
+});
+document.addEventListener('dragover', e => {
+  if([...(e.dataTransfer?.types || [])].includes('Files')) e.preventDefault();
+});
+document.addEventListener('dragleave', () => { if(--dragDepth <= 0){ dragDepth = 0; composer.classList.remove('drop'); } });
+document.addEventListener('drop', e => {
+  if(![...(e.dataTransfer?.types || [])].includes('Files')) return;
+  e.preventDefault();
+  dragDepth = 0; composer.classList.remove('drop');
   uploadImages([...e.dataTransfer.files]);
 });
 
