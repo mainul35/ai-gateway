@@ -20,7 +20,7 @@ import websockets
 
 from app import settings
 from app.engine.supervisor import supervisor
-from app.tools import lettering
+from app.tools import lettering, photo
 
 log = logging.getLogger("tools.images")
 
@@ -250,6 +250,40 @@ async def generate(prompt, size="square", sources=(), strength=0.75, on_progress
                 raise ImageError(f"Could not reach the image server ({e.__class__.__name__})") from e
             finally:
                 # Hand the GPU back to the language models
+                await _release_comfy(client)
+
+
+async def clean_up(png, mime, upscale, on_progress=None):
+    """Removes noise from a photograph, and enlarges it afterwards when it is to be cropped into."""
+    if not is_available():
+        raise ImageError("Image work is turned off on this server")
+    base = settings.comfyui_url()
+    client_id = uuid.uuid4().hex
+
+    async def report(stage, fraction=None):
+        if on_progress:
+            await on_progress(stage, fraction)
+
+    if _job_lock.locked():
+        await report("Waiting for another picture to finish")
+    async with _job_lock:
+        async with httpx.AsyncClient(timeout=60) as client:
+            try:
+                name = await _upload(client, base, client_id, "photo", png, mime)
+                await report("Freeing GPU memory from the language models")
+                await _free_vram_for_images()
+                return await _run_job(client, base, client_id,
+                                      photo.denoise_workflow(name, upscale), report,
+                                      "Removing noise" + (" and enlarging" if upscale else ""))
+            except asyncio.CancelledError:
+                with contextlib.suppress(httpx.HTTPError):
+                    await client.post(f"{base}/interrupt")
+                raise
+            except asyncio.TimeoutError as e:
+                raise ImageError("The picture took too long") from e
+            except (OSError, websockets.WebSocketException, httpx.HTTPError, ValueError, KeyError) as e:
+                raise ImageError(f"Could not reach the image server ({e.__class__.__name__})") from e
+            finally:
                 await _release_comfy(client)
 
 

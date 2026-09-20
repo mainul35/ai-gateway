@@ -13,6 +13,7 @@ from app import settings
 log = logging.getLogger("tools.router")
 
 CHAT, SEARCH, IMAGE, EDIT = "chat", "search", "image", "edit"
+CLEAN, BLUR = "clean", "blur"   # what is asked of a photograph, as opposed to a drawing
 
 PROMPT = """You route a user's message to one of these actions. Answer with one word and nothing else.
 
@@ -23,7 +24,12 @@ CHAT   - can be answered or discussed directly: explanations, opinions, maths, w
          troubleshooting. Questions about a picture the user attached are also CHAT.
 IMAGE  - asks for a picture to be created: "draw", "generate an image of", "a photo of a ...". A
          message that only describes a picture, with no question and no instruction, is also IMAGE.
-EDIT   - asks for the attached picture to be changed: "make it night", "remove the car", "add a hat".
+EDIT   - asks for the attached picture to be changed as a picture: "make it night", "remove the car",
+         "add a hat", "make it look like a painting".
+CLEAN  - asks for a photograph to be cleaned up: noise, grain or speckle removed, or made good
+         enough to crop into or enlarge. Nothing in the picture changes.
+BLUR   - asks for the background of a photograph to be blurred, or for the subject to stand out
+         from it: shallower depth of field than the camera gave.
 
 Examples:
 "What is the latest Java version as of today?" -> SEARCH
@@ -33,6 +39,10 @@ Examples:
 "draw a fox in the snow" -> IMAGE
 "an oil painting of a harbour at dawn, stormy sky" -> IMAGE
 "make it night with northern lights" -> EDIT
+"remove the noise from this photo" -> CLEAN
+"too grainy, clean it up so I can crop in" -> CLEAN
+"blur the background so the bird stands out" -> BLUR
+"can you give this more bokeh?" -> BLUR
 "what is in this image?" -> CHAT
 "can you read the text in this screenshot?" -> CHAT
 
@@ -45,6 +55,12 @@ IMAGE_WORDS = re.compile(
 EDIT_WORDS = re.compile(
     r"\b(make it|turn it|change|replace|remove|delete|erase|add|put|swap|recolou?r|repaint|crop|zoom|"
     r"brighten|darken|blur)\b", re.I)
+CLEAN_WORDS = re.compile(
+    r"\b(noise|noisy|grain|grainy|denoise|de-noise|speckl\w*|iso|clean(ing)? up|clean it up|sharpen|"
+    r"crop into|zoom into|enlarge|upscale|restore)\b", re.I)
+BLUR_WORDS = re.compile(
+    r"\b(bokeh|background blur|blur the background|depth of field|dof|stand out from|"
+    r"separate\w* from the background|portrait mode)\b", re.I)
 SEARCH_WORDS = re.compile(
     r"\b(latest|newest|current|currently|today|todays|tonight|now|recent|recently|this (week|month|year)|"
     r"news|price|cost|release[ds]?|version|available|stock|weather|score|who is|who won|when (is|did|will)|"
@@ -62,13 +78,17 @@ def candidates(tools, has_images):
     if tools.get("web_search") and not has_images:
         allowed.append(SEARCH)
     if tools.get("image_generation"):
-        allowed.append(EDIT if has_images else IMAGE)
+        allowed += [EDIT, CLEAN, BLUR] if has_images else [IMAGE]
     return allowed
 
 
 def by_keywords(message, allowed, has_images):
     """Used when the router model cannot decide. Only ever returns an allowed action."""
     text = (message or "").strip()
+    if has_images and CLEAN in allowed and CLEAN_WORDS.search(text):
+        return CLEAN
+    if has_images and BLUR in allowed and BLUR_WORDS.search(text):
+        return BLUR
     if has_images and EDIT in allowed and EDIT_WORDS.search(text) and not text.endswith("?"):
         return EDIT
     if IMAGE in allowed and IMAGE_WORDS.search(text):

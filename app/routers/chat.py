@@ -20,8 +20,8 @@ from app.auth import Principal, authenticate
 from app.db import get_session, session_factory
 from app.models import ChatFile, Conversation, ConversationMessage, MemoryEntry, utcnow
 from app.routers.openai_v1 import PROXY_PATHS, forward
-from app.tools import (image_prompt, images, markdown, memory as memory_tool, router as intent_router,
-                        web_search)
+from app.tools import (image_prompt, images, markdown, memory as memory_tool, photo,
+                        router as intent_router, web_search)
 
 log = logging.getLogger("playground")
 
@@ -186,6 +186,8 @@ async def capabilities(principal: Principal = Depends(authenticate)):
         # "qwen" follows edit instructions and takes up to 3 images; "flux" re-renders one image
         "edit_engine": await images.edit_engine() if images.is_available() else None,
         "max_edit_images": images.MAX_EDIT_IMAGES,
+        "photo_clean": images.is_available(),
+        "photo_blur": images.is_available() and photo.is_depth_available(),
         "routing": intent_router.is_enabled(),
         "markdown": markdown.is_available(),
         "max_upload_mb": settings.max_upload_bytes() // (1024 * 1024),
@@ -574,6 +576,84 @@ class RenderIn(BaseModel):
 async def render_markdown(payload: RenderIn, _: Principal = Depends(authenticate)):
     """Renders a just-streamed answer. Streaming shows text; the finished answer is Markdown."""
     return {"html": markdown.render(payload.text)}
+
+
+class PhotoIn(BaseModel):
+    file_id: int
+    action: str = Field(pattern="^(clean|blur)$")
+    upscale: bool = True                                    # clean: enlarge for cropping
+    strength: float = Field(default=1.0, ge=0.2, le=3.0)    # blur: how much
+    # blur: 0 the nearest thing, 1 the furthest; unset means wherever the photo is already sharp
+    focus: float | None = Field(default=None, ge=0.0, le=1.0)
+    conversation_id: int | None = None
+
+
+@router.post("/photo")
+async def edit_photo(payload: PhotoIn, principal: Principal = Depends(authenticate),
+                     session: AsyncSession = Depends(get_session)):
+    """Cleans up a photograph, or blurs its background. One or the other, never both at once."""
+    user = _require_user(principal)
+    if not images.is_available():
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "Image work is turned off on this server")
+    if not access.can_generate_images(principal):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "You do not have access to image work")
+    if payload.action == "blur" and not photo.is_depth_available():
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE,
+                            "Background blur needs the depth model; it is not installed")
+    if payload.conversation_id is not None:
+        await _owned(session, payload.conversation_id, user)
+    found = (await _load_files(session, user, [payload.file_id])).get(payload.file_id)
+    if found is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Photo not found")
+    source, mime, user_id = found.data, found.mime_type, user.id
+
+    async def stream():
+        events = asyncio.Queue()
+
+        async def progress(stage, fraction=None):
+            await events.put(_event("progress", stage=stage, fraction=fraction))
+
+        started = time.monotonic()
+        if payload.action == "clean":
+            job = asyncio.create_task(images.clean_up(source, mime, payload.upscale, progress))
+        else:
+            async def blur():
+                await progress("Working out what is near and what is far")
+                return await photo.blur_in_background(source, payload.strength, payload.focus)
+            job = asyncio.create_task(blur())
+        try:
+            while not job.done() or not events.empty():
+                getter = asyncio.create_task(events.get())
+                done, _ = await asyncio.wait({getter, job}, return_when=asyncio.FIRST_COMPLETED)
+                if getter in done:
+                    yield getter.result()
+                else:
+                    getter.cancel()
+            png = job.result()
+        except (images.ImageError, photo.PhotoError) as e:
+            await usage_log.record(principal, settings.image_model_name(), "comfyui",
+                                   f"photo_{payload.action}", True, 502, None,
+                                   (time.monotonic() - started) * 1000, str(e))
+            yield _error(str(e))
+            return
+        finally:
+            if not job.done():
+                job.cancel()
+        await usage_log.record(principal, settings.image_model_name(), "comfyui",
+                               f"photo_{payload.action}", True, 200, None,
+                               (time.monotonic() - started) * 1000)
+        async with session_factory()() as db:
+            done = "cleaned up" if payload.action == "clean" else "background blurred"
+            stored = ChatFile(user_id=user_id, kind="generated", mime_type="image/png",
+                              name=f"photo-{payload.action}.png", prompt=done, data=png)
+            db.add(stored)
+            await db.commit()
+            await db.refresh(stored)
+            yield _event("image", file=_file_json(stored), action=payload.action,
+                         seconds=round(time.monotonic() - started, 1))
+
+    return StreamingResponse(stream(), media_type="text/event-stream",
+                             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
 
 class RouteIn(BaseModel):

@@ -221,6 +221,30 @@ Web answers are told today's date. Without it a model reads anything published a
 science fiction and refuses to answer: the same Java question came back saying the sources were "in
 the future".
 
+## Photographs
+
+Attaching a photograph and asking in plain words gets one of two jobs, never both at once. The router
+decides from what you type, so "remove the noise" and "blur the background" go to different places.
+
+| Ask for | What happens | How long |
+|---|---|---|
+| "remove the noise", "too grainy" | SCUNet takes the noise out. It is a restoration model, not a generative one, so nothing is invented and what was out of focus stays that way | ~2 s |
+| "clean it up so I can crop in" | The same, then Real-ESRGAN doubles the size, in that order: enlarging noise only makes the noise bigger | ~5 s |
+| "blur the background", "more bokeh" | Depth Anything V2 measures distance, and the picture is blurred by it, in layers, the way a lens falls off | ~1 s |
+
+The blur focuses on **where the photograph is already sharp**, not on whatever is nearest: in a shot
+of a bird over water, the water in the foreground is nearer than the bird. The sharpest region of the
+frame is found and its distance is taken as the plane of focus, with a band around it that stays
+sharp. Send `focus` (0 near, 1 far) to override, and `strength` to say how much.
+
+Depth runs on the CPU inside the gateway, so it costs no VRAM and nothing was added to ComfyUI: the
+models live in `models/upscale_models` (SCUNet, Real-ESRGAN) and `models/` (the depth ONNX). Set
+`photo.denoise.model`, `photo.upscale.model` and `photo.depth.model` to use others.
+
+Measured on a photograph with noise added as a small sensor produces it: noise in the background fell
+from 7.5 to 0.2, the blurred background was not sharpened, and the subject kept its detail. The blur
+left the subject alone and halved the detail in the background.
+
 ## Memory
 
 A long chat eventually no longer fits in what a model can read, and a new chat starts from nothing.
