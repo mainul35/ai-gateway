@@ -20,6 +20,8 @@ from app import settings
 log = logging.getLogger("tools.photo")
 
 DEPTH_SIZE = 518          # what Depth Anything V2 was trained at
+MAP_SIDE = 1024           # haze and distance are smooth; they are measured on a copy this big
+BIG_PICTURE = 12_000_000  # beyond this, enlarging to sharpen costs more than it returns
 BLUR_LAYERS = 5           # how many blur strengths are blended by distance
 FOCUS_BAND = 0.18         # how much of the depth around the focus point stays sharp
 MAX_SIDE = 4096           # a photograph, not a poster
@@ -30,7 +32,16 @@ _depth_missing = False
 
 # --- cleaning up: noise out, nothing invented ------------------------------------------
 
-def denoise_workflow(image_name, upscale=False, denoise=True, sharpen=False):
+def too_big_to_double(png):
+    """Whether a picture is already large enough that enlarging it to sharpen is not worth it."""
+    try:
+        with Image.open(io.BytesIO(png)) as picture:
+            return (picture.size[0] * picture.size[1]) > BIG_PICTURE
+    except Exception:
+        return False
+
+
+def denoise_workflow(image_name, upscale=False, denoise=True, sharpen=False, double=True):
     """Noise off first, then enlarge: enlarging noise only makes the noise bigger.
 
     Sharpening is done by putting the picture through the upscaler and bringing it back down. That
@@ -45,7 +56,7 @@ def denoise_workflow(image_name, upscale=False, denoise=True, sharpen=False):
         nodes["denoised"] = {"class_type": "ImageUpscaleWithModel",
                              "inputs": {"upscale_model": ["denoiser", 0], "image": [last, 0]}}
         last = "denoised"
-    if upscale or sharpen:
+    if upscale or (sharpen and double):
         nodes["upscaler"] = {"class_type": "UpscaleModelLoader",
                              "inputs": {"model_name": settings.upscale_model()}}
         nodes["upscaled"] = {"class_type": "ImageUpscaleWithModel",
@@ -72,24 +83,32 @@ def dehaze(png, amount=1.0):
     Haze adds the same pale light everywhere, which shows up as a floor under the darkest colour in
     each neighbourhood. Estimating that floor and removing it brings back contrast and colour, which
     is what "sharper" usually means for a picture taken through air rather than out of focus.
+
+    The map of how much haze is where is measured on a small copy. Haze is a smooth, large thing, so
+    a small copy describes it just as well - and a minimum filter wide enough to mean anything costs
+    minutes on a twenty megapixel picture, which is how this once wedged the whole gateway.
     """
     image = Image.open(io.BytesIO(png)).convert("RGB")
     pixels = np.asarray(image, dtype=np.float32) / 255.0
+
+    small = image.copy()
+    small.thumbnail((MAP_SIDE, MAP_SIDE), Image.BILINEAR)
+    little = np.asarray(small, dtype=np.float32) / 255.0
+    patch = max(5, (min(small.size) // 30) | 1)
     # The darkest channel in a neighbourhood: near zero in a clear picture, lifted by haze
-    darkest = pixels.min(axis=2)
-    patch = max(7, int(min(image.size) / 60) | 1)
-    small = Image.fromarray((darkest * 255).astype(np.uint8), mode="L")
-    dark = np.asarray(small.filter(ImageFilter.MinFilter(patch if patch % 2 else patch + 1)),
-                      dtype=np.float32) / 255.0
+    darkest = Image.fromarray((little.min(axis=2) * 255).astype(np.uint8), mode="L")
+    dark = np.asarray(darkest.filter(ImageFilter.MinFilter(patch)), dtype=np.float32) / 255.0
+
     sky = float(np.percentile(dark, 99.5)) or 1.0
-    atmosphere = np.percentile(pixels.reshape(-1, 3)[dark.reshape(-1) >= sky * 0.999], 90, axis=0)
+    atmosphere = np.percentile(little.reshape(-1, 3)[dark.reshape(-1) >= sky * 0.999], 90, axis=0)
     atmosphere = np.clip(atmosphere, 0.35, 1.0)
     transmission = 1.0 - 0.95 * float(amount) * (dark / max(atmosphere.max(), 1e-3))
-    # Smoothed, so the correction follows the scene rather than the patches it was measured in
-    transmission = np.asarray(Image.fromarray((np.clip(transmission, 0.1, 1.0) * 255).astype(np.uint8),
-                                              mode="L").filter(ImageFilter.GaussianBlur(patch)),
-                              dtype=np.float32) / 255.0
-    transmission = np.clip(transmission, 0.25, 1.0)[..., None]
+    # Smoothed, so the correction follows the scene rather than the patches it was measured in,
+    # then stretched back over the full picture
+    smoothed = Image.fromarray((np.clip(transmission, 0.1, 1.0) * 255).astype(np.uint8), mode="L")
+    smoothed = smoothed.filter(ImageFilter.GaussianBlur(patch)).resize(image.size, Image.BILINEAR)
+    transmission = np.clip(np.asarray(smoothed, dtype=np.float32) / 255.0, 0.25, 1.0)[..., None]
+
     cleared = (pixels - atmosphere) / transmission + atmosphere
     out = io.BytesIO()
     Image.fromarray((np.clip(cleared, 0, 1) * 255).round().astype(np.uint8)).save(out, format="PNG")

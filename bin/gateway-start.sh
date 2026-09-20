@@ -27,11 +27,14 @@ if curl -sf -m 10 "http://127.0.0.1:$PORT/health" >/dev/null 2>&1; then
     exit 0
 fi
 
-# One missed answer is not proof of anything. Ask again before doing something drastic.
-sleep 5
-if curl -sf -m 10 "http://127.0.0.1:$PORT/health" >/dev/null 2>&1; then
-    exit 0
-fi
+# One missed answer is not proof of anything, and neither are two: the gateway can be busy with a
+# picture. Three strikes over the best part of a minute, and only then is it treated as wedged.
+for _ in 1 2; do
+    sleep 15
+    if curl -sf -m 10 "http://127.0.0.1:$PORT/health" >/dev/null 2>&1; then
+        exit 0
+    fi
+done
 
 # A process may exist but be wedged; clear it before starting a fresh one. Uvicorn finishes the
 # requests it has in hand first, so wait for the port rather than racing it: a new process that
