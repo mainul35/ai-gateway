@@ -1,30 +1,88 @@
 {% extends "base.html" %}
 {% block title %}Playground &middot; Model Gateway{% endblock %}
+{% block body_class %}app{% endblock %}
 {% block content %}
 <style>
-.pg{display:grid;grid-template-columns:18rem 1fr;gap:1.25rem;align-items:start}
-@media (max-width: 800px){ .pg{grid-template-columns:1fr} }
-.side{display:flex;flex-direction:column;gap:1.25rem;position:sticky;top:1rem;align-self:start}
-@media (max-width: 800px){ .side{position:static} }
-.convs{margin:0 -.5rem}
-.conv{display:flex;align-items:center;gap:.4rem;padding:.45rem .5rem;border-radius:8px;cursor:pointer}
+/* The window is the frame: the sidebar scrolls if it must, the conversation scrolls, and nothing
+   else does. The composer stays where the hands are. */
+.pg{display:grid;grid-template-columns:17rem minmax(0, 1fr);height:100%;min-height:0}
+.side{border-right:1px solid var(--border);overflow-y:auto;padding:1rem .85rem;display:flex;
+      flex-direction:column;gap:1.5rem;background:var(--card)}
+.main{display:flex;flex-direction:column;min-width:0;min-height:0}
+/* One reading column, the same width for the conversation and the composer under it */
+.column{width:min(52rem, 100%);margin:0 auto;padding:0 1.25rem}
+.transcript{flex:1;min-height:0;overflow-y:auto;padding:1.25rem 0 .5rem}
+.composer-wrap{flex:none;border-top:1px solid var(--border);background:var(--bg);padding:.85rem 0 1rem}
+@media (max-width: 860px){
+  .pg{grid-template-columns:1fr;overflow-y:auto}
+  .side{border-right:none;border-bottom:1px solid var(--border);overflow:visible}
+  .transcript{overflow:visible}
+}
+
+/* --- sidebar ------------------------------------------------------------------------- */
+.side h2{font-size:.72rem;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);margin:0}
+.side .group{display:flex;flex-direction:column;gap:.5rem}
+.side .head{display:flex;align-items:center;justify-content:space-between;gap:.5rem}
+.linkish{background:none;border:none;color:var(--muted);cursor:pointer;font-size:.8rem;font-family:inherit;padding:.1rem .3rem;border-radius:6px}
+.linkish:hover{color:var(--text);background:var(--input)}
+.convs{margin:0 -.35rem}
+.conv{display:flex;align-items:center;gap:.4rem;padding:.4rem .5rem;border-radius:8px;cursor:pointer}
 .conv:hover{background:var(--input)}
-.conv.active{background:rgba(99,102,241,.2)}
-.conv .title{flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-size:.9rem}
-.conv .when{font-size:.72rem;color:var(--muted)}
+.conv.active{background:rgba(99,102,241,.18)}
+.conv .title{flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-size:.88rem}
+.conv .when{font-size:.7rem;color:var(--muted)}
 .conv .del{visibility:hidden;background:none;border:none;color:var(--muted);cursor:pointer;font-size:1rem;padding:0 .2rem}
 .conv:hover .del{visibility:visible}
 .conv .del:hover{color:var(--danger)}
-/* No scroller of its own: a box that scrolls inside a page that also scrolls gives two scrollbars,
-   and neither one holds a whole question and its answer. The page is the only thing that scrolls. */
-.chat{display:flex;flex-direction:column;gap:.9rem}
-.msg{border-radius:10px;padding:.7rem .9rem;word-wrap:break-word;line-height:1.55}
+details.tuning summary{cursor:pointer;font-size:.72rem;text-transform:uppercase;letter-spacing:.06em;
+                       color:var(--muted);list-style:none}
+details.tuning summary::-webkit-details-marker{display:none}
+details.tuning summary::before{content:"\25b8 ";display:inline-block;transition:transform .15s}
+details.tuning[open] summary::before{transform:rotate(90deg)}
+details.tuning[open]{margin-bottom:.25rem}
+details.tuning .body{padding-top:.75rem}
+details.tuning label{margin-bottom:.85rem}
+
+/* --- messages ------------------------------------------------------------------------ */
+.chat{display:flex;flex-direction:column;gap:1.5rem}
+.msg{line-height:1.6}
 .msg .body{white-space:pre-wrap}
-.msg .body.md{white-space:normal;background:var(--paper);border-radius:8px;padding:.75rem .9rem;margin:-.1rem -.2rem}
-.msg.assistant{background:#0b1220}
-.msg.user{background:var(--input);align-self:flex-end;max-width:85%}
-.msg.assistant{background:#0b1220;border:1px solid var(--border)}
-.msg .who{font-size:.75rem;color:var(--muted);margin-bottom:.25rem;font-weight:600}
+/* The answer is the page, not a card on it; only the question is set apart */
+.msg.assistant{background:none;border:none;padding:0}
+.msg.user{background:var(--input);border-radius:12px;padding:.6rem .9rem;align-self:flex-end;max-width:85%}
+.msg.user .who{display:none}
+.msg .who{font-size:.72rem;color:var(--muted);margin-bottom:.45rem;font-weight:600;letter-spacing:.02em}
+.msg .body.md{background:none;padding:0;margin:0}
+/* The conversation's name stays in view while its messages scroll under it */
+.topbar{flex:none;border-bottom:1px solid var(--border);padding:.55rem 0;background:var(--bg)}
+.chatTitle{font-size:.9rem;font-weight:600;color:var(--text);display:block;
+           white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+
+textarea{background:var(--input);border:1px solid var(--border);border-radius:8px;color:var(--text);
+         padding:.6rem .7rem;font-size:.95rem;width:100%;display:block;font-family:inherit;resize:vertical}
+textarea:focus{outline:none;border-color:var(--primary)}
+
+/* --- composer ------------------------------------------------------------------------- */
+.composer{background:var(--card);border:1px solid var(--border);border-radius:14px;padding:.65rem .75rem}
+.composer:focus-within{border-color:var(--primary)}
+.composer textarea{background:none;border:none;border-radius:0;padding:.15rem .2rem;resize:none;
+                   overflow-y:auto;min-height:1.6rem;max-height:35vh;font-size:.95rem;line-height:1.5}
+.composer textarea:focus{outline:none;border:none}
+.composer.drop{border-style:dashed;border-color:var(--primary)}
+.tools{display:flex;gap:.4rem;flex-wrap:wrap;align-items:center;margin-top:.5rem}
+.tools .spacer{margin-left:auto}
+.composer select{background:none;border:none;color:var(--muted);font-size:.8rem;padding:.2rem .2rem;width:auto;cursor:pointer}
+.composer select:hover{color:var(--text)}
+.foot{display:flex;align-items:center;gap:.75rem;justify-content:space-between;margin-top:.45rem;
+      font-size:.78rem;color:var(--muted);min-height:1.1rem}
+.foot > *{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.foot .picker{display:flex;align-items:center;gap:.5rem;flex:none}
+.foot select{background:none;border:none;color:var(--muted);font-size:.78rem;width:auto;padding:0;cursor:pointer}
+.foot select:hover{color:var(--text)}
+.foot .hint{margin:0;min-height:0;flex:1;min-width:0}
+/* A round button for attaching, like the one in the composer of every chat window */
+.icon-btn{width:1.9rem;height:1.9rem;padding:0;border-radius:50%;display:inline-flex;align-items:center;
+          justify-content:center;font-size:1.1rem;line-height:1}
 details.think,details.sources{margin-bottom:.5rem;font-size:.85rem;color:var(--muted)}
 details.think summary,details.sources summary{cursor:pointer}
 details.sources ol{margin:.35rem 0 0;padding-left:1.4rem}
@@ -44,18 +102,13 @@ a.cite{font-size:.75em;vertical-align:super;text-decoration:none;padding:0 .1rem
 .pending button{position:absolute;top:-.4rem;right:-.4rem;width:1.3rem;height:1.3rem;border-radius:50%;border:none;
                 background:var(--danger);color:#fff;cursor:pointer;font-size:.8rem;line-height:1;padding:0}
 .pending .tag{position:absolute;left:.3rem;bottom:.3rem;font-size:.65rem;background:rgba(0,0,0,.7);padding:0 .3rem;border-radius:4px}
-/* Leaves room for the question above it and the caption below, so the pair fits on one screen */
-.generated img{max-width:100%;max-height:min(55vh,32rem);border-radius:8px;display:block;cursor:zoom-in}
+/* Leaves room in the transcript for the question above it and the caption below */
+.generated img{max-width:100%;max-height:min(45vh,26rem);border-radius:8px;display:block;cursor:zoom-in}
 /* The description can run to sixty words; two lines of it is enough to recognise the picture by */
 .generated .caption{font-size:.82rem;color:var(--muted);margin-top:.4rem;cursor:pointer;
                     display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
 .generated .caption.open{-webkit-line-clamp:unset;overflow:visible}
 .generated .actions{display:flex;gap:.5rem;margin-top:.5rem}
-textarea{background:var(--input);border:1px solid var(--border);border-radius:8px;color:var(--text);
-         padding:.6rem .7rem;font-size:.95rem;width:100%;font-family:inherit;resize:vertical}
-textarea:focus{outline:none;border-color:var(--primary)}
-.composer.drop textarea{border-color:var(--primary);border-style:dashed}
-.tools{display:flex;gap:.5rem;flex-wrap:wrap;align-items:center;margin-top:.6rem}
 .chip{display:inline-flex;align-items:center;gap:.35rem;border:1px solid var(--border);background:transparent;
       color:var(--muted);border-radius:20px;padding:.3rem .75rem;font-size:.83rem;font-weight:600;cursor:pointer;font-family:inherit}
 .chip:hover{color:var(--text)}
@@ -91,89 +144,100 @@ textarea:focus{outline:none;border-color:var(--primary)}
 .lightbox img{max-width:100%;max-height:100%;border-radius:8px}
 </style>
 
-<h1>Playground</h1>
-<p class="sub">Chat with the models you have access to. Conversations are saved to your account; requests count toward your usage.</p>
-<div id="error" class="note err" hidden></div>
-
 <div class="pg">
-  <div class="side">
-    <div class="card">
-      <div class="row" style="justify-content:space-between;align-items:center;margin-bottom:.6rem">
-        <h2 style="margin:0">Conversations</h2>
-        <button class="btn btn-sm" id="newChat">+ New</button>
+  <aside class="side">
+    <div class="group">
+      <div class="head">
+        <h2>Conversations</h2>
+        <button class="linkish" id="newChat" title="Start a new conversation">+ New</button>
       </div>
       <div class="convs" id="convs"><span class="muted" style="padding:0 .5rem">Loading&hellip;</span></div>
-      <p class="muted" style="margin:.6rem 0 0;font-size:.75rem">Double-click a conversation to rename it.</p>
     </div>
 
-    <div class="card" id="memoryCard" hidden>
-      <div class="row" style="justify-content:space-between;align-items:center;margin-bottom:.2rem">
-        <h2 style="margin:0">Memory</h2>
-        <button class="btn btn-sm btn-secondary" id="addNote" title="Add something to remember">+ Note</button>
+    <div class="group" id="memoryCard" hidden>
+      <div class="head">
+        <h2>Memory</h2>
+        <button class="linkish" id="addNote" title="Add something to remember">+ Note</button>
       </div>
-      <p class="muted" style="margin:0 0 .5rem;font-size:.75rem">Used to start every chat. Click a note to
-        edit it, &times; to forget it.</p>
       <div class="mem" id="memory"></div>
     </div>
 
-    <div class="card">
-      <label>
-        <span class="lbl">Model</span>
-        <select id="model"></select>
-        <span class="hint" id="modelHint"></span>
-      </label>
-      <label>
-        <span class="lbl">System prompt (optional)</span>
-        <textarea id="system" rows="3" placeholder="You are a helpful assistant."></textarea>
-      </label>
-      <label>
-        <span class="lbl">Temperature <span id="tempValue" class="muted">0.7</span></span>
-        <input type="range" id="temperature" min="0" max="2" step="0.1" value="0.7" style="padding:0">
-      </label>
-      <label>
-        <span class="lbl">Max tokens</span>
-        <input type="number" id="maxTokens" value="2048" min="1" max="32768">
-      </label>
-      <label id="thinkingRow" style="display:flex;gap:.5rem;align-items:center;margin-bottom:0" hidden>
-        <input type="checkbox" id="thinking" style="width:auto">
-        <span style="font-size:.9rem">Enable thinking <span class="muted">(slower, better reasoning)</span></span>
-      </label>
-    </div>
-  </div>
+    <details class="tuning">
+      <summary>Settings</summary>
+      <div class="body">
+        <label>
+          <span class="lbl">System prompt</span>
+          <textarea id="system" rows="3" placeholder="You are a helpful assistant."></textarea>
+        </label>
+        <label>
+          <span class="lbl">Temperature <span id="tempValue" class="muted">0.7</span></span>
+          <input type="range" id="temperature" min="0" max="2" step="0.1" value="0.7" style="padding:0">
+        </label>
+        <label style="margin-bottom:0">
+          <span class="lbl">Max tokens</span>
+          <input type="number" id="maxTokens" value="2048" min="1" max="32768">
+        </label>
+      </div>
+    </details>
+  </aside>
 
-  <div class="card">
-    <h2 id="chatTitle" style="margin-bottom:1rem">New conversation</h2>
-    <div class="chat" id="chat"><p class="muted" id="empty">Pick a model and say something.</p></div>
-    <div class="composer" id="composer" style="margin-top:1rem">
-      <div class="thumbs" id="pending"></div>
-      <textarea id="prompt" rows="3" placeholder="Message&hellip;  (Enter to send, Shift+Enter for a new line)"></textarea>
-      <div class="tools">
-        <button class="chip" id="toolSearch" data-tool="web_search" aria-pressed="false" hidden
-                title="Search the web and answer from the results, with sources"><span class="dot"></span>Web search</button>
-        <button class="chip" id="toolVision" data-tool="vision" aria-pressed="false" hidden
-                title="Attach images for the model to look at"><span class="dot"></span>Image understanding</button>
-        <button class="chip" id="toolImage" data-tool="image_generation" aria-pressed="false" hidden
-                title="Create a new image, or edit an attached one, instead of chatting"><span class="dot"></span>Image generation</button>
-        <button class="icon-btn" id="attach" title="Attach images (you can also paste or drop them)" hidden>&#128206; Attach</button>
-        <input type="file" id="fileInput" accept="image/png,image/jpeg,image/webp,image/gif" multiple hidden>
-        <span class="inline" id="sizeRow" hidden>Shape
-          <select id="imageSize"></select>
-        </span>
-        <span class="inline" id="strengthRow" hidden title="How far the edit may move away from the original">Change
-          <input type="range" id="strength" min="0.2" max="1" step="0.05" value="0.8" style="width:6rem">
-          <span id="strengthValue">0.80</span>
-        </span>
-        <span style="margin-left:auto" class="row">
-          <button class="btn btn-danger" id="stop" hidden>Stop</button>
-          <button class="btn" id="send">Send</button>
-        </span>
-      </div>
-      <div class="hint" id="modeHint"></div>
-      <div class="status" id="deciding" style="margin-top:.35rem" hidden>
-        <span class="spinner"></span><span>Working out what you are asking for&hellip;</span>
+  <section class="main">
+    <header class="topbar">
+      <div class="column"><span class="chatTitle" id="chatTitle">New conversation</span></div>
+    </header>
+
+    <div class="transcript" id="transcript">
+      <div class="column">
+        <div id="error" class="note err" hidden></div>
+        <div class="chat" id="chat">
+          <p class="muted" id="empty">Ask a question, or describe a picture to create.</p>
+        </div>
       </div>
     </div>
-  </div>
+
+    <div class="composer-wrap">
+      <div class="column">
+        <div class="composer" id="composer">
+          <div class="thumbs" id="pending"></div>
+          <textarea id="prompt" rows="1"
+                    title="Enter to send, Shift+Enter for a new line"
+                    placeholder="Ask anything&hellip;"></textarea>
+          <div class="tools">
+            <button class="chip" id="toolSearch" data-tool="web_search" aria-pressed="false" hidden
+                    title="Search the web and answer from the results, with sources"><span class="dot"></span>Web search</button>
+            <button class="chip" id="toolVision" data-tool="vision" aria-pressed="false" hidden
+                    title="Attach images for the model to look at"><span class="dot"></span>Image understanding</button>
+            <button class="chip" id="toolImage" data-tool="image_generation" aria-pressed="false" hidden
+                    title="Create a new image, or edit an attached one, instead of chatting"><span class="dot"></span>Image generation</button>
+            <button class="icon-btn" id="attach" title="Attach an image (you can also paste or drop one)" hidden>+</button>
+            <input type="file" id="fileInput" accept="image/png,image/jpeg,image/webp,image/gif" multiple hidden>
+            <span class="inline" id="sizeRow" hidden>Shape
+              <select id="imageSize"></select>
+            </span>
+            <span class="inline" id="strengthRow" hidden title="How far the edit may move away from the original">Change
+              <input type="range" id="strength" min="0.2" max="1" step="0.05" value="0.8" style="width:5rem">
+              <span id="strengthValue">0.80</span>
+            </span>
+            <span class="spacer"></span>
+            <button class="btn btn-danger btn-sm" id="stop" hidden>Stop</button>
+            <button class="btn btn-sm" id="send">Send</button>
+          </div>
+        </div>
+        <div class="foot">
+          <span class="hint" id="modeHint"></span>
+          <span class="status" id="deciding" hidden>
+            <span class="spinner"></span><span>Working out what you are asking for&hellip;</span>
+          </span>
+          <span class="picker">
+            <select id="model" title="Model"></select>
+            <label id="thinkingRow" class="inline" hidden title="Slower, better reasoning">
+              <input type="checkbox" id="thinking" style="width:auto">think
+            </label>
+          </span>
+        </div>
+      </div>
+    </div>
+  </section>
 </div>
 {% endblock %}
 
@@ -181,11 +245,13 @@ textarea:focus{outline:none;border-color:var(--primary)}
 <script>
 const chat = document.getElementById('chat');
 
-// Follows a streaming answer, but only while the reader is already at the bottom: pulling the page
+const transcript = document.getElementById('transcript');
+
+// Follows a streaming answer, but only while the reader is already at the bottom: pulling the view
 // away from someone who has scrolled up to read something is worse than not following at all.
 function followAlong(){
-  const fromBottom = document.documentElement.scrollHeight - window.scrollY - window.innerHeight;
-  if(fromBottom < 260) window.scrollTo({top: document.documentElement.scrollHeight});
+  const fromBottom = transcript.scrollHeight - transcript.scrollTop - transcript.clientHeight;
+  if(fromBottom < 260) transcript.scrollTop = transcript.scrollHeight;
 }
 
 // A picture is taller than the screen more often than not, and its bottom edge is not the part worth
@@ -193,10 +259,11 @@ function followAlong(){
 function revealFrom(box){
   // From the question, not the answer: the two belong on the screen together
   const anchor = box.previousElementSibling?.classList.contains('user') ? box.previousElementSibling : box;
-  const top = anchor.getBoundingClientRect().top + window.scrollY - 12;
+  const top = transcript.scrollTop + anchor.getBoundingClientRect().top
+              - transcript.getBoundingClientRect().top - 12;
   const pairHeight = box.getBoundingClientRect().bottom - anchor.getBoundingClientRect().top;
-  if(pairHeight > window.innerHeight - 80 || top < window.scrollY){
-    window.scrollTo({top, behavior: 'smooth'});
+  if(pairHeight > transcript.clientHeight - 40 || top < transcript.scrollTop){
+    transcript.scrollTo({top, behavior: 'smooth'});
   }else{
     followAlong();
   }
@@ -310,7 +377,7 @@ function syncTools(){
   const model = modelSelect.value;
   hint.className = 'hint';
   if(imageMode()){
-    promptBox.placeholder = pending.length ? 'Describe how to change the attached image…' : 'Describe the image to create…';
+    promptBox.placeholder = pending.length ? 'How should the picture change?' : 'Describe a picture to create…';
     if(!pending.length){
       hint.textContent = caps.routing
         ? 'Ask for a picture and one is created with Flux; ask a question and you get an answer. Attach an image (or press Edit on one) to change it.'
@@ -322,10 +389,10 @@ function syncTools(){
     }else{
       hint.textContent = 'Sending re-renders the attached image with Flux. Lower "Change" keeps more of the original.';
     }
-    document.getElementById('modelHint').textContent = '';
+    modelSelect.title = '';
     return;
   }
-  promptBox.placeholder = 'Message…  (Enter to send, Shift+Enter for a new line)';
+  promptBox.placeholder = 'Ask anything…';
   const notes = [];
   if(tools.web_search) notes.push(caps.routing
     ? 'Questions that need current information are searched on the web and cited.'
@@ -339,7 +406,7 @@ function syncTools(){
     }
   }
   hint.textContent = notes.join(' ');
-  document.getElementById('modelHint').textContent = model && canSee(model) ? 'This model can read images.' : '';
+  modelSelect.title = model && canSee(model) ? `${model} can read images` : model;
 }
 
 document.getElementById('strength').addEventListener('input', e =>
@@ -882,7 +949,7 @@ async function sendChat(text, decision){
   }
   const images = pending.map(f => f.id);
   pending = []; renderPending();
-  promptBox.value = '';
+  promptBox.value = ''; fitComposer();
   history.push({role: 'user', content: text, images});
   addUserMessage(text, images.map(fileUrl));
   await saveMessage({role: 'user', content: text,
@@ -986,7 +1053,7 @@ async function sendImage(text, decision){
     return;
   }
   pending = []; renderPending();
-  promptBox.value = '';
+  promptBox.value = ''; fitComposer();
   addUserMessage(text, source ? [source, ...references].map(f => f.url) : []);
   // Image turns are kept in the transcript as text only, so a chat model later knows what was made
   history.push({role: 'user', content: text, images: []});
@@ -1047,10 +1114,16 @@ async function sendImage(text, decision){
 
 document.getElementById('send').addEventListener('click', send);
 document.getElementById('stop').addEventListener('click', () => controller?.abort());
+function fitComposer(){
+  promptBox.style.height = 'auto';
+  promptBox.style.height = promptBox.scrollHeight + 'px';
+}
+promptBox.addEventListener('input', fitComposer);
 promptBox.addEventListener('keydown', e => {
   if(e.key === 'Enter' && !e.shiftKey){ e.preventDefault(); send(); }
 });
 
+fitComposer();
 Promise.all([loadModels(), loadCapabilities()]).then(() => Promise.all([loadConversations(), loadMemory()]));
 </script>
 {% endblock %}
