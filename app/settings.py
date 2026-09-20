@@ -27,7 +27,7 @@ DEFAULTS = {
     "images.model_name": "flux-dev",
     "images.steps": "20",
     "images.guidance": "3.5",
-    "images.max_upload_mb": "10",
+    "images.max_upload_mb": "25",
     # A request is rewritten into something an image model can draw, with the conversation for context
     "images.rewrite.prompt": "true",
     # Lettering drawn by Flux is usually misspelled; the editing model puts it right afterwards

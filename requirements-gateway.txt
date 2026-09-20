@@ -14,3 +14,4 @@ markdown-it-py[linkify]>=3.0.0
 rapidocr-onnxruntime>=1.4.0
 pillow>=11.0
 numpy>=2.0
+pillow-heif>=0.18
