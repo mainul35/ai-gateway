@@ -3,6 +3,7 @@
 The results are handed to the model as numbered sources, so it can answer from them and cite [1], [2].
 """
 import asyncio
+import datetime
 import ipaddress
 import logging
 import re
@@ -167,11 +168,19 @@ def sources_prompt(results, query):
     for number, result in enumerate(results, 1):
         body = result.get("content") or result.get("snippet") or ""
         blocks.append(f"[{number}] {result['title']}\nURL: {result['url']}\n{body}")
+    # Without today's date a model reads anything after its training as science fiction and says the
+    # sources are set in the future; it has to be told that they are current and that it is not
+    today = datetime.date.today().strftime("%A, %d %B %Y")
     return (
-        f"A web search for \"{query}\" returned the sources below. Use them to answer the user's latest "
-        "message. Cite sources inline with their numbers in square brackets, like [1] or [2][3]. If the "
-        "sources do not answer the question, say so and answer from your own knowledge, making clear "
-        "which parts are not from the sources.\n\n" + "\n\n".join(blocks)
+        f"Today is {today}. A web search for \"{query}\" returned the sources below. They were "
+        "published before today and are more up to date than your own knowledge: the versions, "
+        "releases and events in them are real and already in the past, however recent they look to "
+        "you. Never call them future or hypothetical, and never refuse to answer because of their "
+        "dates.\n\n"
+        "Use them to answer the user's latest message, formatted in Markdown. Cite sources inline "
+        "with their numbers in square brackets, like [1] or [2][3]. If the sources do not answer the "
+        "question, say so and answer from your own knowledge, making clear which parts are not from "
+        "the sources.\n\n" + "\n\n".join(blocks)
     )
 
 

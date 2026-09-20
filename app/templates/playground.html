@@ -17,6 +17,8 @@
 .chat{min-height:22rem;max-height:60vh;overflow-y:auto;display:flex;flex-direction:column;gap:.9rem}
 .msg{border-radius:10px;padding:.7rem .9rem;word-wrap:break-word;line-height:1.55}
 .msg .body{white-space:pre-wrap}
+.msg .body.md{white-space:normal;background:var(--paper);border-radius:8px;padding:.75rem .9rem;margin:-.1rem -.2rem}
+.msg.assistant{background:#0b1220}
 .msg.user{background:var(--input);align-self:flex-end;max-width:85%}
 .msg.assistant{background:#0b1220;border:1px solid var(--border)}
 .msg .who{font-size:.75rem;color:var(--muted);margin-bottom:.25rem;font-weight:600}
@@ -490,7 +492,7 @@ async function openConversation(id){
         history.push({role: 'assistant', content: m.content});
       }else{
         const box = addMessage('assistant', '', m.model);
-        renderAssistant(box, m.content, m.reasoning, m.stats, extra.sources);
+        renderAssistant(box, m.content, m.reasoning, m.stats, extra.sources, m.html);
         history.push({role: 'assistant', content: m.content});
       }
     }
@@ -632,7 +634,7 @@ function fillWithCitations(target, text, sources){
   });
 }
 
-function renderAssistant(box, content, reasoning, stats, sources){
+function renderAssistant(box, content, reasoning, stats, sources, html){
   const body = box.querySelector('.body');
   renderSources(box, sources);
   if(reasoning){
@@ -642,8 +644,41 @@ function renderAssistant(box, content, reasoning, stats, sources){
     think.querySelector('div').textContent = reasoning;
     box.insertBefore(think, body);
   }
-  fillWithCitations(body, content || (reasoning ? '(the model only produced reasoning; raise max tokens)' : '(no answer)'), sources);
+  const text = content || (reasoning ? '(the model only produced reasoning; raise max tokens)' : '(no answer)');
+  if(html && content){
+    // Markdown rendered by the gateway, which escapes anything the model wrote as HTML
+    body.classList.add('md');
+    body.innerHTML = html;
+    linkCitations(body, sources);
+  }else{
+    body.classList.remove('md');
+    fillWithCitations(body, text, sources);
+  }
   appendStats(box, stats);
+}
+
+// The gateway renders the finished answer; a half-written one is not valid Markdown
+async function renderedHtml(text){
+  if(!caps.markdown || !text) return null;
+  try{
+    return (await api('/chat/render', {method: 'POST', headers: JSON_HEADERS,
+                                       body: JSON.stringify({text})})).html;
+  }catch(e){ return null; }
+}
+
+// Turns [1], [2] inside rendered HTML into links, without rebuilding the HTML itself
+function linkCitations(root, sources){
+  if(!sources?.length) return;
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
+    acceptNode: node => node.parentElement.closest('a, code, pre')
+      ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT});
+  const targets = [];
+  while(walker.nextNode()) if(/\[\d{1,2}\]/.test(walker.currentNode.nodeValue)) targets.push(walker.currentNode);
+  for(const node of targets){
+    const replacement = document.createElement('span');
+    fillWithCitations(replacement, node.nodeValue, sources);
+    node.replaceWith(replacement);
+  }
 }
 
 function appendStats(box, stats){
@@ -852,7 +887,7 @@ async function sendChat(text, decision){
         firstTokenAt ??= performance.now();
         setStatus(box, null);
         answer += delta.content;
-        body.textContent = answer;
+        body.textContent = answer;   // rendered once it is complete, below
       }
       chat.scrollTop = chat.scrollHeight;
     });
@@ -876,7 +911,7 @@ async function sendChat(text, decision){
     tps: tokens && genSeconds > 0 ? +(tokens / genSeconds).toFixed(1) : null,
     total: +total.toFixed(1),
   };
-  renderAssistant(box, answer, thinking, stats, sources);
+  renderAssistant(box, answer, thinking, stats, sources, await renderedHtml(answer));
 
   history.push({role: 'assistant', content: answer});
   if(answer || thinking){

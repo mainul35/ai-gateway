@@ -176,6 +176,22 @@ The same image engine is available to API clients, such as Open WebUI and the Op
 `POST /v1/images/generations` and `POST /v1/images/edits` (multipart, with `strength`), which return
 `b64_json`. Anyone with access to at least one model may generate images.
 
+## How answers look
+
+Answers are Markdown, so the playground renders them the way the
+[MDViewer](https://github.com/mainul35/markdown-viewer) preview does: its palette, its headings, its
+code plates, its tables. `app/static/markdown.css` is generated from MDViewer's own preview stylesheet
+by `scripts/make_markdown_css.py`, scoped to `.md` so it styles answers and nothing else.
+
+A half-finished answer is not valid Markdown, so streaming shows plain text and the finished answer is
+rendered once, in one request to `/chat/render`. The gateway does the rendering: HTML the model wrote
+is escaped rather than obeyed, links open in a new tab, and a picture from somewhere else becomes a
+link instead of being fetched, so an answer cannot make the browser call out on its own.
+
+Web answers are told today's date. Without it a model reads anything published after its training as
+science fiction and refuses to answer: the same Java question came back saying the sources were "in
+the future".
+
 ## Memory
 
 A long chat eventually no longer fits in what a model can read, and a new chat starts from nothing.
