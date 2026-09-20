@@ -121,29 +121,44 @@ async def _ask_searxng(client, query):
     return response.json().get("results") or []
 
 
-async def search(query, limit=None, wants_recent=False):
-    """Returns [{title, url, site, published, snippet}], most useful first."""
+async def search(queries, limit=None, wants_recent=False):
+    """Searches every phrasing given and returns the merged best, most useful first.
+
+    Two phrasings rather than one because the written query can come out wrong - a model once
+    answered with a URL slug - and the user's own words are always a reasonable search on their own.
+    """
+    if isinstance(queries, str):
+        queries = [queries]
+    queries = [q.strip() for q in queries if q and q.strip()][:3]
     limit = limit or settings.search_results()
     try:
         async with httpx.AsyncClient(timeout=40) as client:
-            results = await _ask_searxng(client, query)
+            gathered = await asyncio.gather(*(_ask_searxng(client, q) for q in queries),
+                                            return_exceptions=True)
+            results = [r for group in gathered if isinstance(group, list) for r in group]
             if not results:
                 # Engines time out or hit a CAPTCHA now and then, and one empty search is not an answer
-                log.info("Empty result for %r, asking once more", query)
+                log.info("Empty result for %r, asking once more", queries)
                 await asyncio.sleep(1)
-                results = await _ask_searxng(client, query)
+                results = await _ask_searxng(client, queries[0])
     except (httpx.HTTPError, ValueError) as e:
         raise SearchError(f"search service unavailable ({e.__class__.__name__})") from e
 
-    seen, unique = set(), []
+    unique = {}
     for result in results:
         url = result.get("url")
-        if url and url not in seen and url.startswith(("http://", "https://")):
-            seen.add(url)
-            unique.append(result)
+        if not url or not url.startswith(("http://", "https://")):
+            continue
+        if url in unique:
+            # Found by more than one phrasing: that is agreement, and it counts for something
+            kept = unique[url]
+            kept["score"] = float(kept.get("score") or 0) + float(result.get("score") or 0) / 2
+            kept["engines"] = list({*(kept.get("engines") or ()), *(result.get("engines") or ())})
+        else:
+            unique[url] = dict(result)
 
     found = []
-    for result in rank(unique, query, wants_recent)[:limit]:
+    for result in rank(list(unique.values()), " ".join(queries), wants_recent)[:limit]:
         published = _published(result)
         found.append({"title": (result.get("title") or result["url"]).strip(), "url": result["url"],
                       "site": _domain(result["url"]),
@@ -296,7 +311,7 @@ def sources_prompt(results, query):
         "you. Never call them future or hypothetical, and never refuse to answer because of their "
         "dates.\n\n"
         "Use them to answer the user's latest message, formatted in Markdown. Cite sources inline "
-        "with their numbers in square brackets, like [1] or [2][3].\n\n"
+        "with their numbers in square brackets, one bracket per source: [1] or [2][3], never [1, 2].\n\n"
         "The sources are not equally good. Weigh them:\n"
         "- Prefer whoever publishes the thing itself (its own site, documentation, release notes or "
         "blog) over anyone writing about it.\n"
@@ -311,17 +326,35 @@ def sources_prompt(results, query):
 
 QUERY_PROMPT = (
     "Write one web search query that would find the information needed to answer the user's latest "
-    "message, taking the conversation into account. Reply with the query only: no quotes, no explanation."
+    "message, taking the conversation into account.\n\n"
+    "Write it as plain words separated by spaces, the way someone types into a search box. Not a URL, "
+    "not a path, not a slug, no slashes or hyphens joining words, no quotes, no explanation, no label.\n\n"
+    "Examples:\n"
+    "What is the latest JDK version? -> latest JDK version release date\n"
+    "Is Spring Boot 4 out yet? -> Spring Boot 4 release date\n"
+    "How much does an RTX 5090 cost? -> RTX 5090 price\n\n"
+    "Reply with the query only."
 )
+
+# A query of one ordinary word finds the dictionary, not the answer
+TOO_VAGUE = {"version", "latest", "release", "news", "price", "update", "today", "current", "download",
+             "information", "details", "answer", "search", "query", "result", "results"}
 
 
 def clean_query(text, fallback):
-    lines = [line for line in re.sub(r"<think>.*?</think>", "", text or "", flags=re.S).splitlines() if line.strip()]
-    query = lines[0].strip().strip("\"'`").strip() if lines else ""
-    # Small models like to dress a query up as a command ("/google search ...", "!go ...", "Search:"),
-    # and a search engine takes those literally
-    query = re.sub(r"^(?:\s*(?:/\w+|!\w+|google[:\s]+|query\s*:|search(?:\s+for|\s*:)))+\s*",
-                   "", query, flags=re.I).strip()
-    query = re.sub(r"[-_]{1,}", " ", query)      # postgresql-latest-release is not a phrase
-    query = re.sub(r"\s{2,}", " ", query).strip(" -:\"'")
-    return query[:200] if len(query) >= 2 else fallback[:200]
+    """The query to search, or the user's own words when what came back is not usable."""
+    lines = [line for line in re.sub(r"<think>.*?</think>", "", text or "", flags=re.S).splitlines()
+             if line.strip()]
+    query = lines[0].strip() if lines else ""
+    query = re.sub(r"[*_`\"]", "", query)                       # markdown around the query
+    query = re.sub(r"^\s*(?:!\w+|\w[\w ]{0,20}query|search(?:\s+query)?|keywords?)\s*[:\-]\s*", "",
+                   query, flags=re.I)                          # "Search query: ..." and friends
+    # A slug or a path is words with the spaces taken out, so put them back rather than cutting it
+    # down: "/jdk/latest-version" once became "version", which searched the dictionary
+    query = re.sub(r"[/\_]+", " ", query)
+    query = re.sub(r"(?<=\w)-(?=\w)", " ", query)
+    query = re.sub(r"\s{2,}", " ", query).strip(" -:.,")
+    words = [w for w in re.findall(r"[\w.+#]+", query.lower()) if w not in TOO_VAGUE]
+    if len(query) < 3 or not words:
+        return fallback[:200]
+    return query[:200]
