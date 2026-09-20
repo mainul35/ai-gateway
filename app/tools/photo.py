@@ -30,24 +30,74 @@ _depth_missing = False
 
 # --- cleaning up: noise out, nothing invented ------------------------------------------
 
-def denoise_workflow(image_name, upscale):
-    """Noise off first, then enlarge: enlarging noise only makes the noise bigger."""
-    nodes = {
-        "load": {"class_type": "LoadImage", "inputs": {"image": image_name}},
-        "denoiser": {"class_type": "UpscaleModelLoader",
-                     "inputs": {"model_name": settings.denoise_model()}},
-        "denoised": {"class_type": "ImageUpscaleWithModel",
-                     "inputs": {"upscale_model": ["denoiser", 0], "image": ["load", 0]}},
-    }
-    last = "denoised"
-    if upscale:
+def denoise_workflow(image_name, upscale=False, denoise=True, sharpen=False):
+    """Noise off first, then enlarge: enlarging noise only makes the noise bigger.
+
+    Sharpening is done by putting the picture through the upscaler and bringing it back down. That
+    recovers edges that were softened, where an unsharp mask on its own only draws bright lines
+    along them; a light mask afterwards finishes it.
+    """
+    nodes = {"load": {"class_type": "LoadImage", "inputs": {"image": image_name}}}
+    last = "load"
+    if denoise:
+        nodes["denoiser"] = {"class_type": "UpscaleModelLoader",
+                             "inputs": {"model_name": settings.denoise_model()}}
+        nodes["denoised"] = {"class_type": "ImageUpscaleWithModel",
+                             "inputs": {"upscale_model": ["denoiser", 0], "image": [last, 0]}}
+        last = "denoised"
+    if upscale or sharpen:
         nodes["upscaler"] = {"class_type": "UpscaleModelLoader",
                              "inputs": {"model_name": settings.upscale_model()}}
         nodes["upscaled"] = {"class_type": "ImageUpscaleWithModel",
-                             "inputs": {"upscale_model": ["upscaler", 0], "image": ["denoised", 0]}}
+                             "inputs": {"upscale_model": ["upscaler", 0], "image": [last, 0]}}
         last = "upscaled"
+        if not upscale:
+            # Back to the size it came in at: the detail stays, the file does not double
+            nodes["back"] = {"class_type": "ImageScaleBy",
+                             "inputs": {"image": ["upscaled", 0], "upscale_method": "lanczos",
+                                        "scale_by": 0.5}}
+            last = "back"
+    if sharpen:
+        nodes["sharpened"] = {"class_type": "ImageSharpen",
+                              "inputs": {"image": [last, 0], "sharpen_radius": 2, "sigma": 0.8,
+                                         "alpha": 0.35}}
+        last = "sharpened"
     nodes["save"] = {"class_type": "PreviewImage", "inputs": {"images": [last, 0]}}
     return nodes
+
+
+def dehaze(png, amount=1.0):
+    """Takes the veil off a hazy picture, by the dark channel the haze leaves behind.
+
+    Haze adds the same pale light everywhere, which shows up as a floor under the darkest colour in
+    each neighbourhood. Estimating that floor and removing it brings back contrast and colour, which
+    is what "sharper" usually means for a picture taken through air rather than out of focus.
+    """
+    image = Image.open(io.BytesIO(png)).convert("RGB")
+    pixels = np.asarray(image, dtype=np.float32) / 255.0
+    # The darkest channel in a neighbourhood: near zero in a clear picture, lifted by haze
+    darkest = pixels.min(axis=2)
+    patch = max(7, int(min(image.size) / 60) | 1)
+    small = Image.fromarray((darkest * 255).astype(np.uint8), mode="L")
+    dark = np.asarray(small.filter(ImageFilter.MinFilter(patch if patch % 2 else patch + 1)),
+                      dtype=np.float32) / 255.0
+    sky = float(np.percentile(dark, 99.5)) or 1.0
+    atmosphere = np.percentile(pixels.reshape(-1, 3)[dark.reshape(-1) >= sky * 0.999], 90, axis=0)
+    atmosphere = np.clip(atmosphere, 0.35, 1.0)
+    transmission = 1.0 - 0.95 * float(amount) * (dark / max(atmosphere.max(), 1e-3))
+    # Smoothed, so the correction follows the scene rather than the patches it was measured in
+    transmission = np.asarray(Image.fromarray((np.clip(transmission, 0.1, 1.0) * 255).astype(np.uint8),
+                                              mode="L").filter(ImageFilter.GaussianBlur(patch)),
+                              dtype=np.float32) / 255.0
+    transmission = np.clip(transmission, 0.25, 1.0)[..., None]
+    cleared = (pixels - atmosphere) / transmission + atmosphere
+    out = io.BytesIO()
+    Image.fromarray((np.clip(cleared, 0, 1) * 255).round().astype(np.uint8)).save(out, format="PNG")
+    return out.getvalue()
+
+
+async def dehaze_in_background(png, amount):
+    return await asyncio.to_thread(dehaze, png, amount)
 
 
 # --- background blur: shallower depth of field than the sensor gives --------------------

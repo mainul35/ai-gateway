@@ -7,6 +7,7 @@ import base64
 import io
 import json
 import logging
+import re
 import time
 
 from fastapi import APIRouter, Depends, File, HTTPException, Response, UploadFile, status
@@ -227,6 +228,26 @@ def _file_json(file):
             "kind": file.kind, "prompt": file.prompt}
 
 
+def _upright(data, mime):
+    """Applies the picture's own rotation, if it has one. Anything unexpected is left as it was."""
+    try:
+        from PIL import Image, ImageOps
+        picture = Image.open(io.BytesIO(data))
+        if picture.getexif().get(274, 1) in (1, None):   # 274 is Orientation
+            return data, mime
+        turned = ImageOps.exif_transpose(picture)
+        out = io.BytesIO()
+        if mime == "image/jpeg":
+            turned.convert("RGB").save(out, format="JPEG", quality=95)
+        else:
+            turned.save(out, format="PNG")
+            mime = "image/png"
+        return out.getvalue(), mime
+    except Exception as e:
+        log.info("Could not read the orientation of an upload: %s", e)
+        return data, mime
+
+
 def _to_browser_format(data, mime, name):
     """Turns what a browser cannot display into JPEG, leaving the picture itself alone."""
     try:
@@ -269,6 +290,10 @@ async def upload_file(file: UploadFile = File(...), principal: Principal = Depen
                             "TIFF, GIF and BMP all work.")
     if mime in _CONVERTED:
         data, mime = await asyncio.to_thread(_to_browser_format, data, mime, name)
+    else:
+        # A photograph taken upright carries its rotation in EXIF, which a browser applies and
+        # everything else ignores. Baked in here, so what is worked on is what was seen.
+        data, mime = await asyncio.to_thread(_upright, data, mime)
     stored = ChatFile(user_id=user.id, kind="upload", mime_type=mime, name=name, data=data)
     session.add(stored)
     await session.commit()
@@ -622,9 +647,19 @@ async def render_markdown(payload: RenderIn, _: Principal = Depends(authenticate
     return {"html": markdown.render(payload.text)}
 
 
+# What the words ask for, when a photograph is attached
+WANTS_UPSCALE = re.compile(r"\b(crop|zoom|enlarge|upscale|bigger|larger|print|resolution)\b", re.I)
+WANTS_SHARPEN = re.compile(r"\b(sharp\w*|soft|softness|blurry|blurred|unsharp|crisp\w*|clarity|"
+                           r"definition|detail)\b", re.I)
+WANTS_DEHAZE = re.compile(r"\b(haz\w*|mist\w*|foggy|fog|smog|milky|washed out|flat|dull|"
+                          r"low contrast|contrast)\b", re.I)
+WANTS_DENOISE = re.compile(r"\b(noise|noisy|grain|grainy|denoise|speckl\w*|iso|clean)\b", re.I)
+
+
 class PhotoIn(BaseModel):
     file_id: int
     action: str = Field(pattern="^(clean|blur)$")
+    request: str = ""                                       # what was asked, in the user's words
     upscale: bool = True                                    # clean: enlarge for cropping
     strength: float = Field(default=1.0, ge=0.2, le=3.0)    # blur: how much
     # blur: 0 the nearest thing, 1 the furthest; unset means wherever the photo is already sharp
@@ -651,6 +686,20 @@ async def edit_photo(payload: PhotoIn, principal: Principal = Depends(authentica
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Photo not found")
     source, mime, user_id = found.data, found.mime_type, user.id
 
+    asked = (payload.request or "").strip()
+    if asked:
+        # The words decide, since they are what the person actually asked for
+        wants = {
+            "upscale": payload.upscale and bool(WANTS_UPSCALE.search(asked)),
+            "sharpen": bool(WANTS_SHARPEN.search(asked)),
+            "dehaze": bool(WANTS_DEHAZE.search(asked)),
+            # Noise removal is the default, unless the request is plainly about something else
+            "denoise": bool(WANTS_DENOISE.search(asked)) or not (WANTS_SHARPEN.search(asked)
+                                                                 or WANTS_DEHAZE.search(asked)),
+        }
+    else:
+        wants = {"upscale": payload.upscale, "sharpen": False, "dehaze": False, "denoise": True}
+
     async def stream():
         events = asyncio.Queue()
 
@@ -659,7 +708,14 @@ async def edit_photo(payload: PhotoIn, principal: Principal = Depends(authentica
 
         started = time.monotonic()
         if payload.action == "clean":
-            job = asyncio.create_task(images.clean_up(source, mime, payload.upscale, progress))
+            async def clean():
+                png = await images.clean_up(source, mime, wants["upscale"], progress,
+                                            denoise=wants["denoise"], sharpen=wants["sharpen"])
+                if wants["dehaze"]:
+                    await progress("Clearing the haze")
+                    png = await photo.dehaze_in_background(png, 1.0)
+                return png
+            job = asyncio.create_task(clean())
         else:
             async def blur():
                 await progress("Working out what is near and what is far")
@@ -687,13 +743,21 @@ async def edit_photo(payload: PhotoIn, principal: Principal = Depends(authentica
                                f"photo_{payload.action}", True, 200, None,
                                (time.monotonic() - started) * 1000)
         async with session_factory()() as db:
-            done = "cleaned up" if payload.action == "clean" else "background blurred"
+            if payload.action == "blur":
+                done = "background blurred"
+            else:
+                did = [name for name, flag in (("noise removed", wants["denoise"]),
+                                               ("haze cleared", wants["dehaze"]),
+                                               ("sharpened", wants["sharpen"]),
+                                               ("enlarged 2x", wants["upscale"])) if flag]
+                done = ", ".join(did) or "cleaned up"
             stored = ChatFile(user_id=user_id, kind="generated", mime_type="image/png",
                               name=f"photo-{payload.action}.png", prompt=done, data=png)
             db.add(stored)
             await db.commit()
             await db.refresh(stored)
             yield _event("image", file=_file_json(stored), action=payload.action,
+                         did=done[:1].upper() + done[1:],
                          seconds=round(time.monotonic() - started, 1))
 
     return StreamingResponse(stream(), media_type="text/event-stream",

@@ -253,8 +253,8 @@ async def generate(prompt, size="square", sources=(), strength=0.75, on_progress
                 await _release_comfy(client)
 
 
-async def clean_up(png, mime, upscale, on_progress=None):
-    """Removes noise from a photograph, and enlarges it afterwards when it is to be cropped into."""
+async def clean_up(png, mime, upscale, on_progress=None, denoise=True, sharpen=False):
+    """Improves a photograph without changing what is in it: noise, softness, size."""
     if not is_available():
         raise ImageError("Image work is turned off on this server")
     base = settings.comfyui_url()
@@ -272,9 +272,11 @@ async def clean_up(png, mime, upscale, on_progress=None):
                 name = await _upload(client, base, client_id, "photo", png, mime)
                 await report("Freeing GPU memory from the language models")
                 await _free_vram_for_images()
+                doing = [what for what, flag in (("Removing noise", denoise), ("Sharpening", sharpen),
+                                                 ("Enlarging", upscale)) if flag]
                 return await _run_job(client, base, client_id,
-                                      photo.denoise_workflow(name, upscale), report,
-                                      "Removing noise" + (" and enlarging" if upscale else ""))
+                                      photo.denoise_workflow(name, upscale, denoise, sharpen), report,
+                                      " and ".join(doing) or "Working on the picture")
             except asyncio.CancelledError:
                 with contextlib.suppress(httpx.HTTPError):
                     await client.post(f"{base}/interrupt")

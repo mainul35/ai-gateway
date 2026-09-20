@@ -26,8 +26,11 @@ IMAGE  - asks for a picture to be created: "draw", "generate an image of", "a ph
          message that only describes a picture, with no question and no instruction, is also IMAGE.
 EDIT   - asks for the attached picture to be changed as a picture: "make it night", "remove the car",
          "add a hat", "make it look like a painting".
-CLEAN  - asks for a photograph to be cleaned up: noise, grain or speckle removed, or made good
-         enough to crop into or enlarge. Nothing in the picture changes.
+CLEAN  - asks for the quality of a photograph to be improved, with nothing in it changed: noise or
+         grain removed, haze or mist cleared, softness sharpened, or made good enough to crop into
+         or enlarge. "Make it sharper", "it looks hazy", "too grainy" are all CLEAN. If the scene
+         itself would look different afterwards - the weather, the season, the time of day, the
+         style, anything added or taken away - it is EDIT, not CLEAN.
 BLUR   - asks for the background of a photograph to be blurred, or for the subject to stand out
          from it: shallower depth of field than the camera gave.
 
@@ -41,6 +44,10 @@ Examples:
 "make it night with northern lights" -> EDIT
 "remove the noise from this photo" -> CLEAN
 "too grainy, clean it up so I can crop in" -> CLEAN
+"the tower looks hazy, make it sharper" -> CLEAN
+"this came out soft, can you fix it" -> CLEAN
+"make it look like winter" -> EDIT
+"add fog to this picture" -> EDIT
 "blur the background so the bird stands out" -> BLUR
 "can you give this more bokeh?" -> BLUR
 "what is in this image?" -> CHAT
@@ -56,7 +63,8 @@ EDIT_WORDS = re.compile(
     r"\b(make it|turn it|change|replace|remove|delete|erase|add|put|swap|recolou?r|repaint|crop|zoom|"
     r"brighten|darken|blur)\b", re.I)
 CLEAN_WORDS = re.compile(
-    r"\b(noise|noisy|grain|grainy|denoise|de-noise|speckl\w*|iso|clean(ing)? up|clean it up|sharpen|"
+    r"\b(noise|noisy|grain|grainy|denoise|de-noise|speckl\w*|iso|clean(ing)? up|clean it up|"
+    r"sharp\w*|crisp\w*|clarity|haz\w*|mist\w*|foggy|smog|milky|washed out|soft|blurry|"
     r"crop into|zoom into|enlarge|upscale|restore)\b", re.I)
 BLUR_WORDS = re.compile(
     r"\b(bokeh|background blur|blur the background|depth of field|dof|stand out from|"
