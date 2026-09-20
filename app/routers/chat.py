@@ -609,9 +609,9 @@ async def route(payload: RouteIn, principal: Principal = Depends(authenticate)):
 
 
 async def _drawable_prompt(principal, session, user, request, conversation_id):
-    """What to draw: the request rewritten with the conversation, and the pictures already made in it."""
+    """What to draw, the wording it must spell, and the rewrite to show, if there was one."""
     if not image_prompt.is_enabled():
-        return request, None
+        return request, None, None
     history, made = [], []
     if conversation_id is not None:
         conversation = (await session.execute(
@@ -623,9 +623,14 @@ async def _drawable_prompt(principal, session, user, request, conversation_id):
             generated = (json.loads(message.attachments) if message.attachments else {}).get("generated")
             if generated and generated.get("prompt"):
                 made.append(generated["prompt"])
-    answer = await _ask_helper(principal, image_prompt.build_request(request, history, made))
-    drawn = image_prompt.clean(answer, request)
-    return drawn, (drawn if drawn != request else None)
+    # Both questions at once: what to draw, and which words have to be spelled right in it
+    described, worded = await asyncio.gather(
+        _ask_helper(principal, image_prompt.build_request(request, history, made)),
+        _ask_helper(principal, image_prompt.wording_request(request, history)))
+    drawn, quoted = image_prompt.clean(described, request)
+    wording = image_prompt.clean_wording(worded) or quoted
+    drawn = image_prompt.with_wording(drawn, wording)
+    return drawn, wording, (drawn if drawn != request else None)
 
 
 class ImageIn(BaseModel):
@@ -659,9 +664,9 @@ async def generate_image(payload: ImageIn, principal: Principal = Depends(authen
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Reference images need an image to edit")
     user_id = user.id
     # An edit is already an instruction about a picture that exists, so it is passed through as written
-    drawable, rewritten = ((payload.prompt, None) if sources else
-                           await _drawable_prompt(principal, session, user, payload.prompt,
-                                                  payload.conversation_id))
+    drawable, wording, rewritten = ((payload.prompt, None, None) if sources else
+                                    await _drawable_prompt(principal, session, user, payload.prompt,
+                                                           payload.conversation_id))
 
     async def stream():
         events = asyncio.Queue()
@@ -673,7 +678,8 @@ async def generate_image(payload: ImageIn, principal: Principal = Depends(authen
 
         started = time.monotonic()
         endpoint = "image_edits" if sources else "image_generations"
-        job = asyncio.create_task(images.generate(drawable, payload.size, sources, payload.strength, progress))
+        job = asyncio.create_task(images.generate(drawable, payload.size, sources, payload.strength,
+                                                  progress, text=wording))
         try:
             # Relay progress while the job runs
             while not job.done() or not events.empty():

@@ -27,6 +27,9 @@ DEFAULTS = {
     "images.max_upload_mb": "10",
     # A request is rewritten into something an image model can draw, with the conversation for context
     "images.rewrite.prompt": "true",
+    # Lettering drawn by Flux is usually misspelled; the editing model puts it right afterwards
+    "images.fix.text": "true",
+    "images.text.attempts": "2",
     "images.prompt.model": "",
     # A request is rewritten into something an image model can draw, with the conversation for context
     "images.rewrite.prompt": "true",
@@ -220,6 +223,15 @@ def keep_recent_messages():
 
 def max_user_notes():
     return int(get("memory.max.user.notes", "MEMORY_MAX_USER_NOTES"))
+
+
+def fix_image_text():
+    return get_bool("images.fix.text", "IMAGES_FIX_TEXT", True)
+
+
+def text_attempts():
+    """How many times the editing model may try to get the lettering right."""
+    return max(1, int(get("images.text.attempts", "IMAGES_TEXT_ATTEMPTS")))
 
 
 def edit_model():
