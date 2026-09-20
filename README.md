@@ -169,6 +169,14 @@ picture edits it. The assistant's reply says which was chosen. To force one, lea
 Set `router.enabled=false` to go back to plain rules, or `router.model=` to another small model. The
 same model also writes the search queries, so the big model is not loaded just for one line.
 
+**A request is rewritten before it is drawn.** An image model reads a description of a picture, not a
+message to an assistant: "Generate me an image of Java 27 based on the images available on the web"
+drew an IDE screenshot, and the correction after it drew an unrelated landscape. The small model now
+turns the request, the conversation and the pictures already made in it into one visual description,
+which is shown as the image's caption (hover it to see what you asked). An edit is passed through as
+written, since it already describes a change to a picture that exists. Turn it off with
+`images.rewrite.prompt=false`.
+
 Generating an image first unloads the language models, since Flux needs most of the 24 GB card, and
 frees ComfyUI's VRAM afterwards. Images are stored in the database, and only their owner can open them.
 

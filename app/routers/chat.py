@@ -20,7 +20,8 @@ from app.auth import Principal, authenticate
 from app.db import get_session, session_factory
 from app.models import ChatFile, Conversation, ConversationMessage, MemoryEntry, utcnow
 from app.routers.openai_v1 import PROXY_PATHS, forward
-from app.tools import images, markdown, memory as memory_tool, router as intent_router, web_search
+from app.tools import (image_prompt, images, markdown, memory as memory_tool, router as intent_router,
+                        web_search)
 
 log = logging.getLogger("playground")
 
@@ -603,8 +604,29 @@ async def route(payload: RouteIn, principal: Principal = Depends(authenticate)):
             "decided_by": "keywords"}
 
 
+async def _drawable_prompt(principal, session, user, request, conversation_id):
+    """What to draw: the request rewritten with the conversation, and the pictures already made in it."""
+    if not image_prompt.is_enabled():
+        return request, None
+    history, made = [], []
+    if conversation_id is not None:
+        conversation = (await session.execute(
+            select(Conversation).options(selectinload(Conversation.messages))
+            .where(Conversation.id == conversation_id,
+                   Conversation.user_id == user.id))).scalar_one_or_none()
+        for message in (conversation.messages if conversation else [])[-12:]:
+            history.append({"role": message.role, "content": message.content or ""})
+            generated = (json.loads(message.attachments) if message.attachments else {}).get("generated")
+            if generated and generated.get("prompt"):
+                made.append(generated["prompt"])
+    answer = await _ask_helper(principal, image_prompt.build_request(request, history, made))
+    drawn = image_prompt.clean(answer, request)
+    return drawn, (drawn if drawn != request else None)
+
+
 class ImageIn(BaseModel):
     prompt: str = Field(min_length=1, max_length=4000)
+    conversation_id: int | None = None
     size: str = "square"
     source_file_id: int | None = None      # the picture to edit
     reference_file_ids: list[int] = Field(default_factory=list, max_length=2)  # extra pictures it may use
@@ -620,6 +642,8 @@ async def generate_image(payload: ImageIn, principal: Principal = Depends(authen
         raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "Image generation is turned off on this server")
     if not access.can_generate_images(principal):
         raise HTTPException(status.HTTP_403_FORBIDDEN, "You do not have access to image generation")
+    if payload.conversation_id is not None:
+        await _owned(session, payload.conversation_id, user)
     sources = []
     if payload.source_file_id is not None:
         wanted = [payload.source_file_id, *payload.reference_file_ids]
@@ -630,16 +654,22 @@ async def generate_image(payload: ImageIn, principal: Principal = Depends(authen
     elif payload.reference_file_ids:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Reference images need an image to edit")
     user_id = user.id
+    # An edit is already an instruction about a picture that exists, so it is passed through as written
+    drawable, rewritten = ((payload.prompt, None) if sources else
+                           await _drawable_prompt(principal, session, user, payload.prompt,
+                                                  payload.conversation_id))
 
     async def stream():
         events = asyncio.Queue()
+        if rewritten:
+            yield _event("prompt", text=rewritten)
 
         async def progress(stage, fraction):
             await events.put(_event("progress", stage=stage, fraction=fraction))
 
         started = time.monotonic()
         endpoint = "image_edits" if sources else "image_generations"
-        job = asyncio.create_task(images.generate(payload.prompt, payload.size, sources, payload.strength, progress))
+        job = asyncio.create_task(images.generate(drawable, payload.size, sources, payload.strength, progress))
         try:
             # Relay progress while the job runs
             while not job.done() or not events.empty():
@@ -662,7 +692,7 @@ async def generate_image(payload: ImageIn, principal: Principal = Depends(authen
                                None, (time.monotonic() - started) * 1000)
         async with session_factory()() as db:
             stored = ChatFile(user_id=user_id, kind="generated", mime_type="image/png",
-                              name=f"image-{seed}.png", prompt=payload.prompt, data=png)
+                              name=f"image-{seed}.png", prompt=drawable, data=png)
             db.add(stored)
             await db.commit()
             await db.refresh(stored)
