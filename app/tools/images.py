@@ -20,11 +20,16 @@ import websockets
 
 from app import settings
 from app.engine.supervisor import supervisor
+from app.tools import lettering
 
 log = logging.getLogger("tools.images")
 
 JOB_TIMEOUT = 900
 MAX_EDIT_IMAGES = 3  # Qwen-Image-Edit takes up to three reference pictures
+# Tested against the alternatives: asking to "rewrite" or to "remove any other text" either changed the
+# wording again or threw away the logo with it. Correcting gently keeps the picture and fixes the words.
+FIX_TEXT = ('Correct the lettering so that it reads exactly "{text}", spelled correctly. '
+            'Keep everything else in the picture exactly as it is.')
 SIZES = {"square": (1024, 1024), "portrait": (832, 1216), "landscape": (1216, 832), "wide": (1344, 768)}
 
 # One job at a time: two would fight over the GPU, and ComfyUI runs them one by one anyway
@@ -144,11 +149,50 @@ async def _release_comfy(client):
         await client.post(f"{settings.comfyui_url()}/free", json={"unload_models": True, "free_memory": True})
 
 
-async def generate(prompt, size="square", sources=(), strength=0.75, on_progress=None):
-    """Runs one job and returns (png_bytes, seed).
+async def _upload(client, base, client_id, index, data, mime):
+    """Into ComfyUI's temp folder, which it clears itself, rather than its input library."""
+    extension = {"image/jpeg": "jpg", "image/webp": "webp", "image/gif": "gif"}.get(mime, "png")
+    uploaded = await client.post(f"{base}/upload/image", data={"overwrite": "true", "type": "temp"},
+                                 files={"image": (f"gateway-{client_id}-{index}.{extension}", data, mime)})
+    uploaded.raise_for_status()
+    return f"{uploaded.json()['name']} [temp]"
+
+
+async def _run_job(client, base, client_id, workflow, report, loading_stage):
+    """Queues one ComfyUI job, follows it, and returns the picture it produced."""
+    ws_url = base.replace("http://", "ws://").replace("https://", "wss://") + f"/ws?clientId={client_id}"
+    async with websockets.connect(ws_url, max_size=None, open_timeout=10) as ws:
+        queued = await client.post(f"{base}/prompt", json={"prompt": workflow, "client_id": client_id})
+        if queued.status_code >= 400:
+            raise ImageError(f"The image server rejected the job: {queued.text[:300]}")
+        prompt_id = queued.json()["prompt_id"]
+        await report(loading_stage)
+        await asyncio.wait_for(_follow_progress(ws, prompt_id, report), JOB_TIMEOUT)
+
+    history = (await client.get(f"{base}/history/{prompt_id}")).json().get(prompt_id) or {}
+    status = history.get("status") or {}
+    if status.get("status_str") == "error":
+        messages = [m[1].get("exception_message") for m in status.get("messages", [])
+                    if m[0] == "execution_error"]
+        raise ImageError("Image generation failed: " + (messages[0] if messages else "unknown error"))
+    images = [img for output in (history.get("outputs") or {}).values() for img in output.get("images", [])]
+    if not images:
+        raise ImageError("The image server finished without producing an image")
+    image = images[0]
+    view = await client.get(f"{base}/view", params={"filename": image["filename"],
+                                                    "subfolder": image.get("subfolder", ""),
+                                                    "type": image.get("type", "output")})
+    view.raise_for_status()
+    return view.content
+
+
+async def generate(prompt, size="square", sources=(), strength=0.75, on_progress=None, text=None):
+    """Runs the job and returns (png_bytes, seed).
 
     sources is a list of (bytes, mime_type) for an edit: the picture to change first, then up to two
-    references. on_progress(stage, fraction) is awaited as the job runs.
+    references. text is wording that must appear in the picture; Flux spells it wrong far more often
+    than not, so the result is passed to the editing model to have the lettering put right.
+    on_progress(stage, fraction) is awaited as the job runs.
     """
     if not is_available():
         raise ImageError("Image generation is turned off on this server")
@@ -165,51 +209,36 @@ async def generate(prompt, size="square", sources=(), strength=0.75, on_progress
         await report("Waiting for another image to finish")
     async with _job_lock:
         async with httpx.AsyncClient(timeout=60) as client:
-            source_names = []
-            for index, (data, mime) in enumerate(list(sources)[:MAX_EDIT_IMAGES]):
-                extension = {"image/jpeg": "jpg", "image/webp": "webp", "image/gif": "gif"}.get(mime, "png")
-                try:
-                    # Into ComfyUI's temp folder, which it clears itself, rather than its input library
-                    uploaded = await client.post(
-                        f"{base}/upload/image", data={"overwrite": "true", "type": "temp"},
-                        files={"image": (f"gateway-{client_id}-{index}.{extension}", data, mime)})
-                    uploaded.raise_for_status()
-                    source_names.append(f"{uploaded.json()['name']} [temp]")
-                except (httpx.HTTPError, ValueError, KeyError) as e:
-                    raise ImageError(f"Could not reach the image server ({e.__class__.__name__})") from e
+            try:
+                source_names = [await _upload(client, base, client_id, i, data, mime)
+                                for i, (data, mime) in enumerate(list(sources)[:MAX_EDIT_IMAGES])]
+            except (httpx.HTTPError, ValueError, KeyError) as e:
+                raise ImageError(f"Could not reach the image server ({e.__class__.__name__})") from e
 
-            engine = await edit_engine() if source_names else None
+            engine = await edit_engine()
             await report("Freeing GPU memory from the language models")
             await _free_vram_for_images()
 
-            if engine == "qwen":
-                workflow = _qwen_edit_workflow(prompt, seed, source_names)
-            else:
-                workflow = _workflow(prompt, width, height, seed, source_names[0] if source_names else None, strength)
-            ws_url = base.replace("http://", "ws://").replace("https://", "wss://") + f"/ws?clientId={client_id}"
             try:
-                async with websockets.connect(ws_url, max_size=None, open_timeout=10) as ws:
-                    queued = await client.post(f"{base}/prompt", json={"prompt": workflow, "client_id": client_id})
-                    if queued.status_code >= 400:
-                        raise ImageError(f"The image server rejected the job: {queued.text[:300]}")
-                    prompt_id = queued.json()["prompt_id"]
-                    await report("Loading the image model" if engine != "qwen" else "Loading the image editing model")
-                    await asyncio.wait_for(_follow_progress(ws, prompt_id, report), JOB_TIMEOUT)
+                if source_names and engine == "qwen":
+                    workflow = _qwen_edit_workflow(prompt, seed, source_names)
+                    loading = "Loading the image editing model"
+                else:
+                    workflow = _workflow(prompt, width, height, seed,
+                                         source_names[0] if source_names else None, strength)
+                    loading = "Loading the image model"
+                png = await _run_job(client, base, client_id, workflow, report, loading)
 
-                history = (await client.get(f"{base}/history/{prompt_id}")).json().get(prompt_id) or {}
-                status = history.get("status") or {}
-                if status.get("status_str") == "error":
-                    messages = [m[1].get("exception_message") for m in status.get("messages", [])
-                                if m[0] == "execution_error"]
-                    raise ImageError("Image generation failed: " + (messages[0] if messages else "unknown error"))
-                images = [img for output in (history.get("outputs") or {}).values() for img in output.get("images", [])]
-                if not images:
-                    raise ImageError("The image server finished without producing an image")
-                image = images[0]
-                view = await client.get(f"{base}/view", params={
-                    "filename": image["filename"], "subfolder": image.get("subfolder", ""), "type": image.get("type", "output")})
-                view.raise_for_status()
-                return view.content, seed
+                if text and not source_names and settings.fix_image_text():
+                    async def draw_again():
+                        return await _run_job(
+                            client, base, client_id,
+                            _workflow(prompt, width, height, random.randint(1, 2**31 - 1)),
+                            report, "Drawing it again")
+
+                    png = await _with_correct_lettering(client, base, client_id, png, text, report,
+                                                        draw_again, engine == "qwen")
+                return png, seed
             except asyncio.CancelledError:
                 # Nobody is waiting for the picture any more; stop rendering it
                 with contextlib.suppress(httpx.HTTPError):
@@ -222,6 +251,43 @@ async def generate(prompt, size="square", sources=(), strength=0.75, on_progress
             finally:
                 # Hand the GPU back to the language models
                 await _release_comfy(client)
+
+
+async def _with_correct_lettering(client, base, client_id, png, text, report, draw_again, can_correct):
+    """Returns the picture whose words came out best.
+
+    Each attempt is read back, because neither model can be trusted with words: Flux misspells them,
+    and the editing model, asked to correct a few words, sometimes drops one instead. So the two are
+    alternated - correct what is there, then draw the whole thing afresh - and the best is kept. A
+    picture that came out right first time is returned untouched.
+    """
+    await report("Checking the lettering")
+    best, best_score = png, lettering.score(png, text)
+    log.info("Lettering %r scored %.2f as drawn", text, best_score)
+    if best_score >= 1.0:
+        return png
+
+    for attempt in range(settings.text_attempts()):
+        correcting = can_correct and attempt % 2 == 0
+        if correcting:
+            await report("Correcting the lettering")
+            name = await _upload(client, base, client_id, f"text{attempt}", best, "image/png")
+            candidate = await _run_job(
+                client, base, client_id,
+                _qwen_edit_workflow(FIX_TEXT.format(text=text), random.randint(1, 2**31 - 1), [name]),
+                report, "Correcting the lettering")
+        else:
+            candidate = await draw_again()
+        if not candidate:
+            continue
+        candidate_score = lettering.score(candidate, text)
+        log.info("Lettering %r scored %.2f after %s", text, candidate_score,
+                 "a correction" if correcting else "drawing again")
+        if candidate_score > best_score:
+            best, best_score = candidate, candidate_score
+        if best_score >= 1.0:
+            return best
+    return best
 
 
 async def _follow_progress(ws, prompt_id, report):

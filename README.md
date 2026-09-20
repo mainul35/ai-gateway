@@ -169,6 +169,13 @@ picture edits it. The assistant's reply says which was chosen. To force one, lea
 Set `router.enabled=false` to go back to plain rules, or `router.model=` to another small model. The
 same model also writes the search queries, so the big model is not loaded just for one line.
 
+**Words in a picture are checked and corrected.** Flux draws well and spells badly: a banner asked to
+read "JDK 27" came back as "Javk 27 (USK3SPORE)". So the gateway asks separately which words, if any,
+the picture must contain, reads the finished picture back with OCR on the CPU, and if the lettering is
+wrong has Qwen-Image-Edit correct it, checking again after each attempt. A picture that came out right
+first time is left alone, and one with no words in it costs nothing extra. Adjust with
+`images.fix.text=false` or `images.text.attempts`.
+
 **A request is rewritten before it is drawn.** An image model reads a description of a picture, not a
 message to an assistant: "Generate me an image of Java 27 based on the images available on the web"
 drew an IDE screenshot, and the correction after it drew an unrelated landscape. The small model now

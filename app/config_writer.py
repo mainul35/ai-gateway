@@ -40,6 +40,8 @@ EDITABLE_KEYS = [
     "images.edit.vae",
     "images.edit.lora",
     "images.rewrite.prompt",
+    "images.fix.text",
+    "images.text.attempts",
     "images.prompt.model",
     "images.rewrite.prompt",
     "images.prompt.model",
