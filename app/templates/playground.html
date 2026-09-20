@@ -4,8 +4,9 @@
 <style>
 .pg{display:grid;grid-template-columns:18rem 1fr;gap:1.25rem;align-items:start}
 @media (max-width: 800px){ .pg{grid-template-columns:1fr} }
-.side{display:flex;flex-direction:column;gap:1.25rem}
-.convs{max-height:22rem;overflow-y:auto;margin:0 -.5rem}
+.side{display:flex;flex-direction:column;gap:1.25rem;position:sticky;top:1rem;align-self:start}
+@media (max-width: 800px){ .side{position:static} }
+.convs{margin:0 -.5rem}
 .conv{display:flex;align-items:center;gap:.4rem;padding:.45rem .5rem;border-radius:8px;cursor:pointer}
 .conv:hover{background:var(--input)}
 .conv.active{background:rgba(99,102,241,.2)}
@@ -14,7 +15,9 @@
 .conv .del{visibility:hidden;background:none;border:none;color:var(--muted);cursor:pointer;font-size:1rem;padding:0 .2rem}
 .conv:hover .del{visibility:visible}
 .conv .del:hover{color:var(--danger)}
-.chat{min-height:22rem;max-height:60vh;overflow-y:auto;display:flex;flex-direction:column;gap:.9rem}
+/* No scroller of its own: a box that scrolls inside a page that also scrolls gives two scrollbars,
+   and neither one holds a whole question and its answer. The page is the only thing that scrolls. */
+.chat{display:flex;flex-direction:column;gap:.9rem}
 .msg{border-radius:10px;padding:.7rem .9rem;word-wrap:break-word;line-height:1.55}
 .msg .body{white-space:pre-wrap}
 .msg .body.md{white-space:normal;background:var(--paper);border-radius:8px;padding:.75rem .9rem;margin:-.1rem -.2rem}
@@ -41,8 +44,12 @@ a.cite{font-size:.75em;vertical-align:super;text-decoration:none;padding:0 .1rem
 .pending button{position:absolute;top:-.4rem;right:-.4rem;width:1.3rem;height:1.3rem;border-radius:50%;border:none;
                 background:var(--danger);color:#fff;cursor:pointer;font-size:.8rem;line-height:1;padding:0}
 .pending .tag{position:absolute;left:.3rem;bottom:.3rem;font-size:.65rem;background:rgba(0,0,0,.7);padding:0 .3rem;border-radius:4px}
-.generated img{max-width:100%;max-height:32rem;border-radius:8px;display:block;cursor:zoom-in}
-.generated .caption{font-size:.82rem;color:var(--muted);margin-top:.4rem}
+/* Leaves room for the question above it and the caption below, so the pair fits on one screen */
+.generated img{max-width:100%;max-height:min(55vh,32rem);border-radius:8px;display:block;cursor:zoom-in}
+/* The description can run to sixty words; two lines of it is enough to recognise the picture by */
+.generated .caption{font-size:.82rem;color:var(--muted);margin-top:.4rem;cursor:pointer;
+                    display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.generated .caption.open{-webkit-line-clamp:unset;overflow:visible}
 .generated .actions{display:flex;gap:.5rem;margin-top:.5rem}
 textarea{background:var(--input);border:1px solid var(--border);border-radius:8px;color:var(--text);
          padding:.6rem .7rem;font-size:.95rem;width:100%;font-family:inherit;resize:vertical}
@@ -71,8 +78,14 @@ textarea:focus{outline:none;border-color:var(--primary)}
 .mem li span{flex:1;min-width:0;word-wrap:break-word}
 .mem li button{background:none;border:none;color:var(--muted);cursor:pointer;padding:0 .15rem;font-size:.85rem}
 .mem li button:hover{color:var(--text)}
-.mem .summary{white-space:pre-wrap;color:var(--text);max-height:11rem;overflow-y:auto}
+.mem .summary{white-space:pre-wrap;color:var(--text)}
 .mem .empty{color:var(--muted)}
+/* On a short screen the title and its explanation cost a fifth of the height before anything is
+   shown; the page is recognisable without them. */
+@media (max-height: 800px){
+  main{padding-top:1rem}
+  main > h1, main > h1 + p.sub{display:none}
+}
 .lightbox{position:fixed;inset:0;background:rgba(0,0,0,.85);display:flex;align-items:center;justify-content:center;
           z-index:50;cursor:zoom-out;padding:1rem}
 .lightbox img{max-width:100%;max-height:100%;border-radius:8px}
@@ -167,6 +180,27 @@ textarea:focus{outline:none;border-color:var(--primary)}
 {% block scripts %}
 <script>
 const chat = document.getElementById('chat');
+
+// Follows a streaming answer, but only while the reader is already at the bottom: pulling the page
+// away from someone who has scrolled up to read something is worse than not following at all.
+function followAlong(){
+  const fromBottom = document.documentElement.scrollHeight - window.scrollY - window.innerHeight;
+  if(fromBottom < 260) window.scrollTo({top: document.documentElement.scrollHeight});
+}
+
+// A picture is taller than the screen more often than not, and its bottom edge is not the part worth
+// showing: put the top of the message just under the header instead.
+function revealFrom(box){
+  // From the question, not the answer: the two belong on the screen together
+  const anchor = box.previousElementSibling?.classList.contains('user') ? box.previousElementSibling : box;
+  const top = anchor.getBoundingClientRect().top + window.scrollY - 12;
+  const pairHeight = box.getBoundingClientRect().bottom - anchor.getBoundingClientRect().top;
+  if(pairHeight > window.innerHeight - 80 || top < window.scrollY){
+    window.scrollTo({top, behavior: 'smooth'});
+  }else{
+    followAlong();
+  }
+}
 const modelSelect = document.getElementById('model');
 const systemBox = document.getElementById('system');
 const promptBox = document.getElementById('prompt');
@@ -549,7 +583,7 @@ function addMessage(role, text, model){
   box.innerHTML = `<div class="who">${role === 'user' ? 'You' : escapeHtml(model || modelSelect.value)}</div><div class="body"></div>`;
   box.querySelector('.body').textContent = text;
   chat.appendChild(box);
-  chat.scrollTop = chat.scrollHeight;
+  followAlong();
   return box;
 }
 
@@ -715,6 +749,11 @@ function renderGenerated(box, generated, stats){
   }
   if(stats) appendStats(box, stats.total != null ? `${stats.total}s` + (generated.seed ? ` · seed ${generated.seed}` : '') : '');
 }
+
+chat.addEventListener('click', e => {
+  const caption = e.target.closest('.generated .caption');
+  if(caption) caption.classList.toggle('open');
+});
 
 // "Edit this image" puts a generated image into the composer as the one to change
 chat.addEventListener('click', e => {
@@ -899,7 +938,7 @@ async function sendChat(text, decision){
         answer += delta.content;
         body.textContent = answer;   // rendered once it is complete, below
       }
-      chat.scrollTop = chat.scrollHeight;
+      followAlong();
     });
   }catch(e){
     if(e.name !== 'AbortError') showError(errorText(e));
@@ -978,7 +1017,7 @@ async function sendImage(text, decision){
       }else if(event.type === 'image'){
         result = event;
       }
-      chat.scrollTop = chat.scrollHeight;
+      followAlong();
     });
   }catch(e){
     if(e.name !== 'AbortError') showError(errorText(e));
@@ -998,7 +1037,8 @@ async function sendImage(text, decision){
                      strength: source && !qwenEdits() ? strength : null};
   const stats = {total: +((performance.now() - started) / 1000).toFixed(1)};
   renderGenerated(box, generated, stats);
-  chat.scrollTop = chat.scrollHeight;
+  box.querySelector('.generated img')?.addEventListener('load', () => revealFrom(box), {once: true});
+  revealFrom(box);
   const summary = `(${source ? 'edited the image' : 'generated an image'}: ${drawn || text})`;
   history.push({role: 'assistant', content: summary});
   await saveMessage({role: 'assistant', content: summary, stats, attachments: {generated}});
