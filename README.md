@@ -222,7 +222,7 @@ science fiction and refuses to answer: the same Java question came back saying t
 the future".
 
 ## Photographs
-Pictures are attached with the paperclip, by pasting, or by dropping one anywhere on the page. JPEG,
+Pictures are attached with the paperclip, by pasting, or by dropping one anywhere on the page. A picture appears the moment it is chosen, read from the file on disk and dimmed, with how far it has uploaded written across it; × stops an upload that is still going. JPEG,
 PNG, HEIC, WebP, TIFF, GIF and BMP are accepted, up to `images.max_upload_mb` (25 by default); what a
 browser cannot display is converted to JPEG on arrival, keeping its orientation. Camera raw files are
 refused with a message saying so rather than a generic error: developing ORF, RW2, ARW and the rest

@@ -103,6 +103,12 @@ a.cite{font-size:.75em;vertical-align:super;text-decoration:none;padding:0 .1rem
 .pending button{position:absolute;top:-.4rem;right:-.4rem;width:1.3rem;height:1.3rem;border-radius:50%;border:none;
                 background:var(--danger);color:#fff;cursor:pointer;font-size:.8rem;line-height:1;padding:0}
 .pending .tag{position:absolute;left:.3rem;bottom:.3rem;font-size:.65rem;background:rgba(0,0,0,.7);padding:0 .3rem;border-radius:4px}
+/* While a picture is uploading it is shown dimmed, from the file on disk, with how far it has got */
+.pending.busy img{opacity:.4}
+.pending .sending{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;
+                  justify-content:center;gap:.35rem;font-size:.7rem;color:var(--text);text-shadow:0 1px 2px #000}
+.pending .sending .track{width:70%;height:4px;background:rgba(0,0,0,.55);border-radius:2px;overflow:hidden}
+.pending .sending .track div{height:100%;width:0;background:var(--primary);transition:width .15s}
 /* Leaves room in the transcript for the question above it and the caption below */
 .generated img{max-width:100%;max-height:min(45vh,26rem);border-radius:8px;display:block;cursor:zoom-in}
 /* The description can run to sixty words; two lines of it is enough to recognise the picture by */
@@ -432,18 +438,66 @@ document.getElementById('strength').addEventListener('input', e =>
 
 function renderPending(){
   document.getElementById('pending').innerHTML = pending.map((f, i) => `
-    <div class="pending">
-      <img src="${f.url}" alt="${escapeHtml(f.name || 'image')}" data-zoom="${f.url}">
-      ${imageMode() ? `<span class="tag">${i === 0 ? 'edit' : 'image ' + (i + 1)}</span>` : ''}
-      <button data-unattach="${i}" title="Remove">&times;</button>
+    <div class="pending${f.uploading ? ' busy' : ''}" data-tile="${i}">
+      <img src="${f.url}" alt="${escapeHtml(f.name || 'image')}"${f.uploading ? '' : ` data-zoom="${f.url}"`}>
+      ${f.uploading ? `<span class="sending">
+           <span class="track"><div style="width:${Math.round((f.progress || 0) * 100)}%"></div></span>
+           <span class="says">${uploadLabel(f)}</span>
+         </span>` : ''}
+      ${imageMode() && !f.uploading ? `<span class="tag">${i === 0 ? 'edit' : 'image ' + (i + 1)}</span>` : ''}
+      <button data-unattach="${i}" title="${f.uploading ? 'Stop uploading' : 'Remove'}">&times;</button>
     </div>`).join('');
   syncTools();
 }
 
+function uploadLabel(tile){
+  const percent = Math.round((tile.progress || 0) * 100);
+  // Once the bytes are all sent the server still has to read it, which for a HEIC means converting it
+  return percent >= 100 ? 'finishing\u2026'
+         : `${percent}%${tile.megabytes >= 2 ? ` of ${tile.megabytes.toFixed(0)} MB` : ''}`;
+}
+
+// Only the one tile is redrawn while bytes move, so the others do not flicker
+function updateTile(tile){
+  const index = pending.indexOf(tile);
+  const node = document.querySelector(`[data-tile="${index}"]`);
+  if(!node) return renderPending();
+  node.querySelector('.track div').style.width = Math.round((tile.progress || 0) * 100) + '%';
+  node.querySelector('.says').textContent = uploadLabel(tile);
+}
+
 document.getElementById('pending').addEventListener('click', e => {
   const button = e.target.closest('[data-unattach]');
-  if(button){ pending.splice(Number(button.dataset.unattach), 1); renderPending(); }
+  if(!button) return;
+  const tile = pending[Number(button.dataset.unattach)];
+  if(tile?.uploading && tile.request) tile.request.abort();   // the catch removes the tile
+  else { pending.splice(Number(button.dataset.unattach), 1); renderPending(); }
 });
+
+// fetch cannot say how far an upload has got, and a photograph over a tunnel takes long enough that
+// something has to. XMLHttpRequest reports the bytes as they go.
+function sendFile(file, onProgress, onStart){
+  return new Promise((resolve, reject) => {
+    const form = new FormData();
+    form.append('file', file, file.name || 'pasted.png');
+    const request = new XMLHttpRequest();
+    request.open('POST', '/chat/files');
+    request.upload.addEventListener('progress', e => {
+      if(e.lengthComputable) onProgress(e.loaded / e.total);
+    });
+    request.addEventListener('load', () => {
+      if(request.status === 401){ location.href = '/login'; reject(new Error('signed out')); return; }
+      let body = {};
+      try{ body = JSON.parse(request.responseText); }catch(e){}
+      if(request.status >= 400) reject(new Error(body.detail || `HTTP ${request.status}`));
+      else resolve(body);
+    });
+    request.addEventListener('error', () => reject(new Error('the upload did not reach the server')));
+    request.addEventListener('abort', () => reject(new Error('cancelled')));
+    if(onStart) onStart(request);          // so it can be stopped while it is still going
+    request.send(form);
+  });
+}
 
 async function uploadImages(files){
   if(!canAttach()){
@@ -461,15 +515,28 @@ async function uploadImages(files){
                 + `${caps.max_upload_mb} MB. Export it smaller and try again.`);
       continue;
     }
-    const form = new FormData();
-    form.append('file', file, file.name || 'pasted.png');
+    // The picture appears straight away, read from the file on disk, and fills as it uploads
+    const tile = {uploading: true, progress: 0, name: file.name || 'image',
+                  url: URL.createObjectURL(file), megabytes: file.size / 1048576};
+    if(imageMode() && pending.length >= editLimit()) pending = pending.slice(0, editLimit() - 1);
+    pending.push(tile);
+    renderPending();
     try{
-      const stored = await api('/chat/files', {method: 'POST', body: form});
-      // Understanding takes several images; editing takes as many as the edit model can use
-      if(imageMode() && pending.length >= editLimit()) pending = pending.slice(0, editLimit() - 1);
-      pending.push(stored);
+      const stored = await sendFile(file,
+        fraction => { tile.progress = fraction; updateTile(tile); },
+        request => { tile.request = request; });
+      tile.request = null;
+      Object.assign(tile, stored, {uploading: false});
+      URL.revokeObjectURL(tile.url);
+      tile.url = stored.url;
       renderPending();
-    }catch(e){ showError('Could not attach image: ' + errorText(e)); }
+    }catch(e){
+      pending = pending.filter(p => p !== tile);
+      URL.revokeObjectURL(tile.url);
+      renderPending();
+      if(e.message !== 'cancelled') showError(`Could not attach ${tile.name}: ` + errorText(e));
+    }
+
   }
 }
 
@@ -961,6 +1028,10 @@ async function send(){
   const text = promptBox.value.trim();
   if(controller) return;
   if(!text && !pending.length) return;
+  if(pending.some(p => p.uploading)){
+    showError('One moment: the picture is still uploading.');
+    return;
+  }
   const decision = await decideAction(text, pending.length > 0);
   if(decision.action === 'clean' || decision.action === 'blur') return sendPhoto(text, decision);
   if(decision.action === 'image' || decision.action === 'edit') return sendImage(text, decision);
