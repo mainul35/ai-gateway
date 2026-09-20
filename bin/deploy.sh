@@ -70,7 +70,15 @@ else
 fi
 
 restart() {
-    pkill -f 'uvicorn app.main:app' >/dev/null 2>&1; sleep 2
+    # Uvicorn drains what it is serving before it goes, and a picture job can take a minute. Starting
+    # the new one while the old still holds the port makes it exit, and the watchdog then restarts
+    # every minute until someone notices.
+    pkill -f 'uvicorn app.main:app' >/dev/null 2>&1
+    for _ in $(seq 1 30); do
+        (echo > /dev/tcp/127.0.0.1/9000) >/dev/null 2>&1 || break
+        sleep 1
+    done
+    (echo > /dev/tcp/127.0.0.1/9000) >/dev/null 2>&1 && { pkill -9 -f 'uvicorn app.main:app'; sleep 2; }
     ./bin/gateway-start.sh
     for _ in $(seq 1 30); do
         sleep 1

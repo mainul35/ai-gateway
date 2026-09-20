@@ -656,6 +656,30 @@ WANTS_DEHAZE = re.compile(r"\b(haz\w*|mist\w*|foggy|fog|smog|milky|washed out|fl
 WANTS_DENOISE = re.compile(r"\b(noise|noisy|grain|grainy|denoise|speckl\w*|iso|clean)\b", re.I)
 
 
+async def _save_result(db, user_id, conversation_id, png, name, prompt, extra=None, stats=None):
+    """Stores the picture and, when it belongs to a conversation, the message that shows it.
+
+    Written by the server rather than the browser so that a dropped connection cannot lose it: the
+    work is done and paid for, and reopening the conversation has to show it.
+    """
+    stored = ChatFile(user_id=user_id, kind="generated", mime_type="image/png",
+                      name=name, prompt=prompt, data=png)
+    db.add(stored)
+    await db.commit()
+    await db.refresh(stored)
+    if conversation_id is not None:
+        generated = {"file_id": stored.id, "prompt": prompt, **(extra or {})}
+        conversation = await db.get(Conversation, conversation_id)
+        if conversation is not None and conversation.user_id == user_id:
+            db.add(ConversationMessage(conversation_id=conversation_id, role="assistant",
+                                       content=f"({prompt.lower()})",
+                                       stats=json.dumps(stats) if stats else None,
+                                       attachments=json.dumps({"generated": generated})))
+            conversation.updated_at = utcnow()
+            await db.commit()
+    return stored
+
+
 class PhotoIn(BaseModel):
     file_id: int
     action: str = Field(pattern="^(clean|blur)$")
@@ -676,7 +700,7 @@ async def edit_photo(payload: PhotoIn, principal: Principal = Depends(authentica
         raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "Image work is turned off on this server")
     if not access.can_generate_images(principal):
         raise HTTPException(status.HTTP_403_FORBIDDEN, "You do not have access to image work")
-    if payload.action == "blur" and not photo.is_depth_available():
+    if payload.action == "blur" and not await asyncio.to_thread(photo.is_depth_available):
         raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE,
                             "Background blur needs the depth model; it is not installed")
     if payload.conversation_id is not None:
@@ -751,14 +775,12 @@ async def edit_photo(payload: PhotoIn, principal: Principal = Depends(authentica
                                                ("sharpened", wants["sharpen"]),
                                                ("enlarged 2x", wants["upscale"])) if flag]
                 done = ", ".join(did) or "cleaned up"
-            stored = ChatFile(user_id=user_id, kind="generated", mime_type="image/png",
-                              name=f"photo-{payload.action}.png", prompt=done, data=png)
-            db.add(stored)
-            await db.commit()
-            await db.refresh(stored)
+            seconds = round(time.monotonic() - started, 1)
+            stored = await _save_result(db, user_id, payload.conversation_id, png,
+                                        f"photo-{payload.action}.png", done,
+                                        {"source_file_id": payload.file_id}, {"total": seconds})
             yield _event("image", file=_file_json(stored), action=payload.action,
-                         did=done[:1].upper() + done[1:],
-                         seconds=round(time.monotonic() - started, 1))
+                         did=done[:1].upper() + done[1:], saved=True, seconds=seconds)
 
     return StreamingResponse(stream(), media_type="text/event-stream",
                              headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
@@ -889,13 +911,14 @@ async def generate_image(payload: ImageIn, principal: Principal = Depends(authen
         await usage_log.record(principal, settings.image_model_name(), "comfyui", endpoint, True, 200,
                                None, (time.monotonic() - started) * 1000)
         async with session_factory()() as db:
-            stored = ChatFile(user_id=user_id, kind="generated", mime_type="image/png",
-                              name=f"image-{seed}.png", prompt=drawable, data=png)
-            db.add(stored)
-            await db.commit()
-            await db.refresh(stored)
-            yield _event("image", file=_file_json(stored), seed=seed,
-                         seconds=round(time.monotonic() - started, 1))
+            seconds = round(time.monotonic() - started, 1)
+            stored = await _save_result(db, user_id, payload.conversation_id, png,
+                                        f"image-{seed}.png", drawable,
+                                        {"seed": seed, "size": payload.size,
+                                         "asked": payload.prompt,
+                                         "source_file_id": payload.source_file_id},
+                                        {"total": seconds})
+            yield _event("image", file=_file_json(stored), seed=seed, saved=True, seconds=seconds)
 
     return StreamingResponse(stream(), media_type="text/event-stream",
                              headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})

@@ -298,7 +298,7 @@ async def _with_correct_lettering(client, base, client_id, png, text, report, dr
     picture that came out right first time is returned untouched.
     """
     await report("Checking the lettering")
-    best, best_score = png, lettering.score(png, text)
+    best, best_score = png, await lettering.score_in_background(png, text)
     log.info("Lettering %r scored %.2f as drawn", text, best_score)
     if best_score >= 1.0:
         return png
@@ -316,7 +316,7 @@ async def _with_correct_lettering(client, base, client_id, png, text, report, dr
             candidate = await draw_again()
         if not candidate:
             continue
-        candidate_score = lettering.score(candidate, text)
+        candidate_score = await lettering.score_in_background(candidate, text)
         log.info("Lettering %r scored %.2f after %s", text, candidate_score,
                  "a correction" if correcting else "drawing again")
         if candidate_score > best_score:

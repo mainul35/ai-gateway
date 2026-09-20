@@ -4,6 +4,7 @@ Flux spells badly and the editing model spells well but not always ("JDK 27" cam
 "JDC 27"). Neither can be trusted blindly, so the picture is read back: a few hundred milliseconds on
 the CPU decides whether the lettering needs correcting, and whether the correction worked.
 """
+import asyncio
 import difflib
 import io
 import logging
@@ -89,3 +90,8 @@ def _in_order(wanted_words, found_words):
 
 def is_correct(png, wanted):
     return score(png, wanted) >= 1.0
+
+
+async def score_in_background(png, wanted):
+    """Reading a picture takes a fifth of a second of CPU, which the event loop should not spend."""
+    return await asyncio.to_thread(score, png, wanted)
