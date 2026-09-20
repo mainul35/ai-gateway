@@ -38,6 +38,11 @@ EDITABLE_KEYS = [
     "images.edit.text_encoder",
     "images.edit.vae",
     "images.edit.lora",
+    "memory.enabled",
+    "memory.model",
+    "memory.summarize.every",
+    "memory.keep.recent",
+    "memory.max.user.notes",
 ]
 SECRET_KEYS = {"sso.client.secret"}
 

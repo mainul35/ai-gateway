@@ -60,6 +60,17 @@ textarea:focus{outline:none;border-color:var(--primary)}
 .inline select,.inline input{width:auto;padding:.3rem .5rem;font-size:.83rem}
 .hint{font-size:.8rem;color:var(--muted);margin-top:.45rem;min-height:1.1rem}
 .hint.warn{color:var(--warning)}
+.mem{font-size:.85rem}
+.mem h3{font-size:.8rem;color:var(--muted);margin:.8rem 0 .35rem;text-transform:uppercase;letter-spacing:.04em}
+.mem h3:first-child{margin-top:0}
+.mem ul{list-style:none;margin:0;padding:0}
+.mem li{display:flex;gap:.35rem;align-items:flex-start;padding:.3rem 0;border-bottom:1px solid var(--input)}
+.mem li:last-child{border-bottom:none}
+.mem li span{flex:1;min-width:0;word-wrap:break-word}
+.mem li button{background:none;border:none;color:var(--muted);cursor:pointer;padding:0 .15rem;font-size:.85rem}
+.mem li button:hover{color:var(--text)}
+.mem .summary{white-space:pre-wrap;color:var(--text);max-height:11rem;overflow-y:auto}
+.mem .empty{color:var(--muted)}
 .lightbox{position:fixed;inset:0;background:rgba(0,0,0,.85);display:flex;align-items:center;justify-content:center;
           z-index:50;cursor:zoom-out;padding:1rem}
 .lightbox img{max-width:100%;max-height:100%;border-radius:8px}
@@ -78,6 +89,16 @@ textarea:focus{outline:none;border-color:var(--primary)}
       </div>
       <div class="convs" id="convs"><span class="muted" style="padding:0 .5rem">Loading&hellip;</span></div>
       <p class="muted" style="margin:.6rem 0 0;font-size:.75rem">Double-click a conversation to rename it.</p>
+    </div>
+
+    <div class="card" id="memoryCard" hidden>
+      <div class="row" style="justify-content:space-between;align-items:center;margin-bottom:.2rem">
+        <h2 style="margin:0">Memory</h2>
+        <button class="btn btn-sm btn-secondary" id="addNote" title="Add something to remember">+ Note</button>
+      </div>
+      <p class="muted" style="margin:0 0 .5rem;font-size:.75rem">Used to start every chat. Click a note to
+        edit it, &times; to forget it.</p>
+      <div class="mem" id="memory"></div>
     </div>
 
     <div class="card">
@@ -354,6 +375,66 @@ document.addEventListener('click', e => {
 });
 document.addEventListener('keydown', e => { if(e.key === 'Escape') document.querySelector('.lightbox')?.remove(); });
 
+// --- memory ---------------------------------------------------------------
+
+let memory = {enabled: false, user: [], conversation: null};
+
+async function loadMemory(){
+  try{
+    memory = await api('/chat/memory' + (currentId ? `?conversation_id=${currentId}` : ''));
+  }catch(e){ return; }
+  document.getElementById('memoryCard').hidden = !memory.enabled;
+  renderMemory();
+}
+
+function renderMemory(){
+  const target = document.getElementById('memory');
+  const notes = memory.user.map(n => `
+    <li>
+      <span data-edit-memory="${n.id}" title="${n.source === 'manual' ? 'Written by you' : 'Noticed in a chat'}">${escapeHtml(n.content)}</span>
+      <button data-forget="${n.id}" title="Forget this">&times;</button>
+    </li>`).join('');
+  const summary = memory.conversation;
+  target.innerHTML = `
+    <h3>About you</h3>
+    ${notes ? `<ul>${notes}</ul>` : '<p class="empty" style="margin:0">Nothing yet. Notes appear as you chat.</p>'}
+    ${currentId ? `<h3>This conversation</h3>${summary
+      ? `<div class="summary" data-edit-memory="${summary.id}" title="Click to edit">${escapeHtml(summary.content)}</div>
+         <div style="text-align:right"><button data-forget="${summary.id}" class="btn btn-sm btn-secondary" style="margin-top:.4rem">Forget</button></div>`
+      : '<p class="empty" style="margin:0">Summarised once this chat gets long.</p>'}` : ''}`;
+}
+
+document.getElementById('memory').addEventListener('click', async e => {
+  const forget = e.target.closest('[data-forget]');
+  if(forget){
+    if(!confirm('Forget this? It will no longer be used in your chats.')) return;
+    try{
+      await api(`/chat/memory/${forget.dataset.forget}`, {method: 'DELETE'});
+      loadMemory();
+    }catch(err){ showError(errorText(err)); }
+    return;
+  }
+  const edit = e.target.closest('[data-edit-memory]');
+  if(!edit) return;
+  const updated = prompt('Edit what is remembered', edit.textContent.trim());
+  if(updated === null || !updated.trim()) return;
+  try{
+    await api(`/chat/memory/${edit.dataset.editMemory}`, {method: 'PATCH', headers: JSON_HEADERS,
+                                                          body: JSON.stringify({content: updated.trim()})});
+    loadMemory();
+  }catch(err){ showError(errorText(err)); }
+});
+
+document.getElementById('addNote').addEventListener('click', async () => {
+  const content = prompt('What should be remembered about you in every chat?');
+  if(!content || !content.trim()) return;
+  try{
+    await api('/chat/memory', {method: 'POST', headers: JSON_HEADERS,
+                               body: JSON.stringify({content: content.trim(), scope: 'user'})});
+    loadMemory();
+  }catch(err){ showError(errorText(err)); }
+});
+
 // --- conversation list ----------------------------------------------------
 
 async function loadConversations(){
@@ -381,6 +462,7 @@ function resetChat(){
   document.getElementById('chatTitle').textContent = 'New conversation';
   chat.innerHTML = '<p class="muted" id="empty">Pick a model and say something.</p>';
   loadConversations();
+  loadMemory();
 }
 
 async function openConversation(id){
@@ -419,6 +501,7 @@ async function openConversation(id){
       showError('');
     }
     loadConversations();
+    loadMemory();
   }catch(e){ showError('Could not open conversation: ' + errorText(e)); }
 }
 
@@ -732,7 +815,7 @@ async function sendChat(text, decision){
   if(savedSystem) messages.push({role: 'system', content: savedSystem});
   messages.push(...history.map(h => ({role: h.role, content: h.content, images: h.images || []})));
 
-  const payload = {model, messages,
+  const payload = {model, messages, conversation_id: currentId,
                    temperature: parseFloat(document.getElementById('temperature').value),
                    max_tokens: parseInt(document.getElementById('maxTokens').value, 10) || 2048,
                    web_search: decision.action === 'search',
@@ -799,6 +882,8 @@ async function sendChat(text, decision){
   if(answer || thinking){
     await saveMessage({role: 'assistant', content: answer, reasoning: thinking || null, model, stats,
                        attachments: sources ? {sources} : null});
+    // The summary is written in the background once a chat gets long
+    if(memory.enabled) setTimeout(loadMemory, 4000);
   }
   loadConversations();
 }
@@ -876,6 +961,6 @@ promptBox.addEventListener('keydown', e => {
   if(e.key === 'Enter' && !e.shiftKey){ e.preventDefault(); send(); }
 });
 
-Promise.all([loadModels(), loadCapabilities()]).then(loadConversations);
+Promise.all([loadModels(), loadCapabilities()]).then(() => Promise.all([loadConversations(), loadMemory()]));
 </script>
 {% endblock %}

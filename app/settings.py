@@ -26,6 +26,13 @@ DEFAULTS = {
     "images.max_upload_mb": "10",
     # Small model that decides what a message asks for, and writes search queries and summaries
     "router.model": "qwen3:1.7b",
+    # Playground memory: a running summary per conversation, durable notes per user
+    "memory.enabled": "true",
+    # Empty means each conversation's own model writes its notes; it is already loaded
+    "memory.model": "",
+    "memory.summarize.every": "8",
+    "memory.keep.recent": "8",
+    "memory.max.user.notes": "20",
     # Instruction-based editing; when these files are not in ComfyUI, edits fall back to Flux image-to-image
     "images.edit.model": "qwen_image_edit_2511_fp8mixed.safetensors",
     "images.edit.text_encoder": "qwen_2.5_vl_7b_fp8_scaled.safetensors",
@@ -182,6 +189,25 @@ def image_guidance():
 def router_model():
     """Set to nothing to fall back to keyword rules instead."""
     return get("router.model", "ROUTER_MODEL")
+
+
+def memory_model():
+    """Set to pin summaries to one model; empty lets each conversation use its own."""
+    return get("memory.model", "MEMORY_MODEL")
+
+
+def summarize_every():
+    """How many new messages may pile up before the conversation summary is refreshed."""
+    return int(get("memory.summarize.every", "MEMORY_SUMMARIZE_EVERY"))
+
+
+def keep_recent_messages():
+    """Recent turns always sent in full; everything older is covered by the summary."""
+    return int(get("memory.keep.recent", "MEMORY_KEEP_RECENT"))
+
+
+def max_user_notes():
+    return int(get("memory.max.user.notes", "MEMORY_MAX_USER_NOTES"))
 
 
 def edit_model():
