@@ -13,6 +13,10 @@
   --success:#10b981; --warning:#f59e0b; --danger:#ef4444;
 }
 *{box-sizing:border-box}
+/* A page that fills the window and scrolls inside itself, rather than scrolling as a document */
+body.app{height:100vh;overflow:hidden;display:flex;flex-direction:column}
+body.app main{flex:1;min-height:0;max-width:none;width:100%;padding:0;margin:0}
+body.app header.nav{flex:none;padding:.6rem 1.25rem}
 body{margin:0;background:var(--bg);color:var(--text);line-height:1.6;
      font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif}
 a{color:#818cf8}
@@ -66,7 +70,7 @@ label span.hint{display:block;font-size:.8rem;color:var(--muted);margin-top:.2re
 [hidden]{display:none !important}
 </style>
 </head>
-<body>
+<body class="{% block body_class %}{% endblock %}">
 {% if user %}
 <header class="nav">
   <span class="brand">Model Gateway</span>
