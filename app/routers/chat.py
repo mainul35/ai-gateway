@@ -22,7 +22,7 @@ from app.auth import Principal, authenticate
 from app.db import get_session, session_factory
 from app.models import ChatFile, Conversation, ConversationMessage, MemoryEntry, utcnow
 from app.routers.openai_v1 import PROXY_PATHS, forward
-from app.tools import (image_prompt, images, markdown, memory as memory_tool, photo,
+from app.tools import (image_prompt, images, markdown, memory as memory_tool, photo, portrait,
                         router as intent_router, web_search)
 
 log = logging.getLogger("playground")
@@ -190,6 +190,7 @@ async def capabilities(principal: Principal = Depends(authenticate)):
         "max_edit_images": images.MAX_EDIT_IMAGES,
         "photo_clean": images.is_available(),
         "photo_blur": images.is_available() and photo.is_depth_available(),
+        "photo_backdrop": images.is_available() and portrait.is_available(),
         "routing": intent_router.is_enabled(),
         "markdown": markdown.is_available(),
         "max_upload_mb": settings.max_upload_bytes() // (1024 * 1024),
@@ -682,10 +683,11 @@ async def _save_result(db, user_id, conversation_id, png, name, prompt, extra=No
 
 class PhotoIn(BaseModel):
     file_id: int
-    action: str = Field(pattern="^(clean|blur)$")
+    action: str = Field(pattern="^(clean|blur|backdrop)$")
     request: str = ""                                       # what was asked, in the user's words
     upscale: bool = True                                    # clean: enlarge for cropping
     strength: float = Field(default=1.0, ge=0.2, le=3.0)    # blur: how much
+    colour: str = ""                                        # backdrop: a name or #rrggbb, else the words
     # blur: 0 the nearest thing, 1 the furthest; unset means wherever the photo is already sharp
     focus: float | None = Field(default=None, ge=0.0, le=1.0)
     conversation_id: int | None = None
@@ -703,6 +705,9 @@ async def edit_photo(payload: PhotoIn, principal: Principal = Depends(authentica
     if payload.action == "blur" and not await asyncio.to_thread(photo.is_depth_available):
         raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE,
                             "Background blur needs the depth model; it is not installed")
+    if payload.action == "backdrop" and not await asyncio.to_thread(portrait.is_available):
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE,
+                            "Changing the background colour needs the cut-out model; it is not installed")
     if payload.conversation_id is not None:
         await _owned(session, payload.conversation_id, user)
     found = (await _load_files(session, user, [payload.file_id])).get(payload.file_id)
@@ -723,6 +728,8 @@ async def edit_photo(payload: PhotoIn, principal: Principal = Depends(authentica
         }
     else:
         wants = {"upscale": payload.upscale, "sharpen": False, "dehaze": False, "denoise": True}
+    # A colour picked in the interface wins; otherwise it is whatever the sentence named, then white
+    wanted = portrait.colour_from(payload.colour or asked)
 
     async def stream():
         events = asyncio.Queue()
@@ -740,6 +747,11 @@ async def edit_photo(payload: PhotoIn, principal: Principal = Depends(authentica
                     png = await photo.dehaze_in_background(png, 1.0)
                 return png
             job = asyncio.create_task(clean())
+        elif payload.action == "backdrop":
+            async def backdrop():
+                await progress(f"Putting you on a {portrait.colour_name(wanted)} background")
+                return await portrait.replace_background_in_background(source, wanted)
+            job = asyncio.create_task(backdrop())
         else:
             async def blur():
                 await progress("Working out what is near and what is far")
@@ -754,7 +766,7 @@ async def edit_photo(payload: PhotoIn, principal: Principal = Depends(authentica
                 else:
                     getter.cancel()
             png = job.result()
-        except (images.ImageError, photo.PhotoError) as e:
+        except (images.ImageError, photo.PhotoError, portrait.PortraitError) as e:
             await usage_log.record(principal, settings.image_model_name(), "comfyui",
                                    f"photo_{payload.action}", True, 502, None,
                                    (time.monotonic() - started) * 1000, str(e))
@@ -769,6 +781,8 @@ async def edit_photo(payload: PhotoIn, principal: Principal = Depends(authentica
         async with session_factory()() as db:
             if payload.action == "blur":
                 done = "background blurred"
+            elif payload.action == "backdrop":
+                done = f"background changed to {portrait.colour_name(wanted)}"
             else:
                 did = [name for name, flag in (("noise removed", wants["denoise"]),
                                                ("haze cleared", wants["dehaze"]),

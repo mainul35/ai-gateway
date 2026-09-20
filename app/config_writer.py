@@ -45,6 +45,7 @@ EDITABLE_KEYS = [
     "photo.denoise.model",
     "photo.upscale.model",
     "photo.depth.model",
+    "photo.cutout.model",
     "images.prompt.model",
     "images.rewrite.prompt",
     "images.prompt.model",

@@ -14,6 +14,7 @@ log = logging.getLogger("tools.router")
 
 CHAT, SEARCH, IMAGE, EDIT = "chat", "search", "image", "edit"
 CLEAN, BLUR = "clean", "blur"   # what is asked of a photograph, as opposed to a drawing
+BACKDROP = "backdrop"           # the person kept exactly as they are, on a different plain colour
 
 PROMPT = """You route a user's message to one of these actions. Answer with one word and nothing else.
 
@@ -33,6 +34,10 @@ CLEAN  - asks for the quality of a photograph to be improved, with nothing in it
          style, anything added or taken away - it is EDIT, not CLEAN.
 BLUR   - asks for the background of a photograph to be blurred, or for the subject to stand out
          from it: shallower depth of field than the camera gave.
+BACKDROP - asks for the background behind a person to become a plain colour, or for the colour it
+         already is to become a different one: passport and visa photographs. "White background",
+         "make the background light blue", "I need this on red for my visa form" are all BACKDROP.
+         Only the background colour changes; the person is untouched.
 
 Examples:
 "What is the latest Java version as of today?" -> SEARCH
@@ -50,6 +55,9 @@ Examples:
 "add fog to this picture" -> EDIT
 "blur the background so the bird stands out" -> BLUR
 "can you give this more bokeh?" -> BLUR
+"change the background to white for my passport photo" -> BACKDROP
+"I need a light blue background on this" -> BACKDROP
+"put a plain grey backdrop behind me" -> BACKDROP
 "what is in this image?" -> CHAT
 "can you read the text in this screenshot?" -> CHAT
 
@@ -69,6 +77,13 @@ CLEAN_WORDS = re.compile(
 BLUR_WORDS = re.compile(
     r"\b(bokeh|background blur|blur the background|depth of field|dof|stand out from|"
     r"separate\w* from the background|portrait mode)\b", re.I)
+BACKDROP_WORDS = re.compile(
+    r"\bpassport\b|\bvisa photo\w*|\bid photo\b|"
+    # a colour named next to the background, either way round: "white background", "background to blue"
+    r"\b(background|backdrop|back ?drop)\b[^.?!]{0,20}\b(colou?r|white|blue|red|grey|gray|green|black|"
+    r"beige|cream|pink|navy|#[0-9a-f]{3,6})\b|"
+    r"\b(white|off-white|light blue|sky blue|dark blue|navy|red|grey|gray|light grey|light gray|green|"
+    r"black|beige|cream|pink|plain)\b[^.?!]{0,12}\b(background|backdrop|back ?drop)\b", re.I)
 SEARCH_WORDS = re.compile(
     r"\b(latest|newest|current|currently|today|todays|tonight|now|recent|recently|this (week|month|year)|"
     r"news|price|cost|release[ds]?|version|available|stock|weather|score|who is|who won|when (is|did|will)|"
@@ -86,13 +101,17 @@ def candidates(tools, has_images):
     if tools.get("web_search") and not has_images:
         allowed.append(SEARCH)
     if tools.get("image_generation"):
-        allowed += [EDIT, CLEAN, BLUR] if has_images else [IMAGE]
+        allowed += [EDIT, CLEAN, BLUR, BACKDROP] if has_images else [IMAGE]
     return allowed
 
 
 def by_keywords(message, allowed, has_images):
     """Used when the router model cannot decide. Only ever returns an allowed action."""
     text = (message or "").strip()
+    # First, because a plain colour behind a person is asked for in the same words as an edit:
+    # "change the background to white" is "change ... " to EDIT_WORDS and nothing to the rest
+    if has_images and BACKDROP in allowed and BACKDROP_WORDS.search(text):
+        return BACKDROP
     if has_images and CLEAN in allowed and CLEAN_WORDS.search(text):
         return CLEAN
     if has_images and BLUR in allowed and BLUR_WORDS.search(text):

@@ -238,6 +238,25 @@ a.cite{font-size:.75em;vertical-align:super;text-decoration:none;padding:0 .1rem
               <input type="range" id="blurStrength" min="0.2" max="3" step="0.1" value="1"
                      style="width:5rem">
             </span>
+            <span class="inline" id="backdropRow" hidden
+                  title="The colour to put behind the person, for a passport or visa photo">Backdrop
+              <select id="backdropColour">
+                <option value="">from your words</option>
+                <option value="white">white</option>
+                <option value="off-white">off-white</option>
+                <option value="light blue">light blue</option>
+                <option value="sky blue">sky blue</option>
+                <option value="blue">blue</option>
+                <option value="dark blue">dark blue</option>
+                <option value="light grey">light grey</option>
+                <option value="grey">grey</option>
+                <option value="red">red</option>
+                <option value="cream">cream</option>
+                <option value="custom">pick a colour…</option>
+              </select>
+              <input type="color" id="backdropCustom" value="#ffffff" hidden
+                     style="width:2rem;height:1.6rem;padding:0;border:none;background:none">
+            </span>
             <span class="inline" id="strengthRow" hidden title="How far the edit may move away from the original">Change
               <input type="range" id="strength" min="0.2" max="1" step="0.05" value="0.8" style="width:5rem">
               <span id="strengthValue">0.80</span>
@@ -405,6 +424,8 @@ function syncTools(){
   document.getElementById('sizeRow').hidden = !imageMode() || pending.length > 0;
   document.getElementById('strengthRow').hidden = !imageMode() || pending.length === 0 || qwenEdits();
   document.getElementById('blurRow').hidden = !imageMode() || pending.length === 0 || !caps.photo_blur;
+  document.getElementById('backdropRow').hidden =
+    !imageMode() || pending.length === 0 || !caps.photo_backdrop;
   if(!canAttach() && pending.length){ pending = []; renderPending(); }
 
   const hint = document.getElementById('modeHint');
@@ -417,7 +438,9 @@ function syncTools(){
         ? 'Ask for a picture and one is created with Flux; ask a question and you get an answer. Attach an image (or press Edit on one) to change it.'
         : 'Sending creates an image with Flux instead of chatting. Attach an image (or press Edit on one) to change it.';
     }else if(qwenEdits()){
-      hint.textContent = 'Say what to do: "remove the noise", "blur the background", or a change like "make it night".'
+      hint.textContent = 'Say what to do: "remove the noise", "blur the background", '
+        + (caps.photo_backdrop ? '"white background for my passport", ' : '')
+        + 'or a change like "make it night".'
         + (pending.length > 1 ? ' Refer to the pictures as image 1 (the one edited), image 2 and image 3.'
                               : ` You can attach up to ${editLimit() - 1} more picture(s) to use, e.g. "put the hat from image 2 on the person in image 1".`);
     }else{
@@ -1108,6 +1131,16 @@ async function decideAction(text, hasImages){
   }finally{ setDeciding(false); }
 }
 
+// An empty answer means the sentence decides the colour, which is usually what was typed anyway
+function chosenBackdrop(){
+  const picked = document.getElementById('backdropColour').value;
+  return picked === 'custom' ? document.getElementById('backdropCustom').value : picked;
+}
+
+document.getElementById('backdropColour').addEventListener('change', e => {
+  document.getElementById('backdropCustom').hidden = e.target.value !== 'custom';
+});
+
 function setDeciding(on){
   document.getElementById('send').disabled = on;
   document.getElementById('deciding').hidden = !on;
@@ -1122,7 +1155,8 @@ async function send(){
     return;
   }
   const decision = await decideAction(text, pending.length > 0);
-  if(decision.action === 'clean' || decision.action === 'blur') return sendPhoto(text, decision);
+  if(decision.action === 'clean' || decision.action === 'blur' || decision.action === 'backdrop')
+    return sendPhoto(text, decision);
   if(decision.action === 'image' || decision.action === 'edit') return sendImage(text, decision);
   return sendChat(text, decision);
 }
@@ -1239,6 +1273,7 @@ async function sendPhoto(text, decision){
   if(!source){ showError('Attach a photo first.'); return; }
   showError('');
   const cleaning = decision.action === 'clean';
+  const backdrop = decision.action === 'backdrop';
   try{
     await ensureConversation(text, modelSelect.value);
   }catch(e){
@@ -1253,7 +1288,8 @@ async function sendPhoto(text, decision){
   await saveMessage({role: 'user', content: text,
                      attachments: {mode: 'photo', images: [{file_id: source.id}]}});
 
-  const box = addMessage('assistant', '', cleaning ? 'Clean-up' : 'Background blur');
+  const box = addMessage('assistant', '',
+                         backdrop ? 'Background colour' : cleaning ? 'Clean-up' : 'Background blur');
   noteDecision(box, decision);
   setStatus(box, 'Starting');
   const started = performance.now();
@@ -1263,7 +1299,7 @@ async function sendPhoto(text, decision){
   try{
     const response = await postStream('/chat/photo', {
       file_id: source.id, action: decision.action, conversation_id: currentId,
-      request: text, upscale: cleaning,
+      request: text, upscale: cleaning, colour: chosenBackdrop(),
       strength: parseFloat(document.getElementById('blurStrength').value)});
     await readEvents(response, chunk => {
       const event = chunk.gateway;
@@ -1290,7 +1326,8 @@ async function sendPhoto(text, decision){
     return;
   }
   // The server says what it actually did, since the words decide it
-  const done = result.did || (cleaning ? 'Cleaned up' : 'Background blurred by distance');
+  const done = result.did || (backdrop ? 'Background changed'
+                              : cleaning ? 'Cleaned up' : 'Background blurred by distance');
   const generated = {file_id: result.file.id, prompt: done, source_file_id: source.id};
   renderGenerated(box, generated, {total: +((performance.now() - started) / 1000).toFixed(1)});
   box.querySelector('.generated img')?.addEventListener('load', () => revealFrom(box), {once: true});

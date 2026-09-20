@@ -37,6 +37,7 @@ DEFAULTS = {
     "photo.denoise.model": "scunet_color_real_psnr.pth",
     "photo.upscale.model": "RealESRGAN_x2plus.pth",
     "photo.depth.model": "models/depth-anything-v2-small.onnx",
+    "photo.cutout.model": "models/birefnet-lite.onnx",
     "images.prompt.model": "",
     # A request is rewritten into something an image model can draw, with the conversation for context
     "images.rewrite.prompt": "true",
@@ -251,6 +252,11 @@ def upscale_model():
 
 def depth_model_path():
     path = get("photo.depth.model", "PHOTO_DEPTH_MODEL") or ""
+    return path if os.path.isabs(path) else os.path.join(PROJECT_ROOT, path)
+
+
+def cutout_model_path():
+    path = get("photo.cutout.model", "PHOTO_CUTOUT_MODEL") or ""
     return path if os.path.isabs(path) else os.path.join(PROJECT_ROOT, path)
 
 
