@@ -214,6 +214,10 @@ a.cite{font-size:.75em;vertical-align:super;text-decoration:none;padding:0 .1rem
             <span class="inline" id="sizeRow" hidden>Shape
               <select id="imageSize"></select>
             </span>
+            <span class="inline" id="blurRow" hidden title="How much the background is blurred">Blur
+              <input type="range" id="blurStrength" min="0.2" max="3" step="0.1" value="1"
+                     style="width:5rem">
+            </span>
             <span class="inline" id="strengthRow" hidden title="How far the edit may move away from the original">Change
               <input type="range" id="strength" min="0.2" max="1" step="0.05" value="0.8" style="width:5rem">
               <span id="strengthValue">0.80</span>
@@ -371,6 +375,7 @@ function syncTools(){
   document.getElementById('attach').hidden = !canAttach();
   document.getElementById('sizeRow').hidden = !imageMode() || pending.length > 0;
   document.getElementById('strengthRow').hidden = !imageMode() || pending.length === 0 || qwenEdits();
+  document.getElementById('blurRow').hidden = !imageMode() || pending.length === 0 || !caps.photo_blur;
   if(!canAttach() && pending.length){ pending = []; renderPending(); }
 
   const hint = document.getElementById('modeHint');
@@ -383,7 +388,7 @@ function syncTools(){
         ? 'Ask for a picture and one is created with Flux; ask a question and you get an answer. Attach an image (or press Edit on one) to change it.'
         : 'Sending creates an image with Flux instead of chatting. Attach an image (or press Edit on one) to change it.';
     }else if(qwenEdits()){
-      hint.textContent = 'Say what to change, e.g. "make it night" or "remove the car"; everything else stays as it is.'
+      hint.textContent = 'Say what to do: "remove the noise", "blur the background", or a change like "make it night".'
         + (pending.length > 1 ? ' Refer to the pictures as image 1 (the one edited), image 2 and image 3.'
                               : ` You can attach up to ${editLimit() - 1} more picture(s) to use, e.g. "put the hat from image 2 on the person in image 1".`);
     }else{
@@ -929,6 +934,7 @@ async function send(){
   if(controller) return;
   if(!text && !pending.length) return;
   const decision = await decideAction(text, pending.length > 0);
+  if(decision.action === 'clean' || decision.action === 'blur') return sendPhoto(text, decision);
   if(decision.action === 'image' || decision.action === 'edit') return sendImage(text, decision);
   return sendChat(text, decision);
 }
@@ -1036,6 +1042,75 @@ async function sendChat(text, decision){
     // The summary is written in the background once a chat gets long
     if(memory.enabled) setTimeout(loadMemory, 4000);
   }
+  loadConversations();
+}
+
+// A photograph, not a drawing: noise taken off, or the background blurred. Never both at once.
+async function sendPhoto(text, decision){
+  const source = pending[0];
+  if(!source){ showError('Attach a photo first.'); return; }
+  showError('');
+  const cleaning = decision.action === 'clean';
+  const wantsCrop = /crop|zoom|enlarge|upscale|bigger|print/i.test(text);
+  try{
+    await ensureConversation(text, modelSelect.value);
+  }catch(e){
+    showError('Could not save the conversation: ' + errorText(e));
+    return;
+  }
+  const references = pending.slice(1);
+  pending = []; renderPending();
+  promptBox.value = ''; fitComposer();
+  addUserMessage(text, [source, ...references].map(f => f.url));
+  history.push({role: 'user', content: text, images: []});
+  await saveMessage({role: 'user', content: text,
+                     attachments: {mode: 'photo', images: [{file_id: source.id}]}});
+
+  const box = addMessage('assistant', '', cleaning ? 'Clean-up' : 'Background blur');
+  noteDecision(box, decision);
+  setStatus(box, 'Starting');
+  const started = performance.now();
+  let result = null;
+  controller = new AbortController();
+  busy(true);
+  try{
+    const response = await postStream('/chat/photo', {
+      file_id: source.id, action: decision.action, conversation_id: currentId,
+      upscale: cleaning && wantsCrop,
+      strength: parseFloat(document.getElementById('blurStrength').value)});
+    await readEvents(response, chunk => {
+      const event = chunk.gateway;
+      if(!event) return;
+      if(event.type === 'progress'){
+        setStatus(box, event.fraction != null ? `${event.stage} · ${Math.round(event.fraction * 100)}%` : event.stage,
+                  event.fraction);
+      }else if(event.type === 'image'){
+        result = event;
+      }
+    });
+  }catch(e){
+    if(e.name !== 'AbortError') showError(errorText(e));
+  }finally{
+    controller = null;
+    busy(false);
+  }
+  setStatus(box, null);
+  if(!result){
+    box.querySelector('.body').textContent = '(nothing came back)';
+    history.push({role: 'assistant', content: '(the photo was not changed)'});
+    return;
+  }
+  const done = cleaning ? (wantsCrop ? 'Noise removed and enlarged 2x' : 'Noise removed')
+                        : 'Background blurred by distance';
+  const generated = {file_id: result.file.id, prompt: done, source_file_id: source.id};
+  renderGenerated(box, generated, {total: +((performance.now() - started) / 1000).toFixed(1)});
+  box.querySelector('.generated img')?.addEventListener('load', () => revealFrom(box), {once: true});
+  revealFrom(box);
+  const summary = `(${done.toLowerCase()})`;
+  history.push({role: 'assistant', content: summary});
+  await saveMessage({role: 'assistant', content: summary,
+                     stats: {total: +((performance.now() - started) / 1000).toFixed(1)},
+                     attachments: {generated}});
   loadConversations();
 }
 

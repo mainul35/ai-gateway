@@ -1,7 +1,10 @@
 """Gateway settings, read from config/config.properties with environment fallback."""
+import os
 import secrets
 
 from utils import config
+
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 DEFAULTS = {
     "gateway.models.file": "config/models.yaml",
@@ -30,6 +33,10 @@ DEFAULTS = {
     # Lettering drawn by Flux is usually misspelled; the editing model puts it right afterwards
     "images.fix.text": "true",
     "images.text.attempts": "2",
+    # Photographs: noise removed without inventing detail, and blur added by distance
+    "photo.denoise.model": "scunet_color_real_psnr.pth",
+    "photo.upscale.model": "RealESRGAN_x2plus.pth",
+    "photo.depth.model": "models/depth-anything-v2-small.onnx",
     "images.prompt.model": "",
     # A request is rewritten into something an image model can draw, with the conversation for context
     "images.rewrite.prompt": "true",
@@ -232,6 +239,19 @@ def fix_image_text():
 def text_attempts():
     """How many times the editing model may try to get the lettering right."""
     return max(1, int(get("images.text.attempts", "IMAGES_TEXT_ATTEMPTS")))
+
+
+def denoise_model():
+    return get("photo.denoise.model", "PHOTO_DENOISE_MODEL")
+
+
+def upscale_model():
+    return get("photo.upscale.model", "PHOTO_UPSCALE_MODEL")
+
+
+def depth_model_path():
+    path = get("photo.depth.model", "PHOTO_DEPTH_MODEL") or ""
+    return path if os.path.isabs(path) else os.path.join(PROJECT_ROOT, path)
 
 
 def edit_model():
