@@ -20,6 +20,12 @@ async def ensure_schema():
         await connection.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS model_access VARCHAR(16) DEFAULT 'all'"))
         await connection.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS allowed_models TEXT"))
         await connection.execute(text("ALTER TABLE conversation_messages ADD COLUMN IF NOT EXISTS attachments TEXT"))
+        # One running summary per conversation, whatever races to write it
+        await connection.execute(text("DELETE FROM memory_entries WHERE scope = 'conversation' AND id NOT IN "
+                                      "(SELECT min(id) FROM memory_entries WHERE scope = 'conversation' "
+                                      "GROUP BY conversation_id)"))
+        await connection.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS memory_one_per_conversation "
+                                      "ON memory_entries (conversation_id) WHERE scope = 'conversation'"))
 
 
 async def ensure_default_admin():

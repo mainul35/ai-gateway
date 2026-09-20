@@ -176,6 +176,33 @@ The same image engine is available to API clients, such as Open WebUI and the Op
 `POST /v1/images/generations` and `POST /v1/images/edits` (multipart, with `strength`), which return
 `b64_json`. Anyone with access to at least one model may generate images.
 
+## Memory
+
+A long chat eventually no longer fits in what a model can read, and a new chat starts from nothing.
+The playground keeps two kinds of notes, both visible in its **Memory** panel:
+
+- **This conversation** — a running summary of the older turns. Once a chat passes
+  `memory.keep.recent` messages, those turns are replaced by the summary and only the recent ones are
+  sent in full, so a long conversation keeps its thread instead of losing its beginning.
+- **About you** — short facts that outlive one conversation, such as what you are building, your
+  hardware, or how you like answers. They are added in front of every new chat.
+
+Both are written by the conversation's own model, which is already loaded and has just read the
+material, right after a reply and never while you wait. A note that contradicts an older one replaces
+it, so changing your mind changes the memory.
+
+**You stay in charge.** Click any note to correct it, press &times; to forget it, and **+ Note** to add
+one yourself. Anything you write or edit is kept exactly as you left it and is never rewritten
+automatically. Memory is per user: nobody else can read, edit or see yours.
+
+```properties
+memory.enabled=true
+memory.model=                 # empty: each conversation's own model writes its notes
+memory.summarize.every=8      # new messages before the summary is rewritten
+memory.keep.recent=8          # recent turns always sent in full
+memory.max.user.notes=20
+```
+
 Admins can switch a tool off for everyone in `config/config.properties`:
 
 ```properties

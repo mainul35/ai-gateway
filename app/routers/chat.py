@@ -18,9 +18,9 @@ from sqlalchemy.orm import selectinload
 from app import access, backends, settings, usage as usage_log
 from app.auth import Principal, authenticate
 from app.db import get_session, session_factory
-from app.models import ChatFile, Conversation, ConversationMessage, utcnow
+from app.models import ChatFile, Conversation, ConversationMessage, MemoryEntry, utcnow
 from app.routers.openai_v1 import PROXY_PATHS, forward
-from app.tools import images, router as intent_router, web_search
+from app.tools import images, memory as memory_tool, router as intent_router, web_search
 
 log = logging.getLogger("playground")
 
@@ -164,6 +164,9 @@ async def add_message(conversation_id: int, payload: MessageIn, principal: Princ
         conversation.model = payload.model
     await session.commit()
     await session.refresh(message)
+    if payload.role == "assistant" and memory_tool.is_enabled():
+        # After the reply, so the wait is never the user's
+        asyncio.create_task(_refresh_memory(principal, conversation.user_id, conversation.id))
     return _message_json(message)
 
 
@@ -259,6 +262,7 @@ class ChatMessageIn(BaseModel):
 
 class CompleteIn(BaseModel):
     model: str = Field(max_length=256)
+    conversation_id: int | None = None
     messages: list[ChatMessageIn]
     temperature: float | None = None
     max_tokens: int | None = None
@@ -310,6 +314,8 @@ async def complete(payload: CompleteIn, principal: Principal = Depends(authentic
     if backend is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, f"Model '{payload.model}' is not available")
 
+    if payload.conversation_id is not None:
+        await _owned(session, payload.conversation_id, user)
     use_vision = payload.vision and settings.feature_enabled("vision")
     latest_user = next((m for m in reversed(payload.messages) if m.role == "user"), None)
     if use_vision and latest_user and latest_user.images and "vision" not in backend.capabilities:
@@ -320,8 +326,20 @@ async def complete(payload: CompleteIn, principal: Principal = Depends(authentic
     wanted = [i for m in payload.messages if m.role == "user" for i in m.images] if use_vision else []
     files = await _load_files(session, user, wanted)
 
+    history = list(payload.messages)
+    remembered = None
+    if memory_tool.is_enabled():
+        notes = [n.content for n in await _user_notes(session, user)]
+        summary = await _conversation_memory(session, user.id, payload.conversation_id)
+        remembered = memory_tool.context_block(notes, summary.content if summary else None)
+        if summary and summary.covered_count:
+            # Those turns are in the summary, so they are not sent again
+            system_prompts = [m for m in history if m.role == "system"]
+            rest = [m for m in history if m.role != "system"]
+            history = system_prompts + rest[summary.covered_count:]
+
     messages = []
-    for m in payload.messages:
+    for m in history:
         attached = [files[i] for i in m.images if i in files] if m.role == "user" else []
         if attached:
             parts = [{"type": "text", "text": m.content or "Describe this image."}]
@@ -330,6 +348,11 @@ async def complete(payload: CompleteIn, principal: Principal = Depends(authentic
             messages.append({"role": m.role, "content": parts})
         else:
             messages.append({"role": m.role, "content": m.content})
+
+    if remembered:
+        # After the user's own system prompt, so theirs still comes first
+        messages.insert(1 if messages and messages[0]["role"] == "system" else 0,
+                        {"role": "system", "content": remembered})
 
     body = {"model": payload.model, "messages": messages, "stream": True}
     if payload.temperature is not None:
@@ -371,6 +394,168 @@ async def complete(payload: CompleteIn, principal: Principal = Depends(authentic
 
     return StreamingResponse(stream(), media_type="text/event-stream",
                              headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+
+# --- memory ---------------------------------------------------------------------
+
+def _memory_json(entry):
+    return {"id": entry.id, "scope": entry.scope, "conversation_id": entry.conversation_id,
+            "content": entry.content, "source": entry.source,
+            "updated_at": entry.updated_at.isoformat()}
+
+
+async def _user_notes(session, user):
+    rows = await session.execute(
+        select(MemoryEntry).where(MemoryEntry.user_id == user.id, MemoryEntry.scope == "user")
+        .order_by(MemoryEntry.updated_at.desc()).limit(settings.max_user_notes()))
+    return list(rows.scalars())
+
+
+async def _conversation_memory(session, user_id, conversation_id):
+    if not conversation_id:
+        return None
+    rows = await session.execute(
+        select(MemoryEntry).where(MemoryEntry.user_id == user_id, MemoryEntry.scope == "conversation",
+                                  MemoryEntry.conversation_id == conversation_id).order_by(MemoryEntry.id))
+    return rows.scalars().first()
+
+
+@router.get("/memory")
+async def list_memory(conversation_id: int | None = None, principal: Principal = Depends(authenticate),
+                      session: AsyncSession = Depends(get_session)):
+    """What the playground remembers about this user, and about this conversation."""
+    user = _require_user(principal)
+    summary = await _conversation_memory(session, user.id, conversation_id)
+    return {"enabled": memory_tool.is_enabled(),
+            "user": [_memory_json(n) for n in await _user_notes(session, user)],
+            "conversation": _memory_json(summary) if summary else None}
+
+
+class MemoryIn(BaseModel):
+    content: str = Field(min_length=1, max_length=memory_tool.SUMMARY_LENGTH)
+    scope: str = Field(default="user", pattern="^(user|conversation)$")
+    conversation_id: int | None = None
+
+
+@router.post("/memory", status_code=status.HTTP_201_CREATED)
+async def add_memory(payload: MemoryIn, principal: Principal = Depends(authenticate),
+                     session: AsyncSession = Depends(get_session)):
+    user = _require_user(principal)
+    if payload.scope == "conversation":
+        if payload.conversation_id is None:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "A conversation note needs a conversation")
+        await _owned(session, payload.conversation_id, user)
+        existing = await _conversation_memory(session, user.id, payload.conversation_id)
+        if existing is not None:
+            raise HTTPException(status.HTTP_409_CONFLICT, "This conversation already has notes; edit them")
+    entry = MemoryEntry(user_id=user.id, scope=payload.scope, conversation_id=payload.conversation_id,
+                        content=payload.content.strip(), source="manual")
+    session.add(entry)
+    await session.commit()
+    await session.refresh(entry)
+    return _memory_json(entry)
+
+
+class MemoryPatch(BaseModel):
+    content: str = Field(min_length=1, max_length=memory_tool.SUMMARY_LENGTH)
+
+
+async def _owned_memory(session, user, entry_id):
+    entry = (await session.execute(select(MemoryEntry).where(
+        MemoryEntry.id == entry_id, MemoryEntry.user_id == user.id))).scalar_one_or_none()
+    if entry is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Not found")
+    return entry
+
+
+@router.patch("/memory/{entry_id}")
+async def edit_memory(entry_id: int, payload: MemoryPatch, principal: Principal = Depends(authenticate),
+                      session: AsyncSession = Depends(get_session)):
+    """An edited entry is kept as the user wrote it and is never overwritten automatically."""
+    entry = await _owned_memory(session, _require_user(principal), entry_id)
+    entry.content = payload.content.strip()
+    entry.source = "manual"
+    entry.updated_at = utcnow()
+    await session.commit()
+    await session.refresh(entry)
+    return _memory_json(entry)
+
+
+@router.delete("/memory/{entry_id}")
+async def delete_memory(entry_id: int, principal: Principal = Depends(authenticate),
+                        session: AsyncSession = Depends(get_session)):
+    entry = await _owned_memory(session, _require_user(principal), entry_id)
+    await session.delete(entry)
+    await session.commit()
+    return {"deleted": entry_id}
+
+
+_refreshing = set()
+
+
+async def _refresh_memory(principal, user_id, conversation_id):
+    """Rewrites the conversation summary, then folds what it learned into the user's notes.
+
+    Runs after a turn, in its own session, and never disturbs the chat: failures are only logged.
+    """
+    if conversation_id in _refreshing:
+        return  # a refresh is already running; the next turn picks up whatever it misses
+    _refreshing.add(conversation_id)
+    try:
+        async with session_factory()() as session:
+            conversation = (await session.execute(
+                select(Conversation).options(selectinload(Conversation.messages))
+                .where(Conversation.id == conversation_id, Conversation.user_id == user_id))).scalar_one_or_none()
+            if conversation is None:
+                return
+            keep = settings.keep_recent_messages()
+            older = conversation.messages[:-keep] if keep else list(conversation.messages)
+            if not older:
+                return
+            model = memory_tool.model_for(conversation.model)
+            if not model:
+                return
+            entry = await _conversation_memory(session, user_id, conversation_id)
+            if entry is not None and entry.source == "manual":
+                return  # the user wrote these notes themselves
+            if entry is not None and len(older) - entry.covered_count < settings.summarize_every():
+                return
+
+            previous = entry.content if entry else None
+            # The whole conversation is summarised, but only the older turns count as covered: the
+            # recent ones are still sent in full, and the notes are the better for including them
+            summary = memory_tool.clean_text(await _ask_helper(
+                principal, memory_tool.summary_request(previous, memory_tool.transcript(conversation.messages),
+                                                       model)))
+            if not summary:
+                return
+            if entry is None:
+                entry = MemoryEntry(user_id=user_id, scope="conversation", conversation_id=conversation_id)
+                session.add(entry)
+            entry.content = summary
+            entry.covered_count = len(older)
+            entry.source = "auto"
+            entry.updated_at = utcnow()
+            await session.commit()
+
+            notes = [n for n in (await session.execute(select(MemoryEntry).where(
+                MemoryEntry.user_id == user_id, MemoryEntry.scope == "user"))).scalars()]
+            kept = [n for n in notes if n.source == "manual"]  # the user's own notes stay untouched
+            automatic = [n for n in notes if n.source == "auto"]
+            updated = memory_tool.parse_notes(await _ask_helper(
+                principal, memory_tool.notes_request([n.content for n in notes], summary, model)))
+            updated = [u for u in updated if u not in [k.content for k in kept]]
+            for note, content in zip(automatic, updated):
+                note.content, note.updated_at = content, utcnow()
+            for content in updated[len(automatic):]:
+                session.add(MemoryEntry(user_id=user_id, scope="user", content=content, source="auto"))
+            for note in automatic[len(updated):]:
+                await session.delete(note)   # dropped by the model, usually because it was superseded
+            await session.commit()
+    except Exception as e:  # memory is a convenience; never let it break a conversation
+        log.warning("Could not refresh memory for conversation %s: %s", conversation_id, e)
+    finally:
+        _refreshing.discard(conversation_id)
 
 
 class RouteIn(BaseModel):

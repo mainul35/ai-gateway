@@ -101,6 +101,25 @@ class ConversationMessage(Base):
     conversation: Mapped[Conversation] = relationship(back_populates="messages")
 
 
+class MemoryEntry(Base):
+    """What the playground remembers: notes about a user, or a running summary of one conversation."""
+    __tablename__ = "memory_entries"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    # Set for a conversation summary, empty for a note that outlives any single conversation
+    conversation_id: Mapped[int | None] = mapped_column(
+        ForeignKey("conversations.id", ondelete="CASCADE"), nullable=True, index=True)
+    scope: Mapped[str] = mapped_column(String(16))   # "user" or "conversation"
+    content: Mapped[str] = mapped_column(Text)
+    # Messages already covered by a conversation summary, so the rest can be sent as they are
+    covered_count: Mapped[int] = mapped_column(Integer, default=0)
+    # "auto" when the gateway wrote it, "manual" once the user has edited or added it
+    source: Mapped[str] = mapped_column(String(16), default="auto")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+
+
 class ChatFile(Base):
     """An image a user uploaded to the playground or generated there. Only its owner can read it."""
     __tablename__ = "chat_files"
