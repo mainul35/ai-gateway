@@ -618,19 +618,26 @@ function renderSources(box, sources){
   box.insertBefore(block, box.querySelector('.body'));
 }
 
-// Turns [1], [2] in an answer into links to the matching source
+// Turns [1], [2] and grouped forms like [1, 2, 3] into links to the matching sources
 function fillWithCitations(target, text, sources){
   target.textContent = '';
   if(!sources?.length){ target.textContent = text; return; }
-  const parts = text.split(/\[(\d{1,2})\]/);
+  const parts = text.split(/\[(\d{1,2}(?:\s*[,;]\s*\d{1,2})*)\]/);
   parts.forEach((part, i) => {
     if(i % 2 === 0){ target.appendChild(document.createTextNode(part)); return; }
-    const source = sources[Number(part) - 1];
-    if(!source){ target.appendChild(document.createTextNode(`[${part}]`)); return; }
-    const link = document.createElement('a');
-    link.className = 'cite'; link.href = source.url; link.target = '_blank'; link.rel = 'noopener noreferrer';
-    link.title = source.title; link.textContent = `[${part}]`;
-    target.appendChild(link);
+    const numbers = part.split(/[,;]/).map(n => n.trim());
+    numbers.forEach((number, position) => {
+      const source = sources[Number(number) - 1];
+      if(!source){ target.appendChild(document.createTextNode(`[${number}]`)); }
+      else{
+        const link = document.createElement('a');
+        link.className = 'cite'; link.href = source.url; link.target = '_blank'; link.rel = 'noopener noreferrer';
+        link.title = `${source.title} — ${new URL(source.url).hostname}`;
+        link.textContent = `[${number}]`;
+        target.appendChild(link);
+      }
+      if(position < numbers.length - 1) target.appendChild(document.createTextNode(''));
+    });
   });
 }
 

@@ -196,6 +196,11 @@ rendered once, in one request to `/chat/render`. The gateway does the rendering:
 is escaped rather than obeyed, links open in a new tab, and a picture from somewhere else becomes a
 link instead of being fetched, so an answer cannot make the browser call out on its own.
 
+**Two phrasings are searched, not one.** The model writes a search query from the conversation, and
+the user's own words are searched alongside it: a written query can come out wrong (one came back as
+the URL slug `/jdk/latest-version`), and a page found by both phrasings is more likely to be the right
+one. The written query is cleaned first, so a slug, a label or a bang becomes ordinary words.
+
 **Sources are chosen, not just taken in order.** A search engine's top hit can be a page whose summary
 was written years ago, which is how "what is the latest Java?" came back as Java 25 when 27 was out.
 So results are re-ranked: whoever publishes the thing (its release notes, documentation or newsroom)

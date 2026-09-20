@@ -374,7 +374,10 @@ async def complete(payload: CompleteIn, principal: Principal = Depends(authentic
             query = await _search_query(principal, payload, backend)
             yield _event("status", text=f"Searching the web for “{query}”")
             try:
-                results = await web_search.search(query, wants_recent=web_search.wants_recent(query, latest))
+                # The user's own words are searched too: a written query can come out wrong, and
+                # two phrasings agreeing on a page is a good sign in itself
+                results = await web_search.search([query, latest],
+                                                  wants_recent=web_search.wants_recent(query, latest))
                 if not results:
                     yield _event("notice", text="The web search found nothing; answering without it.")
             except web_search.SearchError as e:
