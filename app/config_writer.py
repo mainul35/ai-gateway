@@ -21,6 +21,23 @@ EDITABLE_KEYS = [
     "sso.claim.name",
     "sso.admin.emails",
     "engine.unload_ollama_first",
+    # Playground tools
+    "features.web_search.enabled",
+    "features.vision.enabled",
+    "features.image_generation.enabled",
+    "router.enabled",
+    "router.model",
+    "search.searxng.url",
+    "search.results",
+    "search.fetch_pages",
+    "images.comfyui.url",
+    "images.checkpoint",
+    "images.steps",
+    "images.guidance",
+    "images.edit.model",
+    "images.edit.text_encoder",
+    "images.edit.vae",
+    "images.edit.lora",
 ]
 SECRET_KEYS = {"sso.client.secret"}
 

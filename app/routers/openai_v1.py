@@ -42,16 +42,18 @@ async def _proxy(request: Request, principal: Principal, endpoint: str, path: st
     return await forward(principal, endpoint, path, body)
 
 
-async def forward(principal: Principal, endpoint: str, path: str, body: dict):
+async def forward(principal: Principal, endpoint: str, path: str, body: dict, skip_access=False):
     """Sends an OpenAI request to the model's upstream, with access checks and usage accounting.
 
-    Returns a JSONResponse, or a StreamingResponse when body["stream"] is set.
+    Returns a JSONResponse, or a StreamingResponse when body["stream"] is set. skip_access is for the
+    gateway's own helper calls (routing, search queries, summaries), which are not the user's choice of
+    model and so are not theirs to be granted.
     """
     model = body.get("model")
     if not model:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Field 'model' is required")
 
-    if not access.can_use_model(principal, model):
+    if not skip_access and not access.can_use_model(principal, model):
         raise HTTPException(status.HTTP_403_FORBIDDEN, f"You do not have access to model '{model}'")
 
     backend = await backends.resolve(model)

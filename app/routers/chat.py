@@ -20,7 +20,7 @@ from app.auth import Principal, authenticate
 from app.db import get_session, session_factory
 from app.models import ChatFile, Conversation, ConversationMessage, utcnow
 from app.routers.openai_v1 import PROXY_PATHS, forward
-from app.tools import images, web_search
+from app.tools import images, router as intent_router, web_search
 
 log = logging.getLogger("playground")
 
@@ -180,6 +180,7 @@ async def capabilities(principal: Principal = Depends(authenticate)):
         # "qwen" follows edit instructions and takes up to 3 images; "flux" re-renders one image
         "edit_engine": await images.edit_engine() if images.is_available() else None,
         "max_edit_images": images.MAX_EDIT_IMAGES,
+        "routing": intent_router.is_enabled(),
         "max_upload_mb": settings.max_upload_bytes() // (1024 * 1024),
     }
 
@@ -266,26 +267,33 @@ class CompleteIn(BaseModel):
     vision: bool = False
 
 
+async def _ask_helper(principal, body):
+    """One non-streamed call for the gateway's own helpers; returns the text, or None if it failed."""
+    try:
+        response = await forward(principal, "chat_completions", PROXY_PATHS["chat_completions"], body,
+                                 skip_access=True)
+        return json.loads(response.body)["choices"][0]["message"].get("content")
+    except (HTTPException, ValueError, KeyError, IndexError, TypeError) as e:
+        log.info("Helper call to %s failed: %s", body.get("model"), e)
+        return None
+
+
 async def _search_query(principal, payload, backend):
-    """Has the model turn the conversation into a search query; falls back to the user's own words."""
+    """Turns the conversation into a search query; falls back to the user's own words."""
     latest = next((m.content for m in reversed(payload.messages) if m.role == "user"), "")
     recent = [m for m in payload.messages if m.role != "system"][-6:]
     transcript = "\n".join(f"{m.role}: {m.content[:1500]}" for m in recent)
-    body = {"model": payload.model, "stream": False, "temperature": 0, "max_tokens": 400,
+    # The small router model writes queries too, so the big model is not loaded just for one line
+    model = settings.router_model() or payload.model
+    body = {"model": model, "stream": False, "temperature": 0, "max_tokens": 400,
             "messages": [{"role": "system", "content": web_search.QUERY_PROMPT},
                          {"role": "user", "content": f"Conversation:\n{transcript}\n\nSearch query:"}]}
     # A one-line query needs no reasoning; skipping it saves most of the wait
-    if backend.kind == "llamacpp":
+    if model == payload.model and backend.kind == "llamacpp":
         body["chat_template_kwargs"] = {"enable_thinking": False}
-    elif backend.kind == "ollama" and "thinking" in backend.capabilities:
+    else:
         body["reasoning_effort"] = "none"
-    try:
-        response = await forward(principal, "chat_completions", PROXY_PATHS["chat_completions"], body)
-        answer = json.loads(response.body)["choices"][0]["message"].get("content")
-    except (HTTPException, ValueError, KeyError, IndexError, TypeError) as e:
-        log.info("Search query generation failed, using the message itself: %s", e)
-        return web_search.clean_query("", latest)
-    return web_search.clean_query(answer, latest)
+    return web_search.clean_query(await _ask_helper(principal, body), latest)
 
 
 @router.post("/complete")
@@ -363,6 +371,38 @@ async def complete(payload: CompleteIn, principal: Principal = Depends(authentic
 
     return StreamingResponse(stream(), media_type="text/event-stream",
                              headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+
+class RouteIn(BaseModel):
+    message: str = ""
+    has_images: bool = False
+    web_search: bool = False
+    image_generation: bool = False
+    history: list[ChatMessageIn] = Field(default_factory=list)
+
+
+@router.post("/route")
+async def route(payload: RouteIn, principal: Principal = Depends(authenticate)):
+    """Picks one action for this message out of the tools the user has switched on."""
+    tools = {
+        "web_search": payload.web_search and web_search.is_available(),
+        "image_generation": (payload.image_generation and images.is_available()
+                             and access.can_generate_images(principal)),
+    }
+    allowed = intent_router.candidates(tools, payload.has_images)
+    if len(allowed) == 1:
+        return {"action": allowed[0], "decided_by": "the only tool switched on"}
+    if not intent_router.is_enabled():
+        return {"action": intent_router.by_keywords(payload.message, allowed, payload.has_images),
+                "decided_by": "keywords"}
+
+    history = [{"role": m.role, "content": m.content} for m in payload.history]
+    answer = await _ask_helper(principal, intent_router.build_request(payload.message, allowed, history))
+    action = intent_router.clean_answer(answer, allowed)
+    if action:
+        return {"action": action, "decided_by": settings.router_model()}
+    return {"action": intent_router.by_keywords(payload.message, allowed, payload.has_images),
+            "decided_by": "keywords"}
 
 
 class ImageIn(BaseModel):
