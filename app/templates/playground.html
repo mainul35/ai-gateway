@@ -116,6 +116,18 @@ a.cite{font-size:.75em;vertical-align:super;text-decoration:none;padding:0 .1rem
                     display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
 .generated .caption.open{-webkit-line-clamp:unset;overflow:visible}
 .generated .actions{display:flex;gap:.5rem;margin-top:.5rem}
+/* An answer that is really a document is offered as one, the way a file would be */
+.file{display:flex;align-items:center;gap:.75rem;margin-top:.9rem;padding:.6rem .75rem;
+      border:1px solid var(--border);border-radius:10px;background:var(--card);max-width:26rem}
+.file .icon{width:2.1rem;height:2.1rem;border-radius:7px;background:var(--input);display:flex;
+            align-items:center;justify-content:center;font-size:1rem;flex:none}
+.file .about{flex:1;min-width:0}
+.file .name{font-size:.88rem;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.file .kind{font-size:.75rem;color:var(--muted)}
+.code-tools{display:flex;gap:.4rem;justify-content:flex-end;margin:-.4rem 0 .6rem}
+.code-tools button{background:none;border:1px solid var(--border);color:var(--muted);border-radius:6px;
+                   font-size:.72rem;padding:.12rem .45rem;cursor:pointer;font-family:inherit}
+.code-tools button:hover{color:var(--text);border-color:var(--primary)}
 .chip{display:inline-flex;align-items:center;gap:.35rem;border:1px solid var(--border);background:transparent;
       color:var(--muted);border-radius:20px;padding:.3rem .75rem;font-size:.83rem;font-weight:600;cursor:pointer;font-family:inherit}
 .chip:hover{color:var(--text)}
@@ -862,6 +874,7 @@ function renderAssistant(box, content, reasoning, stats, sources, html){
     body.classList.remove('md');
     fillWithCitations(body, text, sources);
   }
+  offerFiles(box, content);
   appendStats(box, stats);
 }
 
@@ -887,6 +900,82 @@ function linkCitations(root, sources){
     fillWithCitations(replacement, node.nodeValue, sources);
     node.replaceWith(replacement);
   }
+}
+
+// A language's usual file extension, for naming what is downloaded
+const CODE_SUFFIX = {python: 'py', py: 'py', javascript: 'js', js: 'js', typescript: 'ts', ts: 'ts',
+                     jsx: 'jsx', tsx: 'tsx', bash: 'sh', sh: 'sh', shell: 'sh', zsh: 'sh',
+                     json: 'json', yaml: 'yml', yml: 'yml', toml: 'toml', ini: 'ini', xml: 'xml',
+                     html: 'html', css: 'css', scss: 'scss', sql: 'sql', java: 'java', kotlin: 'kt',
+                     csharp: 'cs', cs: 'cs', cpp: 'cpp', c: 'c', go: 'go', rust: 'rs', rs: 'rs',
+                     php: 'php', ruby: 'rb', rb: 'rb', swift: 'swift', r: 'r', lua: 'lua',
+                     dockerfile: 'Dockerfile', makefile: 'Makefile', diff: 'diff', patch: 'patch',
+                     markdown: 'md', md: 'md', text: 'txt', properties: 'properties'};
+
+function download(text, filename, type = 'text/plain'){
+  const url = URL.createObjectURL(new Blob([text], {type: `${type};charset=utf-8`}));
+  const link = document.createElement('a');
+  link.href = url; link.download = filename;
+  document.body.appendChild(link); link.click(); link.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 10000);
+}
+
+function fileName(text, extension){
+  // The document's own title if it has one, otherwise the conversation's name
+  const heading = text.match(/^\s*#{1,3}\s+(.+)$/m);
+  const title = (heading ? heading[1] : document.getElementById('chatTitle').textContent || 'answer')
+    .replace(/[`*_#\[\]()]/g, '').trim();
+  const slug = title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 60);
+  return `${slug || 'answer'}.${extension}`;
+}
+
+// Long answers and code are things people keep, so they are offered as files rather than left to be
+// selected out of the page by hand.
+function offerFiles(box, text){
+  if(!text) return;
+  const body = box.querySelector('.body');
+  for(const block of body.querySelectorAll('pre')){
+    const code = block.querySelector('code');
+    const language = (code?.className.match(/language-([\w+#-]+)/) || [])[1] || '';
+    const suffix = CODE_SUFFIX[language.toLowerCase()] || 'txt';
+    const tools = document.createElement('div');
+    tools.className = 'code-tools';
+    tools.innerHTML = `<button data-copy-code>Copy</button>
+      <button data-save-code>Save as .${suffix.replace(/^[A-Z]/, m => m.toLowerCase())}</button>`;
+    tools.querySelector('[data-copy-code]').addEventListener('click', async e => {
+      await navigator.clipboard.writeText(code.textContent);
+      e.target.textContent = 'Copied';
+      setTimeout(() => { e.target.textContent = 'Copy'; }, 1500);
+    });
+    tools.querySelector('[data-save-code]').addEventListener('click', () => {
+      const named = /^[A-Z]/.test(suffix) ? suffix : fileName(text, suffix);
+      download(code.textContent, named);
+    });
+    block.parentNode.insertBefore(tools, block);
+  }
+
+  // A document, rather than a reply: long, or with headings to navigate by
+  const headings = body.querySelectorAll('h1, h2, h3').length;
+  if(text.length < 1200 && headings < 2) return;
+  const name = fileName(text, 'md');
+  const card = document.createElement('div');
+  card.className = 'file';
+  card.innerHTML = `
+    <span class="icon">&#128196;</span>
+    <span class="about">
+      <span class="name"></span>
+      <span class="kind">Document &middot; MD &middot; ${(text.length / 1024).toFixed(1)} KB</span>
+    </span>
+    <button class="btn btn-sm btn-secondary" data-copy-all>Copy</button>
+    <button class="btn btn-sm" data-save-all>Download</button>`;
+  card.querySelector('.name').textContent = name;
+  card.querySelector('[data-save-all]').addEventListener('click', () => download(text, name, 'text/markdown'));
+  card.querySelector('[data-copy-all]').addEventListener('click', async e => {
+    await navigator.clipboard.writeText(text);
+    e.target.textContent = 'Copied';
+    setTimeout(() => { e.target.textContent = 'Copy'; }, 1500);
+  });
+  box.appendChild(card);
 }
 
 function appendStats(box, stats){
@@ -1194,8 +1283,10 @@ async function sendPhoto(text, decision){
   }
   setStatus(box, null);
   if(!result){
-    box.querySelector('.body').textContent = '(nothing came back)';
-    history.push({role: 'assistant', content: '(the photo was not changed)'});
+    box.querySelector('.body').textContent =
+      'The connection dropped before the picture came back. If it finished, it is saved in this '
+      + 'conversation: open it again from the list to see.';
+    loadConversations();
     return;
   }
   // The server says what it actually did, since the words decide it
@@ -1204,11 +1295,8 @@ async function sendPhoto(text, decision){
   renderGenerated(box, generated, {total: +((performance.now() - started) / 1000).toFixed(1)});
   box.querySelector('.generated img')?.addEventListener('load', () => revealFrom(box), {once: true});
   revealFrom(box);
-  const summary = `(${done.toLowerCase()})`;
-  history.push({role: 'assistant', content: summary});
-  await saveMessage({role: 'assistant', content: summary,
-                     stats: {total: +((performance.now() - started) / 1000).toFixed(1)},
-                     attachments: {generated}});
+  // The server saved this one, so that a dropped connection cannot lose it
+  history.push({role: 'assistant', content: `(${done.toLowerCase()})`});
   loadConversations();
 }
 
@@ -1267,8 +1355,10 @@ async function sendImage(text, decision){
   }
   setStatus(box, null);
   if(!result){
-    box.querySelector('.body').textContent = '(no image)';
-    history.push({role: 'assistant', content: '(image generation did not finish)'});
+    box.querySelector('.body').textContent =
+      'The connection dropped before the picture came back. If it finished, it is saved in this '
+      + 'conversation: open it again from the list to see.';
+    loadConversations();
     return;
   }
   // The caption shows what was actually drawn, which is what a later edit or retry builds on
@@ -1279,10 +1369,8 @@ async function sendImage(text, decision){
   renderGenerated(box, generated, stats);
   box.querySelector('.generated img')?.addEventListener('load', () => revealFrom(box), {once: true});
   revealFrom(box);
-  const summary = `(${source ? 'edited the image' : 'generated an image'}: ${drawn || text})`;
-  history.push({role: 'assistant', content: summary});
-  await saveMessage({role: 'assistant', content: summary, stats, attachments: {generated}});
-  loadConversations();
+  history.push({role: 'assistant', content: `(${source ? 'edited the image' : 'generated an image'}: ${drawn || text})`});
+  loadConversations();   // saved by the server, so a dropped connection cannot lose it
 }
 
 document.getElementById('send').addEventListener('click', send);

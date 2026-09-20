@@ -257,6 +257,14 @@ Measured on a photograph with noise added as a small sensor produces it: noise i
 from 7.5 to 0.2, the blurred background was not sharpened, and the subject kept its detail. The blur
 left the subject alone and halved the detail in the background.
 
+## Answers you can keep
+
+An answer that is really a document - long, or with headings to navigate by - is offered as a file
+under the reply: its name taken from the document's own title, its size, **Copy** and **Download**.
+Every code block gets **Copy** and **Save as .py** (or .cs, .sh, whatever the block is), named the
+same way. The file is built in the browser from the answer already there, so nothing is uploaded
+anywhere to download it back.
+
 ## Memory
 
 A long chat eventually no longer fits in what a model can read, and a new chat starts from nothing.
