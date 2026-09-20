@@ -24,6 +24,12 @@ DEFAULTS = {
     "images.steps": "20",
     "images.guidance": "3.5",
     "images.max_upload_mb": "10",
+    # A request is rewritten into something an image model can draw, with the conversation for context
+    "images.rewrite.prompt": "true",
+    "images.prompt.model": "",
+    # A request is rewritten into something an image model can draw, with the conversation for context
+    "images.rewrite.prompt": "true",
+    "images.prompt.model": "",
     # Small model that decides what a message asks for, and writes search queries and summaries
     "router.model": "qwen3:1.7b",
     # Playground memory: a running summary per conversation, durable notes per user
