@@ -32,7 +32,10 @@ async def current_user(session: AsyncSession = Depends(get_session),
 
 
 def _page(request, name, user, **context):
-    return templates.TemplateResponse(request, name, {"user": user, **context})
+    # Never cached: the page carries the whole interface, so a browser holding yesterday's copy runs
+    # yesterday's playground against today's gateway, and the mismatch looks like a broken feature.
+    return templates.TemplateResponse(request, name, {"user": user, **context},
+                                      headers={"Cache-Control": "no-store"})
 
 
 def _require_login(user, path):

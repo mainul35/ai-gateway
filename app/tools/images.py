@@ -255,6 +255,9 @@ async def generate(prompt, size="square", sources=(), strength=0.75, on_progress
 
 async def clean_up(png, mime, upscale, on_progress=None, denoise=True, sharpen=False):
     """Improves a photograph without changing what is in it: noise, softness, size."""
+    # A twenty megapixel photograph doubled is eighty, which is slow and gains nothing: at that size
+    # the unsharp mask alone does the work
+    double = not await asyncio.to_thread(photo.too_big_to_double, png)
     if not is_available():
         raise ImageError("Image work is turned off on this server")
     base = settings.comfyui_url()
@@ -275,8 +278,8 @@ async def clean_up(png, mime, upscale, on_progress=None, denoise=True, sharpen=F
                 doing = [what for what, flag in (("Removing noise", denoise), ("Sharpening", sharpen),
                                                  ("Enlarging", upscale)) if flag]
                 return await _run_job(client, base, client_id,
-                                      photo.denoise_workflow(name, upscale, denoise, sharpen), report,
-                                      " and ".join(doing) or "Working on the picture")
+                                      photo.denoise_workflow(name, upscale, denoise, sharpen, double),
+                                      report, " and ".join(doing) or "Working on the picture")
             except asyncio.CancelledError:
                 with contextlib.suppress(httpx.HTTPError):
                     await client.post(f"{base}/interrupt")
