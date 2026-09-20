@@ -1150,7 +1150,6 @@ async function sendPhoto(text, decision){
   if(!source){ showError('Attach a photo first.'); return; }
   showError('');
   const cleaning = decision.action === 'clean';
-  const wantsCrop = /crop|zoom|enlarge|upscale|bigger|print/i.test(text);
   try{
     await ensureConversation(text, modelSelect.value);
   }catch(e){
@@ -1175,7 +1174,7 @@ async function sendPhoto(text, decision){
   try{
     const response = await postStream('/chat/photo', {
       file_id: source.id, action: decision.action, conversation_id: currentId,
-      upscale: cleaning && wantsCrop,
+      request: text, upscale: cleaning,
       strength: parseFloat(document.getElementById('blurStrength').value)});
     await readEvents(response, chunk => {
       const event = chunk.gateway;
@@ -1199,8 +1198,8 @@ async function sendPhoto(text, decision){
     history.push({role: 'assistant', content: '(the photo was not changed)'});
     return;
   }
-  const done = cleaning ? (wantsCrop ? 'Noise removed and enlarged 2x' : 'Noise removed')
-                        : 'Background blurred by distance';
+  // The server says what it actually did, since the words decide it
+  const done = result.did || (cleaning ? 'Cleaned up' : 'Background blurred by distance');
   const generated = {file_id: result.file.id, prompt: done, source_file_id: source.id};
   renderGenerated(box, generated, {total: +((performance.now() - started) / 1000).toFixed(1)});
   box.querySelector('.generated img')?.addEventListener('load', () => revealFrom(box), {once: true});

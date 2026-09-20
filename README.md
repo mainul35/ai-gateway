@@ -235,8 +235,14 @@ decides from what you type, so "remove the noise" and "blur the background" go t
 | Ask for | What happens | How long |
 |---|---|---|
 | "remove the noise", "too grainy" | SCUNet takes the noise out. It is a restoration model, not a generative one, so nothing is invented and what was out of focus stays that way | ~2 s |
+| "it looks hazy", "make it sharper" | The veil is measured from the picture's own dark channel and removed, and softness is answered by putting the picture through the upscaler and bringing it back down, which recovers edges rather than drawing lines along them | ~5 s |
 | "clean it up so I can crop in" | The same, then Real-ESRGAN doubles the size, in that order: enlarging noise only makes the noise bigger | ~5 s |
 | "blur the background", "more bokeh" | Depth Anything V2 measures distance, and the picture is blurred by it, in layers, the way a lens falls off | ~1 s |
+
+The words decide which of those happens: "hazy" clears haze, "sharper" sharpens, "grainy" denoises,
+"so I can crop in" enlarges, and several at once are done in one pass. What is asked for is written
+under the result. A request that would change the scene itself - the weather, the season, the style -
+is an edit, not a clean-up, and goes to the image editor instead.
 
 The blur focuses on **where the photograph is already sharp**, not on whatever is nearest: in a shot
 of a bird over water, the water in the foreground is nearer than the bird. The sharpest region of the
