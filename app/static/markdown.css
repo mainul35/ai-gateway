@@ -1,0 +1,146 @@
+/* The look of MDViewer's preview, for answers rendered in the playground.
+ * Generated from MDViewer's MainController.previewCss() by scripts/make_markdown_css.py;
+ * every rule is scoped to .md and the page-frame rules are left out.
+ */
+.md{
+  --paper:#0F1620;
+  --ink:#D7DEE6;
+  --ink-soft:#8A9AAA;
+  --rule:#22303F;
+  --line:#2C3D4E;
+  --accent:#3FB8CC;
+  --accent-ink:#5FCBDD;
+  --accent-soft:#3FB8CC1F;
+  --mark:#E08A7B;
+  --code-bg:#131C26;
+  --code-ink:#C9D6E2;
+  --stripe:#141E29;
+  --err-fg:#F2A79A;
+  --err-bg:#2A1614;
+  --err-line:#5E2E28;
+  --plate-shadow:0 1px 2px rgba(0,0,0,.35), 0 12px 28px -16px rgba(0,0,0,.75);
+  --mono:"Cascadia Code","Cascadia Mono",Consolas,"Liberation Mono",monospace;
+  --display:"Sitka Heading","Sitka Text",Cambria,Georgia,serif;
+  --body:"Segoe UI Variable Text","Segoe UI",system-ui,-apple-system,sans-serif;
+  --measure:40rem;
+  --breakout:12rem;
+  --plate:min(100%, calc(var(--measure) + var(--breakout)));
+  --gutter:max(0px, calc((100% - var(--measure) - var(--breakout)) / 2));
+  --mdc-line:var(--rule);
+  --mdc-accent:var(--accent);
+  --mdc-shadow:var(--plate-shadow);
+  --mdc-font:var(--body);
+  --mdc-mono:var(--mono);
+  --mdc-mark:var(--mark);
+  --mdc-note-bg:var(--stripe);
+  --mdc-error-ink:var(--err-fg);
+  --mdc-error-bg:var(--err-bg);
+  --mdc-error-line:var(--err-line);
+  color:var(--ink);font-family:var(--body);
+}
+.md h1, .md h2, .md h3, .md h4, .md h5, .md h6 {
+              font-family:var(--display); font-weight:600; line-height:1.22;
+              letter-spacing:-.01em; margin-top:2.1em; margin-bottom:.65em; color:var(--ink);
+            }
+.md h1 { font-size:2.3rem; letter-spacing:-.022em; margin-top:.2em; }
+.md h1::after {
+              content:""; display:block; width:3.25rem; height:3px;
+              margin-top:.6rem; background:var(--accent); border-radius:2px;
+            }
+.md h2 { font-size:1.58rem; padding-bottom:.32em; border-bottom:1px solid var(--rule); }
+.md h3 { font-size:1.24rem; }
+.md h4 { font-size:1.05rem; color:var(--ink-soft); }
+.md h5, .md h6 { font-size:.95rem; color:var(--ink-soft); }
+.md p { margin-top:0; margin-bottom:1.15em; }
+.md ul, .md ol { padding-left:1.5em; margin-top:0; margin-bottom:1.15em; }
+.md li { margin:.3em 0; }
+.md li::marker { color:var(--accent); }
+.md strong { font-weight:650; }
+.md hr { height:1px; border:0; background:var(--rule); margin-top:2.6em; margin-bottom:2.6em; }
+.md a {
+              color:var(--accent-ink); text-decoration:none;
+              border-bottom:1px solid var(--accent-soft);
+              transition:border-color .12s ease, color .12s ease;
+            }
+.md a:hover { border-bottom-color:var(--accent); }
+.md a:focus-visible { outline:2px solid var(--accent); outline-offset:2px; }
+.md :not(pre) > code {
+              font-family:var(--mono); font-size:.86em;
+              background:var(--accent-soft); color:var(--accent-ink);
+              padding:.14em .42em; border-radius:4px;
+            }
+.md pre {
+              margin-top:1.7em; margin-bottom:1.7em; background:var(--code-bg);
+              border:1px solid var(--rule); border-left:3px solid var(--accent);
+              border-radius:7px; overflow:hidden; box-shadow:var(--plate-shadow);
+            }
+.md pre code {
+              font-family:var(--mono); font-size:13.5px; line-height:1.62;
+              color:var(--code-ink); background:none; padding:0;
+            }
+.md .hljs-keyword, .md .hljs-selector-tag, .md .hljs-literal, .md .hljs-section, .md .hljs-doctag {
+              color:var(--accent-ink); font-weight:600;
+            }
+.md .hljs-string, .md .hljs-regexp, .md .hljs-addition, .md .hljs-attribute, .md .hljs-meta .hljs-string {
+              color:var(--mark);
+            }
+.md .hljs-number, .md .hljs-symbol, .md .hljs-bullet, .md .hljs-link, .md .hljs-selector-attr {
+              color:#7A4FB5;
+            }
+.md .hljs-comment, .md .hljs-quote, .md .hljs-deletion {
+              color:var(--ink-soft); font-style:italic;
+            }
+.md .hljs-title, .md .hljs-name, .md .hljs-title.function_, .md .hljs-title.class_ {
+              color:#1F6FB2; font-weight:600;
+            }
+.md .hljs-type, .md .hljs-built_in, .md .hljs-class .hljs-title, .md .hljs-params {
+              color:#0F7A6B;
+            }
+.md .hljs-attr, .md .hljs-variable, .md .hljs-template-variable, .md .hljs-selector-id, .md .hljs-selector-class {
+              color:#8A5A1E;
+            }
+.md .hljs-meta, .md .hljs-tag { color:var(--ink-soft); }
+.md .hljs-emphasis { font-style:italic; }
+.md .hljs-strong { font-weight:700; }
+.md blockquote {
+              margin-top:1.6em; margin-bottom:1.6em; padding:.1em 0 .1em 1.15em;
+              border-left:3px solid var(--mark); color:var(--ink-soft);
+            }
+.md blockquote p:last-child { margin-bottom:0; }
+.md table {
+              display:table; table-layout:auto; width:100%; border-collapse:collapse;
+              margin-top:1.8em; margin-bottom:1.8em; font-size:.94em;
+              border:1px solid var(--rule); border-radius:7px;
+            }
+.md th, .md td { overflow-wrap:break-word; }
+.md th:first-child, .md td:first-child { min-width:20ch; }
+.md th, .md td { padding:9px 15px; border-bottom:1px solid var(--rule); text-align:left; }
+.md thead th {
+              background:var(--stripe); color:var(--ink-soft);
+              font-size:.84em; font-weight:600; letter-spacing:.07em; text-transform:uppercase;
+              border-bottom:1px solid var(--line);
+            }
+.md tbody tr:nth-child(2n) { background:var(--stripe); }
+.md tbody tr:last-child td { border-bottom:none; }
+.md img { border-radius:6px; }
+.md figure { margin-top:1.8em; margin-bottom:1.8em; }
+.md figure img { display:inline-block; }
+.md figcaption {
+              margin-top:.6em; color:var(--ink-soft);
+              font-size:.88em; font-style:italic;
+            }
+.md figure[align="center"], .md div[align="center"] { text-align:center; }
+.md figure[align="right"], .md div[align="right"] { text-align:right; }
+.md p[align="center"] { text-align:center; }
+.md p[align="right"] { text-align:right; }
+.md p[align="left"] { text-align:left; }
+
+/* MDViewer's assistant panel overrides: a message, not a page */
+.md { font-size:14px; line-height:1.6; }
+.md > :first-child { margin-top:0; }
+.md > :last-child { margin-bottom:0; }
+.md pre { padding:16px 18px; overflow-x:auto; }
+.md h1 { font-size:1.75rem; }
+.md h2 { font-size:1.35rem; }
+.md h3 { font-size:1.15rem; }
+.md table { display:block; overflow-x:auto; }

@@ -20,7 +20,7 @@ from app.auth import Principal, authenticate
 from app.db import get_session, session_factory
 from app.models import ChatFile, Conversation, ConversationMessage, MemoryEntry, utcnow
 from app.routers.openai_v1 import PROXY_PATHS, forward
-from app.tools import images, memory as memory_tool, router as intent_router, web_search
+from app.tools import images, markdown, memory as memory_tool, router as intent_router, web_search
 
 log = logging.getLogger("playground")
 
@@ -83,6 +83,8 @@ def _conversation_json(conversation, message_count=None):
 def _message_json(message):
     return {
         "id": message.id, "role": message.role, "content": message.content, "reasoning": message.reasoning,
+        # Answers are Markdown; the playground shows the rendered form and keeps the text for copying
+        "html": markdown.render(message.content) if message.role == "assistant" else None,
         "model": message.model, "stats": json.loads(message.stats) if message.stats else None,
         "attachments": json.loads(message.attachments) if message.attachments else None,
         "created_at": message.created_at.isoformat(),
@@ -184,6 +186,7 @@ async def capabilities(principal: Principal = Depends(authenticate)):
         "edit_engine": await images.edit_engine() if images.is_available() else None,
         "max_edit_images": images.MAX_EDIT_IMAGES,
         "routing": intent_router.is_enabled(),
+        "markdown": markdown.is_available(),
         "max_upload_mb": settings.max_upload_bytes() // (1024 * 1024),
     }
 
@@ -556,6 +559,16 @@ async def _refresh_memory(principal, user_id, conversation_id):
         log.warning("Could not refresh memory for conversation %s: %s", conversation_id, e)
     finally:
         _refreshing.discard(conversation_id)
+
+
+class RenderIn(BaseModel):
+    text: str = Field(default="", max_length=200_000)
+
+
+@router.post("/render")
+async def render_markdown(payload: RenderIn, _: Principal = Depends(authenticate)):
+    """Renders a just-streamed answer. Streaming shows text; the finished answer is Markdown."""
+    return {"html": markdown.render(payload.text)}
 
 
 class RouteIn(BaseModel):
