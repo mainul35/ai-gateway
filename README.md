@@ -196,6 +196,15 @@ rendered once, in one request to `/chat/render`. The gateway does the rendering:
 is escaped rather than obeyed, links open in a new tab, and a picture from somewhere else becomes a
 link instead of being fetched, so an answer cannot make the browser call out on its own.
 
+**Sources are chosen, not just taken in order.** A search engine's top hit can be a page whose summary
+was written years ago, which is how "what is the latest Java?" came back as Java 25 when 27 was out.
+So results are re-ranked: whoever publishes the thing (its release notes, documentation or newsroom)
+and curated references come first, tutorial and answer-farm sites are pushed down, at most two pages
+come from one site, and freshness counts when the question is about what is current. The top pages are
+then read in full, because the page usually says something newer than its search summary, and a source
+that could not be read is dropped rather than quoted. Each source reaches the model with its site and
+publication date, and the model is told to prefer the most official and most recent when they disagree.
+
 Web answers are told today's date. Without it a model reads anything published after its training as
 science fiction and refuses to answer: the same Java question came back saying the sources were "in
 the future".

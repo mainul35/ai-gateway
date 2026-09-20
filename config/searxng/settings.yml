@@ -12,3 +12,28 @@ search:
   formats:
     - html
     - json
+
+outgoing:
+  # The default 3 seconds left engines timing out and whole searches coming back empty
+  request_timeout: 8.0
+  max_request_timeout: 15.0
+  pool_connections: 100
+  pool_maxsize: 20
+
+engines:
+  # Several general engines, so one being rate-limited or showing a CAPTCHA does not empty the results
+  - name: duckduckgo
+    disabled: false
+  - name: brave
+    disabled: false
+  - name: startpage
+    disabled: false
+  - name: mojeek
+    disabled: false
+  - name: qwant
+    disabled: false
+  - name: wikipedia
+    disabled: false
+  # Answers a query with a data record rather than a page, and was the slowest engine by far
+  - name: wikidata
+    disabled: true

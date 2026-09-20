@@ -370,10 +370,11 @@ async def complete(payload: CompleteIn, principal: Principal = Depends(authentic
     async def stream():
         if do_search:
             yield _event("status", text="Working out what to search for")
+            latest = next((m.content for m in reversed(payload.messages) if m.role == "user"), "")
             query = await _search_query(principal, payload, backend)
             yield _event("status", text=f"Searching the web for “{query}”")
             try:
-                results = await web_search.search(query)
+                results = await web_search.search(query, wants_recent=web_search.wants_recent(query, latest))
                 if not results:
                     yield _event("notice", text="The web search found nothing; answering without it.")
             except web_search.SearchError as e:
