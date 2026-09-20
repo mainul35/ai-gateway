@@ -133,6 +133,9 @@ textarea:focus{outline:none;border-color:var(--primary)}
         </span>
       </div>
       <div class="hint" id="modeHint"></div>
+      <div class="status" id="deciding" style="margin-top:.35rem" hidden>
+        <span class="spinner"></span><span>Working out what you are asking for&hellip;</span>
+      </div>
     </div>
   </div>
 </div>
@@ -252,8 +255,9 @@ function syncTools(){
   if(imageMode()){
     promptBox.placeholder = pending.length ? 'Describe how to change the attached image…' : 'Describe the image to create…';
     if(!pending.length){
-      hint.textContent = 'Sending creates an image with Flux instead of chatting. Attach an image (or press Edit on one) to change it.'
-        + (tools.web_search ? ' Web search does not apply to images.' : '');
+      hint.textContent = caps.routing
+        ? 'Ask for a picture and one is created with Flux; ask a question and you get an answer. Attach an image (or press Edit on one) to change it.'
+        : 'Sending creates an image with Flux instead of chatting. Attach an image (or press Edit on one) to change it.';
     }else if(qwenEdits()){
       hint.textContent = 'Say what to change, e.g. "make it night" or "remove the car"; everything else stays as it is.'
         + (pending.length > 1 ? ' Refer to the pictures as image 1 (the one edited), image 2 and image 3.'
@@ -266,7 +270,9 @@ function syncTools(){
   }
   promptBox.placeholder = 'Message…  (Enter to send, Shift+Enter for a new line)';
   const notes = [];
-  if(tools.web_search) notes.push('Answers will search the web first and cite their sources.');
+  if(tools.web_search) notes.push(caps.routing
+    ? 'Questions that need current information are searched on the web and cited.'
+    : 'Answers will search the web first and cite their sources.');
   if(tools.vision && caps.vision){
     if(model && !canSee(model)){
       hint.className = 'hint warn';
@@ -473,6 +479,20 @@ function addUserMessage(text, imageUrls){
   return box;
 }
 
+const ACTION_LABELS = {chat: 'answered directly', search: 'searched the web',
+                       image: 'created an image', edit: 'edited the image'};
+
+function noteDecision(box, decision){
+  if(!decision || decision.decided_by === 'the only tool switched on') return;
+  const note = document.createElement('span');
+  note.className = 'muted';
+  note.style.fontWeight = '400';
+  note.textContent = ` · ${ACTION_LABELS[decision.action] || decision.action}`;
+  note.title = `Chosen by ${decision.decided_by || 'the gateway'} from the tools you switched on.` +
+               ' Leave only one tool on to force it.';
+  box.querySelector('.who').appendChild(note);
+}
+
 function statsText(stats){
   if(!stats) return '';
   return [stats.ttft != null ? `${stats.ttft}s to first token` : '',
@@ -649,11 +669,37 @@ function busy(on){
 
 // --- sending ----------------------------------------------------------------
 
+// With more than one tool switched on, a small model decides what this message asks for
+async function decideAction(text, hasImages){
+  const searchOn = tools.web_search && caps.web_search;
+  if(!imageMode() && !searchOn) return {action: 'chat'};
+  if(!caps.routing) return {action: imageMode() ? (hasImages ? 'edit' : 'image') : 'search'};
+  setDeciding(true);
+  try{
+    return await api('/chat/route', {method: 'POST', headers: JSON_HEADERS, body: JSON.stringify({
+      message: text, has_images: hasImages, web_search: searchOn, image_generation: imageMode(),
+      history: history.slice(-4).map(h => ({role: h.role, content: h.content}))})});
+  }catch(e){
+    // Falling back to what the toggles alone would have done
+    return {action: imageMode() && !searchOn ? (hasImages ? 'edit' : 'image') : 'chat', decided_by: 'toggles'};
+  }finally{ setDeciding(false); }
+}
+
+function setDeciding(on){
+  document.getElementById('send').disabled = on;
+  document.getElementById('deciding').hidden = !on;
+}
+
 async function send(){
   const text = promptBox.value.trim();
   if(controller) return;
-  if(imageMode()) return sendImage(text);
   if(!text && !pending.length) return;
+  const decision = await decideAction(text, pending.length > 0);
+  if(decision.action === 'image' || decision.action === 'edit') return sendImage(text, decision);
+  return sendChat(text, decision);
+}
+
+async function sendChat(text, decision){
   const model = modelSelect.value;
   if(pending.length && !canSee(model)){
     showError(`${model} cannot see images. Pick a model marked "sees images", or remove the attachment.`);
@@ -676,6 +722,7 @@ async function send(){
                      attachments: images.length ? {images: images.map(id => ({file_id: id}))} : null});
 
   const box = addMessage('assistant', '', model);
+  noteDecision(box, decision);
   const body = box.querySelector('.body');
   body.textContent = '…';
   let thinkBlock = null, thinking = '', answer = '', firstTokenAt = null, usage = null, sources = null;
@@ -688,7 +735,7 @@ async function send(){
   const payload = {model, messages,
                    temperature: parseFloat(document.getElementById('temperature').value),
                    max_tokens: parseInt(document.getElementById('maxTokens').value, 10) || 2048,
-                   web_search: tools.web_search && caps.web_search,
+                   web_search: decision.action === 'search',
                    vision: tools.vision && caps.vision};
   if(models[model]?.owned_by === 'llamacpp') payload.thinking = document.getElementById('thinking').checked;
 
@@ -756,7 +803,7 @@ async function send(){
   loadConversations();
 }
 
-async function sendImage(text){
+async function sendImage(text, decision){
   if(!text){ showError('Describe the image you want.'); return; }
   showError('');
   const source = pending[0] || null;
@@ -778,6 +825,7 @@ async function sendImage(text){
                      attachments: {mode: 'image', images: source ? [source, ...references].map(f => ({file_id: f.id})) : []}});
 
   const box = addMessage('assistant', '', source ? 'Image edit' : 'Image generation');
+  noteDecision(box, decision);
   setStatus(box, 'Starting');
   const started = performance.now();
   let result = null;

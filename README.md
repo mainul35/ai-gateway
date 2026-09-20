@@ -162,6 +162,13 @@ remembered per browser.
 | **Image understanding** | Attach, paste or drop images for the model to look at. Models that can see images are marked in the model list, from Ollama's reported capabilities, an engine profile's `mmproj`, or `capabilities: [vision]` in `models.yaml`. | a vision model (e.g. `gemma4:31b`, `llava:13b`) |
 | **Image generation** | Sending creates an image with Flux on ComfyUI instead of chatting. With an image attached, or after pressing **Edit this image**, it edits that image by instruction with Qwen-Image-Edit ("make it night", "remove the car"), keeping everything else. Up to two more pictures can be attached as references ("put the hat from image 2 on the person in image 1"). | ComfyUI with the Flux checkpoint and the Qwen-Image-Edit files below |
 
+**The toggles say what is allowed, not what happens.** With more than one on, a small model
+(`qwen3:1.7b`, about 0.2 s) reads each message and picks one action: a question goes to the web or
+straight to the model, a description of a picture is drawn, and an instruction about an attached
+picture edits it. The assistant's reply says which was chosen. To force one, leave only that toggle on.
+Set `router.enabled=false` to go back to plain rules, or `router.model=` to another small model. The
+same model also writes the search queries, so the big model is not loaded just for one line.
+
 Generating an image first unloads the language models, since Flux needs most of the 24 GB card, and
 frees ComfyUI's VRAM afterwards. Images are stored in the database, and only their owner can open them.
 

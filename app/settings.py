@@ -24,6 +24,8 @@ DEFAULTS = {
     "images.steps": "20",
     "images.guidance": "3.5",
     "images.max_upload_mb": "10",
+    # Small model that decides what a message asks for, and writes search queries and summaries
+    "router.model": "qwen3:1.7b",
     # Instruction-based editing; when these files are not in ComfyUI, edits fall back to Flux image-to-image
     "images.edit.model": "qwen_image_edit_2511_fp8mixed.safetensors",
     "images.edit.text_encoder": "qwen_2.5_vl_7b_fp8_scaled.safetensors",
@@ -175,6 +177,11 @@ def image_steps():
 
 def image_guidance():
     return float(get("images.guidance", "IMAGES_GUIDANCE"))
+
+
+def router_model():
+    """Set to nothing to fall back to keyword rules instead."""
+    return get("router.model", "ROUTER_MODEL")
 
 
 def edit_model():
