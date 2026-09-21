@@ -481,6 +481,8 @@ def _look_up(model_id):
     system = get_system_info()
     return {
         "model_info": hf_client.public_model_info(info),
+        # Ollama installs GGUF and nothing else, so a repository without it needs somewhere to go
+        "gguf_alternatives": [] if gguf_files else hf_client.search_gguf(model_id),
         "model_sizes": {k: v for k, v in sizes.items() if k != "files"},
         "parameters": {"count": param_count, "source": param_source},
         "is_gguf_repo": bool(gguf_files),

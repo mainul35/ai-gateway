@@ -66,6 +66,26 @@ def get_model_info(model_id):
         return {"error": f"Failed to reach HuggingFace: {e}", "status_code": 502}
 
 
+def search_gguf(model_id, limit=6):
+    """Repositories publishing GGUF conversions of this model.
+
+    Ollama can only install GGUF, so a repository that publishes only safetensors is a dead end
+    however well it would fit. Somebody has usually converted it already, and this is how they are
+    found: the same name, filtered to GGUF, most downloaded first.
+    """
+    name = model_id.split("/")[-1]
+    try:
+        response = requests.get(f"{HF_API_BASE}/models", headers=_headers(), timeout=TIMEOUT,
+                                params={"search": name, "filter": "gguf", "sort": "downloads",
+                                        "direction": -1, "limit": limit + 1})
+        response.raise_for_status()
+        found = response.json()
+    except (requests.RequestException, ValueError):
+        return []
+    return [{"id": m["id"], "downloads": m.get("downloads") or 0, "likes": m.get("likes") or 0}
+            for m in found if isinstance(m, dict) and m.get("id") and m["id"] != model_id][:limit]
+
+
 def public_model_info(info):
     """Model info without the bulky fields that are only needed server-side."""
     return {k: v for k, v in info.items() if k not in ("siblings", "cardData", "safetensors", "gguf", "config")}
