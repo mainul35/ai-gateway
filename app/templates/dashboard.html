@@ -54,15 +54,12 @@
 </div>
 
 <div class="card" style="margin-bottom:1.5rem">
-  <h2>{{ 'Models' if user.role == 'admin' else 'Models you can use' }}</h2>
+  <h2>Models you can use</h2>
   <p id="accessNote" class="muted" style="margin:0 0 .6rem;font-size:.88rem" hidden></p>
-  {% if user.role == 'admin' %}
-  <p class="muted" style="margin:0 0 .8rem;font-size:.88rem">
-    What each one is for, and how it has actually behaved. Counts cover the last
-    <span id="windowDays">90</span> days.</p>
-  {% endif %}
   <div id="models" class="muted">Loading&hellip;</div>
-  <p style="margin:.8rem 0 0"><a href="/playground">Try them in the playground &rarr;</a></p>
+  <p style="margin:.8rem 0 0"><a href="/playground">Try them in the playground &rarr;</a>
+    {% if user.role == 'admin' %}<span class="muted"> &middot; </span>
+    <a href="/models">Find, install and manage models &rarr;</a>{% endif %}</p>
 </div>
 
 <div class="card" style="margin-bottom:1.5rem">
@@ -195,99 +192,7 @@ document.addEventListener('click', async e => {
   finally{ loadAdmin(); }
 });
 
-const IS_ADMIN = {{ 'true' if user.role == 'admin' else 'false' }};
-
-function bytes(n){
-  if(!n) return '';
-  return n >= 1e9 ? (n / 1e9).toFixed(1) + ' GB' : Math.round(n / 1e6) + ' MB';
-}
-
-function ago(iso){
-  if(!iso) return 'never';
-  const days = Math.floor((Date.now() - new Date(iso)) / 86400000);
-  return days <= 0 ? 'today' : days === 1 ? 'yesterday' : days + ' days ago';
-}
-
-// Worst first, so the reason not to delete something is the first thing read
-const NOTE_STYLE = {stop: 'err', warn: 'off', info: 'on'};
-
-function modelCard(m){
-  const facts = [m.parameter_size, m.quantization && m.quantization !== 'unknown' ? m.quantization : '',
-                 bytes(m.size_bytes), m.context_length ? Math.round(m.context_length / 1024) + 'K context' : '']
-                .filter(Boolean).join(' · ');
-  const notes = (m.notes || []).map(n =>
-    `<div class="note ${NOTE_STYLE[n.level] || 'ok'}" style="margin:.35rem 0 0;padding:.4rem .7rem;font-size:.85rem">
-       ${escapeHtml(n.text)}</div>`).join('');
-  const usage = m.usage || {};
-  // Latency is only worth showing when something actually came back to be timed
-  const health = usage.requests
-    ? [`${usage.requests} request${usage.requests === 1 ? '' : 's'}, ${usage.failures} failed`,
-       `last used ${ago(usage.last_used)}`,
-       usage.avg_latency_ms >= 100 ? `${(usage.avg_latency_ms / 1000).toFixed(1)}s on average` : ''
-      ].filter(Boolean).join(' · ')
-    : 'No requests recorded in the window.';
-  const button = m.can_delete
-    ? `<button class="btn btn-danger btn-sm" data-delete="${escapeHtml(m.name)}">Delete</button>`
-    : `<span class="muted" style="font-size:.8rem" title="${escapeHtml(m.delete_note)}">kept elsewhere</span>`;
-  return `<div style="border:1px solid var(--border);border-radius:10px;padding:.8rem 1rem;margin-bottom:.7rem">
-    <div style="display:flex;gap:.6rem;align-items:baseline;flex-wrap:wrap">
-      <code style="font-size:.95rem">${escapeHtml(m.name)}</code>
-      <span class="pill ${m.reachable ? 'on' : 'err'}">${m.reachable ? m.backend : 'unreachable'}</span>
-      ${(m.capabilities || []).map(c => `<span class="pill off">${escapeHtml(c)}</span>`).join('')}
-      <span class="spacer" style="flex:1"></span>${button}
-    </div>
-    ${facts ? `<p class="muted" style="margin:.3rem 0 0;font-size:.82rem">${escapeHtml(facts)}</p>` : ''}
-    <p style="margin:.4rem 0 0;font-size:.9rem">${escapeHtml(m.description)}</p>
-    <p class="muted" style="margin:.35rem 0 0;font-size:.82rem">${escapeHtml(health)}</p>
-    ${notes}
-  </div>`;
-}
-
-async function loadAdminModels(){
-  const target = document.getElementById('models');
-  try{
-    const data = await api('/admin/models');
-    document.getElementById('windowDays').textContent = data.window_days;
-    target.classList.remove('muted');
-    target.innerHTML = data.models.map(modelCard).join('')
-      || '<span class="muted">No models found.</span>';
-  }catch(e){ target.textContent = 'Could not load models: ' + e.message; }
-}
-
-// Deleting is not undoable without pulling the model again, so it is asked twice: once here, and once
-// more by the server when the model is spoken for
-document.getElementById('models').addEventListener('click', async e => {
-  const button = e.target.closest('[data-delete]');
-  if(!button) return;
-  const name = button.dataset.delete;
-  if(!confirm(`Delete ${name} from the Ollama server?\n\nThis frees its disk space and cannot be undone `
-              + `without pulling it again.`)) return;
-  button.disabled = true;
-  const original = button.textContent;
-  button.textContent = 'Deleting…';
-  try{
-    await api('/admin/models/delete', {method: 'POST', headers: {'Content-Type': 'application/json'},
-                                       body: JSON.stringify({name})});
-  }catch(err){
-    // A 409 is the server saying something still depends on it; it names what, and asks again
-    if(/Confirm again/.test(err.message)
-        && confirm(err.message.replace('Not deleted: ', '') + '\n\nDelete anyway?')){
-      try{
-        await api('/admin/models/delete', {method: 'POST', headers: {'Content-Type': 'application/json'},
-                                           body: JSON.stringify({name, force: true})});
-      }catch(again){ showError(again.message); }
-    }else if(!/Confirm again/.test(err.message)){
-      showError(err.message);
-    }
-  }finally{
-    button.disabled = false;
-    button.textContent = original;
-    loadAdminModels();
-  }
-});
-
 async function loadMyModels(){
-  if(IS_ADMIN) return loadAdminModels();
   const target = document.getElementById('models');
   try{
     const [models, me] = await Promise.all([api('/v1/models'), api('/auth/me')]);
