@@ -22,7 +22,7 @@ from app.auth import Principal, authenticate
 from app.db import get_session, session_factory
 from app.models import ChatFile, Conversation, ConversationMessage, MemoryEntry, utcnow
 from app.routers.openai_v1 import PROXY_PATHS, forward
-from app.tools import (image_prompt, images, markdown, memory as memory_tool, photo, portrait,
+from app.tools import (image_prompt, images, jobs, markdown, memory as memory_tool, photo, portrait,
                         router as intent_router, web_search)
 
 log = logging.getLogger("playground")
@@ -330,6 +330,60 @@ def _error(message):
     return f"data: {json.dumps({'error': {'message': message}})}\n\n".encode()
 
 
+class _Answer:
+    """The model's reply, reassembled from the chunks as they pass through on their way out.
+
+    The gateway used to hand the chunks straight to the browser and let the browser save the finished
+    message. That works exactly as long as the browser is still there; walk away mid-answer and the
+    whole turn is lost, having been generated and paid for. So it is read here as well.
+    """
+
+    def __init__(self):
+        self.text = ""
+        self.reasoning = ""
+        self.tokens = None
+        self.sources = None
+        self.started = time.monotonic()
+        self.first_token_at = None
+        self._partial = ""
+
+    def feed(self, chunk):
+        # A chunk is a piece of the stream, not a whole line: the last one is kept back until it ends
+        self._partial += chunk.decode(errors="replace") if isinstance(chunk, bytes) else chunk
+        lines = self._partial.split("\n")
+        self._partial = lines.pop()
+        for line in lines:
+            if not line.startswith("data:"):
+                continue
+            body = line[5:].strip()
+            if not body or body == "[DONE]":
+                continue
+            try:
+                data = json.loads(body)
+            except ValueError:
+                continue
+            if isinstance(data.get("usage"), dict):
+                self.tokens = data["usage"].get("completion_tokens") or self.tokens
+            delta = (data.get("choices") or [{}])[0].get("delta") or {}
+            # llama.cpp calls it reasoning_content and Ollama calls it reasoning; the same thing
+            thought = delta.get("reasoning_content") or delta.get("reasoning")
+            if thought:
+                self.first_token_at = self.first_token_at or time.monotonic()
+                self.reasoning += thought
+            if delta.get("content"):
+                self.first_token_at = self.first_token_at or time.monotonic()
+                self.text += delta["content"]
+
+    def stats(self):
+        now = time.monotonic()
+        total = now - self.started
+        writing = (now - self.first_token_at) if self.first_token_at else total
+        return {"ttft": round(self.first_token_at - self.started, 1) if self.first_token_at else None,
+                "tokens": self.tokens,
+                "tps": round(self.tokens / writing, 1) if self.tokens and writing > 0 else None,
+                "total": round(total, 1)}
+
+
 class ChatMessageIn(BaseModel):
     role: str = Field(pattern="^(system|user|assistant)$")
     content: str = ""
@@ -439,6 +493,8 @@ async def complete(payload: CompleteIn, principal: Principal = Depends(authentic
         body["chat_template_kwargs"] = {"enable_thinking": payload.thinking}
     do_search = payload.web_search and web_search.is_available()
 
+    answer = _Answer()
+
     async def stream():
         if do_search:
             yield _event("status", text="Working out what to search for")
@@ -458,8 +514,8 @@ async def complete(payload: CompleteIn, principal: Principal = Depends(authentic
             if results:
                 yield _event("status", text=f"Reading the top {min(len(results), settings.search_fetch_pages())} pages")
                 results = await web_search.fetch_pages(results)
-                yield _event("sources", query=query,
-                             sources=[{"title": r["title"], "url": r["url"]} for r in results])
+                answer.sources = [{"title": r["title"], "url": r["url"]} for r in results]
+                yield _event("sources", query=query, sources=answer.sources)
                 # After the user's own system prompt, if there is one, so theirs still comes first
                 position = 1 if messages and messages[0]["role"] == "system" else 0
                 messages.insert(position, {"role": "system", "content": web_search.sources_prompt(results, query)})
@@ -470,9 +526,55 @@ async def complete(payload: CompleteIn, principal: Principal = Depends(authentic
             yield _error(str(e.detail))
             return
         async for chunk in response.body_iterator:
+            answer.feed(chunk)
             yield chunk
 
-    return StreamingResponse(stream(), media_type="text/event-stream",
+    async def save(_job):
+        """Writes the turn down once the answer is finished, whoever is still watching."""
+        if payload.conversation_id is None or not (answer.text or answer.reasoning):
+            return
+        async with session_factory()() as db:
+            conversation = await db.get(Conversation, payload.conversation_id)
+            if conversation is None or conversation.user_id != user.id:
+                return
+            db.add(ConversationMessage(
+                conversation_id=payload.conversation_id, role="assistant", content=answer.text,
+                reasoning=answer.reasoning or None, model=payload.model,
+                stats=json.dumps(answer.stats()),
+                attachments=json.dumps({"sources": answer.sources}) if answer.sources else None))
+            conversation.updated_at = utcnow()
+            conversation.model = payload.model
+            await db.commit()
+        if memory_tool.is_enabled():
+            await _refresh_memory(principal, user.id, payload.conversation_id)
+
+    if payload.conversation_id is None:
+        # Nothing to come back to, so there is nothing to keep
+        return StreamingResponse(stream(), media_type="text/event-stream",
+                                 headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+    asked = (latest_user.content if latest_user else "") or "New message"
+    job = jobs.start(user.id, payload.conversation_id, "chat", asked[:120], stream(), on_finish=save)
+    return StreamingResponse(jobs.follow(job), media_type="text/event-stream",
+                             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+
+@router.get("/conversations/{conversation_id}/job")
+async def running_job(conversation_id: int, principal: Principal = Depends(authenticate),
+                      session: AsyncSession = Depends(get_session)):
+    """What this conversation is still busy with, so reopening it can pick the thread back up."""
+    user = _require_user(principal)
+    await _owned(session, conversation_id, user)
+    job = jobs.running_for(user.id, conversation_id)
+    return {"job": job.json() if job else None}
+
+
+@router.get("/jobs/{job_id}/stream")
+async def watch_job(job_id: int, principal: Principal = Depends(authenticate)):
+    """Everything the job has produced so far, then the rest of it as it arrives."""
+    job = jobs.get(_require_user(principal).id, job_id)
+    if job is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "That job has been forgotten")
+    return StreamingResponse(jobs.follow(job), media_type="text/event-stream",
                              headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
 
@@ -796,6 +898,11 @@ async def edit_photo(payload: PhotoIn, principal: Principal = Depends(authentica
             yield _event("image", file=_file_json(stored), action=payload.action,
                          did=done[:1].upper() + done[1:], saved=True, seconds=seconds)
 
+    if payload.conversation_id is not None:
+        asked = (payload.request or payload.action).strip()[:120]
+        job = jobs.start(user.id, payload.conversation_id, "photo", asked, stream())
+        return StreamingResponse(jobs.follow(job), media_type="text/event-stream",
+                                 headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
     return StreamingResponse(stream(), media_type="text/event-stream",
                              headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
@@ -934,5 +1041,9 @@ async def generate_image(payload: ImageIn, principal: Principal = Depends(authen
                                         {"total": seconds})
             yield _event("image", file=_file_json(stored), seed=seed, saved=True, seconds=seconds)
 
+    if payload.conversation_id is not None:
+        job = jobs.start(user.id, payload.conversation_id, "image", (payload.prompt or "")[:120], stream())
+        return StreamingResponse(jobs.follow(job), media_type="text/event-stream",
+                                 headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
     return StreamingResponse(stream(), media_type="text/event-stream",
                              headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})

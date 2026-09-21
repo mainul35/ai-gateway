@@ -791,6 +791,7 @@ async function openConversation(id){
     }
     if(!conversation.messages.length) chat.innerHTML = '<p class="muted" id="empty">Empty conversation.</p>';
     openAtLatest();
+    attachToRunningJob(conversation.id);
     if(conversation.model && !models[conversation.model]){
       showError(`This conversation used ${conversation.model}, which you no longer have access to. Pick another model to continue.`);
     }else{
@@ -799,6 +800,47 @@ async function openConversation(id){
     loadConversations();
     loadMemory();
   }catch(e){ showError('Could not open conversation: ' + errorText(e)); }
+}
+
+// Work carries on in the gateway whether or not the tab that asked for it is still watching, so
+// reopening a conversation that is still busy joins the job rather than showing nothing. The stream
+// replays from its beginning, so an answer half-written while you were on another page is all there.
+async function attachToRunningJob(conversationId){
+  let job;
+  try{ ({job} = await api(`/chat/conversations/${conversationId}/job`)); }catch(e){ return; }
+  if(!job || currentId !== conversationId) return;
+
+  const box = addMessage('assistant', '', modelSelect.value);
+  const body = box.querySelector('.body');
+  setStatus(box, job.kind === 'chat' ? 'Still writing the answer' : 'Still working on the picture');
+  let answer = '';
+  try{
+    const response = await fetch(`/chat/jobs/${job.id}/stream`);
+    if(!response.ok) throw new Error('gone');
+    await readEvents(response, chunk => {
+      const event = chunk.gateway;
+      if(event){
+        if(event.type === 'progress' || event.type === 'status'){
+          setStatus(box, event.stage || event.text,
+                    event.fraction != null ? event.fraction : undefined);
+        }
+        return;
+      }
+      const delta = chunk.choices?.[0]?.delta || {};
+      if(delta.content){
+        setStatus(box, null);
+        answer += delta.content;
+        body.textContent = answer;
+        followAlong();
+      }
+    });
+  }catch(e){
+    // The job ended while we were asking about it; the result is saved, so just show it
+  }
+  setStatus(box, null);
+  // Whatever it produced is in the database by now. Reopening renders it the same way as any other
+  // finished turn, instead of this function having to know how each kind of result is drawn.
+  if(currentId === conversationId) openConversation(conversationId);
 }
 
 document.getElementById('convs').addEventListener('click', async e => {
@@ -1294,10 +1336,12 @@ async function sendChat(text, decision){
       }
       if(chunk.usage) usage = chunk.usage;
       const delta = chunk.choices?.[0]?.delta || {};
-      if(delta.reasoning_content){
+      // llama.cpp calls it reasoning_content and Ollama calls it reasoning; the same thing
+      const thought = delta.reasoning_content || delta.reasoning;
+      if(thought){
         firstTokenAt ??= performance.now();
         setStatus(box, null);
-        thinking += delta.reasoning_content;
+        thinking += thought;
         if(!thinkBlock){
           thinkBlock = document.createElement('details');
           thinkBlock.className = 'think';
@@ -1337,9 +1381,9 @@ async function sendChat(text, decision){
   renderAssistant(box, answer, thinking, stats, sources, await renderedHtml(answer));
 
   history.push({role: 'assistant', content: answer});
+  // The server writes the answer down itself as the job finishes, so that walking away mid-answer
+  // does not throw the turn away. Saving it from here as well would store it twice.
   if(answer || thinking){
-    await saveMessage({role: 'assistant', content: answer, reasoning: thinking || null, model, stats,
-                       attachments: sources ? {sources} : null});
     // The summary is written in the background once a chat gets long
     if(memory.enabled) setTimeout(loadMemory, 4000);
   }
