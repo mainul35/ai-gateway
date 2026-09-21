@@ -4,7 +4,6 @@ import json
 import logging
 import re
 import threading
-import uuid
 from datetime import timedelta
 
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -15,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app import access, backends, catalogue, fitting, settings
+from app.tools import jobs
 from app.auth import Principal, generate_key, hash_key, require_admin, require_manager
 from app import config_writer
 from app.engine.supervisor import supervisor
@@ -445,10 +445,24 @@ async def delete_model(payload: ModelDelete, principal: Principal = Depends(requ
 
 # --- finding a model to install, and installing it ----------------------------------------------
 
-# The client picks the id so that it can cancel before the first byte of progress has arrived
-OPERATION_ID = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
-_running = {}
-_running_lock = threading.Lock()
+# An install outlives the page that started it: it is a task holding its own events, so reloading
+# the browser loses the connection and nothing else. These are the tokens that can stop one.
+_cancellations = {}
+_cancellations_lock = threading.Lock()
+
+
+def _progress_of(job):
+    """The most recent byte counts a job has produced, for a page that has only just joined."""
+    for event in reversed(job.events):
+        try:
+            data = json.loads(event.decode()[5:])
+        except (ValueError, UnicodeDecodeError):
+            continue
+        if data.get("total") and data.get("completed") is not None:
+            return {"status": data.get("status"), "completed": data["completed"], "total": data["total"]}
+        if data.get("status"):
+            return {"status": data["status"]}
+    return {}
 
 
 class ModelCheck(BaseModel):
@@ -461,11 +475,10 @@ class ModelInstall(BaseModel):
     # "pull" takes the published GGUF as it is; "create" builds a local model with a context length
     mode: str = Field(default="pull", pattern="^(pull|create)$")
     context_length: int = fitting.DEFAULT_CONTEXT_LENGTH
-    operation_id: str = ""
 
 
 class Cancel(BaseModel):
-    operation_id: str = Field(min_length=1, max_length=64)
+    job_id: int
 
 
 def _look_up(model_id):
@@ -551,16 +564,7 @@ async def install_model(payload: ModelInstall, principal: Principal = Depends(re
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "That is not a Hugging Face repository name")
     if payload.quantization not in fitting.QUANTIZATION_LEVELS:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, f"Unknown quantization {payload.quantization}")
-    operation = payload.operation_id or uuid.uuid4().hex
-    if not OPERATION_ID.match(operation):
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Invalid operation id")
-
     cancellation = StreamCancellation()
-    with _running_lock:
-        if operation in _running:
-            raise HTTPException(status.HTTP_409_CONFLICT, "That operation is already running")
-        _running[operation] = cancellation
-
     source = fitting.hf_reference(model_id, payload.quantization)
     if payload.mode == "create":
         name = fitting.ollama_name(model_id, payload.quantization)
@@ -573,28 +577,53 @@ async def install_model(payload: ModelInstall, principal: Principal = Depends(re
     log.info("%s of %s started by %s", payload.mode, name,
              getattr(principal.user, "name", None) or "master-key")
 
-    async def stream():
+    async def work():
         try:
-            yield f"data: {json.dumps({'operation_id': operation, 'model_name': name})}\n\n".encode()
             async for event in _as_events(_final_result(rows, name)):
                 yield event
         finally:
-            with _running_lock:
-                _running.pop(operation, None)
             backends.forget_discovery()   # a new model should appear in the list at once
+
+    owner = principal.user.id if principal.user else 0
+    job = jobs.start(owner, None, "install", name, work())
+    with _cancellations_lock:
+        _cancellations[job.id] = cancellation
+
+    async def stream():
+        yield f"data: {json.dumps({'job_id': job.id, 'model_name': name})}\n\n".encode()
+        async for event in jobs.follow(job):
+            yield event
 
     return StreamingResponse(stream(), media_type="text/event-stream",
                              headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
 
+@router.get("/models/installing")
+async def installing(_: Principal = Depends(require_admin)):
+    """What this machine is downloading right now, so a reloaded page can pick it back up."""
+    return {"installing": [{**job.json(), "progress": _progress_of(job)}
+                           for job in jobs.running_of_kind("install")]}
+
+
+@router.get("/models/install/{job_id}/watch")
+async def watch_install(job_id: int, _: Principal = Depends(require_admin)):
+    """Everything the install has produced so far, then the rest as it arrives."""
+    job = jobs.any_job(job_id)
+    if job is None or job.kind != "install":
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "No such install")
+    return StreamingResponse(jobs.follow(job), media_type="text/event-stream",
+                             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+
 @router.post("/models/cancel")
 async def cancel_install(payload: Cancel, _: Principal = Depends(require_admin)):
-    with _running_lock:
-        cancellation = _running.get(payload.operation_id)
-    if cancellation is None:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "Nothing by that name is running")
+    with _cancellations_lock:
+        cancellation = _cancellations.get(payload.job_id)
+    job = jobs.any_job(payload.job_id)
+    if cancellation is None or job is None or job.done:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Nothing by that number is running")
     cancellation.cancel()
-    return {"cancelling": payload.operation_id}
+    return {"cancelling": payload.job_id}
 
 
 @router.get("/engines")
