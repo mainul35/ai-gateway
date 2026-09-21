@@ -45,6 +45,12 @@ pre{background:#0b1220;padding:.9rem 1rem;border-radius:8px;overflow-x:auto;marg
 input,select{background:var(--input);border:1px solid var(--border);border-radius:8px;color:var(--text);
      padding:.55rem .7rem;font-size:.95rem;width:100%;font-family:inherit}
 input:focus,select:focus{outline:none;border-color:var(--primary)}
+/* An open drop-down takes its colours from the control it belongs to. The playground's model picker
+   is deliberately styled to look like plain text - no background, muted colour - which leaves the
+   open list muted grey on the browser's own pale popup: every model but the selected one reads as
+   unavailable. The list is given colours of its own so it stays legible wherever it is used. */
+option{background:var(--card);color:var(--text)}
+option:checked{background:var(--input);color:var(--text)}
 label{display:block;margin-bottom:1rem}
 label span.lbl{display:block;font-size:.85rem;color:var(--muted);margin-bottom:.25rem}
 label span.hint{display:block;font-size:.8rem;color:var(--muted);margin-top:.2rem}
