@@ -82,10 +82,29 @@ function aboutModel(data){
 
 const RUN_STYLE = {'GPU': 'on', 'GPU + CPU': 'off', 'CPU': 'err'};
 
+// Ollama installs GGUF and nothing else. For a repository that publishes only safetensors the sizing
+// is still worth having - it says what a conversion would cost here - but offering a Pull that the
+// pull itself will refuse is worse than offering nothing, so the buttons go and the conversions
+// somebody has already made take their place.
+function elsewhere(data){
+  const others = data.gguf_alternatives || [];
+  const links = others.map(o =>
+    `<button class="btn btn-sm btn-secondary" data-repo="${escapeHtml(o.id)}" style="margin:.2rem .3rem 0 0">
+       ${escapeHtml(o.id)} <span class="muted">${Math.round(o.downloads / 1000)}k</span></button>`).join('');
+  return `<div class="note warn" style="margin:0 0 .9rem">
+      This repository publishes no GGUF files, and GGUF is the only thing Ollama can install. The
+      sizes below are what a conversion of it would cost on this machine.
+      ${others.length
+        ? `<div style="margin-top:.5rem">Someone has already converted it:</div>${links}`
+        : '<div style="margin-top:.5rem">No GGUF conversion of it was found.</div>'}
+    </div>`;
+}
+
 function fitRows(data){
   if(!data.recommendations.length){
     return '<p class="note warn" style="margin:0">None of its quantizations fit in this machine\'s memory.</p>';
   }
+  const installable = data.is_gguf_repo;
   const rows = data.recommendations.map(r => `
     <tr${r.recommended ? ' style="background:rgba(99,102,241,.12)"' : ''}>
       <td><strong>${escapeHtml(r.name)}</strong>${r.recommended ? ' <span class="pill on">pick this</span>' : ''}
@@ -94,17 +113,18 @@ function fitRows(data){
       <td>${r.estimated_size_gb} GB${r.size_is_exact ? '' : '<span class="muted"> est.</span>'}</td>
       <td>${r.memory_needed_gb} GB${r.vram_usage_percent ? `<div class="muted" style="font-size:.78rem">${r.vram_usage_percent}% of VRAM</div>` : ''}</td>
       <td>${escapeHtml(r.quality)}</td>
-      <td style="white-space:nowrap">
+      ${installable ? `<td style="white-space:nowrap">
         <button class="btn btn-sm" data-install="pull" data-quant="${escapeHtml(r.quantization)}">Pull</button>
         <button class="btn btn-sm btn-secondary" data-install="create" data-quant="${escapeHtml(r.quantization)}"
                 title="Builds a local model with the context length below">Build</button>
-      </td>
+      </td>` : '<td></td>'}
     </tr>`).join('');
   const cache = data.kv_cache || {};
   return `
+    ${installable ? '' : elsewhere(data)}
     <table><tr><th>Quantization</th><th>Runs on</th><th>Download</th><th>Memory</th><th>Quality</th><th></th></tr>
       ${rows}</table>
-    <div class="row" style="margin-top:.9rem;align-items:center">
+    ${installable ? `<div class="row" style="margin-top:.9rem;align-items:center">
       <label style="margin:0;max-width:11rem">
         <span class="lbl">Context length, when building</span>
         <input type="number" id="context" value="${cache.recommended_context_length || 4096}"
@@ -112,7 +132,7 @@ function fitRows(data){
       </label>
       <span class="muted" style="font-size:.82rem">Pull takes the model as published; Build makes a
         local copy fixed to that context length.</span>
-    </div>`;
+    </div>` : ''}`;
 }
 
 let found = null;
@@ -205,14 +225,24 @@ async function install(mode, quantization){
     document.getElementById('installBar').style.width = '100%';
   }else if(finished){
     document.getElementById('installStage').textContent = finished.cancelled ? 'Cancelled' : 'Did not finish';
-    if(finished.error && !finished.cancelled) showError(finished.error);
+    // In the card as well as at the top of the page: by the time an install fails you are usually
+    // scrolled down to watch it, and "Did not finish" on its own says nothing about why
+    if(finished.error && !finished.cancelled){
+      document.getElementById('installDetail').textContent = finished.error;
+      showError(finished.error);
+    }
   }
   loadModels();
 }
 
 document.getElementById('fit').addEventListener('click', e => {
-  const button = e.target.closest('[data-install]');
-  if(button) install(button.dataset.install, button.dataset.quant);
+  const wanted = e.target.closest('[data-install]');
+  if(wanted) return install(wanted.dataset.install, wanted.dataset.quant);
+  const conversion = e.target.closest('[data-repo]');
+  if(conversion){
+    document.getElementById('repo').value = conversion.dataset.repo;
+    check();
+  }
 });
 
 document.getElementById('installCancel').addEventListener('click', async () => {
