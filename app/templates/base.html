@@ -14,7 +14,7 @@
 }
 *{box-sizing:border-box}
 /* A page that fills the window and scrolls inside itself, rather than scrolling as a document */
-body.app{height:100vh;overflow:hidden;display:flex;flex-direction:column}
+body.app{height:100vh;height:100dvh;overflow:hidden;display:flex;flex-direction:column}
 body.app main{flex:1;min-height:0;max-width:none;width:100%;padding:0;margin:0}
 body.app header.nav{flex:none;padding:.6rem 1.25rem}
 body{margin:0;background:var(--bg);color:var(--text);line-height:1.6;
@@ -68,6 +68,26 @@ label span.hint{display:block;font-size:.8rem;color:var(--muted);margin-top:.2re
 .note.err{background:rgba(239,68,68,.1);border:1px solid var(--danger);color:var(--danger)}
 .muted{color:var(--muted)}
 [hidden]{display:none !important}
+
+/* --- phones ---------------------------------------------------------------------------
+   Narrower gutters, smaller headings, and two things that are not about size at all:
+   a form control under 16px makes iOS Safari zoom the whole page when it is focused, and a
+   table wider than the screen drags the page sideways unless it is made to scroll by itself. */
+@media (max-width: 640px){
+  header.nav{padding:.7rem 1rem;gap:.6rem 1rem}
+  .nav a{font-size:.9rem}
+  .who{display:none}
+  main{padding:1.25rem 1rem}
+  h1{font-size:1.35rem}
+  p.sub{margin-bottom:1.25rem}
+  .card{padding:1rem 1.1rem}
+  .grid{gap:.75rem;margin-bottom:1rem}
+  .stat{font-size:1.4rem}
+  input,select,textarea{font-size:16px}
+  table{display:block;overflow-x:auto;white-space:nowrap;font-size:.86rem}
+  th,td{padding:.45rem .5rem}
+  pre{font-size:.82rem}
+}
 </style>
 </head>
 <body class="{% block body_class %}{% endblock %}">
