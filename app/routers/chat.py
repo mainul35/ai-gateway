@@ -980,9 +980,8 @@ async def route(payload: RouteIn, principal: Principal = Depends(authenticate),
         answer = await _ask_helper(principal,
                                    intent_router.build_category_request(payload.message, history))
         found = intent_router.clean_category(answer, payload.has_images)
-        if found:
-            return found, settings.router_model()
-        return intent_router.category_by_keywords(payload.message, payload.has_images), "keywords"
+        category, by = intent_router.settle_category(found, payload.message, payload.has_images)
+        return category, settings.router_model() if by == "model" else "keywords"
 
     (action, decided_by), (category, category_by) = await asyncio.gather(decide_action(),
                                                                         decide_category())

@@ -190,6 +190,21 @@ def clean_category(text, has_images=False):
     return None
 
 
+def settle_category(answered, message, has_images=False):
+    """The model's answer, unless it said GENERAL while the words plainly said otherwise.
+
+    GENERAL is the absence of a signal rather than a finding, so a positive one beats it: asked
+    "write me a python function" with no further detail, the small model answers GENERAL, and the
+    words python and function are better evidence than that. A specific answer is never overruled.
+    """
+    if answered and answered != "general":
+        return answered, "model"
+    by_words = category_by_keywords(message, has_images)
+    if by_words != "general":
+        return by_words, "keywords"
+    return answered or by_words, "model" if answered else "keywords"
+
+
 def category_by_keywords(message, has_images=False):
     """Used when the model cannot decide. Prefers general, because a wrong specialist is worse."""
     text = (message or "").strip()

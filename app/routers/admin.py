@@ -9,11 +9,11 @@ from datetime import timedelta
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
-from sqlalchemy import case, func, select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from app import access, backends, catalogue, fitting, settings
+from app import access, backends, catalogue, fitting, settings, usage as usage_log
 from app.tools import jobs
 from app.auth import Principal, generate_key, hash_key, require_admin, require_manager
 from app import config_writer
