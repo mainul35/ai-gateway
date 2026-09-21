@@ -9,6 +9,7 @@ import logging
 import re
 
 from app import settings
+from app.tools.chooser import CATEGORIES
 
 log = logging.getLogger("tools.router")
 
@@ -62,6 +63,44 @@ Examples:
 "can you read the text in this screenshot?" -> CHAT
 
 Allowed answers this time: {allowed}. Answer with one of those words only."""
+
+# What kind of work the message is, which decides which model should do it. Asked of the same small
+# model, in its own call, at the same time as the action: the two questions are independent, and
+# putting both in one prompt made the action worse, which is the answer that matters most.
+CATEGORY_PROMPT = """You read a user's message and say what kind of work it asks for. Answer with one
+word and nothing else.
+
+CODE      - writing, reading, fixing, explaining or reviewing code, or anything about a program's
+            behaviour: build errors, stack traces, configuration files, shell commands, SQL.
+VISION    - it is about a picture the user has attached.
+REASONING - it needs careful step-by-step thought before an answer is possible: maths, logic
+            puzzles, planning, weighing options, working something out from given facts.
+LONG      - it comes with, or is about, a long piece of text to read through: summarise this,
+            what does this document say, go through this transcript.
+GENERAL   - everything else: ordinary questions, explanations, writing, conversation.
+
+Examples:
+"Why does my Spring Boot app fail to start with a BeanCreationException?" -> CODE
+"Write a function that merges two sorted lists" -> CODE
+"What is in this image?" -> VISION
+"If a train leaves at 3pm going 60mph, when does it arrive 200 miles away?" -> REASONING
+"Should I use Postgres or MongoDB for this, and why?" -> REASONING
+"Summarise the attached meeting notes" -> LONG
+"What is the capital of Bangladesh?" -> GENERAL
+"Write me a short poem about rain" -> GENERAL
+
+Answer with one of: CODE, VISION, REASONING, LONG, GENERAL."""
+
+CODE_WORDS = re.compile(
+    r"\b(code|function|class|method|variable|compile|build|error|exception|stack ?trace|bug|debug|"
+    r"api|endpoint|database|query|sql|docker|container|kubernetes|yaml|json|regex|script|shell|"
+    r"python|java|javascript|typescript|rust|golang|spring|react|npm|maven|gradle|git)\b", re.I)
+REASONING_WORDS = re.compile(
+    r"\b(calculate|compute|solve|prove|derive|how many|how much|why (is|does|would)|"
+    r"compare|trade-?offs?|should i|which is better|plan|strategy|step by step)\b", re.I)
+LONG_WORDS = re.compile(
+    r"\b(summari[sz]e|summary|tl;?dr|these notes|this document|this transcript|this article|"
+    r"go through|read through)\b", re.I)
 
 IMAGE_WORDS = re.compile(
     r"\b(draw|sketch|paint|render|illustrate|generate|create|make|produce|design)\b[^.?!]{0,40}"
@@ -123,6 +162,46 @@ def by_keywords(message, allowed, has_images):
     if SEARCH in allowed and SEARCH_WORDS.search(text):
         return SEARCH
     return CHAT
+
+
+def build_category_request(message, history=()):
+    """The second classification call: what kind of work, rather than which tool."""
+    recent = "\n".join(f"{m['role']}: {m['content'][:200]}" for m in list(history)[-2:])
+    context = f"Earlier in the conversation:\n{recent}\n\n" if recent else ""
+    return {
+        "model": settings.router_model(),
+        "stream": False,
+        "temperature": 0,
+        "max_tokens": 200,
+        "reasoning_effort": "none",
+        "messages": [
+            {"role": "system", "content": CATEGORY_PROMPT},
+            {"role": "user", "content": f"{context}Message: {message}\n\nKind:"},
+        ],
+    }
+
+
+def clean_category(text, has_images=False):
+    """The category word out of the model's reply, or None when it did not name one."""
+    words = re.findall(r"[a-z]+", re.sub(r"<think>.*?</think>", "", (text or ""), flags=re.S).lower())
+    for word in words:
+        if word in CATEGORIES:
+            return "vision" if has_images and word == "vision" else word
+    return None
+
+
+def category_by_keywords(message, has_images=False):
+    """Used when the model cannot decide. Prefers general, because a wrong specialist is worse."""
+    text = (message or "").strip()
+    if has_images:
+        return "vision"
+    if CODE_WORDS.search(text):
+        return "code"
+    if LONG_WORDS.search(text) or len(text) > 4000:
+        return "long"
+    if REASONING_WORDS.search(text):
+        return "reasoning"
+    return "general"
 
 
 def clean_answer(text, allowed):

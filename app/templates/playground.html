@@ -419,6 +419,17 @@ function relativeTime(iso){
 }
 
 const canSee = id => (models[id]?.capabilities || []).includes('vision');
+// With Auto chosen there is no model until the router has picked one, so anything that needs a name
+// now asks for one: chosenModel is what the last routing decision settled on, falling back to the
+// first model that can see, since a picture is the only case where the wrong choice simply fails.
+const choosing = () => modelSelect.value === 'auto';
+let chosenModel = '';
+function currentModel(){
+  if(!choosing()) return modelSelect.value;
+  if(chosenModel && models[chosenModel]) return chosenModel;
+  const names = Object.keys(models);
+  return names.find(n => canSee(n)) || names[0] || '';
+}
 
 // --- models -------------------------------------------------------------
 
@@ -432,11 +443,12 @@ async function loadModels(){
       document.getElementById('send').disabled = true;
       return;
     }
-    modelSelect.innerHTML = data.map(m =>
-      `<option value="${escapeHtml(m.id)}">${escapeHtml(m.id)}${canSee(m.id) ? '  · sees images' : ''}</option>`).join('');
+    modelSelect.innerHTML = '<option value="auto">Auto · best for the question</option>'
+      + data.map(m =>
+        `<option value="${escapeHtml(m.id)}">${escapeHtml(m.id)}${canSee(m.id) ? '  · sees images' : ''}</option>`).join('');
     let remembered = null;
     try{ remembered = localStorage.getItem('pg.model'); }catch(e){}
-    if(remembered && models[remembered]) modelSelect.value = remembered;
+    if(remembered === 'auto' || (remembered && models[remembered])) modelSelect.value = remembered;
     syncModel();
   }catch(e){ showError('Could not load models: ' + errorText(e)); }
 }
@@ -495,7 +507,7 @@ function syncTools(){
   if(!canAttach() && pending.length){ pending = []; renderPending(); }
 
   const hint = document.getElementById('modeHint');
-  const model = modelSelect.value;
+  const model = currentModel();
   hint.className = 'hint';
   if(imageMode()){
     promptBox.placeholder = pending.length ? 'How should the picture change?' : 'Describe a picture to create…';
@@ -819,7 +831,7 @@ async function attachToRunningJob(conversationId){
   try{ ({job} = await api(`/chat/conversations/${conversationId}/job`)); }catch(e){ return; }
   if(!job || currentId !== conversationId) return;
 
-  const box = addMessage('assistant', '', modelSelect.value);
+  const box = addMessage('assistant', '', currentModel());
   const body = box.querySelector('.body');
   setStatus(box, job.kind === 'chat' ? 'Still writing the answer' : 'Still working on the picture');
   let answer = '';
@@ -910,7 +922,7 @@ function addMessage(role, text, model){
   document.getElementById('empty')?.remove();
   const box = document.createElement('div');
   box.className = `msg ${role}`;
-  box.innerHTML = `<div class="who">${role === 'user' ? 'You' : escapeHtml(model || modelSelect.value)}</div><div class="body"></div>`;
+  box.innerHTML = `<div class="who">${role === 'user' ? 'You' : escapeHtml(model || currentModel())}</div><div class="body"></div>`;
   box.querySelector('.body').textContent = text;
   chat.appendChild(box);
   followAlong();
@@ -931,15 +943,34 @@ function addUserMessage(text, imageUrls){
 const ACTION_LABELS = {chat: 'answered directly', search: 'searched the web',
                        image: 'created an image', edit: 'edited the image'};
 
+const CATEGORY_LABELS = {code: 'a coding question', vision: 'a question about the picture',
+                         reasoning: 'something to work out', long: 'a long read',
+                         general: 'a general question'};
+
 function noteDecision(box, decision){
-  if(!decision || decision.decided_by === 'the only tool switched on') return;
-  const note = document.createElement('span');
-  note.className = 'muted';
-  note.style.fontWeight = '400';
-  note.textContent = ` · ${ACTION_LABELS[decision.action] || decision.action}`;
-  note.title = `Chosen by ${decision.decided_by || 'the gateway'} from the tools you switched on.` +
-               ' Leave only one tool on to force it.';
-  box.querySelector('.who').appendChild(note);
+  if(!decision) return;
+  const who = box.querySelector('.who');
+  if(decision.decided_by !== 'the only tool switched on'){
+    const note = document.createElement('span');
+    note.className = 'muted';
+    note.style.fontWeight = '400';
+    note.textContent = ` · ${ACTION_LABELS[decision.action] || decision.action}`;
+    note.title = `Chosen by ${decision.decided_by || 'the gateway'} from the tools you switched on.` +
+                 ' Leave only one tool on to force it.';
+    who.appendChild(note);
+  }
+  // With Auto on, why this model and not one of the others is the thing worth saying
+  if(decision.model && decision.category){
+    const picked = document.createElement('span');
+    picked.className = 'muted';
+    picked.style.fontWeight = '400';
+    picked.textContent = ` · auto`;
+    picked.title = `Read as ${CATEGORY_LABELS[decision.category] || decision.category}`
+                 + ` by ${decision.category_by || 'the gateway'}, so ${decision.model} was picked`
+                 + `${decision.model_why ? ' (' + decision.model_why + ')' : ''}`
+                 + `${decision.considered ? ' out of ' + decision.considered + ' models' : ''}.`;
+    who.appendChild(picked);
+  }
 }
 
 function statsText(stats){
@@ -1246,13 +1277,17 @@ function busy(on){
 // With more than one tool switched on, a small model decides what this message asks for
 async function decideAction(text, hasImages){
   const searchOn = tools.web_search && caps.web_search;
-  if(!imageMode() && !searchOn) return {action: 'chat'};
-  if(!caps.routing) return {action: imageMode() ? (hasImages ? 'edit' : 'image') : 'search'};
+  // Even with no tool to choose between, Auto still has a model to choose
+  if(!imageMode() && !searchOn && !choosing()) return {action: 'chat'};
+  if(!caps.routing && !choosing()) return {action: imageMode() ? (hasImages ? 'edit' : 'image') : 'search'};
   setDeciding(true);
   try{
-    return await api('/chat/route', {method: 'POST', headers: JSON_HEADERS, body: JSON.stringify({
+    const decision = await api('/chat/route', {method: 'POST', headers: JSON_HEADERS, body: JSON.stringify({
       message: text, has_images: hasImages, web_search: searchOn, image_generation: imageMode(),
+      choose_model: choosing(), current_model: chosenModel,
       history: history.slice(-4).map(h => ({role: h.role, content: h.content}))})});
+    if(decision.model) chosenModel = decision.model;
+    return decision;
   }catch(e){
     // Falling back to what the toggles alone would have done
     return {action: imageMode() && !searchOn ? (hasImages ? 'edit' : 'image') : 'chat', decided_by: 'toggles'};
@@ -1290,9 +1325,11 @@ async function send(){
 }
 
 async function sendChat(text, decision){
-  const model = modelSelect.value;
+  const model = decision.model || currentModel();
   if(pending.length && !canSee(model)){
-    showError(`${model} cannot see images. Pick a model marked "sees images", or remove the attachment.`);
+    showError(choosing()
+      ? `None of your models can see images, so ${model} cannot read this attachment.`
+      : `${model} cannot see images. Pick a model marked "sees images", or remove the attachment.`);
     return;
   }
   showError('');
@@ -1407,7 +1444,7 @@ async function sendPhoto(text, decision){
   const cleaning = decision.action === 'clean';
   const backdrop = decision.action === 'backdrop';
   try{
-    await ensureConversation(text, modelSelect.value);
+    await ensureConversation(text, currentModel());
   }catch(e){
     showError('Could not save the conversation: ' + errorText(e));
     return;
@@ -1477,7 +1514,7 @@ async function sendImage(text, decision){
   const size = document.getElementById('imageSize').value;
   const strength = parseFloat(document.getElementById('strength').value);
   try{
-    await ensureConversation(text, modelSelect.value);
+    await ensureConversation(text, currentModel());
   }catch(e){
     showError('Could not save the conversation: ' + errorText(e));
     return;

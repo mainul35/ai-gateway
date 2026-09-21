@@ -233,20 +233,8 @@ SHAKY_FAILURES = 0.2    # a fifth of requests failing is worth a warning
 
 
 async def _usage_by_model(session, since):
-    """Requests, failures, tokens and latency per model over a window, plus the last failure's words."""
-    rows = (await session.execute(
-        select(UsageRecord.model, func.count(UsageRecord.id),
-               func.sum(case((UsageRecord.status_code >= 400, 1), else_=0)),
-               func.max(UsageRecord.created_at), func.avg(UsageRecord.latency_ms),
-               func.sum(UsageRecord.total_tokens))
-        .where(UsageRecord.created_at >= since).group_by(UsageRecord.model)
-    )).all()
-    stats = {
-        model: {"requests": int(requests or 0), "failures": int(failures or 0),
-                "last_used": last.isoformat() if last else None, "_last": last,
-                "avg_latency_ms": int(latency or 0), "tokens": int(tokens or 0), "last_error": None}
-        for model, requests, failures, last, latency, tokens in rows
-    }
+    """How each model has behaved, plus the words of its most recent failure."""
+    stats = await usage_log.by_model(session, since)
     # One recent failure per model says more about what is wrong than a count does
     failures = (await session.execute(
         select(UsageRecord.model, UsageRecord.error, UsageRecord.status_code, UsageRecord.created_at)
