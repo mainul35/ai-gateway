@@ -103,7 +103,7 @@ label span.hint{display:block;font-size:.8rem;color:var(--muted);margin-top:.2re
   <a href="/dashboard">Dashboard</a>
   <a href="/playground">Playground</a>
   {% if user.role in ('manager', 'admin') %}<a href="/users">Users</a>{% endif %}
-  {% if user.role == 'admin' %}<a href="/settings/sso">SSO</a><a href="/docs">API</a>{% endif %}
+  {% if user.role == 'admin' %}<a href="/models">Models</a><a href="/settings/sso">SSO</a><a href="/docs">API</a>{% endif %}
   <span class="spacer"></span>
   <span class="who">{{ user.name }} &middot; {{ user.role }}</span>
   <a href="/logout">Sign out</a>

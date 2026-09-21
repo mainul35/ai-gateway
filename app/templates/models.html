@@ -1,0 +1,318 @@
+{% extends "base.html" %}
+{% block title %}Models &middot; Model Gateway{% endblock %}
+{% block content %}
+<h1>Models</h1>
+<p class="sub">Find a model that fits this machine, install it, and see how the installed ones behave.</p>
+
+<div id="error" class="note err" hidden></div>
+
+<div class="card" style="margin-bottom:1.5rem">
+  <h2>Will it run here?</h2>
+  <p class="muted" style="margin:0 0 .8rem;font-size:.88rem">
+    A Hugging Face repository, as <code>owner/model</code>. Every quantization it publishes is measured
+    against this machine's memory, with the key/value cache counted in.</p>
+  <div class="row">
+    <label style="flex:1;min-width:14rem;margin:0">
+      <span class="lbl">Repository</span>
+      <input id="repo" placeholder="e.g. unsloth/Qwen3-8B-GGUF" autocomplete="off">
+    </label>
+    <button class="btn" id="check">Check</button>
+  </div>
+  <div id="checking" class="muted" style="margin-top:.8rem" hidden>
+    Asking Hugging Face&hellip;</div>
+  <div id="found" hidden>
+    <div id="about" style="margin-top:1rem"></div>
+    <div id="fit" style="margin-top:1rem"></div>
+  </div>
+</div>
+
+<div class="card" style="margin-bottom:1.5rem" id="installCard" hidden>
+  <h2>Installing <code id="installName"></code></h2>
+  <div class="status" style="margin:.4rem 0"><span class="spinner" id="installSpinner"></span>
+    <span id="installStage">Starting</span></div>
+  <div class="bar"><div id="installBar"></div></div>
+  <p class="muted" id="installDetail" style="margin:.5rem 0 0;font-size:.85rem"></p>
+  <button class="btn btn-danger btn-sm" id="installCancel" style="margin-top:.7rem">Cancel</button>
+</div>
+
+<div class="card">
+  <h2>Installed</h2>
+  <p class="muted" style="margin:0 0 .8rem;font-size:.88rem">
+    What each one is for, and how it has actually behaved. Counts cover the last
+    <span id="windowDays">90</span> days.</p>
+  <div id="models" class="muted">Loading&hellip;</div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+function showError(message){
+  const box = document.getElementById('error');
+  box.textContent = message;
+  box.hidden = !message;
+}
+
+function gb(value){ return value == null ? '' : `${value} GB`; }
+
+// --- what a repository is, and which of its quantizations fit -------------------------------
+
+function aboutModel(data){
+  const info = data.model_info || {};
+  const system = data.system_info || {};
+  const parameters = data.parameters || {};
+  const cache = data.kv_cache || {};
+  const facts = [
+    parameters.count ? `${(parameters.count / 1e9).toFixed(1)}B parameters` : '',
+    data.is_gguf_repo ? 'publishes GGUF files' : 'no GGUF files, so sizes are calculated',
+    cache.recommended_context_length
+      ? `${Math.round(cache.recommended_context_length / 1024)}K context costs ${gb(cache.kv_cache_recommended_gb)}`
+      : '',
+  ].filter(Boolean);
+  return `
+    <div style="display:flex;gap:.6rem;align-items:baseline;flex-wrap:wrap">
+      <code style="font-size:.95rem">${escapeHtml(info.id || '')}</code>
+      ${info.downloads ? `<span class="pill off">${info.downloads.toLocaleString()} downloads</span>` : ''}
+      ${info.likes ? `<span class="pill off">${info.likes} likes</span>` : ''}
+    </div>
+    <p class="muted" style="margin:.35rem 0 0;font-size:.85rem">${escapeHtml(facts.join(' · '))}</p>
+    <p class="muted" style="margin:.2rem 0 0;font-size:.85rem">
+      This machine: ${escapeHtml(system.total_vram ? formatBytes(system.total_vram) + ' of VRAM' : 'no GPU')},
+      ${escapeHtml(formatBytes(system.available_ram || 0))} of RAM free.</p>`;
+}
+
+const RUN_STYLE = {'GPU': 'on', 'GPU + CPU': 'off', 'CPU': 'err'};
+
+function fitRows(data){
+  if(!data.recommendations.length){
+    return '<p class="note warn" style="margin:0">None of its quantizations fit in this machine\'s memory.</p>';
+  }
+  const rows = data.recommendations.map(r => `
+    <tr${r.recommended ? ' style="background:rgba(99,102,241,.12)"' : ''}>
+      <td><strong>${escapeHtml(r.name)}</strong>${r.recommended ? ' <span class="pill on">pick this</span>' : ''}
+        <div class="muted" style="font-size:.78rem">${escapeHtml(r.description)}</div></td>
+      <td><span class="pill ${RUN_STYLE[r.run_mode] || 'off'}">${escapeHtml(r.run_mode)}</span></td>
+      <td>${r.estimated_size_gb} GB${r.size_is_exact ? '' : '<span class="muted"> est.</span>'}</td>
+      <td>${r.memory_needed_gb} GB${r.vram_usage_percent ? `<div class="muted" style="font-size:.78rem">${r.vram_usage_percent}% of VRAM</div>` : ''}</td>
+      <td>${escapeHtml(r.quality)}</td>
+      <td style="white-space:nowrap">
+        <button class="btn btn-sm" data-install="pull" data-quant="${escapeHtml(r.quantization)}">Pull</button>
+        <button class="btn btn-sm btn-secondary" data-install="create" data-quant="${escapeHtml(r.quantization)}"
+                title="Builds a local model with the context length below">Build</button>
+      </td>
+    </tr>`).join('');
+  const cache = data.kv_cache || {};
+  return `
+    <table><tr><th>Quantization</th><th>Runs on</th><th>Download</th><th>Memory</th><th>Quality</th><th></th></tr>
+      ${rows}</table>
+    <div class="row" style="margin-top:.9rem;align-items:center">
+      <label style="margin:0;max-width:11rem">
+        <span class="lbl">Context length, when building</span>
+        <input type="number" id="context" value="${cache.recommended_context_length || 4096}"
+               min="256" max="${cache.max_context_length || 1048576}">
+      </label>
+      <span class="muted" style="font-size:.82rem">Pull takes the model as published; Build makes a
+        local copy fixed to that context length.</span>
+    </div>`;
+}
+
+let found = null;
+
+async function check(){
+  const repo = document.getElementById('repo').value.trim();
+  if(!repo) return;
+  showError('');
+  document.getElementById('found').hidden = true;
+  document.getElementById('checking').hidden = false;
+  document.getElementById('check').disabled = true;
+  try{
+    found = await api('/admin/models/check', {method: 'POST', headers: {'Content-Type': 'application/json'},
+                                              body: JSON.stringify({model_id: repo})});
+    document.getElementById('about').innerHTML = aboutModel(found);
+    document.getElementById('fit').innerHTML = fitRows(found);
+    document.getElementById('found').hidden = false;
+  }catch(e){ showError(e.message); }
+  finally{
+    document.getElementById('checking').hidden = true;
+    document.getElementById('check').disabled = false;
+  }
+}
+
+document.getElementById('check').addEventListener('click', check);
+document.getElementById('repo').addEventListener('keydown', e => { if(e.key === 'Enter') check(); });
+
+// --- installing -----------------------------------------------------------------------------
+
+let operation = null;
+
+function installProgress(event){
+  if(event.total && event.completed != null){
+    const share = event.completed / event.total;
+    document.getElementById('installBar').style.width = Math.round(share * 100) + '%';
+    document.getElementById('installDetail').textContent =
+      `${formatBytes(event.completed)} of ${formatBytes(event.total)}`;
+  }
+  if(event.status) document.getElementById('installStage').textContent = event.status;
+}
+
+async function install(mode, quantization){
+  if(operation){ showError('Something is already installing.'); return; }
+  showError('');
+  operation = crypto.randomUUID().replace(/-/g, '');
+  const card = document.getElementById('installCard');
+  card.hidden = false;
+  document.getElementById('installBar').style.width = '0%';
+  document.getElementById('installDetail').textContent = '';
+  document.getElementById('installStage').textContent = 'Starting';
+  document.getElementById('installSpinner').hidden = false;
+  document.getElementById('installCancel').hidden = false;
+  document.getElementById('installName').textContent = found.model_info.id;
+
+  let finished = null;
+  try{
+    const response = await fetch('/admin/models/install', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({model_id: found.model_info.id, quantization, mode, operation_id: operation,
+                            context_length: parseInt(document.getElementById('context')?.value, 10) || 4096})});
+    if(!response.ok){
+      const body = await response.json().catch(() => null);
+      throw new Error((body && body.detail) || `HTTP ${response.status}`);
+    }
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    while(true){
+      const {value, done} = await reader.read();
+      if(done) break;
+      buffer += decoder.decode(value, {stream: true});
+      const lines = buffer.split('\n');
+      buffer = lines.pop();
+      for(const line of lines){
+        if(!line.startsWith('data:')) continue;
+        let event;
+        try{ event = JSON.parse(line.slice(5)); }catch(err){ continue; }
+        if(event.model_name) document.getElementById('installName').textContent = event.model_name;
+        if(event.done) finished = event; else installProgress(event);
+      }
+    }
+  }catch(e){ showError(e.message); }
+  finally{
+    operation = null;
+    document.getElementById('installSpinner').hidden = true;
+    document.getElementById('installCancel').hidden = true;
+  }
+  if(finished && finished.success){
+    document.getElementById('installStage').textContent = `Installed as ${finished.model_name}`;
+    document.getElementById('installBar').style.width = '100%';
+  }else if(finished){
+    document.getElementById('installStage').textContent = finished.cancelled ? 'Cancelled' : 'Did not finish';
+    if(finished.error && !finished.cancelled) showError(finished.error);
+  }
+  loadModels();
+}
+
+document.getElementById('fit').addEventListener('click', e => {
+  const button = e.target.closest('[data-install]');
+  if(button) install(button.dataset.install, button.dataset.quant);
+});
+
+document.getElementById('installCancel').addEventListener('click', async () => {
+  if(!operation) return;
+  try{
+    await api('/admin/models/cancel', {method: 'POST', headers: {'Content-Type': 'application/json'},
+                                       body: JSON.stringify({operation_id: operation})});
+  }catch(e){ showError(e.message); }
+});
+
+// --- what is installed ------------------------------------------------------------------------
+
+function bytes(n){
+  if(!n) return '';
+  return n >= 1e9 ? (n / 1e9).toFixed(1) + ' GB' : Math.round(n / 1e6) + ' MB';
+}
+
+function ago(iso){
+  if(!iso) return 'never';
+  const days = Math.floor((Date.now() - new Date(iso)) / 86400000);
+  return days <= 0 ? 'today' : days === 1 ? 'yesterday' : days + ' days ago';
+}
+
+// Worst first, so the reason not to delete something is the first thing read
+const NOTE_STYLE = {stop: 'err', warn: 'off', info: 'on'};
+
+function modelCard(m){
+  const facts = [m.parameter_size, m.quantization && m.quantization !== 'unknown' ? m.quantization : '',
+                 bytes(m.size_bytes), m.context_length ? Math.round(m.context_length / 1024) + 'K context' : '']
+                .filter(Boolean).join(' · ');
+  const notes = (m.notes || []).map(n =>
+    `<div class="note ${NOTE_STYLE[n.level] || 'ok'}" style="margin:.35rem 0 0;padding:.4rem .7rem;font-size:.85rem">
+       ${escapeHtml(n.text)}</div>`).join('');
+  const usage = m.usage || {};
+  // Latency is only worth showing when something actually came back to be timed
+  const health = usage.requests
+    ? [`${usage.requests} request${usage.requests === 1 ? '' : 's'}, ${usage.failures} failed`,
+       `last used ${ago(usage.last_used)}`,
+       usage.avg_latency_ms >= 100 ? `${(usage.avg_latency_ms / 1000).toFixed(1)}s on average` : ''
+      ].filter(Boolean).join(' · ')
+    : 'No requests recorded in the window.';
+  const button = m.can_delete
+    ? `<button class="btn btn-danger btn-sm" data-delete="${escapeHtml(m.name)}">Delete</button>`
+    : `<span class="muted" style="font-size:.8rem" title="${escapeHtml(m.delete_note)}">kept elsewhere</span>`;
+  return `<div style="border:1px solid var(--border);border-radius:10px;padding:.8rem 1rem;margin-bottom:.7rem">
+    <div style="display:flex;gap:.6rem;align-items:baseline;flex-wrap:wrap">
+      <code style="font-size:.95rem">${escapeHtml(m.name)}</code>
+      <span class="pill ${m.reachable ? 'on' : 'err'}">${m.reachable ? m.backend : 'unreachable'}</span>
+      ${(m.capabilities || []).map(c => `<span class="pill off">${escapeHtml(c)}</span>`).join('')}
+      <span class="spacer" style="flex:1"></span>${button}
+    </div>
+    ${facts ? `<p class="muted" style="margin:.3rem 0 0;font-size:.82rem">${escapeHtml(facts)}</p>` : ''}
+    <p style="margin:.4rem 0 0;font-size:.9rem">${escapeHtml(m.description)}</p>
+    <p class="muted" style="margin:.35rem 0 0;font-size:.82rem">${escapeHtml(health)}</p>
+    ${notes}
+  </div>`;
+}
+
+async function loadModels(){
+  const target = document.getElementById('models');
+  try{
+    const data = await api('/admin/models');
+    document.getElementById('windowDays').textContent = data.window_days;
+    target.classList.remove('muted');
+    target.innerHTML = data.models.map(modelCard).join('') || '<span class="muted">No models found.</span>';
+  }catch(e){ target.textContent = 'Could not load models: ' + e.message; }
+}
+
+// Deleting is not undoable without pulling the model again, so it is asked twice: once here, and once
+// more by the server when the model is spoken for
+document.getElementById('models').addEventListener('click', async e => {
+  const button = e.target.closest('[data-delete]');
+  if(!button) return;
+  const name = button.dataset.delete;
+  if(!confirm(`Delete ${name} from the Ollama server?\n\nThis frees its disk space and cannot be undone `
+              + `without pulling it again.`)) return;
+  button.disabled = true;
+  const original = button.textContent;
+  button.textContent = 'Deleting…';
+  try{
+    await api('/admin/models/delete', {method: 'POST', headers: {'Content-Type': 'application/json'},
+                                       body: JSON.stringify({name})});
+  }catch(err){
+    // A 409 is the server saying something still depends on it; it names what, and asks again
+    if(/Confirm again/.test(err.message)
+        && confirm(err.message.replace('Not deleted: ', '') + '\n\nDelete anyway?')){
+      try{
+        await api('/admin/models/delete', {method: 'POST', headers: {'Content-Type': 'application/json'},
+                                           body: JSON.stringify({name, force: true})});
+      }catch(again){ showError(again.message); }
+    }else if(!/Confirm again/.test(err.message)){
+      showError(err.message);
+    }
+  }finally{
+    button.disabled = false;
+    button.textContent = original;
+    loadModels();
+  }
+});
+
+loadModels();
+</script>
+{% endblock %}

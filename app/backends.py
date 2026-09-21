@@ -157,19 +157,44 @@ async def resolve(model_name):
     return models.get(model_name)
 
 
+def forget_discovery():
+    """Makes the next listing ask Ollama again, for when this gateway has just changed what it has."""
+    _cache["expires_at"] = 0.0
+
+
+async def _ollama_has(client, name):
+    try:
+        response = await client.get(f"{ollama_host()}/api/tags")
+        response.raise_for_status()
+        return any(tag.get("name") == name for tag in response.json().get("models") or [])
+    except (httpx.HTTPError, ValueError):
+        return True      # cannot tell, so do not claim it is gone
+
+
 async def delete_ollama_model(name):
     """Removes a model from the Ollama server. Returns None, or why it could not be done.
 
     Ollama deletes the manifest and any blob no other model still points at, so the space a shared
     base costs is only returned when the last model using it goes.
+
+    A 404 is not taken at face value. A model built moments ago can be listed by /api/tags and still
+    answer "not found" to a delete, and a model that is genuinely absent is already in the state the
+    caller wanted. So the tags decide: gone means done, present means try once more.
     """
     try:
         async with httpx.AsyncClient(timeout=60) as client:
             response = await client.request("DELETE", f"{ollama_host()}/api/delete", json={"model": name})
-        if response.status_code == 404:
-            return f"Ollama does not have a model called {name}"
-        response.raise_for_status()
+            if response.status_code == 404:
+                if not await _ollama_has(client, name):
+                    forget_discovery()
+                    return None
+                await asyncio.sleep(1.5)
+                response = await client.request("DELETE", f"{ollama_host()}/api/delete",
+                                                json={"model": name})
+                if response.status_code == 404:
+                    return f"Ollama would not delete {name}: it says there is no such model"
+            response.raise_for_status()
     except httpx.HTTPError as e:
         return f"Ollama would not delete it: {e}"
-    _cache["expires_at"] = 0.0   # the next listing asks Ollama again rather than trusting the cache
+    forget_discovery()   # the next listing asks Ollama again rather than trusting the cache
     return None

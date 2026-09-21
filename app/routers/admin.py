@@ -1,19 +1,27 @@
 """Admin API: users, API keys, usage, and the models themselves."""
+import asyncio
 import json
 import logging
+import re
+import threading
+import uuid
 from datetime import timedelta
 
 from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import case, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from app import access, backends, catalogue, settings
+from app import access, backends, catalogue, fitting, settings
 from app.auth import Principal, generate_key, hash_key, require_admin, require_manager
 from app import config_writer
 from app.engine.supervisor import supervisor
-from utils.ollama_client import check_ollama_status, ollama_host
+from utils import hf_client
+from utils.ollama_client import (StreamCancellation, check_ollama_status, ollama_host,
+                                 stream_create_model, stream_pull_model)
+from utils.system_info import get_system_info
 from utils.system_info import get_system_info
 from app.db import get_session
 from app.models import ApiKey, UsageRecord, User, utcnow
@@ -432,6 +440,159 @@ async def delete_model(payload: ModelDelete, principal: Principal = Depends(requ
     # Its own size, not what the disk gets back: Ollama keeps any layer another model still points at,
     # so deleting one of two models built on the same base frees very little
     return {"deleted": payload.name, "size_bytes": backend.size_bytes}
+
+
+
+# --- finding a model to install, and installing it ----------------------------------------------
+
+# The client picks the id so that it can cancel before the first byte of progress has arrived
+OPERATION_ID = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+_running = {}
+_running_lock = threading.Lock()
+
+
+class ModelCheck(BaseModel):
+    model_id: str = Field(min_length=1, max_length=256)
+
+
+class ModelInstall(BaseModel):
+    model_id: str = Field(min_length=1, max_length=256)
+    quantization: str = Field(min_length=1, max_length=32)
+    # "pull" takes the published GGUF as it is; "create" builds a local model with a context length
+    mode: str = Field(default="pull", pattern="^(pull|create)$")
+    context_length: int = fitting.DEFAULT_CONTEXT_LENGTH
+    operation_id: str = ""
+
+
+class Cancel(BaseModel):
+    operation_id: str = Field(min_length=1, max_length=64)
+
+
+def _look_up(model_id):
+    """Everything Hugging Face and this machine have to say about a repository. Blocking; threaded."""
+    info = hf_client.get_model_info(model_id)
+    if "error" in info:
+        return {"error": info["error"], "status_code": info.get("status_code", 502)}
+    sizes = hf_client.get_model_sizes(info)
+    param_count, param_source = hf_client.get_parameter_count(info, sizes)
+    gguf_files = hf_client.get_gguf_files(info, fitting.QUANTIZATION_LEVELS)
+    architecture = hf_client.get_model_architecture(info["id"], info)
+    cache = fitting.kv_cache(architecture)
+    system = get_system_info()
+    return {
+        "model_info": hf_client.public_model_info(info),
+        "model_sizes": {k: v for k, v in sizes.items() if k != "files"},
+        "parameters": {"count": param_count, "source": param_source},
+        "is_gguf_repo": bool(gguf_files),
+        "model_architecture": architecture,
+        "system_info": system,
+        "kv_cache": cache,
+        "recommendations": fitting.recommend(system, param_count,
+                                             cache["kv_cache_recommended_bytes"], gguf_files),
+    }
+
+
+@router.post("/models/check")
+async def check_model(payload: ModelCheck, _: Principal = Depends(require_admin)):
+    """What this model is, and which of its quantizations this machine could actually run."""
+    model_id = payload.model_id.strip()
+    if not hf_client.is_valid_model_id(model_id):
+        raise HTTPException(status.HTTP_400_BAD_REQUEST,
+                            "That does not look like a Hugging Face repository name (owner/model)")
+    found = await asyncio.to_thread(_look_up, model_id)
+    if "error" in found:
+        raise HTTPException(found.get("status_code") or status.HTTP_502_BAD_GATEWAY, found["error"])
+    return found
+
+
+def _final_result(events, model_name):
+    """Passes progress through and ends with exactly one {"done": true, ...}."""
+    last_status = None
+    for event in events:
+        if event.get("cancelled"):
+            yield {"done": True, "success": False, "cancelled": True, "error": "Cancelled"}
+            return
+        if event.get("error"):
+            yield {"done": True, "success": False, "error": event["error"]}
+            return
+        last_status = event.get("status") or last_status
+        # /api/create forwards the pull's own "success" before it creates the model, so only the last
+        # status of the whole stream counts; stopping at the first one would cut the create short
+        if last_status != "success":
+            yield event
+    if last_status == "success":
+        yield {"done": True, "success": True, "model_name": model_name}
+    else:
+        yield {"done": True, "success": False, "error": "The install did not finish"}
+
+
+async def _as_events(rows):
+    """A blocking generator, read one item at a time off the event loop."""
+    ending = object()
+    while True:
+        row = await asyncio.to_thread(next, rows, ending)
+        if row is ending:
+            return
+        yield f"data: {json.dumps(row)}\n\n".encode()
+
+
+@router.post("/models/install")
+async def install_model(payload: ModelInstall, principal: Principal = Depends(require_admin)):
+    """Pulls a model from Hugging Face, or builds a local one with a context length of your choosing.
+
+    A download of twenty gigabytes is not a request anyone should have to sit and watch, but it is
+    Ollama doing the downloading: closing this stream stops the progress arriving, not the work.
+    Cancelling is a separate, deliberate act.
+    """
+    model_id = payload.model_id.strip()
+    if not hf_client.is_valid_model_id(model_id):
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "That is not a Hugging Face repository name")
+    if payload.quantization not in fitting.QUANTIZATION_LEVELS:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, f"Unknown quantization {payload.quantization}")
+    operation = payload.operation_id or uuid.uuid4().hex
+    if not OPERATION_ID.match(operation):
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Invalid operation id")
+
+    cancellation = StreamCancellation()
+    with _running_lock:
+        if operation in _running:
+            raise HTTPException(status.HTTP_409_CONFLICT, "That operation is already running")
+        _running[operation] = cancellation
+
+    source = fitting.hf_reference(model_id, payload.quantization)
+    if payload.mode == "create":
+        name = fitting.ollama_name(model_id, payload.quantization)
+        context = fitting.clamp_context(payload.context_length)
+        rows = stream_create_model(name, source, {"num_ctx": context}, cancellation)
+    else:
+        name = source
+        rows = stream_pull_model(source, cancellation)
+
+    log.info("%s of %s started by %s", payload.mode, name,
+             getattr(principal.user, "name", None) or "master-key")
+
+    async def stream():
+        try:
+            yield f"data: {json.dumps({'operation_id': operation, 'model_name': name})}\n\n".encode()
+            async for event in _as_events(_final_result(rows, name)):
+                yield event
+        finally:
+            with _running_lock:
+                _running.pop(operation, None)
+            backends.forget_discovery()   # a new model should appear in the list at once
+
+    return StreamingResponse(stream(), media_type="text/event-stream",
+                             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+
+@router.post("/models/cancel")
+async def cancel_install(payload: Cancel, _: Principal = Depends(require_admin)):
+    with _running_lock:
+        cancellation = _running.get(payload.operation_id)
+    if cancellation is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Nothing by that name is running")
+    cancellation.cancel()
+    return {"cancelling": payload.operation_id}
 
 
 @router.get("/engines")
