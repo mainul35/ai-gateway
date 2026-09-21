@@ -29,7 +29,9 @@
 <div class="card" style="margin-bottom:1.5rem" id="installCard" hidden>
   <h2>Installing <code id="installName"></code></h2>
   <div class="status" style="margin:.4rem 0"><span class="spinner" id="installSpinner"></span>
-    <span id="installStage">Starting</span></div>
+    <span id="installStage">Starting</span>
+    <span class="spacer" style="flex:1"></span>
+    <span id="installPercent" class="muted"></span></div>
   <div class="bar"><div id="installBar"></div></div>
   <p class="muted" id="installDetail" style="margin:.5rem 0 0;font-size:.85rem"></p>
   <button class="btn btn-danger btn-sm" id="installCancel" style="margin-top:.7rem">Cancel</button>
@@ -162,67 +164,65 @@ document.getElementById('repo').addEventListener('keydown', e => { if(e.key === 
 
 // --- installing -----------------------------------------------------------------------------
 
-let operation = null;
+let installJob = null;
 
 function installProgress(event){
   if(event.total && event.completed != null){
-    const share = event.completed / event.total;
-    document.getElementById('installBar').style.width = Math.round(share * 100) + '%';
+    const share = Math.max(0, Math.min(1, event.completed / event.total));
+    document.getElementById('installBar').style.width = (share * 100).toFixed(1) + '%';
+    document.getElementById('installPercent').textContent = Math.round(share * 100) + '%';
     document.getElementById('installDetail').textContent =
       `${formatBytes(event.completed)} of ${formatBytes(event.total)}`;
   }
   if(event.status) document.getElementById('installStage').textContent = event.status;
 }
 
-async function install(mode, quantization){
-  if(operation){ showError('Something is already installing.'); return; }
-  showError('');
-  operation = crypto.randomUUID().replace(/-/g, '');
+function showInstallCard(name){
   const card = document.getElementById('installCard');
   card.hidden = false;
+  document.getElementById('installName').textContent = name || '';
   document.getElementById('installBar').style.width = '0%';
+  document.getElementById('installPercent').textContent = '';
   document.getElementById('installDetail').textContent = '';
   document.getElementById('installStage').textContent = 'Starting';
   document.getElementById('installSpinner').hidden = false;
   document.getElementById('installCancel').hidden = false;
-  document.getElementById('installName').textContent = found.model_info.id;
+}
 
+// Reads an install's event stream to its end, updating the card as it goes. The same function serves
+// the page that started the install and a page that has only just joined one, because the stream
+// replays from the beginning either way.
+async function followInstall(response){
   let finished = null;
-  try{
-    const response = await fetch('/admin/models/install', {
-      method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({model_id: found.model_info.id, quantization, mode, operation_id: operation,
-                            context_length: parseInt(document.getElementById('context')?.value, 10) || 4096})});
-    if(!response.ok){
-      const body = await response.json().catch(() => null);
-      throw new Error((body && body.detail) || `HTTP ${response.status}`);
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  while(true){
+    const {value, done} = await reader.read();
+    if(done) break;
+    buffer += decoder.decode(value, {stream: true});
+    const lines = buffer.split('\n');
+    buffer = lines.pop();
+    for(const line of lines){
+      if(!line.startsWith('data:')) continue;
+      let event;
+      try{ event = JSON.parse(line.slice(5)); }catch(err){ continue; }
+      if(event.job_id) installJob = event.job_id;
+      if(event.model_name && !event.done) document.getElementById('installName').textContent = event.model_name;
+      if(event.done) finished = event; else installProgress(event);
     }
-    const reader = response.body.getReader();
-    const decoder = new TextDecoder();
-    let buffer = '';
-    while(true){
-      const {value, done} = await reader.read();
-      if(done) break;
-      buffer += decoder.decode(value, {stream: true});
-      const lines = buffer.split('\n');
-      buffer = lines.pop();
-      for(const line of lines){
-        if(!line.startsWith('data:')) continue;
-        let event;
-        try{ event = JSON.parse(line.slice(5)); }catch(err){ continue; }
-        if(event.model_name) document.getElementById('installName').textContent = event.model_name;
-        if(event.done) finished = event; else installProgress(event);
-      }
-    }
-  }catch(e){ showError(e.message); }
-  finally{
-    operation = null;
-    document.getElementById('installSpinner').hidden = true;
-    document.getElementById('installCancel').hidden = true;
   }
+  return finished;
+}
+
+function installEnded(finished){
+  installJob = null;
+  document.getElementById('installSpinner').hidden = true;
+  document.getElementById('installCancel').hidden = true;
   if(finished && finished.success){
     document.getElementById('installStage').textContent = `Installed as ${finished.model_name}`;
     document.getElementById('installBar').style.width = '100%';
+    document.getElementById('installPercent').textContent = '100%';
   }else if(finished){
     document.getElementById('installStage').textContent = finished.cancelled ? 'Cancelled' : 'Did not finish';
     // In the card as well as at the top of the page: by the time an install fails you are usually
@@ -233,6 +233,46 @@ async function install(mode, quantization){
     }
   }
   loadModels();
+}
+
+// A download of twenty gigabytes outlives any page. On arriving, ask what this machine is already
+// busy with and join it, rather than showing an idle page over a running download.
+async function rejoinInstall(){
+  let running;
+  try{ ({installing: running} = await api('/admin/models/installing')); }catch(e){ return; }
+  if(!running || !running.length) return;
+  const job = running[0];
+  installJob = job.id;
+  showInstallCard(job.label);
+  if(job.progress) installProgress(job.progress);
+  try{
+    const response = await fetch(`/admin/models/install/${job.id}/watch`);
+    if(!response.ok) throw new Error('gone');
+    installEnded(await followInstall(response));
+  }catch(e){
+    installJob = null;
+    document.getElementById('installSpinner').hidden = true;
+    loadModels();
+  }
+}
+
+async function install(mode, quantization){
+  if(installJob){ showError('Something is already installing.'); return; }
+  showError('');
+  showInstallCard(found.model_info.id);
+  let finished = null;
+  try{
+    const response = await fetch('/admin/models/install', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({model_id: found.model_info.id, quantization, mode,
+                            context_length: parseInt(document.getElementById('context')?.value, 10) || 4096})});
+    if(!response.ok){
+      const body = await response.json().catch(() => null);
+      throw new Error((body && body.detail) || `HTTP ${response.status}`);
+    }
+    finished = await followInstall(response);
+  }catch(e){ showError(e.message); }
+  installEnded(finished);
 }
 
 document.getElementById('fit').addEventListener('click', e => {
@@ -246,10 +286,10 @@ document.getElementById('fit').addEventListener('click', e => {
 });
 
 document.getElementById('installCancel').addEventListener('click', async () => {
-  if(!operation) return;
+  if(!installJob) return;
   try{
     await api('/admin/models/cancel', {method: 'POST', headers: {'Content-Type': 'application/json'},
-                                       body: JSON.stringify({operation_id: operation})});
+                                       body: JSON.stringify({job_id: installJob})});
   }catch(e){ showError(e.message); }
 });
 
@@ -344,5 +384,6 @@ document.getElementById('models').addEventListener('click', async e => {
 });
 
 loadModels();
+rejoinInstall();
 </script>
 {% endblock %}

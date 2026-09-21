@@ -115,6 +115,21 @@ async def follow(job, start_at=0):
         await job._more.wait()
 
 
+def running_of_kind(kind):
+    """Every job of this kind still going, whoever started it.
+
+    Installing a model is not one person's private business the way a conversation is: it is the
+    machine filling its disk, and any admin looking at the page should see it happening.
+    """
+    _forget_old()
+    return [job for job in sorted(_jobs.values(), key=lambda j: j.id) if not job.done and job.kind == kind]
+
+
+def any_job(job_id):
+    """A job by number, without asking whose it is. Only for endpoints that are already admin-only."""
+    return _jobs.get(job_id)
+
+
 def running_for(user_id, conversation_id):
     """The job still working on this conversation, if there is one."""
     _forget_old()
