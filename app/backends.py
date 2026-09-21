@@ -16,14 +16,16 @@ from app.engine.profiles import load_profiles
 from utils.ollama_client import ollama_host
 
 _cache = {"expires_at": 0.0, "models": {}}
-# Ollama model digest -> capabilities; a digest never changes what it can do
+# Ollama model digest -> what /api/show said about it; a digest never changes what it is
 _capabilities_by_digest = {}
+_context_by_digest = {}
 
 
 class Backend:
     """An upstream that speaks the OpenAI API."""
 
-    def __init__(self, name, kind, base_url, upstream_model, api_key=None, capabilities=()):
+    def __init__(self, name, kind, base_url, upstream_model, api_key=None, capabilities=(),
+                 size_bytes=0, details=None, context_length=None, modified_at=None, description=""):
         self.name = name
         self.kind = kind  # "ollama", "llamacpp" or "openai"
         self.base_url = base_url.rstrip("/")
@@ -31,6 +33,12 @@ class Backend:
         self.api_key = api_key
         # What the model can take or do beyond text, e.g. "vision"; shown to clients in /v1/models
         self.capabilities = set(capabilities)
+        # Only the admin model list reads the rest: what it is, how big, and how much it remembers
+        self.size_bytes = size_bytes
+        self.details = details or {}
+        self.context_length = context_length
+        self.modified_at = modified_at
+        self.description = description
 
     def url(self, path):
         return f"{self.base_url}{path}"
@@ -66,6 +74,7 @@ def _load_model_file():
             upstream_model=entry.get("upstream_model", name),
             api_key=api_key,
             capabilities=entry.get("capabilities") or (),
+            description=entry.get("description") or "",
         )
     return models
 
@@ -85,7 +94,9 @@ async def _discover_ollama():
         name = tag.get("name")
         if name:
             # Ollama exposes an OpenAI-compatible API at /v1
-            discovered[name] = Backend(name="ollama", kind="ollama", base_url=f"{host}/v1", upstream_model=name)
+            discovered[name] = Backend(name="ollama", kind="ollama", base_url=f"{host}/v1", upstream_model=name,
+                                       size_bytes=tag.get("size") or 0, details=tag.get("details"),
+                                       modified_at=tag.get("modified_at"))
     await _add_ollama_capabilities(host, tags, discovered)
     return discovered
 
@@ -99,13 +110,19 @@ async def _add_ollama_capabilities(host, tags, discovered):
                 try:
                     response = await client.post(f"{host}/api/show", json={"model": tag["name"]})
                     response.raise_for_status()
-                    _capabilities_by_digest[tag.get("digest")] = set(response.json().get("capabilities") or ())
+                    shown = response.json()
+                    _capabilities_by_digest[tag.get("digest")] = set(shown.get("capabilities") or ())
+                    # Every family names its own window: qwen3.context_length, llama.context_length
+                    info = shown.get("model_info") or {}
+                    _context_by_digest[tag.get("digest")] = next(
+                        (value for key, value in info.items() if key.endswith(".context_length")), None)
                 except (httpx.HTTPError, ValueError):
                     pass  # tried again at the next discovery
             await asyncio.gather(*(show(t) for t in unknown))
     for tag in tags:
         if tag.get("name") in discovered:
             discovered[tag["name"]].capabilities = set(_capabilities_by_digest.get(tag.get("digest"), ()))
+            discovered[tag["name"]].context_length = _context_by_digest.get(tag.get("digest"))
 
 
 def _engine_models():
@@ -138,3 +155,21 @@ async def resolve(model_name):
     # A model may have been pulled since the last discovery
     models = await available_models(force_refresh=True)
     return models.get(model_name)
+
+
+async def delete_ollama_model(name):
+    """Removes a model from the Ollama server. Returns None, or why it could not be done.
+
+    Ollama deletes the manifest and any blob no other model still points at, so the space a shared
+    base costs is only returned when the last model using it goes.
+    """
+    try:
+        async with httpx.AsyncClient(timeout=60) as client:
+            response = await client.request("DELETE", f"{ollama_host()}/api/delete", json={"model": name})
+        if response.status_code == 404:
+            return f"Ollama does not have a model called {name}"
+        response.raise_for_status()
+    except httpx.HTTPError as e:
+        return f"Ollama would not delete it: {e}"
+    _cache["expires_at"] = 0.0   # the next listing asks Ollama again rather than trusting the cache
+    return None

@@ -1,13 +1,15 @@
-"""Admin API: users, API keys and usage. No seat limit."""
+"""Admin API: users, API keys, usage, and the models themselves."""
+import json
+import logging
 from datetime import timedelta
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
-from sqlalchemy import func, select
+from sqlalchemy import case, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from app import access
+from app import access, backends, catalogue, settings
 from app.auth import Principal, generate_key, hash_key, require_admin, require_manager
 from app import config_writer
 from app.engine.supervisor import supervisor
@@ -15,6 +17,8 @@ from utils.ollama_client import check_ollama_status, ollama_host
 from utils.system_info import get_system_info
 from app.db import get_session
 from app.models import ApiKey, UsageRecord, User, utcnow
+
+log = logging.getLogger("admin")
 
 router = APIRouter(prefix="/admin", tags=["admin"])
 
@@ -203,6 +207,231 @@ async def usage_summary(days: int = 7, _: Principal = Depends(require_manager),
             for name, model, requests, prompt, completion in result.all()
         ],
     }
+
+
+# --- the model list, and deleting from it ------------------------------------------------------
+
+# Settings that name a model. Deleting one of these breaks a part of the gateway quietly, days later,
+# so it is said plainly in the list rather than discovered afterwards.
+MODEL_SETTINGS = [
+    ("router.model", "deciding what a playground message asks for"),
+    ("memory.model", "writing conversation memory"),
+    ("images.prompt.model", "rewriting requests into something an image model can draw"),
+]
+HEALTH_DAYS = 90        # the window the counts are over
+QUIET_DAYS = 30         # unused for longer than this is worth mentioning
+FEW_REQUESTS = 5        # fewer than this in the window is "barely used"
+SHAKY_FAILURES = 0.2    # a fifth of requests failing is worth a warning
+
+
+async def _usage_by_model(session, since):
+    """Requests, failures, tokens and latency per model over a window, plus the last failure's words."""
+    rows = (await session.execute(
+        select(UsageRecord.model, func.count(UsageRecord.id),
+               func.sum(case((UsageRecord.status_code >= 400, 1), else_=0)),
+               func.max(UsageRecord.created_at), func.avg(UsageRecord.latency_ms),
+               func.sum(UsageRecord.total_tokens))
+        .where(UsageRecord.created_at >= since).group_by(UsageRecord.model)
+    )).all()
+    stats = {
+        model: {"requests": int(requests or 0), "failures": int(failures or 0),
+                "last_used": last.isoformat() if last else None, "_last": last,
+                "avg_latency_ms": int(latency or 0), "tokens": int(tokens or 0), "last_error": None}
+        for model, requests, failures, last, latency, tokens in rows
+    }
+    # One recent failure per model says more about what is wrong than a count does
+    failures = (await session.execute(
+        select(UsageRecord.model, UsageRecord.error, UsageRecord.status_code, UsageRecord.created_at)
+        .where(UsageRecord.created_at >= since, UsageRecord.status_code >= 400)
+        .order_by(UsageRecord.created_at.desc()).limit(400)
+    )).all()
+    for model, error, code, when in failures:
+        entry = stats.get(model)
+        if entry and entry["last_error"] is None:
+            entry["last_error"] = {"status": code, "text": _plain_error(error),
+                                   "at": when.isoformat() if when else None}
+    return stats
+
+
+def _plain_error(error):
+    """An upstream's error as a sentence. They answer with JSON, which reads badly on a card."""
+    text = (error or "").strip()
+    if text.startswith("{"):
+        try:
+            body = json.loads(text)
+            inner = body.get("error") if isinstance(body.get("error"), dict) else body
+            text = (inner or {}).get("message") or text
+        except (ValueError, AttributeError):
+            pass
+    return text[:300]
+
+
+async def _granted_to(session):
+    """Which users have been granted each model by name, so deleting one does not silently strand them."""
+    granted = {}
+    users = (await session.execute(
+        select(User.name, User.allowed_models)
+        .where(User.model_access == "selected", User.is_active.is_(True))
+    )).all()
+    for name, patterns in users:
+        for pattern in access.parse_patterns(patterns):
+            if "*" not in pattern and "?" not in pattern:
+                granted.setdefault(pattern, []).append(name)
+    return granted
+
+
+def _used_for(name):
+    """The gateway's own jobs that name this model in the settings."""
+    return [purpose for key, purpose in MODEL_SETTINGS if (settings.get(key) or "").strip() == name]
+
+
+def _notes(name, backend, usage, used_for, granted, reachable):
+    """What an admin needs to know before pressing Delete, worst first."""
+    notes = []
+    for purpose in used_for:
+        notes.append({"level": "stop", "text": f"The gateway uses this model for {purpose}. "
+                                               f"Deleting it stops that working."})
+    if granted:
+        who = ", ".join(sorted(granted)[:4]) + (f" and {len(granted) - 4} more" if len(granted) > 4 else "")
+        notes.append({"level": "stop" if len(granted) > 1 else "warn",
+                      "text": f"Granted by name to {who}. They lose access to it."})
+    if not reachable:
+        notes.append({"level": "warn", "text": "Not reachable right now: "
+                      + ("the Ollama server is not answering, so this is about the server rather than "
+                         "the model" if backend.kind == "ollama"
+                         else "the llama.cpp binary is missing, so this profile cannot start.")})
+
+    requests = usage["requests"]
+    failures = usage["failures"]
+    if requests == 0:
+        notes.append({"level": "info", "text": f"Not used once in the last {HEALTH_DAYS} days."})
+    elif usage.get("_last"):
+        quiet = (utcnow() - usage["_last"]).days
+        if quiet >= QUIET_DAYS:
+            notes.append({"level": "info", "text": f"Last used {quiet} days ago."})
+        elif requests < FEW_REQUESTS:
+            notes.append({"level": "info",
+                          "text": f"Barely used: {requests} request{'' if requests == 1 else 's'} "
+                                  f"in {HEALTH_DAYS} days."})
+    if failures and requests and failures / requests >= SHAKY_FAILURES:
+        share = round(100 * failures / requests)
+        note = f"{failures} of {requests} requests failed ({share}%)."
+        if usage["last_error"] and usage["last_error"]["text"]:
+            note += f" Most recently: {usage['last_error']['text'][:160]}"
+        notes.append({"level": "warn", "text": note})
+    elif failures:
+        notes.append({"level": "info", "text": f"{failures} failed request{'' if failures == 1 else 's'} "
+                                               f"in {HEALTH_DAYS} days."})
+    return notes
+
+
+def _deletability(backend):
+    """Only models Ollama holds can be deleted from here; the rest are someone else's to remove."""
+    if backend.kind == "ollama":
+        return True, ""
+    if backend.kind == "llamacpp":
+        return False, "This is one of the gateway's own llama.cpp profiles. Remove it from config/engines.yaml."
+    return False, "This one is defined in config/models.yaml. Remove the entry there."
+
+
+@router.get("/models")
+async def list_models_for_admin(_: Principal = Depends(require_admin),
+                                session: AsyncSession = Depends(get_session)):
+    """Every model, what it is for, and everything that argues for or against deleting it."""
+    # Always asked afresh: this page is read to decide what to delete, and it is read again straight
+    # after deleting. A cached list would show a model that is already gone, or hide one just pulled.
+    models = await backends.available_models(force_refresh=True)
+    since = utcnow() - timedelta(days=HEALTH_DAYS)
+    usage = await _usage_by_model(session, since)
+    granted = await _granted_to(session)
+    engines = supervisor.status()
+    # A llama.cpp profile that is not started is still usable: it is started on the first request.
+    # Only a missing binary means nothing in that group can run at all.
+    loaded = {model["name"] for model in engines.get("running") or [] if model.get("running")}
+    engines_available = engines.get("available", False)
+    ollama_up = check_ollama_status().get("status") == "running"
+
+    listed = []
+    for name, backend in sorted(models.items()):
+        details = backend.details or {}
+        stats = usage.get(name, {"requests": 0, "failures": 0, "last_used": None, "_last": None,
+                                 "avg_latency_ms": 0, "tokens": 0, "last_error": None})
+        if backend.kind == "ollama":
+            reachable = ollama_up
+        elif backend.kind == "llamacpp":
+            reachable = engines_available
+        else:
+            reachable = True
+        used_for = _used_for(name)
+        can_delete, why_not = _deletability(backend)
+        listed.append({
+            "name": name,
+            "backend": backend.kind,
+            "owned_by": backend.name,
+            "size_bytes": backend.size_bytes,
+            "parameter_size": details.get("parameter_size", ""),
+            "quantization": details.get("quantization_level", ""),
+            "family": details.get("family", ""),
+            "context_length": backend.context_length,
+            "capabilities": sorted(backend.capabilities),
+            "modified_at": backend.modified_at,
+            "description": catalogue.describe(
+                name, override=backend.description, family=details.get("family", ""),
+                parameter_size=details.get("parameter_size", ""),
+                quantization=details.get("quantization_level", ""),
+                context_length=backend.context_length, capabilities=backend.capabilities,
+                backend=backend.kind),
+            "usage": {k: v for k, v in stats.items() if not k.startswith("_")},
+            "used_for": used_for,
+            "granted_to": sorted(granted.get(name, [])),
+            "reachable": reachable,
+            "loaded": name in loaded,
+            "can_delete": can_delete,
+            "delete_note": why_not,
+            "notes": _notes(name, backend, stats, used_for, granted.get(name, []), reachable),
+        })
+    return {"window_days": HEALTH_DAYS, "models": listed}
+
+
+class ModelDelete(BaseModel):
+    # Model names carry slashes and colons - hf.co/unsloth/Qwen3.8-27B-GGUF:Q4_1 - so the name travels
+    # in the body rather than in the path, where it would have to be escaped twice
+    name: str = Field(min_length=1, max_length=256)
+    force: bool = False
+
+
+# A POST rather than a DELETE with a body: bodies on DELETE are legal but tunnels and proxies are
+# known to drop them, and a delete that silently loses its argument is not a thing to leave lying about
+@router.post("/models/delete")
+async def delete_model(payload: ModelDelete, principal: Principal = Depends(require_admin),
+                       session: AsyncSession = Depends(get_session)):
+    """Deletes a model from the Ollama server. Not undoable without pulling it again."""
+    backend = await backends.resolve(payload.name)   # asks Ollama again when the name is unfamiliar
+    if backend is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, f"No model called {payload.name}")
+    can_delete, why_not = _deletability(backend)
+    if not can_delete:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, why_not)
+
+    if not payload.force:
+        # The two things that break other people rather than just freeing space
+        blocking = [f"the gateway uses it for {purpose}" for purpose in _used_for(payload.name)]
+        granted = (await _granted_to(session)).get(payload.name, [])
+        if granted:
+            blocking.append(f"it is granted by name to {', '.join(sorted(granted))}")
+        if blocking:
+            raise HTTPException(status.HTTP_409_CONFLICT,
+                                "Not deleted: " + ", and ".join(blocking)
+                                + ". Confirm again to delete it anyway.")
+
+    problem = await backends.delete_ollama_model(payload.name)
+    if problem:
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, problem)
+    log.info("model %s deleted by %s", payload.name,
+             getattr(principal.user, "name", None) or "master-key")
+    # Its own size, not what the disk gets back: Ollama keeps any layer another model still points at,
+    # so deleting one of two models built on the same base frees very little
+    return {"deleted": payload.name, "size_bytes": backend.size_bytes}
 
 
 @router.get("/engines")
