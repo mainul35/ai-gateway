@@ -9,6 +9,7 @@ import json
 import logging
 import re
 import time
+from datetime import timedelta
 
 from fastapi import APIRouter, Depends, File, HTTPException, Response, UploadFile, status
 from fastapi.responses import StreamingResponse
@@ -22,8 +23,8 @@ from app.auth import Principal, authenticate
 from app.db import get_session, session_factory
 from app.models import ChatFile, Conversation, ConversationMessage, MemoryEntry, utcnow
 from app.routers.openai_v1 import PROXY_PATHS, forward
-from app.tools import (image_prompt, images, jobs, markdown, memory as memory_tool, photo, portrait,
-                        router as intent_router, web_search)
+from app.tools import (chooser, image_prompt, images, jobs, markdown, memory as memory_tool, photo,
+                        portrait, router as intent_router, web_search)
 
 log = logging.getLogger("playground")
 
@@ -907,36 +908,97 @@ async def edit_photo(payload: PhotoIn, principal: Principal = Depends(authentica
                              headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
 
+CHOOSER_DAYS = 30      # how far back the chooser looks at a model's record
+
+
+async def _choose_model(principal, session, category, has_images, prefer=None):
+    """The best model this user may use for this kind of work, with the reason it was picked."""
+    available = await backends.available_models()
+    health = await usage_log.by_model(session, utcnow() - timedelta(days=CHOOSER_DAYS))
+    candidates = []
+    for name, backend in available.items():
+        if not access.can_use_model(principal, name):
+            continue
+        details = backend.details or {}
+        candidates.append({
+            "name": name,
+            "capabilities": sorted(backend.capabilities),
+            "parameter_size": details.get("parameter_size", ""),
+            "context_length": backend.context_length,
+            "health": health.get(name, {}),
+        })
+    return chooser.pick(candidates, category, needs_vision=has_images, prefer=prefer)
+
+
 class RouteIn(BaseModel):
     message: str = ""
     has_images: bool = False
     web_search: bool = False
     image_generation: bool = False
     history: list[ChatMessageIn] = Field(default_factory=list)
+    # The model the conversation is already using: it keeps the job when nothing scores better,
+    # because swapping model reloads weights and throws away a warm cache
+    current_model: str = ""
+    choose_model: bool = False
 
 
 @router.post("/route")
-async def route(payload: RouteIn, principal: Principal = Depends(authenticate)):
-    """Picks one action for this message out of the tools the user has switched on."""
+async def route(payload: RouteIn, principal: Principal = Depends(authenticate),
+                session: AsyncSession = Depends(get_session)):
+    """What this message asks for: which tool, what kind of work, and which model should do it.
+
+    The two questions go to the small model at the same time. They are independent, so asking them
+    together costs one round trip rather than two, and keeping them in separate prompts keeps the
+    action answer as good as it was - putting both in one prompt made it worse.
+    """
     tools = {
         "web_search": payload.web_search and web_search.is_available(),
         "image_generation": (payload.image_generation and images.is_available()
                              and access.can_generate_images(principal)),
     }
     allowed = intent_router.candidates(tools, payload.has_images)
-    if len(allowed) == 1:
-        return {"action": allowed[0], "decided_by": "the only tool switched on"}
-    if not intent_router.is_enabled():
-        return {"action": intent_router.by_keywords(payload.message, allowed, payload.has_images),
-                "decided_by": "keywords"}
-
     history = [{"role": m.role, "content": m.content} for m in payload.history]
-    answer = await _ask_helper(principal, intent_router.build_request(payload.message, allowed, history))
-    action = intent_router.clean_answer(answer, allowed)
-    if action:
-        return {"action": action, "decided_by": settings.router_model()}
-    return {"action": intent_router.by_keywords(payload.message, allowed, payload.has_images),
-            "decided_by": "keywords"}
+    asking_model = intent_router.is_enabled()
+
+    async def decide_action():
+        if len(allowed) == 1:
+            return allowed[0], "the only tool switched on"
+        if not asking_model:
+            return intent_router.by_keywords(payload.message, allowed, payload.has_images), "keywords"
+        answer = await _ask_helper(principal,
+                                   intent_router.build_request(payload.message, allowed, history))
+        found = intent_router.clean_answer(answer, allowed)
+        if found:
+            return found, settings.router_model()
+        return intent_router.by_keywords(payload.message, allowed, payload.has_images), "keywords"
+
+    async def decide_category():
+        if not payload.choose_model:
+            return None, None
+        if not asking_model:
+            return intent_router.category_by_keywords(payload.message, payload.has_images), "keywords"
+        answer = await _ask_helper(principal,
+                                   intent_router.build_category_request(payload.message, history))
+        found = intent_router.clean_category(answer, payload.has_images)
+        if found:
+            return found, settings.router_model()
+        return intent_router.category_by_keywords(payload.message, payload.has_images), "keywords"
+
+    (action, decided_by), (category, category_by) = await asyncio.gather(decide_action(),
+                                                                        decide_category())
+    decision = {"action": action, "decided_by": decided_by}
+    if category is None:
+        return decision
+    decision.update(category=category, category_by=category_by)
+    # Only a text answer is the model's to choose: a picture is drawn by the image model, and a
+    # photograph is worked on by tools that have nothing to do with the drop-down
+    if action in (intent_router.CHAT, intent_router.SEARCH):
+        picked = await _choose_model(principal, session, category, payload.has_images,
+                                     prefer=payload.current_model or None)
+        if picked:
+            decision.update(model=picked["model"], model_why=picked["why"],
+                            considered=picked["considered"])
+    return decision
 
 
 async def _drawable_prompt(principal, session, user, request, conversation_id):
