@@ -291,6 +291,29 @@ const chat = document.getElementById('chat');
 
 const transcript = document.getElementById('transcript');
 
+// A conversation is opened to see where it got to, so it opens at its end rather than its start.
+// Pictures arrive after the text and change the height as they do, so the bottom is held until they
+// have settled - and let go the moment the reader scrolls for themselves, because someone who has
+// started reading higher up should not be dragged back down by a picture finishing.
+function openAtLatest(){
+  const settling = new AbortController();
+  const stick = () => { transcript.scrollTop = transcript.scrollHeight; };
+  const release = () => settling.abort();
+  for(const event of ['wheel', 'touchmove', 'keydown']){
+    window.addEventListener(event, release, {signal: settling.signal, passive: true});
+  }
+  settling.signal.addEventListener('abort', () => clearTimeout(timer));
+  stick();
+  requestAnimationFrame(stick);
+  for(const image of chat.querySelectorAll('img')){
+    if(image.complete) continue;
+    image.addEventListener('load', stick, {signal: settling.signal});
+    image.addEventListener('error', stick, {signal: settling.signal});
+  }
+  // Nothing is still loading after this, and holding on any longer would fight the reader
+  const timer = setTimeout(release, 4000);
+}
+
 // Follows a streaming answer, but only while the reader is already at the bottom: pulling the view
 // away from someone who has scrolled up to read something is worse than not following at all.
 function followAlong(){
@@ -733,6 +756,7 @@ async function openConversation(id){
       }
     }
     if(!conversation.messages.length) chat.innerHTML = '<p class="muted" id="empty">Empty conversation.</p>';
+    openAtLatest();
     if(conversation.model && !models[conversation.model]){
       showError(`This conversation used ${conversation.model}, which you no longer have access to. Pick another model to continue.`);
     }else{
