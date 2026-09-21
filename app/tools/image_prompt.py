@@ -1,9 +1,6 @@
 """Turns what the user asked for into a prompt an image model can actually draw.
 
-Flux reads a description of a picture, not a request to an assistant. "Generate me an image of Java 27
-based on the images available on the web" describes nothing to draw, and a follow-up such as "I wanted
-a banner, not an IDE screenshot" makes sense only against the picture before it. So the conversation,
-including the prompts of the images already made in it, is rewritten into one visual description.
+Flux reads a description of a picture, not a request to an assistant.
 """
 import re
 
@@ -37,15 +34,7 @@ would be written on the picture itself. If the picture needs no words at all, re
 
 Only words the user actually asked for. A scene, a place, a mood or a style is not a caption: never
 invent a title for a picture.
-
-Examples:
-"generate me a banner image for jdk27" -> JDK 27
-"a banner for my project called SpringLens" -> SpringLens
-"make a poster that says Happy New Year" -> Happy New Year
-"a red fox sitting in deep snow" -> NONE
-"a cyberpunk street in Dhaka at night, neon reflections" -> NONE
-"a watercolour painting of Dhaka in the rain" -> NONE
-"create a logo for my gateway project, minimal, purple" -> NONE"""
+"""
 
 
 def is_enabled():
