@@ -7,6 +7,8 @@ able to make the browser call out to somewhere of its own choosing.
 import logging
 import re
 
+from app.tools import tex
+
 log = logging.getLogger("tools.markdown")
 
 try:
@@ -45,8 +47,22 @@ def _build():
         return (f'<a href="{escapeHtml(source)}" target="_blank" rel="noopener noreferrer nofollow">'
                 f'{escapeHtml(label)} (image)</a>')
 
+    def symbols(state):
+        """Turns $\rightarrow$ into an arrow, in prose only.
+
+        Done on the token stream rather than the text, so that it reaches every piece of writing and
+        no piece of code: inline code and fenced blocks are tokens of their own and are never walked.
+        """
+        for token in state.tokens:
+            if token.type != "inline":
+                continue
+            for child in token.children or ():
+                if child.type == "text":
+                    child.content = tex.unwrap(child.content)
+
     parser.add_render_rule("link_open", link_open)
     parser.add_render_rule("image", image)
+    parser.core.ruler.push("symbols", symbols)
     return parser
 
 
