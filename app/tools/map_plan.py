@@ -32,6 +32,22 @@ Examples:
 Answer with the JSON object only."""
 
 INTENTS = ("find", "here", "route", "along", "near")
+# Words that mean "where I am standing", which no amount of geocoding can resolve: only the
+# browser knows, and only if the person allows it
+ABOUT_ME = re.compile(
+    r"\b(near|around|close to|next to|nearest to|by)\s+(me|here|us)\b"
+    r"|\bnear\s?by\b|\bfrom here\b|\baround here\b|\bmy (current )?(location|position|place)\b"
+    r"|\bcurrent location\b|\bwhere am i\b|\bnear my\b|\bclosest\b", re.I)
+
+
+def wants_my_location(message, plan=None):
+    """Whether answering this needs the coordinate of the person asking."""
+    if ABOUT_ME.search(message or ""):
+        return True
+    # "restaurants nearby" with nowhere named is about here, whatever words were used
+    if plan and plan.get("intent") in ("near", "along") and not (plan.get("to") or plan.get("from")):
+        return True
+    return False
 FROM_TO = re.compile(r"\bfrom\s+(.+?)\s+(?:to|towards|until)\s+(.+?)[.?!]*$", re.I)
 NEAR = re.compile(r"\b(?:near|nearest|around|close to|beside|next to)\s+(.+?)[.?!]*$", re.I)
 ALONG = re.compile(r"\b(?:along|on)\s+the\s+(?:way|route)\b", re.I)

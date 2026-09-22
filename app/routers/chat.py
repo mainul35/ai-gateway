@@ -970,6 +970,9 @@ async def _choose_model(principal, session, category, has_images, prefer=None):
 class MapIn(BaseModel):
     message: str = Field(min_length=1, max_length=2000)
     conversation_id: int | None = None
+    # Where the browser says the person is, when they allowed it to say
+    here_lat: float | None = Field(default=None, ge=-90, le=90)
+    here_lon: float | None = Field(default=None, ge=-180, le=180)
 
 
 async def _candidates(words, fallback_points, index):
@@ -1009,6 +1012,10 @@ async def find_on_map(payload: MapIn, principal: Principal = Depends(authenticat
 
     message = payload.message.strip()
     points = maps.parse_points(message)
+    # A coordinate the browser supplied is used only where the question left a gap, never in place
+    # of somewhere the person actually named
+    standing = ((payload.here_lat, payload.here_lon)
+                if payload.here_lat is not None and payload.here_lon is not None else None)
     plan = None
     if intent_router.is_enabled():
         answer = await _ask_helper(principal, map_plan.build_request(message, settings.router_model()))
@@ -1019,10 +1026,27 @@ async def find_on_map(payload: MapIn, principal: Principal = Depends(authenticat
     if points and plan["intent"] == "find":
         plan["intent"] = "near" if maps.amenity_for(plan["what"] or message) else "here"
 
+    about_me = map_plan.wants_my_location(message, plan)
+    if about_me and standing and not points:
+        # "near me" and "from here" mean the browser's coordinate, so it takes the place of the
+        # name the question never gave
+        points = [standing]
+        if plan["intent"] == "find":
+            plan["intent"] = "near" if maps.amenity_for(plan["what"] or message) else "here"
+        if plan["intent"] == "near" and not plan["to"]:
+            plan["to"] = ""
+        if plan["intent"] in ("route", "along") and not plan["from"]:
+            plan["from"] = ""
+    elif about_me and not standing and not points:
+        raise HTTPException(status.HTTP_428_PRECONDITION_REQUIRED,
+                            "This needs to know where you are. Allow this page to use your "
+                            "location, or name a place instead.")
+
     tag = maps.amenity_for(plan["what"] or message)
     mode = maps.transport_for(message)
     result = {"intent": plan["intent"], "asked": message, "what": plan["what"],
-              "places": [], "route": None, "start": None, "end": None, "mode": mode}
+              "places": [], "route": None, "start": None, "end": None, "mode": mode,
+              "from_your_location": bool(about_me and standing)}
 
     try:
         if plan["intent"] == "here":
@@ -1056,8 +1080,13 @@ async def find_on_map(payload: MapIn, principal: Principal = Depends(authenticat
                 # Not a kind of place this knows a tag for, so it is searched for by its words
                 result["places"] = await maps.search(plan["what"] or message,
                                                      near=(centre["lat"], centre["lon"]))
+                for place in result["places"]:
+                    place["metres_away"] = round(maps.distance(centre["lat"], centre["lon"],
+                                                               place["lat"], place["lon"]))
+                result["places"].sort(key=lambda p: p["metres_away"])
             else:
-                result["places"] = await maps.nearby(tag, centre["lat"], centre["lon"])
+                result["places"] = await maps.nearby(tag, centre["lat"], centre["lon"],
+                                                     words=plan["what"] or message)
 
         else:                                   # find
             result["places"] = await maps.search(plan["what"] or message,
@@ -1084,6 +1113,7 @@ class RouteIn(BaseModel):
     has_images: bool = False
     web_search: bool = False
     image_generation: bool = False
+    maps: bool = False
     history: list[ChatMessageIn] = Field(default_factory=list)
     # The model the conversation is already using: it keeps the job when nothing scores better,
     # because swapping model reloads weights and throws away a warm cache
@@ -1104,6 +1134,7 @@ async def route(payload: RouteIn, principal: Principal = Depends(authenticate),
         "web_search": payload.web_search and web_search.is_available(),
         "image_generation": (payload.image_generation and images.is_available()
                              and access.can_generate_images(principal)),
+        "maps": payload.maps and settings.feature_enabled("maps"),
     }
     allowed = intent_router.candidates(tools, payload.has_images)
     history = [{"role": m.role, "content": m.content} for m in payload.history]
@@ -1117,8 +1148,9 @@ async def route(payload: RouteIn, principal: Principal = Depends(authenticate),
         answer = await _ask_helper(principal,
                                    intent_router.build_request(payload.message, allowed, history))
         found = intent_router.clean_answer(answer, allowed)
-        if found:
-            return found, settings.router_model()
+        settled, by = intent_router.settle_action(found, payload.message, allowed, payload.has_images)
+        if settled:
+            return settled, settings.router_model() if by == "model" else "keywords"
         return intent_router.by_keywords(payload.message, allowed, payload.has_images), "keywords"
 
     async def decide_category():

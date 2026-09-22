@@ -71,6 +71,8 @@ AMENITIES = {
     "parking": ("amenity", "parking", ("parking", "car park")),
     "charging_station": ("amenity", "charging_station", ("charging", "ev charger", "charging point")),
     "supermarket": ("shop", "supermarket", ("supermarket", "grocery", "groceries")),
+    "convenience": ("shop", "convenience", ("convenience store", "convenience", "corner shop",
+                                            "konbini")),
     "pharmacy_shop": ("shop", "chemist", ("chemist shop",)),
     "school": ("amenity", "school", ("school",)),
     "university": ("amenity", "university", ("university", "college")),
@@ -253,7 +255,10 @@ async def _overpass(query):
     trouble = None
     async with httpx.AsyncClient(timeout=OVERPASS_TIMEOUT,
                                  headers={"User-Agent": USER_AGENT}) as client:
-        for server in OVERPASS_SERVERS:
+        # The main server again at the end: these refuse when loaded, and a moment later they do not
+        for attempt, server in enumerate(OVERPASS_SERVERS + (OVERPASS_SERVERS[0],)):
+            if attempt == len(OVERPASS_SERVERS):
+                await asyncio.sleep(2)
             try:
                 response = await client.post(server, data={"data": query})
                 response.raise_for_status()
@@ -279,12 +284,30 @@ def _from_overpass(element):
             "osm": f"https://www.openstreetmap.org/{element.get('type', 'node')}/{element.get('id')}"}
 
 
-async def nearby(tag, lat, lon, radius_m=3000, limit=MAX_RESULTS):
-    """Things of a kind near a point."""
+async def nearby(tag, lat, lon, radius_m=3000, limit=MAX_RESULTS, words=""):
+    """Things of a kind near a point.
+
+    Overpass is the right tool and a busy one. When every mirror is refusing, Nominatim can be asked
+    the same question in words: the answers are the same OpenStreetMap data, found by name rather
+    than by tag, so there are fewer of them and they are less complete. Fewer real places beats an
+    error page, as long as the answer admits which way round it was.
+    """
     key, value = tag
     query = (f'[out:json][timeout:25];(node["{key}"="{value}"](around:{int(radius_m)},{lat},{lon});'
              f'way["{key}"="{value}"](around:{int(radius_m)},{lat},{lon}););out center {limit * 3};')
-    places = [p for p in map(_from_overpass, await _overpass(query)) if p]
+    try:
+        elements = await _overpass(query)
+    except MapError:
+        if not words:
+            raise
+        log.info("overpass unavailable; falling back to a name search for %r", words)
+        found = await search(words, near=(lat, lon), limit=limit)
+        for place in found:
+            place["metres_away"] = round(_metres(lat, lon, place["lat"], place["lon"]))
+            place["by_name"] = True
+        return [p for p in sorted(found, key=lambda p: p["metres_away"])
+                if p["metres_away"] <= radius_m * 4][:limit]
+    places = [p for p in map(_from_overpass, elements) if p]
     places.sort(key=lambda p: (p["name"] == "(unnamed)", _metres(lat, lon, p["lat"], p["lon"])))
     for place in places:
         place["metres_away"] = round(_metres(lat, lon, place["lat"], place["lon"]))
@@ -317,6 +340,11 @@ async def along(tag, line, radius_m=1500, limit=MAX_RESULTS):
     ordered.sort(key=lambda p: (p["along"], p["name"] == "(unnamed)", p["metres_away"]))
     named = [p for p in ordered if p["name"] != "(unnamed)"]
     return (named or ordered)[:limit]
+
+
+def distance(lat1, lon1, lat2, lon2):
+    """Metres between two coordinates, for anything outside this module that needs to sort by it."""
+    return _metres(lat1, lon1, lat2, lon2)
 
 
 def _metres(lat1, lon1, lat2, lon2):
