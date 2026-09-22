@@ -36,10 +36,13 @@ CLEAN  - asks for the quality of a photograph to be improved, with nothing in it
          style, anything added or taken away - it is EDIT, not CLEAN.
 BLUR   - asks for the background of a photograph to be blurred, or for the subject to stand out
          from it: shallower depth of field than the camera gave.
-MAP    - asks about somewhere on the earth: finding a place, what is at a coordinate, how to get
-         from one place to another, how far or how long it is, or what of some kind is nearby or
-         along a route. "Where is X", "route from A to B", "petrol stations on the way to Y",
-         "what is at 23.81, 90.41" are all MAP.
+MAP    - asks about somewhere on the earth: finding a place, what is at a coordinate, getting
+         from one place to another, how far or how long a journey is, or what of some kind is
+         nearby or along the way. Wanting to go somewhere is MAP even when it is phrased as a
+         wish rather than a question, and so is anything asking for a route, directions, the way
+         there, or what is near the person asking. A question about a place that wants a fact
+         rather than a position on the ground - which country a city is in, what it is famous
+         for, its population, its history - is CHAT, not MAP.
 BACKDROP - asks for the background behind a person to become a plain colour, or for the colour it
          already is to become a different one: passport and visa photographs. "White background",
          "make the background light blue", "I need this on red for my visa form" are all BACKDROP.
@@ -65,6 +68,12 @@ Examples:
 "find petrol stations along the way to Chittagong" -> MAP
 "what is at 23.8103, 90.4125" -> MAP
 "how far is Cox\'s Bazar from Dhaka by road" -> MAP
+"I want to go to Futako Tamagawa, show me the easiest route" -> MAP
+"take me to the nearest pharmacy" -> MAP
+"what restaurants are near me" -> MAP
+"how do I get to the station from here" -> MAP
+"what is the capital of Japan" -> CHAT
+"what is Kyoto famous for" -> CHAT
 "can you give this more bokeh?" -> BLUR
 "change the background to white for my passport photo" -> BACKDROP
 "I need a light blue background on this" -> BACKDROP
@@ -135,6 +144,7 @@ BACKDROP_WORDS = re.compile(
     r"black|beige|cream|pink|plain)\b[^.?!]{0,12}\b(background|backdrop|back ?drop)\b", re.I)
 MAP_WORDS = re.compile(
     r"\b(map|maps|route|directions?|navigate|navigation|how (do i|to) get|"
+    r"(want|need|like) to (go|get) to|take me to|way to get|best way to|"
     r"how far|how long.*(drive|walk|cycle|by road)|distance (from|to|between)|"
     r"nearest|nearby|near me|around me|along the (way|route)|on the way|"
     r"where is|where are|located|location of|address of|coordinates?|lat(itude)?\b|lon(gitude)?\b|"
@@ -237,6 +247,33 @@ def category_by_keywords(message, has_images=False):
     if REASONING_WORDS.search(text):
         return "reasoning"
     return "general"
+
+
+# Questions that name a place but want a fact about it. A map answers these with a pin and no
+# words, which is a worse answer than a sentence, so the model is overruled on them.
+FACT_ABOUT_PLACE = re.compile(
+    r"^\s*(what|which|who|when|why|how many|how much)\b(?!.*\b(route|directions?|get (to|there)|"
+    r"far|long|near|nearby|nearest|closest|way to)\b)"
+    r".*\b(capital|population|people live|live in|famous|known for|currency|language|founded|"
+    r"history|weather|climate|time zone|country|continent|mean|called)\b", re.I)
+
+
+def settle_action(answered, message, allowed, has_images):
+    """The model's answer, unless it fell back to CHAT while the words plainly asked for a map.
+
+    CHAT is this prompt's catch-all, and a message like "I want to go to Futako Tamagawa, show me
+    the easiest route" reads conversationally enough to land there. The words route, directions and
+    want to go to are better evidence than a shrug. Only CHAT is second-guessed, and only in favour
+    of MAP: every other action changes what is produced, and guessing at those is how a question
+    ends up as a picture.
+    """
+    if answered == MAP and FACT_ABOUT_PLACE.search(message or ""):
+        return CHAT, "keywords"
+    if answered and answered != CHAT:
+        return answered, "model"
+    if MAP in allowed and not has_images and MAP_WORDS.search(message or ""):
+        return MAP, "keywords"
+    return answered, "model" if answered else None
 
 
 def clean_answer(text, allowed):

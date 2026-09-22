@@ -1437,7 +1437,8 @@ function renderMap(box, answer){
     bits.push(`<b>${answer.route.distance_km} km</b>`,
               `about <b>${answer.route.minutes} min</b> by ${escapeHtml(answer.route.mode)}`);
   }
-  if(answer.start) bits.push(`from ${escapeHtml(answer.start.name)}`);
+  if(answer.from_your_location) bits.push('from where you are');
+  else if(answer.start) bits.push(`from ${escapeHtml(answer.start.name)}`);
   if(answer.end) bits.push(`to ${escapeHtml(answer.end.name)}`);
   if(!answer.route && answer.places.length){
     bits.push(`<b>${answer.places.length}</b> place${answer.places.length === 1 ? '' : 's'} found`);
@@ -1499,6 +1500,35 @@ function renderMap(box, answer){
   });
 }
 
+// A question about "near me" or "the way there from here" cannot be answered by any amount of
+// geocoding: only this browser knows where its owner is, and only if they allow it. The prompt is
+// the browser's own, it is only raised when a question actually needs it, and a refusal is taken
+// as a refusal - the question is sent anyway and comes back asking for a place name instead.
+const NEEDS_ME = /\b(near|around|close to|next to|nearest to)\s+(me|here|us)\b|\bnear\s?by\b/i;
+const NEEDS_ME_TOO = /\bfrom here\b|\baround here\b|\bmy (current )?(location|position)\b|\bcurrent location\b|\bwhere am i\b|\bnearest\b|\bclosest\b/i;
+const LOCATION_GOOD_FOR = 5 * 60 * 1000;      // a fix is reused for a few minutes, not re-asked
+
+let lastFix = null;
+
+function needsMyLocation(text){
+  return NEEDS_ME.test(text) || NEEDS_ME_TOO.test(text);
+}
+
+function myLocation(){
+  if(lastFix && Date.now() - lastFix.at < LOCATION_GOOD_FOR) return Promise.resolve(lastFix);
+  if(!navigator.geolocation || !window.isSecureContext) return Promise.resolve(null);
+  return new Promise(resolve => {
+    navigator.geolocation.getCurrentPosition(
+      position => {
+        lastFix = {lat: position.coords.latitude, lon: position.coords.longitude,
+                   accuracy: Math.round(position.coords.accuracy || 0), at: Date.now()};
+        resolve(lastFix);
+      },
+      () => resolve(null),                     // refused, or the device could not get a fix
+      {enableHighAccuracy: true, timeout: 12000, maximumAge: LOCATION_GOOD_FOR});
+  });
+}
+
 async function sendMap(text, decision){
   showError('');
   try{
@@ -1514,12 +1544,19 @@ async function sendMap(text, decision){
 
   const box = addMessage('assistant', '', 'OpenStreetMap');
   noteDecision(box, decision);
-  setStatus(box, 'Looking it up on the map');
   busy(true);
+  let here = null;
+  if(needsMyLocation(text)){
+    setStatus(box, 'Asking your browser where you are');
+    here = await myLocation();
+  }
+  setStatus(box, 'Looking it up on the map');
   let answer = null;
   try{
     answer = await api('/chat/map', {method: 'POST', headers: JSON_HEADERS,
-                                     body: JSON.stringify({message: text, conversation_id: currentId})});
+                                     body: JSON.stringify({message: text, conversation_id: currentId,
+                                                           here_lat: here ? here.lat : null,
+                                                           here_lon: here ? here.lon : null})});
   }catch(e){
     showError(errorText(e));
   }finally{
