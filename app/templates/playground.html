@@ -92,6 +92,22 @@ a.cite{font-size:.75em;vertical-align:super;text-decoration:none;padding:0 .1rem
 @keyframes spin{to{transform:rotate(360deg)}}
 .bar{height:6px;background:var(--input);border-radius:3px;overflow:hidden;margin-top:.4rem}
 .bar div{height:100%;background:var(--primary);width:0;transition:width .3s}
+/* An attached document has nothing to show, so it says what it is instead of pretending */
+.paper{display:flex;align-items:center;gap:.5rem;height:5.5rem;width:11rem;padding:.5rem .6rem;
+       border:1px solid var(--border);border-radius:8px;background:var(--input);position:relative}
+.paper .what{min-width:0}
+.paper .who{font-size:.8rem;font-weight:600;word-break:break-word;
+            display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}
+.paper .size{font-size:.7rem;color:var(--muted)}
+.paper .glyph{font-size:1.4rem;flex:none}
+/* The camera, when one is asked for: a live picture with a shutter under it */
+.camera{position:fixed;inset:0;z-index:60;background:rgba(0,0,0,.85);display:flex;
+        flex-direction:column;align-items:center;justify-content:center;gap:1rem;padding:1rem}
+.camera video{max-width:min(100%,46rem);max-height:70vh;border-radius:12px;background:#000}
+.camera .row{display:flex;gap:.75rem;align-items:center}
+.camera .shutter{width:3.6rem;height:3.6rem;border-radius:50%;border:4px solid #fff;background:#fff2;
+                 cursor:pointer}
+.camera .shutter:active{background:#fff6}
 .thumbs{display:flex;gap:.5rem;flex-wrap:wrap;margin-bottom:.4rem}
 .thumbs img{height:5.5rem;max-width:9rem;object-fit:cover;border-radius:8px;border:1px solid var(--border);cursor:zoom-in}
 .pending{position:relative}
@@ -281,9 +297,12 @@ a.cite{font-size:.75em;vertical-align:super;text-decoration:none;padding:0 .1rem
                     title="Attach images for the model to look at"><span class="dot"></span>Image understanding</button>
             <button class="chip" id="toolImage" data-tool="image_generation" aria-pressed="false" hidden
                     title="Create a new image, or edit an attached one, instead of chatting"><span class="dot"></span>Image generation</button>
-            <button class="icon-btn" id="attach" title="Attach an image (you can also paste or drop one)" hidden>+</button>
+            <button class="icon-btn" id="attach"
+                    title="Attach a picture or a document (you can also paste or drop one)">+</button>
+            <button class="icon-btn" id="camera" title="Take a photo with the camera" hidden>&#9673;</button>
             <input type="file" id="fileInput" multiple hidden
-                   accept="image/*,.heic,.heif,.avif,.tif,.tiff,.bmp">
+                   accept="image/*,.heic,.heif,.avif,.tif,.tiff,.bmp,.pdf,.docx,.xlsx,.xlsm,.txt,.md,.csv,.tsv,.log,.json,.yaml,.yml,.xml,.rst">
+            <input type="file" id="cameraInput" accept="image/*" capture="environment" hidden>
             <span class="inline" id="sizeRow" hidden>Shape
               <select id="imageSize"></select>
             </span>
@@ -432,6 +451,8 @@ const canSee = id => (models[id]?.capabilities || []).includes('vision');
 // With Auto chosen there is no model until the router has picked one, so anything that needs a name
 // now asks for one: chosenModel is what the last routing decision settled on, falling back to the
 // first model that can see, since a picture is the only case where the wrong choice simply fails.
+// Everything that asks "is there a picture attached" means a picture, not a PDF
+const attachedPictures = () => pending.filter(p => !p.document);
 const choosing = () => modelSelect.value === 'auto';
 let chosenModel = '';
 function currentModel(){
@@ -508,13 +529,20 @@ const editLimit = () => qwenEdits() ? (caps.max_edit_images || 3) : 1;
 function syncTools(){
   document.querySelectorAll('.chip[data-tool]').forEach(chip =>
     chip.setAttribute('aria-pressed', String(!!tools[chip.dataset.tool])));
-  document.getElementById('attach').hidden = !canAttach();
-  document.getElementById('sizeRow').hidden = !imageMode() || pending.length > 0;
+  document.getElementById('attach').hidden = false;    // documents need no tool switched on
+  document.getElementById('camera').hidden = !canAttach();
+  document.getElementById('sizeRow').hidden = !imageMode() || attachedPictures().length > 0;
   document.getElementById('strengthRow').hidden = !imageMode() || pending.length === 0 || qwenEdits();
   document.getElementById('blurRow').hidden = !imageMode() || pending.length === 0 || !caps.photo_blur;
   document.getElementById('backdropRow').hidden =
     !imageMode() || pending.length === 0 || !caps.photo_backdrop;
-  if(!canAttach() && pending.length){ pending = []; renderPending(); }
+  // Switching the picture tools off drops the pictures, not the documents: a document never
+  // needed those tools to be on in the first place
+  if(!canAttach() && attachedPictures().length){
+    for(const tile of attachedPictures()) if(tile.url) URL.revokeObjectURL(tile.url);
+    pending = pending.filter(p => p.document);
+    renderPending();
+  }
 
   const hint = document.getElementById('modeHint');
   const model = currentModel();
@@ -559,8 +587,28 @@ document.getElementById('strength').addEventListener('input', e =>
 
 // --- attachments ------------------------------------------------------------
 
+const DOCUMENT_GLYPH = {pdf: '\u{1F4D5}', docx: '\u{1F4C4}', xlsx: '\u{1F4CA}'};
+
+function paperGlyph(tile){
+  const name = (tile.name || '').toLowerCase();
+  if(name.endsWith('.pdf')) return DOCUMENT_GLYPH.pdf;
+  if(name.endsWith('.docx')) return DOCUMENT_GLYPH.docx;
+  if(name.endsWith('.xlsx') || name.endsWith('.xlsm')) return DOCUMENT_GLYPH.xlsx;
+  return '\u{1F4DD}';
+}
+
 function renderPending(){
-  document.getElementById('pending').innerHTML = pending.map((f, i) => `
+  document.getElementById('pending').innerHTML = pending.map((f, i) => f.document ? `
+    <div class="paper${f.uploading ? ' busy' : ''}" data-tile="${i}">
+      <span class="glyph">${paperGlyph(f)}</span>
+      <span class="what">
+        <span class="who">${escapeHtml(f.name || 'document')}</span>
+        <span class="size">${f.uploading ? uploadLabel(f)
+                             : (f.characters ? Math.round(f.characters / 1000) + 'k characters read'
+                                             : 'attached')}</span>
+      </span>
+      <button data-unattach="${i}" title="${f.uploading ? 'Stop uploading' : 'Remove'}">&times;</button>
+    </div>` : `
     <div class="pending${f.uploading ? ' busy' : ''}" data-tile="${i}">
       <img src="${f.url}" alt="${escapeHtml(f.name || 'image')}"${f.uploading ? '' : ` data-zoom="${f.url}"`}>
       ${f.uploading ? `<span class="sending">
@@ -585,6 +633,10 @@ function updateTile(tile){
   const index = pending.indexOf(tile);
   const node = document.querySelector(`[data-tile="${index}"]`);
   if(!node) return renderPending();
+  if(tile.document){
+    node.querySelector('.size').textContent = uploadLabel(tile);
+    return;
+  }
   node.querySelector('.track div').style.width = Math.round((tile.progress || 0) * 100) + '%';
   node.querySelector('.says').textContent = uploadLabel(tile);
 }
@@ -622,26 +674,42 @@ function sendFile(file, onProgress, onStart){
   });
 }
 
+const PICTURE = /\.(heic|heif|avif|tiff?|bmp)$/i;
+const PAPER = /\.(pdf|docx|xlsx|xlsm|txt|md|markdown|csv|tsv|log|json|ya?ml|xml|html?|rst|ini|properties)$/i;
+const looksLikePicture = f => f.type.startsWith('image/') || PICTURE.test(f.name || '');
+const looksLikePaper = f => PAPER.test(f.name || '') || f.type === 'application/pdf';
+
 async function uploadImages(files){
-  if(!canAttach()){
-    showError('Turn on "Image understanding" or "Image generation" to attach images.');
-    return;
+  const pictures = files.filter(looksLikePicture);
+  const papers = files.filter(f => !looksLikePicture(f) && looksLikePaper(f));
+  const neither = files.filter(f => !looksLikePicture(f) && !looksLikePaper(f));
+  // A document is only text by the time it reaches a model, so it needs neither toggle
+  if(pictures.length && !canAttach()){
+    showError('Turn on "Image understanding" or "Image generation" to attach pictures. Documents '
+              + 'can be attached either way.');
+    if(!papers.length) return;
   }
-  const pictures = files.filter(f => f.type.startsWith('image/') || /\.(heic|heif|avif|tiff?|bmp)$/i.test(f.name));
-  if(!pictures.length && files.length){
-    showError(files.length === 1 ? `${files[0].name} is not a picture.` : 'Those are not pictures.');
-    return;
+  if(neither.length){
+    showError(neither.length === 1
+      ? `${neither[0].name} is neither a picture nor a document this server can read.`
+      : 'Some of those are neither pictures nor documents this server can read.');
   }
-  for(const file of pictures){
+  for(const file of [...(canAttach() ? pictures : []), ...papers]){
     if(file.size > caps.max_upload_mb * 1024 * 1024){
       showError(`${file.name} is ${(file.size / 1048576).toFixed(0)} MB; the limit is `
                 + `${caps.max_upload_mb} MB. Export it smaller and try again.`);
       continue;
     }
+    const paper = !looksLikePicture(file);
     // The picture appears straight away, read from the file on disk, and fills as it uploads
-    const tile = {uploading: true, progress: 0, name: file.name || 'image',
-                  url: URL.createObjectURL(file), megabytes: file.size / 1048576};
-    if(imageMode() && pending.length >= editLimit()) pending = pending.slice(0, editLimit() - 1);
+    const tile = {uploading: true, progress: 0, name: file.name || (paper ? 'document' : 'image'),
+                  document: paper, url: paper ? '' : URL.createObjectURL(file),
+                  megabytes: file.size / 1048576};
+    // Only pictures compete for the edit slots; a document is never one of the images being edited
+    if(!paper && imageMode() && pending.filter(p => !p.document).length >= editLimit()){
+      const papersKept = pending.filter(p => p.document);
+      pending = [...pending.filter(p => !p.document).slice(0, editLimit() - 1), ...papersKept];
+    }
     pending.push(tile);
     renderPending();
     try{
@@ -649,13 +717,13 @@ async function uploadImages(files){
         fraction => { tile.progress = fraction; updateTile(tile); },
         request => { tile.request = request; });
       tile.request = null;
-      Object.assign(tile, stored, {uploading: false});
-      URL.revokeObjectURL(tile.url);
+      if(tile.url) URL.revokeObjectURL(tile.url);
+      Object.assign(tile, stored, {uploading: false, document: paper});
       tile.url = stored.url;
       renderPending();
     }catch(e){
       pending = pending.filter(p => p !== tile);
-      URL.revokeObjectURL(tile.url);
+      if(tile.url) URL.revokeObjectURL(tile.url);
       renderPending();
       if(e.message !== 'cancelled') showError(`Could not attach ${tile.name}: ` + errorText(e));
     }
@@ -663,6 +731,80 @@ async function uploadImages(files){
   }
 }
 
+// The camera, for a photograph taken now rather than found on disk. getUserMedia needs a secure
+// page and the person's permission; when either is missing, the file input with capture= is handed
+// to the phone's own camera app instead, which is the thing that actually works on iOS.
+const canOpenCamera = () => !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia
+                               && window.isSecureContext);
+
+function showCamera(stream){
+  const panel = document.createElement('div');
+  panel.className = 'camera';
+  panel.innerHTML = `
+    <video autoplay playsinline muted></video>
+    <div class="row">
+      <button class="btn btn-secondary" data-cancel>Cancel</button>
+      <button class="shutter" data-shoot title="Take the photo"></button>
+      <button class="btn btn-secondary" data-flip hidden>Flip</button>
+    </div>`;
+  document.body.appendChild(panel);
+  const video = panel.querySelector('video');
+  video.srcObject = stream;
+
+  const close = () => {
+    stream.getTracks().forEach(track => track.stop());
+    panel.remove();
+    document.removeEventListener('keydown', onKey);
+  };
+  const onKey = e => { if(e.key === 'Escape') close(); };
+  document.addEventListener('keydown', onKey);
+  panel.querySelector('[data-cancel]').addEventListener('click', close);
+  panel.addEventListener('click', e => { if(e.target === panel) close(); });
+
+  panel.querySelector('[data-shoot]').addEventListener('click', () => {
+    const canvas = document.createElement('canvas');
+    canvas.width = video.videoWidth || 1280;
+    canvas.height = video.videoHeight || 720;
+    canvas.getContext('2d').drawImage(video, 0, 0, canvas.width, canvas.height);
+    canvas.toBlob(blob => {
+      close();
+      if(!blob){ showError('The camera gave back an empty picture.'); return; }
+      const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-');
+      uploadImages([new File([blob], `photo-${stamp}.jpg`, {type: 'image/jpeg'})]);
+    }, 'image/jpeg', 0.92);
+  });
+}
+
+async function openCamera(){
+  if(!canAttach()){
+    showError('Turn on "Image understanding" to take a photo for the model to look at.');
+    return;
+  }
+  if(!canOpenCamera()){
+    document.getElementById('cameraInput').click();      // the phone's own camera app
+    return;
+  }
+  try{
+    // The back camera by preference: this is for photographing a thing, not oneself
+    const stream = await navigator.mediaDevices.getUserMedia({
+      video: {facingMode: {ideal: 'environment'}, width: {ideal: 1920}}, audio: false});
+    showCamera(stream);
+  }catch(e){
+    // Refused, or there is no camera. Either way the file input still gets a photo on a phone.
+    const refused = e && (e.name === 'NotAllowedError' || e.name === 'SecurityError');
+    showError(refused
+      ? 'The camera was not allowed. Give this page camera permission in your browser, or attach a '
+        + 'photo with +.'
+      : 'No camera was available, so the file picker is open instead.');
+    if(!refused) document.getElementById('cameraInput').click();
+  }
+}
+
+document.getElementById('camera').addEventListener('click', openCamera);
+document.getElementById('cameraInput').addEventListener('change', e => {
+  uploadImages([...e.target.files]);
+  e.target.value = '';
+});
 document.getElementById('attach').addEventListener('click', () => document.getElementById('fileInput').click());
 document.getElementById('fileInput').addEventListener('change', e => { uploadImages([...e.target.files]); e.target.value = ''; });
 promptBox.addEventListener('paste', e => {
@@ -1381,7 +1523,7 @@ async function send(){
     showError('One moment: the picture is still uploading.');
     return;
   }
-  const decision = await decideAction(text, pending.length > 0);
+  const decision = await decideAction(text, attachedPictures().length > 0);
   if(decision.action === 'clean' || decision.action === 'blur' || decision.action === 'backdrop')
     return sendPhoto(text, decision);
   if(decision.action === 'image' || decision.action === 'edit') return sendImage(text, decision);
@@ -1390,7 +1532,7 @@ async function send(){
 
 async function sendChat(text, decision){
   const model = decision.model || currentModel();
-  if(pending.length && !canSee(model)){
+  if(attachedPictures().length && !canSee(model)){
     showError(choosing()
       ? `None of your models can see images, so ${model} cannot read this attachment.`
       : `${model} cannot see images. Pick a model marked "sees images", or remove the attachment.`);

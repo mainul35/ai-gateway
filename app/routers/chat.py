@@ -23,8 +23,8 @@ from app.auth import Principal, authenticate
 from app.db import get_session, session_factory
 from app.models import ChatFile, Conversation, ConversationMessage, MemoryEntry, utcnow
 from app.routers.openai_v1 import PROXY_PATHS, forward
-from app.tools import (chooser, image_prompt, images, jobs, markdown, memory as memory_tool, photo,
-                        portrait, router as intent_router, web_search)
+from app.tools import (chooser, documents, image_prompt, images, jobs, markdown,
+                        memory as memory_tool, photo, portrait, router as intent_router, web_search)
 
 log = logging.getLogger("playground")
 
@@ -226,8 +226,11 @@ def _image_type(data):
 
 
 def _file_json(file):
-    return {"id": file.id, "url": f"/chat/files/{file.id}", "mime_type": file.mime_type, "name": file.name,
-            "kind": file.kind, "prompt": file.prompt}
+    data = {"id": file.id, "url": f"/chat/files/{file.id}", "mime_type": file.mime_type,
+            "name": file.name, "kind": file.kind}
+    # A document keeps its text in prompt, which is megabytes of no use to the browser
+    data["prompt"] = None if file.kind == "document" else file.prompt
+    return data
 
 
 def _upright(data, mime):
@@ -287,9 +290,28 @@ async def upload_file(file: UploadFile = File(...), principal: Principal = Depen
                             f"{name} is a camera raw file, which this server cannot develop yet. "
                             "Export it as JPEG or HEIC and attach that.")
     if mime is None:
+        # Not a picture: it may still be something a model can be told the contents of
+        try:
+            kind = documents.kind_of(name, data)
+        except documents.DocumentError as e:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, str(e))
+        if kind is not None:
+            # Read now rather than at send time, so a file that cannot be read says so while the
+            # person is still looking at the upload rather than halfway through an answer
+            try:
+                text = await asyncio.to_thread(documents.extract, name, data)
+            except documents.DocumentError as e:
+                raise HTTPException(status.HTTP_400_BAD_REQUEST, str(e))
+            stored = ChatFile(user_id=user.id, kind="document", mime_type=documents.MIME[kind],
+                              name=name, prompt=text, data=data)
+            session.add(stored)
+            await session.commit()
+            await session.refresh(stored)
+            return {**_file_json(stored), "characters": len(text)}
         raise HTTPException(status.HTTP_400_BAD_REQUEST,
-                            f"{name} is not a picture this server recognises. JPEG, PNG, HEIC, WebP, "
-                            "TIFF, GIF and BMP all work.")
+                            f"{name} is neither a picture nor a document this server can read. "
+                            "Pictures: JPEG, PNG, HEIC, WebP, TIFF, GIF, BMP. Documents: PDF, "
+                            "Word (.docx), Excel (.xlsx), and plain text.")
     if mime in _CONVERTED:
         data, mime = await asyncio.to_thread(_to_browser_format, data, mime, name)
     else:
@@ -449,13 +471,19 @@ async def complete(payload: CompleteIn, principal: Principal = Depends(authentic
         await _owned(session, payload.conversation_id, user)
     use_vision = payload.vision and settings.feature_enabled("vision")
     latest_user = next((m for m in reversed(payload.messages) if m.role == "user"), None)
-    if use_vision and latest_user and latest_user.images and "vision" not in backend.capabilities:
-        raise HTTPException(status.HTTP_400_BAD_REQUEST,
-                            f"{payload.model} cannot read images. Pick a model marked as vision-capable.")
     # Pictures from earlier turns are dropped for a text-only model rather than failing the chat
     use_vision = use_vision and "vision" in backend.capabilities
-    wanted = [i for m in payload.messages if m.role == "user" for i in m.images] if use_vision else []
-    files = await _load_files(session, user, wanted)
+    # Every attachment is loaded, then sorted: pictures go to a model that can see, documents go to
+    # any model at all, because by the time they get there they are only text
+    attached = [i for m in payload.messages for i in m.images]
+    everything = await _load_files(session, user, attached)
+    papers = [f for f in everything.values() if f.kind == "document"]
+    pictures = [f for f in everything.values() if f.kind != "document"]
+    if pictures and payload.vision and "vision" not in backend.capabilities:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST,
+                            f"{payload.model} cannot see images. Pick a model marked as "
+                            "vision-capable, or attach a document instead.")
+    files = {i: f for i, f in everything.items() if f.kind != "document"} if use_vision else {}
 
     history = list(payload.messages)
     remembered = None
@@ -480,6 +508,10 @@ async def complete(payload: CompleteIn, principal: Principal = Depends(authentic
         else:
             messages.append({"role": m.role, "content": m.content})
 
+    if papers:
+        block = documents.context_block([(f.name or "document", f.prompt or "") for f in papers])
+        messages.insert(1 if messages and messages[0]["role"] == "system" else 0,
+                        {"role": "system", "content": block})
     if remembered:
         # After the user's own system prompt, so theirs still comes first
         messages.insert(1 if messages and messages[0]["role"] == "system" else 0,
