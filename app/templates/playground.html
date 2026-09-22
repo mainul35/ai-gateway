@@ -119,6 +119,14 @@ a.cite{font-size:.75em;vertical-align:super;text-decoration:none;padding:0 .1rem
 .file .about{flex:1;min-width:0}
 .file .name{font-size:.88rem;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .file .kind{font-size:.75rem;color:var(--muted)}
+/* A page the model wrote, shown as a page. The frame is sandboxed, so what is inside it cannot
+   reach this one - see the comment on preview() for why that matters. */
+.preview{border:1px solid var(--border);border-radius:10px;overflow:hidden;margin:.2rem 0 .8rem;
+         background:#fff}
+.preview iframe{display:block;width:100%;border:none;background:#fff}
+.preview .bar-top{display:flex;align-items:center;gap:.5rem;padding:.35rem .6rem;background:var(--card);
+                  border-bottom:1px solid var(--border);font-size:.78rem;color:var(--muted)}
+.preview .bar-top .spacer{flex:1}
 .code-tools{display:flex;gap:.4rem;justify-content:flex-end;margin:-.4rem 0 .6rem}
 .code-tools button{background:none;border:1px solid var(--border);color:var(--muted);border-radius:6px;
                    font-size:.72rem;padding:.12rem .45rem;cursor:pointer;font-family:inherit}
@@ -1113,6 +1121,48 @@ function fileName(text, extension){
 
 // Long answers and code are things people keep, so they are offered as files rather than left to be
 // selected out of the page by hand.
+// A whole HTML document, rather than a snippet of markup
+const WHOLE_PAGE = /<!doctype html|<html[\s>]/i;
+
+// Shown in a sandboxed frame with no same-origin permission, so the page inside gets an opaque
+// origin of its own: it can run its own scripts, and it cannot read this page, its cookies, its
+// storage, or the conversation. A model writes this HTML, so it is treated as something a stranger
+// wrote - which it is.
+function preview(block, code){
+  const html = code.textContent;
+  const frame = document.createElement('div');
+  frame.className = 'preview';
+  frame.innerHTML = `
+    <div class="bar-top">
+      <span>Preview</span><span class="spacer"></span>
+      <button class="linkish" data-open-tab>Open in a tab</button>
+      <button class="linkish" data-show-code>Show the code</button>
+    </div>
+    <iframe sandbox="allow-scripts allow-modals" referrerpolicy="no-referrer" title="preview"></iframe>`;
+  const inner = frame.querySelector('iframe');
+  inner.srcdoc = html;
+  // Grown to fit what is inside it, within reason: a worksheet is a page, not a thumbnail
+  inner.style.height = '60vh';
+
+  // A new tab can print, which a sandboxed frame cannot, and printing is usually the whole point
+  frame.querySelector('[data-open-tab]').addEventListener('click', () => {
+    const blob = new Blob([html], {type: 'text/html'});
+    const url = URL.createObjectURL(blob);
+    window.open(url, '_blank', 'noopener');
+    setTimeout(() => URL.revokeObjectURL(url), 60000);
+  });
+  const toggle = frame.querySelector('[data-show-code]');
+  toggle.addEventListener('click', () => {
+    const showCode = block.hidden;          // hidden now means the code is what we are switching to
+    block.hidden = !showCode;
+    inner.hidden = showCode;
+    toggle.textContent = showCode ? 'Show the page' : 'Show the code';
+  });
+  block.parentNode.insertBefore(frame, block);
+  block.hidden = true;
+  return frame;
+}
+
 function offerFiles(box, text){
   if(!text) return;
   const body = box.querySelector('.body');
@@ -1134,6 +1184,10 @@ function offerFiles(box, text){
       download(code.textContent, named);
     });
     block.parentNode.insertBefore(tools, block);
+    // A complete page is worth seeing as a page. A fragment is not: it would render as a scrap
+    // of markup with no styles around it, which tells you less than the markup does.
+    // An unlabelled block counts too: models often emit a bare fence around a whole page
+    if((suffix === 'html' || !language) && WHOLE_PAGE.test(code.textContent)) preview(block, code);
   }
 
   // A document, rather than a reply: long, or with headings to navigate by
