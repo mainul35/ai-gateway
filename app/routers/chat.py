@@ -23,7 +23,7 @@ from app.auth import Principal, authenticate
 from app.db import get_session, session_factory
 from app.models import ChatFile, Conversation, ConversationMessage, MemoryEntry, utcnow
 from app.routers.openai_v1 import PROXY_PATHS, forward
-from app.tools import (chooser, documents, image_prompt, images, jobs, markdown,
+from app.tools import (chooser, documents, image_prompt, images, jobs, map_plan, maps, markdown,
                         memory as memory_tool, photo, portrait, router as intent_router, web_search)
 
 log = logging.getLogger("playground")
@@ -192,6 +192,7 @@ async def capabilities(principal: Principal = Depends(authenticate)):
         "photo_clean": images.is_available(),
         "photo_blur": images.is_available() and photo.is_depth_available(),
         "photo_backdrop": images.is_available() and portrait.is_available(),
+        "maps": settings.feature_enabled("maps"),
         "routing": intent_router.is_enabled(),
         "markdown": markdown.is_available(),
         "max_upload_mb": settings.max_upload_bytes() // (1024 * 1024),
@@ -960,6 +961,122 @@ async def _choose_model(principal, session, category, has_images, prefer=None):
             "health": health.get(name, {}),
         })
     return chooser.pick(candidates, category, needs_vision=has_images, prefer=prefer)
+
+
+
+
+# --- maps -----------------------------------------------------------------------------------
+
+class MapIn(BaseModel):
+    message: str = Field(min_length=1, max_length=2000)
+    conversation_id: int | None = None
+
+
+async def _candidates(words, fallback_points, index):
+    """Everywhere a name might mean, or the one place a coordinate already is."""
+    if index < len(fallback_points):
+        lat, lon = fallback_points[index]
+        try:
+            return [await maps.reverse(lat, lon)]
+        except maps.MapError:
+            return [{"name": f"{lat:.5f}, {lon:.5f}", "address": "", "lat": lat, "lon": lon,
+                     "kind": "", "osm": None}]
+    if not words:
+        return []
+    found = await maps.search(words, limit=5)
+    if not found:
+        raise maps.MapError(f"Nowhere called \u201c{words}\u201d could be found on the map.")
+    return found
+
+
+async def _somewhere(words, fallback_points, index):
+    found = await _candidates(words, fallback_points, index)
+    return found[0] if found else None
+
+
+@router.post("/map")
+async def find_on_map(payload: MapIn, principal: Principal = Depends(authenticate),
+                      session: AsyncSession = Depends(get_session)):
+    """Answers a question about places with real coordinates, a route, and what is along it.
+
+    The reading of the question is the model's; every coordinate in the answer comes from
+    OpenStreetMap. That division is the point: a model asked for a latitude will produce one that
+    looks entirely plausible and is wrong, and nobody would notice until they drove there.
+    """
+    _require_user(principal)
+    if not settings.feature_enabled("maps"):
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "Maps are turned off on this server")
+
+    message = payload.message.strip()
+    points = maps.parse_points(message)
+    plan = None
+    if intent_router.is_enabled():
+        answer = await _ask_helper(principal, map_plan.build_request(message, settings.router_model()))
+        plan = map_plan.read_answer(answer)
+    if plan is None:
+        plan = map_plan.by_keywords(message, bool(points))
+    # A coordinate in the message settles what it is about, whatever the model made of the words
+    if points and plan["intent"] == "find":
+        plan["intent"] = "near" if maps.amenity_for(plan["what"] or message) else "here"
+
+    tag = maps.amenity_for(plan["what"] or message)
+    mode = maps.transport_for(message)
+    result = {"intent": plan["intent"], "asked": message, "what": plan["what"],
+              "places": [], "route": None, "start": None, "end": None, "mode": mode}
+
+    try:
+        if plan["intent"] == "here":
+            if not points:
+                raise maps.MapError("No coordinate was given to look up.")
+            result["places"] = [await maps.reverse(*points[0])]
+
+        elif plan["intent"] in ("route", "along"):
+            # Both ends are resolved together, so that two vague names settle on the pairing
+            # that makes a journey rather than a continent
+            start, end = maps.nearest_pair(await _candidates(plan["from"], points, 0),
+                                           await _candidates(plan["to"], points, 1))
+            if not start or not end:
+                raise maps.MapError("A route needs both a start and a finish; name them as "
+                                    "\u201cfrom A to B\u201d.")
+            result["start"], result["end"] = start, end
+            result["route"] = await maps.route([(start["lat"], start["lon"]),
+                                                (end["lat"], end["lon"])], mode)
+            if plan["intent"] == "along":
+                if not tag:
+                    raise maps.MapError("What should be looked for along the way? Name a kind of "
+                                        "place, such as petrol stations or restaurants.")
+                result["places"] = await maps.along(tag, result["route"]["line"])
+
+        elif plan["intent"] == "near":
+            centre = await _somewhere(plan["to"] or plan["what"], points, 0)
+            if not centre:
+                raise maps.MapError("Near where? Name a place, or give a coordinate.")
+            result["start"] = centre
+            if not tag:
+                # Not a kind of place this knows a tag for, so it is searched for by its words
+                result["places"] = await maps.search(plan["what"] or message,
+                                                     near=(centre["lat"], centre["lon"]))
+            else:
+                result["places"] = await maps.nearby(tag, centre["lat"], centre["lon"])
+
+        else:                                   # find
+            result["places"] = await maps.search(plan["what"] or message,
+                                                 near=(points[0] if points else None))
+            if not result["places"]:
+                raise maps.MapError("Nothing on the map matched that.")
+    except maps.MapError as e:
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(e))
+
+    for place in result["places"]:
+        place["google"] = maps.google_link(place=place)
+    if result["route"]:
+        result["google_route"] = maps.google_link(
+            start=(result["start"]["lat"], result["start"]["lon"]),
+            end=(result["end"]["lat"], result["end"]["lon"]), mode=mode)
+    everything = result["places"] + [p for p in (result["start"], result["end"]) if p]
+    result["bounds"] = maps.bounds(everything, (result["route"] or {}).get("line", []))
+    await usage_log.record(principal, "openstreetmap", "maps", "map", False, 200, None, 0)
+    return result
 
 
 class RouteIn(BaseModel):

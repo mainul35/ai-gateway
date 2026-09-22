@@ -18,6 +18,7 @@ DEFAULTS = {
     "features.web_search.enabled": "true",
     "features.vision.enabled": "true",
     "features.image_generation.enabled": "true",
+    "features.maps.enabled": "true",
     "search.searxng.url": "http://127.0.0.1:8888",
     "search.results": "6",
     "search.fetch_pages": "4",

@@ -24,7 +24,7 @@ EDITABLE_KEYS = [
     # Playground tools
     "features.web_search.enabled",
     "features.vision.enabled",
-    "features.image_generation.enabled",
+    "features.image_generation.enabled", "features.maps.enabled",
     "router.enabled",
     "router.model",
     "search.searxng.url",
