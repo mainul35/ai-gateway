@@ -121,13 +121,18 @@ class MemoryEntry(Base):
 
 
 class ChatFile(Base):
-    """An image a user uploaded to the playground or generated there. Only its owner can read it."""
+    """A file a user uploaded to the playground, or an image generated there.
+
+    Only its owner can read it. A document keeps the text taken out of it in `prompt`, which is what
+    the model is given: nothing sends the bytes of a spreadsheet to a language model.
+    """
     __tablename__ = "chat_files"
 
     id: Mapped[int] = mapped_column(primary_key=True)
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
-    kind: Mapped[str] = mapped_column(String(16))  # "upload" or "generated"
-    mime_type: Mapped[str] = mapped_column(String(64))
+    kind: Mapped[str] = mapped_column(String(16))  # "upload", "generated" or "document"
+    # 128, because the Office media types are 65 and 71 characters long and 64 was not enough
+    mime_type: Mapped[str] = mapped_column(String(128))
     name: Mapped[str | None] = mapped_column(String(256), nullable=True)
     # The prompt an image was generated from, shown under it
     prompt: Mapped[str | None] = mapped_column(Text, nullable=True)
