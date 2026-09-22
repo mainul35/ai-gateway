@@ -27,7 +27,8 @@
 </div>
 
 <div class="card" style="margin-bottom:1.5rem" id="installCard" hidden>
-  <h2>Installing <code id="installName"></code></h2>
+  <h2><span id="installHeading">Installing</span> <code id="installName"></code>
+    <button class="linkish" id="installDismiss" style="float:right;font-size:.8rem" hidden>Dismiss</button></h2>
   <div class="status" style="margin:.4rem 0"><span class="spinner" id="installSpinner"></span>
     <span id="installStage">Starting</span>
     <span class="spacer" style="flex:1"></span>
@@ -185,8 +186,10 @@ function showInstallCard(name){
   document.getElementById('installPercent').textContent = '';
   document.getElementById('installDetail').textContent = '';
   document.getElementById('installStage').textContent = 'Starting';
+  document.getElementById('installHeading').textContent = 'Installing';
   document.getElementById('installSpinner').hidden = false;
   document.getElementById('installCancel').hidden = false;
+  document.getElementById('installDismiss').hidden = true;
 }
 
 // Reads an install's event stream to its end, updating the card as it goes. The same function serves
@@ -219,21 +222,39 @@ function installEnded(finished){
   installJob = null;
   document.getElementById('installSpinner').hidden = true;
   document.getElementById('installCancel').hidden = true;
+  document.getElementById('installDismiss').hidden = false;
+  // The heading has to move on too. It said "Installing" whatever had happened, so a finished
+  // download went on announcing itself as one and the only contradiction was in smaller print.
+  const heading = document.getElementById('installHeading');
   if(finished && finished.success){
-    document.getElementById('installStage').textContent = `Installed as ${finished.model_name}`;
+    heading.textContent = 'Installed';
+    document.getElementById('installStage').textContent = `Ready to use as ${finished.model_name}`;
     document.getElementById('installBar').style.width = '100%';
     document.getElementById('installPercent').textContent = '100%';
+  }else if(finished && finished.cancelled){
+    heading.textContent = 'Cancelled';
+    document.getElementById('installStage').textContent = 'Stopped before it finished';
   }else if(finished){
-    document.getElementById('installStage').textContent = finished.cancelled ? 'Cancelled' : 'Did not finish';
+    heading.textContent = 'Could not install';
+    document.getElementById('installStage').textContent = 'Did not finish';
     // In the card as well as at the top of the page: by the time an install fails you are usually
     // scrolled down to watch it, and "Did not finish" on its own says nothing about why
-    if(finished.error && !finished.cancelled){
+    if(finished.error){
       document.getElementById('installDetail').textContent = finished.error;
       showError(finished.error);
     }
+  }else{
+    // The stream broke without a final word; the download may well still be running underneath
+    heading.textContent = 'Lost track of';
+    document.getElementById('installStage').textContent =
+      'The connection dropped. Reload the page to pick it up again if it is still going.';
   }
   loadModels();
 }
+
+document.getElementById('installDismiss').addEventListener('click', () => {
+  document.getElementById('installCard').hidden = true;
+});
 
 // A download of twenty gigabytes outlives any page. On arriving, ask what this machine is already
 // busy with and join it, rather than showing an idle page over a running download.
