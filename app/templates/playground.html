@@ -121,8 +121,10 @@ a.cite{font-size:.75em;vertical-align:super;text-decoration:none;padding:0 .1rem
 .file .kind{font-size:.75rem;color:var(--muted)}
 /* A page the model wrote, shown as a page. The frame is sandboxed, so what is inside it cannot
    reach this one - see the comment on preview() for why that matters. */
+/* white-space:normal because the answer body is pre-wrap: without it the newlines between these
+   elements in the markup render as real blank lines, and the frame arrives wearing a white gap */
 .preview{border:1px solid var(--border);border-radius:10px;overflow:hidden;margin:.2rem 0 .8rem;
-         background:#fff}
+         background:var(--card);white-space:normal}
 .preview iframe{display:block;width:100%;border:none;background:#fff}
 .preview .bar-top{display:flex;align-items:center;gap:.5rem;padding:.35rem .6rem;background:var(--card);
                   border-bottom:1px solid var(--border);font-size:.78rem;color:var(--muted)}
@@ -1134,12 +1136,20 @@ function preview(block, code){
   frame.className = 'preview';
   frame.innerHTML = `
     <div class="bar-top">
-      <span>Preview</span><span class="spacer"></span>
+      <span data-preview-state>Rendering&hellip;</span><span class="spacer"></span>
       <button class="linkish" data-open-tab>Open in a tab</button>
       <button class="linkish" data-show-code>Show the code</button>
     </div>
     <iframe sandbox="allow-scripts allow-modals" referrerpolicy="no-referrer" title="preview"></iframe>`;
   const inner = frame.querySelector('iframe');
+  // Kept dark and labelled until it has painted, so that a frame which is slow, or which fails,
+  // never looks like a frame that rendered a blank page
+  const note = frame.querySelector('[data-preview-state]');
+  inner.style.visibility = 'hidden';
+  inner.addEventListener('load', () => {
+    inner.style.visibility = 'visible';
+    note.textContent = 'Preview';
+  }, {once: true});
   inner.srcdoc = html;
   // Grown to fit what is inside it, within reason: a worksheet is a page, not a thumbnail
   inner.style.height = '60vh';
