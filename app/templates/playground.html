@@ -274,7 +274,7 @@ a.cite{font-size:.75em;vertical-align:super;text-decoration:none;padding:0 .1rem
         </label>
         <label style="margin-bottom:0">
           <span class="lbl">Max tokens</span>
-          <input type="number" id="maxTokens" value="2048" min="1" max="32768">
+          <input type="number" id="maxTokens" value="8192" min="1" max="32768">
         </label>
       </div>
     </details>
@@ -1634,7 +1634,7 @@ async function sendChat(text, decision){
 
   const payload = {model, messages, conversation_id: currentId,
                    temperature: parseFloat(document.getElementById('temperature').value),
-                   max_tokens: parseInt(document.getElementById('maxTokens').value, 10) || 2048,
+                   max_tokens: parseInt(document.getElementById('maxTokens').value, 10) || 8192,
                    web_search: decision.action === 'search',
                    vision: tools.vision && caps.vision};
   if(models[model]?.owned_by === 'llamacpp') payload.thinking = document.getElementById('thinking').checked;

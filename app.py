@@ -120,7 +120,7 @@ def calculate_kv_cache(model_arch):
     # Grouped-query attention models cache fewer key/value heads than attention heads
     num_kv_heads = model_arch.get("num_key_value_heads") or num_heads
     head_dim = model_arch.get("head_dim") or hidden_size // num_heads
-    max_positions = model_arch.get("max_position_embeddings") or 2048
+    max_positions = model_arch.get("max_position_embeddings") or 8192
     recommended_context = min(max_positions, DEFAULT_CONTEXT_LENGTH)
 
     # One key and one value vector per layer for every token
