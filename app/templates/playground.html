@@ -2,6 +2,8 @@
 {% block title %}Playground &middot; Model Gateway{% endblock %}
 {% block body_class %}app{% endblock %}
 {% block content %}
+<link rel="stylesheet" href="/static/leaflet/leaflet.css">
+<script src="/static/leaflet/leaflet.js"></script>
 <style>
 /* The window is the frame: the sidebar scrolls if it must, the conversation scrolls, and nothing
    else does. The composer stays where the hands are. */
@@ -106,6 +108,31 @@ a.cite{font-size:.75em;vertical-align:super;text-decoration:none;padding:0 .1rem
 .attach-menu .glyph{font-size:1.15rem;flex:none}
 .attach-menu b{display:block;font-weight:600}
 .attach-menu small{display:block;color:var(--muted);font-size:.75rem}
+
+/* A map answer: the map itself, then the places under it as a list worth reading on its own */
+.mapbox{border:1px solid var(--border);border-radius:10px;overflow:hidden;margin:.3rem 0 .6rem;
+        white-space:normal}
+/* The height lives on .canvas and nowhere else. Leaflet adds .leaflet-container to this very
+   element, so a .mapbox .leaflet-container{height:100%} rule below is the same weight and written
+   later: it wins, resolves against a parent of no height at all, and the map collapses to nothing
+   while still dutifully loading its tiles. */
+.mapbox .canvas{height:min(48vh,22rem);background:var(--input)}
+.mapbox .leaflet-container{background:var(--input);font-family:inherit}
+.map-summary{display:flex;flex-wrap:wrap;gap:.5rem .9rem;align-items:baseline;
+             padding:.5rem .7rem;background:var(--card);border-bottom:1px solid var(--border);
+             font-size:.85rem}
+.map-summary .spacer{flex:1}
+.map-places{list-style:none;margin:.2rem 0 0;padding:0;display:flex;flex-direction:column;gap:.15rem}
+.map-places li{display:flex;gap:.55rem;align-items:baseline;padding:.35rem .5rem;border-radius:7px}
+.map-places li:hover{background:var(--input)}
+.map-places .pin{font-size:.72rem;font-weight:700;color:#fff;background:var(--primary);
+                 min-width:1.3rem;height:1.3rem;border-radius:50%;display:inline-flex;
+                 align-items:center;justify-content:center;flex:none}
+.map-places .about{flex:1;min-width:0}
+.map-places .name{font-weight:600;font-size:.9rem}
+.map-places .where{font-size:.78rem;color:var(--muted);white-space:nowrap;overflow:hidden;
+                   text-overflow:ellipsis}
+.map-places .links{display:flex;gap:.5rem;font-size:.76rem;flex:none}
 
 /* An attached document has nothing to show, so it says what it is instead of pretending */
 .paper{display:flex;align-items:center;gap:.5rem;height:5.5rem;width:11rem;padding:.5rem .6rem;
@@ -310,6 +337,8 @@ a.cite{font-size:.75em;vertical-align:super;text-decoration:none;padding:0 .1rem
                     title="Search the web and answer from the results, with sources"><span class="dot"></span>Web search</button>
             <button class="chip" id="toolVision" data-tool="vision" aria-pressed="false" hidden
                     title="Attach images for the model to look at"><span class="dot"></span>Image understanding</button>
+            <button class="chip" id="toolMaps" data-tool="maps" aria-pressed="false" hidden
+                    title="Find places, routes, and what is along the way, on OpenStreetMap"><span class="dot"></span>Maps</button>
             <button class="chip" id="toolImage" data-tool="image_generation" aria-pressed="false" hidden
                     title="Create a new image, or edit an attached one, instead of chatting"><span class="dot"></span>Image generation</button>
             <span class="attach-wrap">
@@ -448,8 +477,9 @@ let conversations = [];
 let currentId = null;    // saved conversation being continued, if any
 let savedSystem = '';    // system prompt stored with the current conversation
 let controller = null;
-let caps = {web_search: false, vision: false, image_generation: false, image_sizes: [], max_upload_mb: 10};
-let tools = {web_search: false, vision: false, image_generation: false};
+let caps = {web_search: false, vision: false, image_generation: false, maps: false,
+            image_sizes: [], max_upload_mb: 10};
+let tools = {web_search: false, vision: false, image_generation: false, maps: false};
 let pending = [];        // images attached to the next message: [{id, url, name, kind}]
 
 function showError(message){
@@ -537,6 +567,7 @@ async function loadCapabilities(){
   document.getElementById('toolSearch').hidden = !caps.web_search;
   document.getElementById('toolVision').hidden = !caps.vision;
   document.getElementById('toolImage').hidden = !caps.image_generation;
+  document.getElementById('toolMaps').hidden = !caps.maps;
   document.getElementById('imageSize').innerHTML = caps.image_sizes.map(s =>
     `<option value="${s}">${s[0].toUpperCase() + s.slice(1)}</option>`).join('');
   syncTools();
@@ -1018,6 +1049,9 @@ async function openConversation(id){
       if(m.role === 'user'){
         addUserMessage(m.content, imageIds.map(fileUrl));
         history.push({role: 'user', content: m.content, images: extra.mode === 'image' ? [] : imageIds});
+      }else if(extra.map){
+        renderMap(addMessage('assistant', '', m.model || 'OpenStreetMap'), extra.map);
+        history.push({role: 'assistant', content: m.content});
       }else if(extra.generated){
         renderGenerated(addMessage('assistant', '', m.model), extra.generated, m.stats);
         history.push({role: 'assistant', content: m.content});
@@ -1158,7 +1192,8 @@ function addUserMessage(text, imageUrls){
 }
 
 const ACTION_LABELS = {chat: 'answered directly', search: 'searched the web',
-                       image: 'created an image', edit: 'edited the image'};
+                       image: 'created an image', edit: 'edited the image',
+                       map: 'looked it up on the map'};
 
 const CATEGORY_LABELS = {code: 'a coding question', vision: 'a question about the picture',
                          reasoning: 'something to work out', long: 'a long read',
@@ -1380,6 +1415,134 @@ function preview(block, code){
   return frame;
 }
 
+// Tiles come from OpenStreetMap's own servers, which ask for attribution and for the traffic to
+// stay modest. Both are honoured: the credit is on every map, and a map is only drawn when one was
+// actually asked for.
+const TILES = 'https://tile.openstreetmap.org/{z}/{x}/{y}.png';
+const CREDIT = '&copy; <a href="https://www.openstreetmap.org/copyright" target="_blank" '
+             + 'rel="noopener">OpenStreetMap</a> contributors';
+
+function metres(distance){
+  return distance >= 1000 ? `${(distance / 1000).toFixed(1)} km away` : `${distance} m away`;
+}
+
+function renderMap(box, answer){
+  const body = box.querySelector('.body');
+  body.textContent = '';
+  const frame = document.createElement('div');
+  frame.className = 'mapbox';
+
+  const bits = [];
+  if(answer.route){
+    bits.push(`<b>${answer.route.distance_km} km</b>`,
+              `about <b>${answer.route.minutes} min</b> by ${escapeHtml(answer.route.mode)}`);
+  }
+  if(answer.start) bits.push(`from ${escapeHtml(answer.start.name)}`);
+  if(answer.end) bits.push(`to ${escapeHtml(answer.end.name)}`);
+  if(!answer.route && answer.places.length){
+    bits.push(`<b>${answer.places.length}</b> place${answer.places.length === 1 ? '' : 's'} found`);
+  }
+  frame.innerHTML = `<div class="map-summary">${bits.join('<span class="muted">&middot;</span>')}
+      <span class="spacer"></span>
+      ${answer.google_route ? `<a href="${answer.google_route}" target="_blank" rel="noopener">Open in Google Maps</a>` : ''}
+    </div><div class="canvas"></div>`;
+  body.appendChild(frame);
+
+  const list = document.createElement('ol');
+  list.className = 'map-places';
+  list.innerHTML = answer.places.map((place, i) => `
+    <li data-place="${i}">
+      <span class="pin">${i + 1}</span>
+      <span class="about">
+        <span class="name">${escapeHtml(place.name)}</span>
+        <span class="where">${escapeHtml(place.address || place.kind || '')}` +
+        `${place.metres_away != null ? ' \u00b7 ' + metres(place.metres_away) : ''}</span>
+      </span>
+      <span class="links">
+        ${place.osm ? `<a href="${place.osm}" target="_blank" rel="noopener">OSM</a>` : ''}
+        <a href="${place.google}" target="_blank" rel="noopener">Google</a>
+      </span>
+    </li>`).join('');
+  body.appendChild(list);
+
+  if(typeof L === 'undefined'){
+    frame.querySelector('.canvas').textContent = 'The map library did not load.';
+    return;
+  }
+  const map = L.map(frame.querySelector('.canvas'), {scrollWheelZoom: false});
+  L.tileLayer(TILES, {maxZoom: 19, attribution: CREDIT}).addTo(map);
+
+  const markers = [];
+  const pin = (place, label, colour) => {
+    const marker = L.circleMarker([place.lat, place.lon], {
+      radius: 9, weight: 2, color: '#fff', fillColor: colour, fillOpacity: 1});
+    marker.bindPopup(`<b>${escapeHtml(place.name)}</b><br>${escapeHtml(place.address || '')}`);
+    marker.addTo(map);
+    marker.bindTooltip(String(label), {permanent: true, direction: 'center', className: 'map-pin'});
+    return marker;
+  };
+  if(answer.route) L.polyline(answer.route.line, {color: '#6366f1', weight: 5, opacity: .85}).addTo(map);
+  if(answer.start && answer.route) pin(answer.start, 'A', '#10b981');
+  if(answer.end && answer.route) pin(answer.end, 'B', '#ef4444');
+  answer.places.forEach((place, i) => markers.push(pin(place, i + 1, '#6366f1')));
+
+  if(answer.bounds) map.fitBounds(answer.bounds, {padding: [28, 28], maxZoom: 16});
+  else if(answer.places.length) map.setView([answer.places[0].lat, answer.places[0].lon], 14);
+  // The map is drawn into a box that has only just appeared, so it has to be told to measure again
+  setTimeout(() => map.invalidateSize(), 60);
+
+  list.addEventListener('click', e => {
+    const row = e.target.closest('[data-place]');
+    if(!row || e.target.closest('a')) return;
+    const marker = markers[Number(row.dataset.place)];
+    if(marker){ map.setView(marker.getLatLng(), Math.max(map.getZoom(), 15)); marker.openPopup(); }
+  });
+}
+
+async function sendMap(text, decision){
+  showError('');
+  try{
+    await ensureConversation(text, currentModel());
+  }catch(e){
+    showError('Could not save the conversation: ' + errorText(e));
+    return;
+  }
+  promptBox.value = ''; fitComposer();
+  addUserMessage(text, []);
+  history.push({role: 'user', content: text, images: []});
+  await saveMessage({role: 'user', content: text});
+
+  const box = addMessage('assistant', '', 'OpenStreetMap');
+  noteDecision(box, decision);
+  setStatus(box, 'Looking it up on the map');
+  busy(true);
+  let answer = null;
+  try{
+    answer = await api('/chat/map', {method: 'POST', headers: JSON_HEADERS,
+                                     body: JSON.stringify({message: text, conversation_id: currentId})});
+  }catch(e){
+    showError(errorText(e));
+  }finally{
+    busy(false);
+    setStatus(box, null);
+  }
+  if(!answer){
+    box.querySelector('.body').textContent = 'Nothing came back from the map.';
+    return;
+  }
+  renderMap(box, answer);
+  const named = answer.places.slice(0, 5).map(p => p.name).join(', ');
+  const said = answer.route
+    ? `(${answer.route.distance_km} km, about ${answer.route.minutes} minutes`
+      + `${named ? '; ' + named : ''})`
+    : `(${named || 'nothing found'})`;
+  history.push({role: 'assistant', content: said});
+  await saveMessage({role: 'assistant', content: said, model: 'OpenStreetMap',
+                     attachments: {map: answer}});
+  revealFrom(box);
+  loadConversations();
+}
+
 function offerFiles(box, text){
   if(!text) return;
   const body = box.querySelector('.body');
@@ -1555,6 +1718,7 @@ async function decideAction(text, hasImages){
   try{
     const decision = await api('/chat/route', {method: 'POST', headers: JSON_HEADERS, body: JSON.stringify({
       message: text, has_images: hasImages, web_search: searchOn, image_generation: imageMode(),
+      maps: tools.maps && caps.maps,
       choose_model: choosing(), current_model: chosenModel,
       history: history.slice(-4).map(h => ({role: h.role, content: h.content}))})});
     if(decision.model) chosenModel = decision.model;
@@ -1589,6 +1753,7 @@ async function send(){
     return;
   }
   const decision = await decideAction(text, attachedPictures().length > 0);
+  if(decision.action === 'map') return sendMap(text, decision);
   if(decision.action === 'clean' || decision.action === 'blur' || decision.action === 'backdrop')
     return sendPhoto(text, decision);
   if(decision.action === 'image' || decision.action === 'edit') return sendImage(text, decision);

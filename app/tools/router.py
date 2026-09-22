@@ -16,6 +16,7 @@ log = logging.getLogger("tools.router")
 CHAT, SEARCH, IMAGE, EDIT = "chat", "search", "image", "edit"
 CLEAN, BLUR = "clean", "blur"   # what is asked of a photograph, as opposed to a drawing
 BACKDROP = "backdrop"           # the person kept exactly as they are, on a different plain colour
+MAP = "map"                     # somewhere on the earth, rather than something to read or draw
 
 PROMPT = """You route a user's message to one of these actions. Answer with one word and nothing else.
 
@@ -35,6 +36,10 @@ CLEAN  - asks for the quality of a photograph to be improved, with nothing in it
          style, anything added or taken away - it is EDIT, not CLEAN.
 BLUR   - asks for the background of a photograph to be blurred, or for the subject to stand out
          from it: shallower depth of field than the camera gave.
+MAP    - asks about somewhere on the earth: finding a place, what is at a coordinate, how to get
+         from one place to another, how far or how long it is, or what of some kind is nearby or
+         along a route. "Where is X", "route from A to B", "petrol stations on the way to Y",
+         "what is at 23.81, 90.41" are all MAP.
 BACKDROP - asks for the background behind a person to become a plain colour, or for the colour it
          already is to become a different one: passport and visa photographs. "White background",
          "make the background light blue", "I need this on red for my visa form" are all BACKDROP.
@@ -55,6 +60,11 @@ Examples:
 "make it look like winter" -> EDIT
 "add fog to this picture" -> EDIT
 "blur the background so the bird stands out" -> BLUR
+"where is Dhaka University" -> MAP
+"route from Gulshan to the airport" -> MAP
+"find petrol stations along the way to Chittagong" -> MAP
+"what is at 23.8103, 90.4125" -> MAP
+"how far is Cox\'s Bazar from Dhaka by road" -> MAP
 "can you give this more bokeh?" -> BLUR
 "change the background to white for my passport photo" -> BACKDROP
 "I need a light blue background on this" -> BACKDROP
@@ -123,6 +133,12 @@ BACKDROP_WORDS = re.compile(
     r"beige|cream|pink|navy|#[0-9a-f]{3,6})\b|"
     r"\b(white|off-white|light blue|sky blue|dark blue|navy|red|grey|gray|light grey|light gray|green|"
     r"black|beige|cream|pink|plain)\b[^.?!]{0,12}\b(background|backdrop|back ?drop)\b", re.I)
+MAP_WORDS = re.compile(
+    r"\b(map|maps|route|directions?|navigate|navigation|how (do i|to) get|"
+    r"how far|how long.*(drive|walk|cycle|by road)|distance (from|to|between)|"
+    r"nearest|nearby|near me|around me|along the (way|route)|on the way|"
+    r"where is|where are|located|location of|address of|coordinates?|lat(itude)?\b|lon(gitude)?\b|"
+    r"petrol|fuel station|restaurants? near|hotels? near|atm near)\b", re.I)
 SEARCH_WORDS = re.compile(
     r"\b(latest|newest|current|currently|today|todays|tonight|now|recent|recently|this (week|month|year)|"
     r"news|price|cost|release[ds]?|version|available|stock|weather|score|who is|who won|when (is|did|will)|"
@@ -136,6 +152,8 @@ def is_enabled():
 def candidates(tools, has_images):
     """The actions the user's toggles allow for this message."""
     allowed = [CHAT]
+    if tools.get("maps") and not has_images:
+        allowed.append(MAP)
     # A web search is text only, so it cannot help with a picture the user just attached
     if tools.get("web_search") and not has_images:
         allowed.append(SEARCH)
@@ -151,6 +169,8 @@ def by_keywords(message, allowed, has_images):
     # "change the background to white" is "change ... " to EDIT_WORDS and nothing to the rest
     if has_images and BACKDROP in allowed and BACKDROP_WORDS.search(text):
         return BACKDROP
+    if MAP in allowed and not has_images and MAP_WORDS.search(text):
+        return MAP
     if has_images and CLEAN in allowed and CLEAN_WORDS.search(text):
         return CLEAN
     if has_images and BLUR in allowed and BLUR_WORDS.search(text):
