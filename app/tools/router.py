@@ -10,10 +10,12 @@ import re
 
 from app import settings
 from app.tools.chooser import CATEGORIES
+from app.tools.media import LOOK_WORDS, MADE_UP_WORDS, points_at_something
 
 log = logging.getLogger("tools.router")
 
 CHAT, SEARCH, IMAGE, EDIT = "chat", "search", "image", "edit"
+PHOTOS = "photos"               # a real photograph of a real thing, found rather than drawn
 CLEAN, BLUR = "clean", "blur"   # what is asked of a photograph, as opposed to a drawing
 BACKDROP = "backdrop"           # the person kept exactly as they are, on a different plain colour
 MAP = "map"                     # somewhere on the earth, rather than something to read or draw
@@ -25,8 +27,15 @@ SEARCH - needs current or factual information from the web about the world: news
 CHAT   - can be answered or discussed directly: explanations, opinions, maths, writing, and anything
          about the user's own code, configuration, logs, machine or earlier messages, including
          troubleshooting. Questions about a picture the user attached are also CHAT.
-IMAGE  - asks for a picture to be created: "draw", "generate an image of", "a photo of a ...". A
-         message that only describes a picture, with no question and no instruction, is also IMAGE.
+IMAGE  - asks for a picture to be created that nobody has ever photographed: "draw", "generate an
+         image of", "make me a picture of". A message that only describes a picture, with no
+         question and no instruction, is also IMAGE.
+PHOTOS - asks to be SHOWN something that really exists: a product, a brand, a building, a place, a
+         person, an animal, a machine, a book, a car, or a video of something that happened. The
+         test is whether a photograph of it is already out there to be found. If it is, this is
+         PHOTOS, because a drawing of a real product is a picture of something that does not
+         exist. Asking to see something mentioned earlier in the conversation - "show me the ones
+         you suggested", "what does that one look like" - is PHOTOS.
 EDIT   - asks for the attached picture to be changed as a picture: "make it night", "remove the car",
          "add a hat", "make it look like a painting".
 CLEAN  - asks for the quality of a photograph to be improved, with nothing in it changed: noise or
@@ -55,6 +64,11 @@ Examples:
 "What is 17 * 23?" -> CHAT
 "draw a fox in the snow" -> IMAGE
 "an oil painting of a harbour at dawn, stormy sky" -> IMAGE
+"show me the photos of the drinks you are suggesting" -> PHOTOS
+"what does a Fairphone 5 look like?" -> PHOTOS
+"find me pictures of the Shibuya crossing" -> PHOTOS
+"show me a video of a Shinkansen leaving Tokyo station" -> PHOTOS
+"can I see the actual product?" -> PHOTOS
 "make it night with northern lights" -> EDIT
 "remove the noise from this photo" -> CLEAN
 "too grainy, clean it up so I can crop in" -> CLEAN
@@ -166,10 +180,22 @@ def candidates(tools, has_images):
         allowed.append(MAP)
     # A web search is text only, so it cannot help with a picture the user just attached
     if tools.get("web_search") and not has_images:
-        allowed.append(SEARCH)
+        allowed += [SEARCH, PHOTOS]     # finding a photograph is a web search with a different eye
     if tools.get("image_generation"):
         allowed += [EDIT, CLEAN, BLUR, BACKDROP] if has_images else [IMAGE]
     return allowed
+
+
+def _wants_the_real_thing(text):
+    """Asking to be shown one particular thing that exists, in words that do not ask for a drawing.
+
+    All three conditions matter. "Show me a nice nature photo" asks to be shown a photo and means
+    a made-up one perfectly happily, because it names nothing: it is a kind of picture, not a
+    thing. Overruling that would take away the image model for the whole class of request.
+    """
+    text = text or ""
+    return bool(LOOK_WORDS.search(text)) and not MADE_UP_WORDS.search(text) \
+        and points_at_something(text)
 
 
 def by_keywords(message, allowed, has_images):
@@ -187,6 +213,10 @@ def by_keywords(message, allowed, has_images):
         return BLUR
     if has_images and EDIT in allowed and EDIT_WORDS.search(text) and not text.endswith("?"):
         return EDIT
+    # Before IMAGE: wanting to see a thing and wanting one drawn are asked for in nearly the same
+    # words, and only one of the two produces a picture of something that exists
+    if PHOTOS in allowed and _wants_the_real_thing(text):
+        return PHOTOS
     if IMAGE in allowed and IMAGE_WORDS.search(text):
         return IMAGE
     if SEARCH in allowed and SEARCH_WORDS.search(text):
@@ -263,16 +293,24 @@ def settle_action(answered, message, allowed, has_images):
 
     CHAT is this prompt's catch-all, and a message like "I want to go to Futako Tamagawa, show me
     the easiest route" reads conversationally enough to land there. The words route, directions and
-    want to go to are better evidence than a shrug. Only CHAT is second-guessed, and only in favour
-    of MAP: every other action changes what is produced, and guessing at those is how a question
-    ends up as a picture.
+    want to go to are better evidence than a shrug. Beyond that only two answers are second-guessed
+    - CHAT in favour of MAP, and IMAGE in favour of PHOTOS - because guessing at the rest is how a
+    question ends up as a picture.
     """
     if answered == MAP and FACT_ABOUT_PLACE.search(message or ""):
         return CHAT, "keywords"
+    # The one other place the model is overruled, for the same reason: "show me a photo of it" and
+    # "draw me a photo of it" are one word apart, and answering the first by drawing produces a
+    # picture of a product that does not exist, with a made-up label, presented as the thing asked
+    # about. Only ever in this direction - nothing is ever turned INTO a drawing here.
+    if answered == IMAGE and PHOTOS in allowed and _wants_the_real_thing(message):
+        return PHOTOS, "keywords"
     if answered and answered != CHAT:
         return answered, "model"
     if MAP in allowed and not has_images and MAP_WORDS.search(message or ""):
         return MAP, "keywords"
+    if PHOTOS in allowed and _wants_the_real_thing(message):
+        return PHOTOS, "keywords"
     return answered, "model" if answered else None
 
 

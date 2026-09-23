@@ -24,7 +24,7 @@ from app.db import get_session, session_factory
 from app.models import ChatFile, Conversation, ConversationMessage, MemoryEntry, utcnow
 from app.routers.openai_v1 import PROXY_PATHS, forward
 from app.tools import (chooser, documents, image_prompt, images, jobs, map_plan, map_web, maps,
-                        markdown, memory as memory_tool, photo, places, portrait,
+                        markdown, media, memory as memory_tool, photo, places, portrait,
                         router as intent_router, web_search)
 
 log = logging.getLogger("playground")
@@ -184,6 +184,9 @@ async def capabilities(principal: Principal = Depends(authenticate)):
     """Which tools this server offers; the playground only shows toggles for these."""
     return {
         "web_search": web_search.is_available(),
+        # Finding a real photograph of a real thing, rather than drawing one. It rides on the same
+        # search service, so it is offered exactly when web search is.
+        "media_search": web_search.is_available() and media.is_available(),
         "vision": settings.feature_enabled("vision"),
         "image_generation": images.is_available() and access.can_generate_images(principal),
         "image_sizes": list(images.SIZES),
@@ -822,6 +825,133 @@ async def _save_result(db, user_id, conversation_id, png, name, prompt, extra=No
             conversation.updated_at = utcnow()
             await db.commit()
     return stored
+
+
+# --- pictures of real things ----------------------------------------------------------------------
+
+class MediaIn(BaseModel):
+    message: str = Field(min_length=1, max_length=2000)
+    conversation_id: int | None = None
+    kind: str = Field(default="auto", pattern="^(auto|images|videos)$")
+
+
+async def _media_subjects(principal, session, user, payload):
+    """What the message is actually asking to see, in words a search box can use.
+
+    "Show me the photos of the drinks you are suggesting" names nothing at all, and searching for
+    it finds pictures of the word drinks. What it points at is two paragraphs back, so the
+    conversation goes to the small model and comes back as "Contrex mineral water bottle".
+    """
+    history = []
+    if payload.conversation_id is not None:
+        conversation = (await session.execute(
+            select(Conversation).options(selectinload(Conversation.messages))
+            .where(Conversation.id == payload.conversation_id,
+                   Conversation.user_id == user.id))).scalar_one_or_none()
+        history = [{"role": m.role, "content": m.content or ""}
+                   for m in (conversation.messages if conversation else [])[-6:]]
+    if not intent_router.is_enabled():
+        return [media.plain_subject(payload.message)], "your own words"
+    answer = await _ask_helper(principal, media.build_request(settings.router_model(),
+                                                              payload.message, history))
+    subjects = media.read_subjects(answer, payload.message)
+    return subjects, settings.router_model() if answer else "your own words"
+
+
+async def _pictures_of(subject, kind):
+    """Candidates for one subject, fetched and proved to be pictures. Never raises."""
+    try:
+        if kind == media.VIDEOS:
+            found = await media.find_videos(subject)
+            # The thumbnail is all that is fetched: the video itself stays where it is and is
+            # watched there, which is also the only way its publisher gets counted
+            return await media.collect([f for f in found if f["src"]], keep=media.KEEP,
+                                       smallest=media.THUMB_SMALLEST)
+        found = await media.find_images(subject)
+        pictures = await media.collect(found)
+        if len(pictures) >= 2:
+            return pictures
+        # The image engines index the well known. A local shop, a small manufacturer or anything
+        # written up in one language and asked about in another can be missing from them entirely
+        # while its own front page carries a photograph of it.
+        log.info("only %d pictures of %r from image search; reading pages instead",
+                 len(pictures), subject)
+        scraped = await media.scrape_pages(subject)
+        seen = {p["src"] for p in pictures}
+        return pictures + await media.collect([s for s in scraped if s["src"] not in seen],
+                                              keep=media.KEEP - len(pictures))
+    except media.MediaError as e:
+        log.info("no media for %r (%s)", subject, e)
+        return []
+    except Exception as e:                      # one bad subject must not lose the other two
+        log.warning("media search for %r failed: %s", subject, e, exc_info=True)
+        return []
+
+
+@router.post("/media")
+async def find_media(payload: MediaIn, principal: Principal = Depends(authenticate),
+                     session: AsyncSession = Depends(get_session)):
+    """Finds real photographs or videos of what was asked about, and keeps a copy of each.
+
+    A copy, rather than a link, for three reasons: somebody else's CDN is entitled to stop serving
+    a URL at any moment and this conversation has to still show what it showed; a page full of
+    hotlinks announces its reader to every site on it; and a good few of those hosts refuse a
+    request that did not come from their own page, which would leave the answer full of broken
+    frames. What is kept is a scaled-down copy, shown beside the name of the site it came from and
+    a link to the page that carried it.
+    """
+    user = _require_user(principal)
+    if not (web_search.is_available() and media.is_available()):
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE,
+                            "Searching the web is turned off on this server, so there is nowhere "
+                            "to look for pictures.")
+    if payload.conversation_id is not None:
+        await _owned(session, payload.conversation_id, user)
+
+    kind = payload.kind if payload.kind != "auto" else media.kind_of(payload.message)
+    subjects, decided_by = await _media_subjects(principal, session, user, payload)
+    if not subjects:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST,
+                            "It is not clear what to look for. Name the thing you want to see.")
+
+    started = time.monotonic()
+    everything = await asyncio.gather(*(_pictures_of(s, kind) for s in subjects))
+
+    groups, saved = [], 0
+    for subject, found in zip(subjects, everything):
+        items = []
+        for picture in found:
+            stored = ChatFile(user_id=user.id, kind="web", mime_type=picture["mime"],
+                              name=(picture.get("title") or subject)[:256],
+                              prompt=picture.get("page") or picture["src"], data=picture["data"])
+            session.add(stored)
+            items.append((stored, picture))
+        if items:
+            await session.commit()
+            saved += len(items)
+        groups.append({
+            "subject": subject,
+            "items": [{"file_id": stored.id, "url": f"/chat/files/{stored.id}",
+                       "title": picture.get("title") or subject,
+                       "page": picture.get("page") or picture["src"],
+                       "site": picture.get("site") or "",
+                       "width": picture["width"], "height": picture["height"],
+                       "found_by": picture.get("found_by") or "",
+                       "length": picture.get("length") or "",
+                       "author": picture.get("author") or "",
+                       "embed": picture.get("embed") or ""}
+                      for stored, picture in items],
+        })
+
+    result = {"asked": payload.message, "kind": kind, "groups": groups,
+              "subjects_by": decided_by, "seconds": round(time.monotonic() - started, 1)}
+    if not saved:
+        result["note"] = (
+            "Nothing usable came back for "
+            + ", ".join(f"“{s}”" for s in subjects)
+            + ". Either nobody has published a picture of it, or the ones that came back could not "
+              "be fetched. Naming the thing more exactly usually finds it.")
+    return result
 
 
 class PhotoIn(BaseModel):
