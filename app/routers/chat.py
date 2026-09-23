@@ -1187,8 +1187,24 @@ async def find_on_map(payload: MapIn, principal: Principal = Depends(authenticat
     except maps.MapError as e:
         raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(e))
 
+    if not result["places"] and not result["route"]:
+        # Past the try above, so this is raised as the answer it is rather than through it
+        widest = maps.RADII[-1] // 1000
+        raise HTTPException(
+            status.HTTP_404_NOT_FOUND,
+            f"Nothing of that kind is mapped within {widest} km of there. OpenStreetMap only "
+            "knows what somebody has added to it, so a quiet area can genuinely be empty - try a "
+            "wider kind of place, or name a town to search around.")
+
+    centre = result["start"] if result["intent"] in ("near", "find") else None
     for place in result["places"]:
         place["google"] = maps.google_link(place=place)
+        # "and their directions": every place carries the way to it from wherever the search began
+        if centre:
+            place["directions"] = maps.google_link(start=(centre["lat"], centre["lon"]),
+                                                   end=(place["lat"], place["lon"]), mode=mode)
+    if result["places"] and result["places"][0].get("searched_within_m"):
+        result["searched_within_km"] = round(result["places"][0]["searched_within_m"] / 1000)
     if result["route"]:
         result["google_route"] = maps.google_link(
             start=(result["start"]["lat"], result["start"]["lon"]),

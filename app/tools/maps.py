@@ -40,6 +40,10 @@ NOMINATIM_EVERY = 1.1        # seconds between calls, which is their published l
 SEARCH_TIMEOUT = 25
 ROUTE_TIMEOUT = 30
 OVERPASS_TIMEOUT = 60
+# Three kilometres is a walk; fifteen is a thing you would still travel to. A mosque, a hospital
+# or a charging point can be none of the first and several of the third, so an empty answer is
+# retried wider before it is believed.
+RADII = (3000, 8000, 15000)
 ALONG_SAMPLES = 6            # points taken along a route to look around, kept few: each one is a
                              # separate sub-query and a dozen of them times the free server out
 MAX_RESULTS = 8
@@ -395,7 +399,7 @@ def _filters(tags):
     return "".join(f'["{key}"="{value}"]' for key, value in tags.items())
 
 
-async def nearby(tag, lat, lon, radius_m=3000, limit=MAX_RESULTS, words=""):
+async def nearby(tag, lat, lon, radius_m=None, limit=MAX_RESULTS, words=""):
     """Things of a kind near a point.
 
     Overpass is the right tool and a busy one. When every mirror is refusing, Nominatim can be asked
@@ -404,10 +408,16 @@ async def nearby(tag, lat, lon, radius_m=3000, limit=MAX_RESULTS, words=""):
     error page, as long as the answer admits which way round it was.
     """
     where = _filters(tag)
-    query = (f'[out:json][timeout:25];(node{where}(around:{int(radius_m)},{lat},{lon});'
-             f'way{where}(around:{int(radius_m)},{lat},{lon}););out center {limit * 3};')
+    widths = [radius_m] if radius_m else list(RADII)
+    elements, radius_m = [], widths[-1]
     try:
-        elements = await _overpass(query)
+        for width in widths:
+            query = (f'[out:json][timeout:40];(node{where}(around:{int(width)},{lat},{lon});'
+                     f'way{where}(around:{int(width)},{lat},{lon}););out center {limit * 3};')
+            elements = await _overpass(query)
+            if elements:
+                radius_m = width
+                break
     except MapError:
         if not words:
             raise
@@ -416,12 +426,18 @@ async def nearby(tag, lat, lon, radius_m=3000, limit=MAX_RESULTS, words=""):
         for place in found:
             place["metres_away"] = round(_metres(lat, lon, place["lat"], place["lon"]))
             place["by_name"] = True
-        return [p for p in sorted(found, key=lambda p: p["metres_away"])
-                if p["metres_away"] <= radius_m * 4][:limit]
+        near_enough = [p for p in sorted(found, key=lambda p: p["metres_away"])
+                       if p["metres_away"] <= radius_m * 4][:limit]
+        if not near_enough:
+            # The search did not happen. Saying "there is nothing there" would be inventing a
+            # fact out of a failed request, and the two are not the same answer at all.
+            raise
+        return near_enough
     places = [p for p in map(_from_overpass, elements) if p]
     places.sort(key=lambda p: (p["name"] == "(unnamed)", _metres(lat, lon, p["lat"], p["lon"])))
     for place in places:
         place["metres_away"] = round(_metres(lat, lon, place["lat"], place["lon"]))
+        place["searched_within_m"] = radius_m
     return places[:limit]
 
 
@@ -438,7 +454,7 @@ def meaningful(words):
     return " ".join(kept[:4])
 
 
-async def named_nearby(words, lat, lon, radius_m=4000, limit=MAX_RESULTS):
+async def named_nearby(words, lat, lon, radius_m=8000, limit=MAX_RESULTS):
     """Anything near a point whose name contains these words.
 
     For a kind of place this has no tag for, asking Nominatim its name in the whole world and
