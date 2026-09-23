@@ -1450,7 +1450,11 @@ function renderMap(box, answer){
   frame.innerHTML = `<div class="map-summary">${bits.join('<span class="muted">&middot;</span>')}
       <span class="spacer"></span>
       ${answer.google_route ? `<a href="${answer.google_route}" target="_blank" rel="noopener">Open in Google Maps</a>` : ''}
-    </div><div class="canvas"></div>`;
+    </div>
+    ${answer.route && answer.route.note
+      ? `<p class="note warn" style="margin:0;border-radius:0;border-width:0 0 1px 0;font-size:.82rem">
+           ${escapeHtml(answer.route.note)}</p>` : ''}
+    <div class="canvas"></div>`;
   body.appendChild(frame);
 
   const list = document.createElement('ol');

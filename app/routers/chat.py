@@ -1046,6 +1046,15 @@ async def find_on_map(payload: MapIn, principal: Principal = Depends(authenticat
     if plan["intent"] in ("route", "along") and plan["from"] and not plan["to"]:
         plan["from"], plan["to"] = "", plan["from"]
 
+    # A journey dressed up in preferences - "the easiest and fastest route to go to X, I prefer
+    # less walking" - reads to the small model as one long place name, which matches nothing. When
+    # the sentence plainly asks to get somewhere, the destination is taken from the sentence.
+    towards = map_plan.destination_in(message)
+    if towards and plan["intent"] in ("find", "near") and not points:
+        plan = {**plan, "intent": "route", "to": towards, "from": "", "what": ""}
+    elif towards and plan["intent"] in ("route", "along") and not plan["to"]:
+        plan["to"] = towards
+
     about_me = map_plan.wants_my_location(message, plan)
     if about_me and standing and not points:
         # "near me" and "from here" mean the browser's coordinate, so it takes the place of the
@@ -1118,10 +1127,13 @@ async def find_on_map(payload: MapIn, principal: Principal = Depends(authenticat
                                                      words=plan["what"] or message)
 
         else:                                   # find
-            result["places"] = await maps.search(plan["what"] or message,
-                                                 near=(points[0] if points else None))
+            # find, not search: a name that does not resolve whole is tried in parts
+            result["places"] = await maps.find(plan["what"] or message,
+                                               near=(points[0] if points else standing))
             if not result["places"]:
-                raise maps.MapError("Nothing on the map matched that.")
+                raise _NotOnTheMap(
+                    "Nothing on the map matched that. Try naming the place on its own - a "
+                    "station, a district, a landmark - rather than in a sentence.")
     except _NeedsYou as e:
         raise HTTPException(status.HTTP_428_PRECONDITION_REQUIRED, str(e))
     except _NotOnTheMap as e:
@@ -1134,7 +1146,8 @@ async def find_on_map(payload: MapIn, principal: Principal = Depends(authenticat
     if result["route"]:
         result["google_route"] = maps.google_link(
             start=(result["start"]["lat"], result["start"]["lon"]),
-            end=(result["end"]["lat"], result["end"]["lon"]), mode=mode)
+            end=(result["end"]["lat"], result["end"]["lon"]),
+            mode=result["route"].get("asked_for") or mode)
     everything = result["places"] + [p for p in (result["start"], result["end"]) if p]
     result["bounds"] = maps.bounds(everything, (result["route"] or {}).get("line", []))
     await usage_log.record(principal, "openstreetmap", "maps", "map", False, 200, None, 0)
