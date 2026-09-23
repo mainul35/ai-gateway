@@ -33,7 +33,8 @@ OSRM = "https://router.project-osrm.org"
 # carries Switzerland and nothing else. A regional extract does not fail when asked about somewhere
 # it has never heard of - it agrees that there is nothing there, which is far worse than an error.
 OVERPASS_SERVERS = ("https://overpass-api.de/api/interpreter",
-                    "https://overpass.private.coffee/api/interpreter")
+                    "https://overpass.private.coffee/api/interpreter",
+                    "https://maps.mail.ru/osm/tools/overpass/api/interpreter")
 USER_AGENT = "ai-gateway/0.1 (+https://github.com/mainul35/ai-gateway)"
 
 NOMINATIM_EVERY = 1.1        # seconds between calls, which is their published limit plus a margin
@@ -54,6 +55,13 @@ MAX_RESULTS = 8
 
 _last_nominatim = 0.0
 _nominatim_lock = asyncio.Lock()
+
+# Answers are kept because places do not move. An hour old is as true as a second old for where a
+# mosque is, and on a day when every mirror is refusing - which happens - a stale answer is the
+# difference between the feature working and the feature not existing.
+CACHE_SECONDS = 3600
+CACHE_LIMIT = 300
+_answers = {}
 
 
 class MapError(Exception):
@@ -356,6 +364,38 @@ async def route(points, mode="driving"):
     }
 
 
+async def travel_times(origin, places, mode="driving"):
+    """How far and how long each place is by road from one origin, in a single request.
+
+    Straight-line distance is what a map shows and not what a journey costs: of two mosques three
+    kilometres away, one is a seven minute drive and the other is round a river. OSRM answers a
+    whole column of that at once, which is one request rather than one per place.
+    """
+    if not places:
+        return
+    coordinates = ";".join([f"{origin[1]},{origin[0]}"]
+                           + [f"{p['lon']},{p['lat']}" for p in places])
+    async with httpx.AsyncClient(timeout=ROUTE_TIMEOUT, headers={"User-Agent": USER_AGENT}) as client:
+        try:
+            response = await client.get(f"{OSRM}/table/v1/{ROUTED}/{coordinates}",
+                                        params={"sources": "0", "annotations": "duration,distance"})
+            response.raise_for_status()
+            answer = response.json()
+        except (httpx.HTTPError, ValueError) as e:
+            log.info("no travel times (%s)", e)
+            return
+    if answer.get("code") != "Ok":
+        return
+    seconds = (answer.get("durations") or [[]])[0][1:]
+    metres = (answer.get("distances") or [[]])[0][1:]
+    for place, duration, distance in zip(places, seconds, metres):
+        if duration is None or distance is None:
+            continue
+        place["road_km"] = round(distance / 1000, 1)
+        place["road_minutes"] = round(duration / 60)
+        place["road_mode"] = ROUTED
+
+
 def _thin(line, wanted):
     """`wanted` points spread evenly along a line, including both ends."""
     if len(line) <= wanted:
@@ -364,12 +404,23 @@ def _thin(line, wanted):
     return [line[round(i * step)] for i in range(wanted)]
 
 
+def _remember(query, elements):
+    if len(_answers) >= CACHE_LIMIT:
+        for old in sorted(_answers, key=lambda k: _answers[k][0])[:CACHE_LIMIT // 4]:
+            _answers.pop(old, None)
+    _answers[query] = (time.monotonic(), elements)
+
+
 async def _overpass(query, deadline=None):
     """Asks each mirror in turn, within whatever time is left.
 
     Once each, and no more: every extra attempt is another half minute a person spends looking at
     a spinner, and two refusals in a row mean the service is busy rather than unlucky.
     """
+    remembered = _answers.get(query)
+    if remembered and time.monotonic() - remembered[0] < CACHE_SECONDS:
+        return remembered[1]
+
     trouble = None
     for server in OVERPASS_SERVERS:
         left = OVERPASS_TIMEOUT if deadline is None else deadline - time.monotonic()
@@ -380,10 +431,16 @@ async def _overpass(query, deadline=None):
                                          headers={"User-Agent": USER_AGENT}) as client:
                 response = await client.post(server, data={"data": query})
                 response.raise_for_status()
-                return response.json().get("elements", [])
+                elements = response.json().get("elements", [])
+            _remember(query, elements)
+            return elements
         except (httpx.HTTPError, ValueError) as e:
             trouble = e.__class__.__name__ if not str(e) else str(e)
             log.info("overpass %s did not answer (%s)", server, trouble)
+    if remembered:
+        # Every mirror is refusing and this was asked before. A building does not move in an hour.
+        log.info("overpass unreachable; answering from what was kept")
+        return remembered[1]
     raise MapError(f"The place search did not answer ({trouble or 'out of time'}). These are busy "
                    "free services; trying again in a minute usually works.")
 
