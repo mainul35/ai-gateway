@@ -40,9 +40,17 @@ ABOUT_ME = re.compile(
     r"|\bcurrent location\b|\bwhere am i\b|\bnear my\b|\bclosest\b", re.I)
 
 
+# The same rule the browser uses: a vague "around" means here, unless the sentence names a where
+VAGUELY_HERE = re.compile(r"\b(around|nearby|near|closest|nearest|local)\b", re.I)
+NAMES_A_PLACE = re.compile(r"\b(?:in|near|around|at|by|close to)\s+(?:the\s+)?"
+                           r"[A-Z぀-鿿][\w぀-鿿'-]*")
+
+
 def wants_my_location(message, plan=None):
     """Whether answering this needs the coordinate of the person asking."""
     if ABOUT_ME.search(message or ""):
+        return True
+    if VAGUELY_HERE.search(message or "") and not NAMES_A_PLACE.search(message or ""):
         return True
     # "restaurants nearby" with nowhere named is about here, whatever words were used
     if plan and plan.get("intent") in ("near", "along") and not (plan.get("to") or plan.get("from")):
