@@ -24,7 +24,7 @@ from app.db import get_session, session_factory
 from app.models import ChatFile, Conversation, ConversationMessage, MemoryEntry, utcnow
 from app.routers.openai_v1 import PROXY_PATHS, forward
 from app.tools import (chooser, documents, image_prompt, images, jobs, map_plan, map_web, maps,
-                        markdown, memory as memory_tool, photo, portrait,
+                        markdown, memory as memory_tool, photo, places, portrait,
                         router as intent_router, web_search)
 
 log = logging.getLogger("playground")
@@ -194,6 +194,12 @@ async def capabilities(principal: Principal = Depends(authenticate)):
         "photo_blur": images.is_available() and photo.is_depth_available(),
         "photo_backdrop": images.is_available() and portrait.is_available(),
         "maps": settings.feature_enabled("maps"),
+        # Which map the browser must draw on, and the browser key for it when that is Google's.
+        # The two are never mixed: Google's terms forbid their places on anybody else's tiles.
+        "maps_tiles": places.tiles() if settings.feature_enabled("maps") else "osm",
+        "google_maps_key": (settings.google_maps_key()
+                            if settings.feature_enabled("maps") and places.name() == "google"
+                            else ""),
         "routing": intent_router.is_enabled(),
         "markdown": markdown.is_available(),
         "max_upload_mb": settings.max_upload_bytes() // (1024 * 1024),
@@ -1001,7 +1007,7 @@ async def _from_the_web(principal, kind, centre):
     candidates = map_web.verify(map_web.read_answer(answer), readable)
     if not candidates:
         return []
-    return await map_web.locate(candidates, (centre["lat"], centre["lon"]), maps)
+    return await map_web.locate(candidates, (centre["lat"], centre["lon"]), places.active())
 
 
 class _Found(Exception):
@@ -1032,26 +1038,26 @@ class MapIn(BaseModel):
     here_lon: float | None = Field(default=None, ge=-180, le=180)
 
 
-async def _candidates(words, fallback_points, index, near=None):
+async def _candidates(words, fallback_points, index, near=None, atlas=maps):
     """Everywhere a name might mean, or the one place a coordinate already is."""
     if index < len(fallback_points):
         lat, lon = fallback_points[index]
         try:
-            return [await maps.reverse(lat, lon)]
+            return [await atlas.reverse(lat, lon)]
         except maps.MapError:
             return [{"name": f"{lat:.5f}, {lon:.5f}", "address": "", "lat": lat, "lon": lon,
                      "kind": "", "osm": None}]
     if not words:
         return []
-    found = await maps.find(words, near=near, limit=5)
+    found = await atlas.find(words, near=near, limit=5)
     if not found:
         raise _NotOnTheMap(f"Nowhere called \u201c{words}\u201d could be found on the map. "
                            "Try the name as it appears locally, or add the city.")
     return found
 
 
-async def _somewhere(words, fallback_points, index):
-    found = await _candidates(words, fallback_points, index)
+async def _somewhere(words, fallback_points, index, atlas=maps):
+    found = await _candidates(words, fallback_points, index, atlas=atlas)
     return found[0] if found else None
 
 
@@ -1068,6 +1074,7 @@ async def find_on_map(payload: MapIn, principal: Principal = Depends(authenticat
     if not settings.feature_enabled("maps"):
         raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "Maps are turned off on this server")
 
+    atlas = places.active()             # OpenStreetMap, or Google when a key is set
     message = payload.message.strip()
     # Read together for anything the follow-up left out, kept apart for anything it named
     context = f"{payload.earlier.strip()} {message}".strip() if payload.earlier.strip() else message
@@ -1120,13 +1127,14 @@ async def find_on_map(payload: MapIn, principal: Principal = Depends(authenticat
     mode = maps.transport_for(message)
     result = {"intent": plan["intent"], "asked": message, "what": plan["what"],
               "places": [], "route": None, "start": None, "end": None, "mode": mode,
+              "provider": places.name(), "tiles": places.tiles(),
               "from_your_location": bool(about_me and standing)}
 
     try:
         if plan["intent"] == "here":
             if not points:
                 raise maps.MapError("No coordinate was given to look up.")
-            result["places"] = [await maps.reverse(*points[0])]
+            result["places"] = [await atlas.reverse(*points[0])]
 
         elif plan["intent"] in ("route", "along"):
             # A destination with no starting point means from where the person is, which is what
@@ -1139,20 +1147,20 @@ async def find_on_map(payload: MapIn, principal: Principal = Depends(authenticat
             # Both ends are resolved together, so that two vague names settle on the pairing
             # that makes a journey rather than a continent
             start, end = maps.nearest_pair(
-                await _candidates(plan["from"], points, 0),
+                await _candidates(plan["from"], points, 0, atlas=atlas),
                 await _candidates(plan["to"], points, 1 if plan["from"] or points else 0,
-                                  near=standing))
+                                  near=standing, atlas=atlas))
             if not start or not end:
                 raise maps.MapError("A route needs both a start and a finish; name them as "
                                     "\u201cfrom A to B\u201d.")
             result["start"], result["end"] = start, end
-            result["route"] = await maps.route([(start["lat"], start["lon"]),
+            result["route"] = await atlas.route([(start["lat"], start["lon"]),
                                                 (end["lat"], end["lon"])], mode)
             if plan["intent"] == "along":
                 if not tag:
                     raise maps.MapError("What should be looked for along the way? Name a kind of "
                                         "place, such as petrol stations or restaurants.")
-                result["places"] = await maps.along(tag, result["route"]["line"])
+                result["places"] = await atlas.along(tag, result["route"]["line"])
 
         elif plan["intent"] == "near":
             # "Masjids near me" names a kind of place, not a place. Looking up the word Masjid
@@ -1166,7 +1174,7 @@ async def find_on_map(payload: MapIn, principal: Principal = Depends(authenticat
                     raise _NeedsYou()
                 points = [standing]
                 result["from_your_location"] = True
-            centre = await _somewhere(around, points, 0)
+            centre = await _somewhere(around, points, 0, atlas)
             if not centre:
                 raise _NotOnTheMap("Near where? Name a place, or allow this page to use your "
                                    "location.")
@@ -1175,13 +1183,13 @@ async def find_on_map(payload: MapIn, principal: Principal = Depends(authenticat
                 # No tag for this kind of place, so the map is asked what near here is called
                 # something like it - and only if that finds nothing is the whole world searched
                 wanted = plan["what"] or message
-                result["places"] = await maps.named_nearby(wanted, centre["lat"], centre["lon"])
+                result["places"] = await atlas.named_nearby(wanted, centre["lat"], centre["lon"])
                 if not result["places"]:
                     # Nominatim searches the planet and only leans towards a box, so asking it for
                     # "a coworking space near me" returns one five thousand kilometres away. Near
                     # means near: anything beyond a long day's drive is not an answer to this
                     # question, and no answer is better than that one.
-                    found = await maps.find(wanted, near=(centre["lat"], centre["lon"]))
+                    found = await atlas.find(wanted, near=(centre["lat"], centre["lon"]))
                     for place in found:
                         place["metres_away"] = round(maps.distance(centre["lat"], centre["lon"],
                                                                    place["lat"], place["lon"]))
@@ -1195,7 +1203,7 @@ async def find_on_map(payload: MapIn, principal: Principal = Depends(authenticat
                         "locally.")
             else:
                 try:
-                    result["places"] = await maps.nearby(tag, centre["lat"], centre["lon"],
+                    result["places"] = await atlas.nearby(tag, centre["lat"], centre["lon"],
                                                          words=plan["what"] or message)
                 except maps.MapError as e:
                     # Overpass refusing is not the end of the question. The web path below needs
@@ -1221,15 +1229,15 @@ async def find_on_map(payload: MapIn, principal: Principal = Depends(authenticat
         else:                                   # find
             # Asked to find a kind of place with somewhere to be, that is a search around here
             if tag and (points or standing):
-                centre = await _somewhere("", points or [standing], 0)
+                centre = await _somewhere("", points or [standing], 0, atlas)
                 result["start"] = centre
                 result["from_your_location"] = not points
                 result["intent"] = "near"
-                result["places"] = await maps.nearby(tag, centre["lat"], centre["lon"],
+                result["places"] = await atlas.nearby(tag, centre["lat"], centre["lon"],
                                                      words=plan["what"] or message)
                 raise _Found()
             # find, not search: a name that does not resolve whole is tried in parts
-            result["places"] = await maps.find(plan["what"] or message,
+            result["places"] = await atlas.find(plan["what"] or message,
                                                near=(points[0] if points else standing))
             if not result["places"]:
                 raise _NotOnTheMap(
@@ -1248,7 +1256,7 @@ async def find_on_map(payload: MapIn, principal: Principal = Depends(authenticat
     # is the difference between "three kilometres away" and "twenty minutes round a river"
     origin = result["start"] if result["intent"] in ("near", "find") else None
     if origin and result["places"]:
-        await maps.travel_times((origin["lat"], origin["lon"]), result["places"], mode)
+        await atlas.travel_times((origin["lat"], origin["lon"]), result["places"], mode)
         result["places"].sort(key=lambda p: (p.get("road_minutes") is None,
                                              p.get("road_minutes", 0), p["metres_away"]))
 

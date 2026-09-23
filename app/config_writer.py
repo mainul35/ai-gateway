@@ -25,6 +25,7 @@ EDITABLE_KEYS = [
     "features.web_search.enabled",
     "features.vision.enabled",
     "features.image_generation.enabled", "features.maps.enabled",
+    "maps.provider", "maps.google.key",
     "router.enabled",
     "router.model",
     "search.searxng.url",
