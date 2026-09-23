@@ -169,8 +169,12 @@ async def search(queries, limit=None, wants_recent=False):
 
 # --- page text ------------------------------------------------------------------
 
-def _is_public_host(host):
-    """Pages are fetched from the server, so never let a result point it at the LAN or itself."""
+def is_public_host(host):
+    """Pages and pictures are fetched by the server, so never let a result point it at the LAN.
+
+    Shared with the media search, which follows image URLs out of search results and is the more
+    exposed of the two: a result can name any host at all, including this one.
+    """
     try:
         addresses = {info[4][0] for info in socket.getaddrinfo(host, None)}
     except (socket.gaierror, UnicodeError):
@@ -217,7 +221,7 @@ class _TextExtractor(HTMLParser):
 
 async def _page_text(client, url):
     host = urlparse(url).hostname
-    if not host or not await asyncio.to_thread(_is_public_host, host):
+    if not host or not await asyncio.to_thread(is_public_host, host):
         return None
     try:
         async with client.stream("GET", url) as response:
@@ -244,7 +248,7 @@ async def _follow(client, url, hops=3):
     """Resolves redirects one at a time, refusing any that lead to a private address."""
     for _ in range(hops):
         host = urlparse(url).hostname
-        if not host or not await asyncio.to_thread(_is_public_host, host):
+        if not host or not await asyncio.to_thread(is_public_host, host):
             return None
         try:
             response = await client.head(url)

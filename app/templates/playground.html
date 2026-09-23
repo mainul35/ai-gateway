@@ -169,6 +169,31 @@ a.cite{font-size:.75em;vertical-align:super;text-decoration:none;padding:0 .1rem
                     display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
 .generated .caption.open{-webkit-line-clamp:unset;overflow:visible}
 .generated .actions{display:flex;gap:.5rem;margin-top:.5rem}
+/* Pictures found on the web rather than drawn. Every tile carries the site it came from, because
+   that is what tells the reader whether it is the right thing: the manufacturer's own photograph
+   and a stock library's approximation look identical until you see whose page they are on. */
+.found{white-space:normal}
+.found .subject{font-size:.85rem;font-weight:600;margin:.75rem 0 .35rem}
+.found .subject:first-child{margin-top:0}
+.found .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(8.5rem,1fr));gap:.5rem}
+.found figure{margin:0;border:1px solid var(--border);border-radius:9px;overflow:hidden;
+              background:var(--card)}
+.found figure img{width:100%;height:8rem;object-fit:cover;display:block;background:var(--input)}
+.found .shot img{cursor:zoom-in}
+.found figcaption{padding:.35rem .45rem;font-size:.72rem;min-width:0}
+.found figcaption .name{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;
+                        overflow:hidden;line-height:1.25}
+.found figcaption .from{color:var(--muted);text-decoration:none;display:block;margin-top:.15rem;
+                        white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.found figcaption .from:hover{color:var(--primary);text-decoration:underline}
+/* A video is watched where it was published; what is kept here is the still it opens with */
+.found .play{display:block;position:relative}
+.found .play::after{content:'\25B6';position:absolute;inset:0;display:flex;align-items:center;
+                    justify-content:center;font-size:1.5rem;color:#fff;text-shadow:0 1px 6px #000;
+                    pointer-events:none}
+.found .clip{position:absolute;right:.3rem;bottom:.3rem;font-size:.65rem;background:rgba(0,0,0,.72);
+             color:#fff;padding:0 .3rem;border-radius:4px}
+.found .where-from{font-size:.75rem;color:var(--muted);margin-top:.6rem}
 /* An answer that is really a document is offered as one, the way a file would be */
 .file{display:flex;align-items:center;gap:.75rem;margin-top:.9rem;padding:.6rem .75rem;
       border:1px solid var(--border);border-radius:10px;background:var(--card);max-width:26rem}
@@ -249,6 +274,9 @@ a.cite{font-size:.75em;vertical-align:super;text-decoration:none;padding:0 .1rem
   .msg.user{max-width:92%}
   .thumbs img{height:4.5rem;max-width:7rem}
   .generated img{max-height:min(42vh, 20rem)}
+  /* Two tiles across on a phone rather than one enormous one */
+  .found .grid{grid-template-columns:repeat(auto-fill,minmax(6.5rem,1fr));gap:.4rem}
+  .found figure img{height:6rem}
   .file{max-width:100%}
   /* 16px, or iOS zooms the whole page the moment the composer is tapped. The rule in base.html
      cannot do this on its own: .composer textarea is the more specific selector. */
@@ -611,8 +639,13 @@ function syncTools(){
   if(imageMode()){
     promptBox.placeholder = pending.length ? 'How should the picture change?' : 'Describe a picture to create…';
     if(!pending.length){
+      // Drawing and finding are asked for in nearly the same words, so the difference is worth
+      // spelling out where the asking happens
+      const finds = caps.routing && tools.web_search && caps.media_search;
       hint.textContent = caps.routing
-        ? 'Ask for a picture and one is created with Flux; ask a question and you get an answer. Attach an image (or press Edit on one) to change it.'
+        ? 'Ask for a picture and one is created with Flux'
+          + (finds ? '; ask to see something real and real photographs of it are found instead' : '')
+          + '; ask a question and you get an answer. Attach an image (or press Edit on one) to change it.'
         : 'Sending creates an image with Flux instead of chatting. Attach an image (or press Edit on one) to change it.';
     }else if(qwenEdits()){
       hint.textContent = 'Say what to do: "remove the noise", "blur the background", '
@@ -629,7 +662,8 @@ function syncTools(){
   promptBox.placeholder = 'Ask anything…';
   const notes = [];
   if(tools.web_search) notes.push(caps.routing
-    ? 'Questions that need current information are searched on the web and cited.'
+    ? 'Questions that need current information are searched on the web and cited'
+      + (caps.media_search ? '; asking to see something real finds photographs of it.' : '.')
     : 'Answers will search the web first and cite their sources.');
   if(tools.vision && caps.vision){
     if(model && !canSee(model)){
@@ -1052,6 +1086,9 @@ async function openConversation(id){
       }else if(extra.map){
         renderMap(addMessage('assistant', '', m.model || 'OpenStreetMap'), extra.map);
         history.push({role: 'assistant', content: m.content});
+      }else if(extra.media){
+        renderMedia(addMessage('assistant', '', m.model || 'Picture search'), extra.media);
+        history.push({role: 'assistant', content: m.content});
       }else if(extra.generated){
         renderGenerated(addMessage('assistant', '', m.model), extra.generated, m.stats);
         history.push({role: 'assistant', content: m.content});
@@ -1193,7 +1230,7 @@ function addUserMessage(text, imageUrls){
 
 const ACTION_LABELS = {chat: 'answered directly', search: 'searched the web',
                        image: 'created an image', edit: 'edited the image',
-                       map: 'looked it up on the map'};
+                       map: 'looked it up on the map', photos: 'found real pictures of it'};
 
 const CATEGORY_LABELS = {code: 'a coding question', vision: 'a question about the picture',
                          reasoning: 'something to work out', long: 'a long read',
@@ -1725,6 +1762,58 @@ async function sendMap(text, decision, fix){
   loadConversations();
 }
 
+async function sendMedia(text, decision){
+  showError('');
+  try{
+    await ensureConversation(text, currentModel());
+  }catch(e){
+    showError('Could not save the conversation: ' + errorText(e));
+    return;
+  }
+  promptBox.value = ''; fitComposer();
+  addUserMessage(text, []);
+  history.push({role: 'user', content: text, images: []});
+  await saveMessage({role: 'user', content: text});
+
+  const box = addMessage('assistant', '', 'Picture search');
+  noteDecision(box, decision);
+  busy(true);
+  setStatus(box, 'Working out what to look for');
+  // The search, the fetching and the checking take a while, and one unchanging line for half a
+  // minute reads like something has hung
+  const later = setTimeout(() => setStatus(box, 'Searching, then checking each picture is really there'), 3000);
+  let answer = null;
+  let trouble = '';
+  try{
+    answer = await api('/chat/media', {method: 'POST', headers: JSON_HEADERS,
+                                       body: JSON.stringify({message: text, kind: 'auto',
+                                                             conversation_id: currentId})});
+  }catch(e){
+    trouble = errorText(e);
+    showError(trouble);
+  }finally{
+    clearTimeout(later);
+    busy(false);
+    setStatus(box, null);
+  }
+  if(!answer){
+    box.querySelector('.body').textContent = trouble || 'Nothing came back from the picture search.';
+    return;
+  }
+  renderMedia(box, answer);
+  const counted = (answer.groups || []).filter(g => g.items.length)
+    .map(g => `${g.items.length} of ${g.subject}`).join(', ');
+  const said = counted
+    ? `(found ${answer.kind === 'videos' ? 'videos' : 'pictures'} on the web: ${counted})`
+    : `(no ${answer.kind === 'videos' ? 'videos' : 'pictures'} found for `
+      + `${(answer.groups || []).map(g => g.subject).join(', ') || text})`;
+  history.push({role: 'assistant', content: said});
+  await saveMessage({role: 'assistant', content: said, model: 'Picture search',
+                     attachments: {media: answer}});
+  revealFrom(box);
+  loadConversations();
+}
+
 function offerFiles(box, text){
   if(!text) return;
   const body = box.querySelector('.body');
@@ -1783,6 +1872,56 @@ function appendStats(box, stats){
   line.className = 'stats';
   line.textContent = text;
   box.appendChild(line);
+}
+
+// --- pictures found rather than drawn ---------------------------------------
+
+function mediaTile(item, video){
+  const page = escapeHtml(item.page || '');
+  const title = escapeHtml(item.title || '');
+  const site = escapeHtml(item.site || 'source');
+  const caption = `<figcaption><div class="name" title="${title}">${title}</div>` +
+    `<a class="from" href="${page}" target="_blank" rel="noopener noreferrer nofollow"` +
+    ` title="Open ${site}">${site}${item.author ? ' · ' + escapeHtml(item.author) : ''}</a></figcaption>`;
+  if(video){
+    return `<figure><a class="play" href="${page}" target="_blank" rel="noopener noreferrer nofollow">` +
+      `<img src="${item.url}" alt="${title}" loading="lazy">` +
+      `${item.length ? `<span class="clip">${escapeHtml(item.length)}</span>` : ''}</a>${caption}</figure>`;
+  }
+  return `<figure class="shot"><img src="${item.url}" alt="${title}" data-zoom="${item.url}"` +
+         ` loading="lazy">${caption}</figure>`;
+}
+
+function renderMedia(box, answer){
+  const video = answer.kind === 'videos';
+  box.querySelector('.who').textContent = video ? 'Video search' : 'Picture search';
+  const body = box.querySelector('.body');
+  body.className = 'body found';
+  body.innerHTML = '';
+  const shown = (answer.groups || []).filter(group => group.items.length);
+  for(const group of shown){
+    // The heading matters: it is what was actually searched for, which is how you tell a search
+    // that misread the question from one that simply found nothing
+    const heading = document.createElement('div');
+    heading.className = 'subject';
+    heading.textContent = group.subject;
+    body.appendChild(heading);
+    const grid = document.createElement('div');
+    grid.className = 'grid';
+    grid.innerHTML = group.items.map(item => mediaTile(item, video)).join('');
+    body.appendChild(grid);
+  }
+  const note = document.createElement('p');
+  note.className = 'where-from';
+  if(!shown.length){
+    note.textContent = answer.note || 'Nothing came back for that.';
+  }else{
+    note.textContent = video
+      ? 'Found on the web. Each one opens where it was published.'
+      : 'Found on the web, not drawn. Each one links to the page it came from, which is worth a '
+        + 'look before trusting that it is the right thing.';
+  }
+  body.appendChild(note);
 }
 
 function renderGenerated(box, generated, stats){
@@ -1943,6 +2082,7 @@ async function send(){
 
   const decision = await decideAction(text, attachedPictures().length > 0);
   if(decision.action === 'map') return sendMap(text, decision, fix);
+  if(decision.action === 'photos') return sendMedia(text, decision);
   if(decision.action === 'clean' || decision.action === 'blur' || decision.action === 'backdrop')
     return sendPhoto(text, decision);
   if(decision.action === 'image' || decision.action === 'edit') return sendImage(text, decision);
