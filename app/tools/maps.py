@@ -90,7 +90,23 @@ AMENITIES = {
 
 TRANSPORT = {"driving": ("driving", ("drive", "driving", "car", "by road", "taxi")),
              "cycling": ("cycling", ("cycle", "cycling", "bike", "bicycle")),
-             "foot": ("foot", ("walk", "walking", "on foot", "foot"))}
+             "foot": ("foot", ("walk", "walking", "on foot", "foot")),
+             "transit": ("transit", ("train", "metro", "subway", "underground", "bus", "rail",
+                                     "public transport", "transit", "tube"))}
+
+# The public OSRM accepts every profile name in the URL and answers all of them from the same car
+# data: ask it to walk thirteen kilometres and it says fourteen minutes. So only driving is real
+# here, and anything else is answered with the road route and told plainly what it is. Google is
+# offered instead, because Google does have walking, cycling and transit.
+ROUTED = "driving"
+NOT_ROUTED = {
+    "foot": "This is the road route. The routing service here has car data only, so it cannot "
+            "time a walk - the link opens the same journey in Google Maps, which can.",
+    "cycling": "This is the road route. The routing service here has car data only, so it cannot "
+               "time a ride - the link opens the same journey in Google Maps, which can.",
+    "transit": "This is the road route. Nothing here knows train or bus timetables - the link "
+               "opens the same journey in Google Maps, which does.",
+}
 
 # 23.8103, 90.4125 - and the same with N/S/E/W, or in degrees and minutes
 DECIMAL_PAIR = re.compile(
@@ -145,11 +161,41 @@ def amenity_for(text):
     return (best[0], best[1]) if best else None
 
 
+# "no taxi" and "I don't have a car" both name a car, and both mean the opposite of choosing one.
+# "I prefer less walking" is the same shape. So a mode word is only taken as a choice when nothing
+# just before it turns it down.
+REFUSED = re.compile(
+    # Either apostrophe, or none: people type don't, don\u2019t and dont, and a pattern that knows
+    # only one of the three reads "I don't have a car" as a request for a car
+    r"\b(?:no|not|never|without|avoid(?:ing)?|hate|dislike|less|minimal|minimum|"
+    r"can['\u2019]?t|cannot|cant|don['\u2019]?t|do not|doesn['\u2019]?t|won['\u2019]?t|"
+    r"rather than|instead of|other than|except)\b"
+    # Within a short reach and not across the end of a sentence, so "I have a car. Walk?" is safe
+    r"[^.;!?]{0,25}$", re.I)
+
+
 def transport_for(text):
+    """How the person wants to travel, reading refusals as refusals.
+
+    When every way of travelling they mentioned was one they were ruling out, the answer is what
+    is left: somebody with no car, no taxi and a dislike of walking is describing a train.
+    """
     lowered = (text or "").lower()
+    chosen, refused = [], []
     for mode, (profile, words) in TRANSPORT.items():
-        if any(re.search(rf"\b{re.escape(w)}\b", lowered) for w in words):
+        for word in words:
+            for found in re.finditer(rf"\b{re.escape(word)}\b", lowered):
+                before = lowered[max(0, found.start() - 40):found.start()]
+                (refused if REFUSED.search(before) else chosen).append(profile)
+                break
+    for profile in ("transit", "foot", "cycling", "driving"):
+        if profile in chosen:
             return profile
+    if refused:
+        # Everything named was ruled out. What is left of the four is the answer, and when a car
+        # is among the refusals the honest reading is public transport.
+        left = [p for p in ("transit", "foot", "cycling", "driving") if p not in refused]
+        return left[0] if left else "transit"
     return "driving"
 
 
@@ -249,9 +295,10 @@ async def reverse(lat, lon):
 
 
 async def route(points, mode="driving"):
-    """A route through the given (lat, lon) points."""
+    """A route through the given (lat, lon) points, and what it is honestly a route for."""
     if len(points) < 2:
         raise MapError("A route needs somewhere to start and somewhere to finish.")
+    asked, mode = mode, ROUTED          # everything is driven, whatever was asked
     path = ";".join(f"{lon},{lat}" for lat, lon in points)
     async with httpx.AsyncClient(timeout=ROUTE_TIMEOUT, headers={"User-Agent": USER_AGENT}) as client:
         try:
@@ -266,6 +313,8 @@ async def route(points, mode="driving"):
     best = answer["routes"][0]
     return {
         "mode": mode,
+        "asked_for": asked,
+        "note": NOT_ROUTED.get(asked),
         "distance_km": round(best["distance"] / 1000, 1),
         "minutes": round(best["duration"] / 60),
         # (lat, lon) for the browser, which is the order every map library wants
@@ -406,7 +455,8 @@ def nearest_pair(first, second):
 def google_link(place=None, start=None, end=None, mode="driving"):
     """A Google Maps URL, which needs no key: the search is done here, the opening is done there."""
     if start and end:
-        modes = {"driving": "driving", "cycling": "bicycling", "foot": "walking"}
+        modes = {"driving": "driving", "cycling": "bicycling", "foot": "walking",
+                 "transit": "transit"}
         return (f"https://www.google.com/maps/dir/?api=1&origin={start[0]},{start[1]}"
                 f"&destination={end[0]},{end[1]}&travelmode={modes.get(mode, 'driving')}")
     if place:

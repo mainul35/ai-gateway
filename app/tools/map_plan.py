@@ -79,6 +79,32 @@ def read_answer(text):
             "from": str(data.get("from") or "").strip(), "to": str(data.get("to") or "").strip()}
 
 
+# "Show me the easiest and fastest route to go to Koyama Futako Tamagawa. I prefer less walking,
+# but no taxi." is a journey wrapped in preferences, and the small model reads the whole thing as
+# one place to look up - which matches nothing at all. The destination is the part right after the
+# words that mean "to", and it ends at the first piece of punctuation.
+WANTS_JOURNEY = re.compile(
+    r"\b(?:route|directions?|way)\s+(?:to\s+)?(?:go\s+to|get\s+to|to)\s+(.+?)(?=[.?!,;]|$)"
+    r"|\b(?:want|need|would like)\s+to\s+(?:go|get)\s+to\s+(.+?)(?=[.?!,;]|$)"
+    r"|\btake me to\s+(.+?)(?=[.?!,;]|$)"
+    r"|\bhow\s+(?:do i|to)\s+get\s+to\s+(.+?)(?=[.?!,;]|$)", re.I)
+
+# Words that describe a preference rather than a place, and would ruin a search if kept
+NOT_A_PLACE = re.compile(r"^\s*(the|a|an)?\s*(easiest|fastest|quickest|shortest|best|cheapest)\b", re.I)
+
+
+def destination_in(message):
+    """The place a journey is towards, pulled out of a sentence that also says other things."""
+    found = WANTS_JOURNEY.search(message or "")
+    if not found:
+        return ""
+    where = next((group for group in found.groups() if group), "").strip()
+    where = re.sub(r"^\s*(the|a|an)\s+", "", where, flags=re.I).strip(" .,:;")
+    if not where or NOT_A_PLACE.match(where) or len(where) > 80:
+        return ""
+    return where
+
+
 def by_keywords(message, has_coordinates=False):
     """Used when the model cannot answer. Plain, and never invents a place name."""
     text = (message or "").strip()
