@@ -200,6 +200,37 @@ async def search(query, near=None, limit=MAX_RESULTS):
     return [_place(row) for row in rows if row.get("lat")]
 
 
+async def find(words, near=None, limit=MAX_RESULTS):
+    """Search, then try harder: a name nobody wrote down exactly is still a name of somewhere.
+
+    "Koyama Futako Tamagawa" finds nothing, because it is two place names run together and
+    Nominatim matches the whole string or nothing. Dropping a word from the front, then from the
+    back, turns it into "Futako Tamagawa", which is a station in Setagaya. Each attempt is a
+    separate request to a service that asks for one a second, so there are at most three.
+    """
+    attempts = [words]
+    pieces = (words or "").split()
+    if len(pieces) > 2:
+        attempts.append(" ".join(pieces[1:]))     # without the first word
+        attempts.append(" ".join(pieces[:-1]))    # without the last
+    elif len(pieces) == 2:
+        attempts.append(pieces[-1])
+    seen = set()
+    for attempt in attempts:
+        attempt = attempt.strip()
+        if not attempt or attempt.lower() in seen:
+            continue
+        seen.add(attempt.lower())
+        found = await search(attempt, near=near, limit=limit)
+        if found:
+            if attempt != words:
+                log.info("map: %r found nothing, %r did", words, attempt)
+                for place in found:
+                    place["matched"] = attempt
+            return found
+    return []
+
+
 async def reverse(lat, lon):
     """What is at a coordinate."""
     await _be_polite()

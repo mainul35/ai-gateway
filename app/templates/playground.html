@@ -1439,6 +1439,10 @@ function renderMap(box, answer){
   }
   if(answer.from_your_location) bits.push('from where you are');
   else if(answer.start) bits.push(`from ${escapeHtml(answer.start.name)}`);
+  // When the name had to be shortened to find anything, say so: it is the difference between
+  // the place asked for and the place found, and only the reader can judge whether it is right
+  const loose = (answer.end && answer.end.matched) || (answer.places[0] || {}).matched;
+  if(loose) bits.push(`<span class="muted">matched on “${escapeHtml(loose)}”</span>`);
   if(answer.end) bits.push(`to ${escapeHtml(answer.end.name)}`);
   if(!answer.route && answer.places.length){
     bits.push(`<b>${answer.places.length}</b> place${answer.places.length === 1 ? '' : 's'} found`);
@@ -1510,8 +1514,14 @@ const LOCATION_GOOD_FOR = 5 * 60 * 1000;      // a fix is reused for a few minut
 
 let lastFix = null;
 
+// Naming somewhere to go without saying where from means from here, which is what every map
+// application assumes and what "I want to go to X" plainly means
+const WANTS_TO_GO = /\b(want|need|would like) to (go|get) to\b|\btake me to\b|\bhow (do i|to) get to\b|\b(route|directions?|way) to\b/i;
+const SAYS_WHERE_FROM = /\bfrom\s+\S/i;
+
 function needsMyLocation(text){
-  return NEEDS_ME.test(text) || NEEDS_ME_TOO.test(text);
+  if(NEEDS_ME.test(text) || NEEDS_ME_TOO.test(text)) return true;
+  return WANTS_TO_GO.test(text) && !SAYS_WHERE_FROM.test(text);
 }
 
 function myLocation(){
