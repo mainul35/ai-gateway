@@ -90,7 +90,19 @@ out += ["",
         ".md h1 { font-size:1.75rem; }",
         ".md h2 { font-size:1.35rem; }",
         ".md h3 { font-size:1.15rem; }",
-        ".md table { display:block; overflow-x:auto; }"]
+        ".md table { display:block; overflow-x:auto; }",
+        "",
+        "/* Tighter rhythm than MDViewer's, which spaces a printed page: there a horizontal rule",
+        " * gets two and a half lines of air above it and the same below, and a section heading",
+        " * nearly as much again. Read in a chat column that looks like the answer has finished and",
+        " * something else has started. A line and a quarter, and at most two lines of air between",
+        " * one block and the next. */",
+        ".md { line-height:1.25; }",
+        ".md p, .md ul, .md ol { margin-bottom:1.25em; }",
+        ".md li { margin:.15em 0; }",
+        ".md h1, .md h2, .md h3, .md h4, .md h5, .md h6 { margin-top:1.5em; margin-bottom:.5em; }",
+        ".md hr { margin-top:1.25em; margin-bottom:1.25em; }",
+        ".md pre, .md blockquote, .md table, .md figure { margin-top:1.25em; margin-bottom:1.25em; }"]
 
 TARGET.write_text("\n".join(out).replace("\r\n", "\n") + "\n", encoding="utf-8", newline="\n")
 print(f"{TARGET}: {len(out)} rules from {len(blocks(source))} in the source")
