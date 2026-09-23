@@ -167,7 +167,12 @@ async def add_message(conversation_id: int, payload: MessageIn, principal: Princ
                                   attachments=json.dumps(payload.attachments) if payload.attachments else None)
     session.add(message)
     conversation.updated_at = utcnow()
-    if payload.model:
+    # A message's model says who produced it, and for a tool's answer the playground signs it with
+    # the tool - "OpenStreetMap", "Picture search" - because that is the truth and it belongs in
+    # the transcript. The conversation's model means something else entirely: which model to carry
+    # on with. Adopting one as the other left conversations pointing at a name that is not a model
+    # at all, so reopening them announced that you had lost access to a model you never had.
+    if payload.model and await backends.resolve(payload.model) is not None:
         conversation.model = payload.model
     await session.commit()
     await session.refresh(message)
