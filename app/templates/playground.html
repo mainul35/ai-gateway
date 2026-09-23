@@ -1534,9 +1534,15 @@ let lastFix = null;
 const WANTS_TO_GO = /\b(want|need|would like) to (go|get) to\b|\btake me to\b|\bhow (do i|to) get to\b|\b(route|directions?|way) to\b/i;
 const SAYS_WHERE_FROM = /\bfrom\s+\S/i;
 
+// "Masjids around" is "masjids around me". The word on its own means here unless the sentence goes
+// on to say where - "restaurants near Banani" names the where and must not be answered from here.
+const VAGUELY_HERE = /\b(around|nearby|near|closest|nearest|local)\b/i;
+const NAMES_A_PLACE = /\b(?:in|near|around|at|by|close to)\s+(?:the\s+)?[A-Z぀-鿿][\w぀-鿿'-]*/;
+
 function needsMyLocation(text, earlier){
   const both = earlier ? `${earlier} ${text}` : text;
   if(NEEDS_ME.test(both) || NEEDS_ME_TOO.test(both)) return true;
+  if(VAGUELY_HERE.test(both) && !NAMES_A_PLACE.test(both)) return true;
   return WANTS_TO_GO.test(text) && !SAYS_WHERE_FROM.test(text);
 }
 

@@ -1187,8 +1187,16 @@ async def find_on_map(payload: MapIn, principal: Principal = Depends(authenticat
                         "name and by kind - try the kind of place, or the name as it is written "
                         "locally.")
             else:
-                result["places"] = await maps.nearby(tag, centre["lat"], centre["lon"],
-                                                     words=plan["what"] or message)
+                try:
+                    result["places"] = await maps.nearby(tag, centre["lat"], centre["lon"],
+                                                         words=plan["what"] or message)
+                except maps.MapError as e:
+                    # Overpass refusing is not the end of the question. The web path below needs
+                    # nothing from it, so a failed map search becomes a thin one and the search
+                    # carries on somewhere else rather than becoming a page with an error on it.
+                    log.info("map search unavailable (%s); trying the web instead", e)
+                    result["places"] = []
+                    result["map_search_failed"] = True
             # The map holds only what somebody added to it, and a real mosque can simply not be
             # there. When it comes back thin, the web is asked the same question and whatever it
             # names has to survive the geocoder before it is shown.
@@ -1236,6 +1244,11 @@ async def find_on_map(payload: MapIn, principal: Principal = Depends(authenticat
 
     if not result["places"] and not result["route"]:
         # Past the try above, so this is raised as the answer it is rather than through it
+        if result.get("map_search_failed"):
+            raise HTTPException(
+                status.HTTP_502_BAD_GATEWAY,
+                "The map's place search is not answering at the moment, and searching the web for "
+                "it found nothing either. These are busy free services; a minute usually fixes it.")
         widest = maps.SEARCH_RADIUS // 1000
         raise HTTPException(
             status.HTTP_404_NOT_FOUND,
