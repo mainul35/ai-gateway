@@ -257,14 +257,19 @@ async def _follow(client, url, hops=3):
     return None
 
 
-async def fetch_pages(results):
+async def fetch_pages(results, least=200, wanted=None):
     """Reads the top pages, and puts the ones that could actually be read first.
 
     A page built entirely in the browser gives nothing back, and a source with nothing but a search
     summary behind it is what leaves an answer quoting a line written years ago. Every candidate is
     tried, and a source that yielded no text is dropped while enough others remain.
+
+    `least` is how much text makes a page worth keeping. Two hundred characters is right for an
+    answer that needs something to quote, and wrong for a map: a mosque's contact page is a heading,
+    an address and a phone number - one hundred and eighty-eight characters, thrown away by that
+    rule, after which a model with nothing to read invented the address instead.
     """
-    wanted = settings.search_fetch_pages()
+    wanted = wanted or settings.search_fetch_pages()
     if not wanted or not results:
         return results
     async with httpx.AsyncClient(timeout=PAGE_TIMEOUT, follow_redirects=False,
@@ -277,7 +282,7 @@ async def fetch_pages(results):
 
     read, unread = [], []
     for result, text in zip(results, texts):
-        if isinstance(text, str) and len(text) >= 200 and len(read) < wanted:
+        if isinstance(text, str) and len(text) >= least and len(read) < wanted:
             result["content"] = text
             read.append(result)
         else:

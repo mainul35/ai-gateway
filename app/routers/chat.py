@@ -982,16 +982,23 @@ async def _from_the_web(principal, kind, centre):
     area = ", ".join(part.strip() for part in area[:3] if part.strip())
     query = map_web.build_query(kind, area)
     try:
-        results = await web_search.search([query], limit=map_web.MAX_PAGES + 2)
-        pages = await web_search.fetch_pages(results) if results else []
+        results = await web_search.search([query], limit=map_web.MAX_PAGES + 3)
+        # A contact page is short by nature, and short is exactly where an address lives
+        pages = await web_search.fetch_pages(results, least=60,
+                                             wanted=map_web.MAX_PAGES) if results else []
     except web_search.SearchError as e:
         log.info("map web search failed (%s)", e)
         return []
-    if not pages:
+    readable = [{"url": p.get("url", ""), "text": p.get("content") or ""}
+                for p in pages if p.get("content")]
+    if not readable:
+        # Nothing was read, so there is nothing to extract from. Asking anyway is asking a model to
+        # make something up, and it will.
+        log.info("map web search read no pages for %r", query)
         return []
     answer = await _ask_helper(principal, map_web.build_request(settings.router_model(), kind,
-                                                                area, pages))
-    candidates = map_web.read_answer(answer)
+                                                                area, readable))
+    candidates = map_web.verify(map_web.read_answer(answer), readable)
     if not candidates:
         return []
     return await map_web.locate(candidates, (centre["lat"], centre["lon"]), maps)
@@ -1197,16 +1204,19 @@ async def find_on_map(payload: MapIn, principal: Principal = Depends(authenticat
                     log.info("map search unavailable (%s); trying the web instead", e)
                     result["places"] = []
                     result["map_search_failed"] = True
-            # The map holds only what somebody added to it, and a real mosque can simply not be
-            # there. When it comes back thin, the web is asked the same question and whatever it
-            # names has to survive the geocoder before it is shown.
-            if len(result["places"]) < map_web.THIN:
-                extra = await _from_the_web(principal, plan["what"] or message, centre)
-                known = {(round(p["lat"], 4), round(p["lon"], 4)) for p in result["places"]}
+            # The web is asked every time, not only when the map is thin. Shinkoiwa Masjid is the
+            # first thing a search engine returns for this question and the map does not contain it
+            # at all, so a full list from the map is still a list with the nearest one missing.
+            extra = await _from_the_web(principal, plan["what"] or message, centre)
+            if extra:
+                # Two sources for one street corner: anything within a hundred metres of a place
+                # the map already gave is the same building under a different name
                 for place in extra:
-                    if (round(place["lat"], 4), round(place["lon"], 4)) not in known:
+                    same = any(maps.distance(place["lat"], place["lon"], p["lat"], p["lon"]) < 100
+                               for p in result["places"])
+                    if not same:
                         result["places"].append(place)
-                result["searched_the_web"] = bool(extra)
+            result["searched_the_web"] = bool(extra)
 
         else:                                   # find
             # Asked to find a kind of place with somewhere to be, that is a search around here

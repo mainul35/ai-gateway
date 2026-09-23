@@ -25,7 +25,7 @@ log = logging.getLogger("tools.map_web")
 
 # Fewer than this from the map is thin enough to be worth asking the web as well
 THIN = 3
-MAX_PAGES = 3
+MAX_PAGES = 4
 MAX_CANDIDATES = 6
 PAGE_CHARACTERS = 6000
 
@@ -68,6 +68,48 @@ def build_request(model, kind, area, pages):
     }
 
 
+# A string that opens with a house number and carries street words is an address, not a name
+ADDRESS_SHAPED = re.compile(r"^\s*\d+[-–\d]*\s*(chome|ban|banchi|block|street|st\.?|road|"
+                            r"rd\.?|avenue|ave\.?|lane|dori)?", re.I)
+
+
+def _squashed(text):
+    """Lowercase, with everything that is not a letter or digit removed, for comparing addresses."""
+    return re.sub(r"[^0-9a-z\u3040-\u9fff]", "", (text or "").lower())
+
+
+def verify(places, pages):
+    """Keeps only the places whose address was actually written on one of the pages.
+
+    This is the one check that matters. A model with nothing to read will still answer, and what it
+    answers looks exactly like an address: "1-2-3 Shinkoiwa, Katsushika, Tokyo" for a mosque that is
+    really at 4-34-8 Matsushima in Edogawa, a different ward. That invention geocodes perfectly well
+    - a plausible address in a real neighbourhood resolves to a real coordinate - so the geocoder
+    cannot catch it and nothing downstream can either. The page either says it or it does not.
+    """
+    haystack = _squashed(" ".join((page.get("text") or "") for page in pages))
+    if not haystack:
+        return []
+    kept = []
+    for place in places:
+        name = _squashed(place.get("name"))
+        if len(name) < 4 or name not in haystack:
+            log.info("dropping %r: that name is not on any page read", place.get("name"))
+            continue
+        # The name is grounded, so the place is real. The address is a separate claim: keep it only
+        # when the page actually carries it, and otherwise let the name be geocoded on its own.
+        # An address nobody wrote is the one thing that must never reach the geocoder, because a
+        # plausible address in a real neighbourhood resolves to a real and entirely wrong coordinate.
+        address = _squashed(place.get("address"))
+        if not (len(address) >= 8 and address in haystack):
+            if place.get("address"):
+                log.info("keeping %r but dropping its address, which is on no page",
+                         place.get("name"))
+            place = {**place, "address": ""}
+        kept.append(place)
+    return kept
+
+
 def read_answer(text):
     """The array the model was asked for, or an empty list when it produced something else."""
     cleaned = re.sub(r"<think>.*?</think>", "", text or "", flags=re.S)
@@ -86,12 +128,21 @@ def read_answer(text):
             continue
         name = str(row.get("name") or "").strip()
         address = str(row.get("address") or "").strip()
-        if name and len(name) < 120:
+        # "9 Chome-2-13 Akasaka" is an address the model filed under name. A name that is mostly
+        # digits and street words is not what anybody calls the place
+        letters = len(re.sub(r"[^A-Za-z぀-鿿]", "", name))
+        if name and len(name) < 120 and letters >= 4 and not ADDRESS_SHAPED.match(name):
             places.append({"name": name, "address": address[:200]})
     return places
 
 
-async def locate(candidates, centre, maps, limit=MAX_CANDIDATES):
+# A place found by searching "near Osaka" that geocodes to Lebanon is not that place. The geocoder
+# will happily match a name against somewhere on another continent, and it did: Kobe Mosque landed
+# eight and a half thousand kilometres away, a coffee shop in Buffalo, New York. Near means near.
+TOO_FAR = 50_000
+
+
+async def locate(candidates, centre, maps, limit=MAX_CANDIDATES, too_far=TOO_FAR):
     """Turns names and addresses into places, keeping only the ones the geocoder agrees exist.
 
     Every lookup is a request to a service that asks for one a second, so this is deliberately a
@@ -109,11 +160,17 @@ async def locate(candidates, centre, maps, limit=MAX_CANDIDATES):
             except maps.MapError as e:
                 log.info("could not geocode %r (%s)", words, e)
                 continue
-            if hits:
-                place = hits[0]
-                place["name"] = candidate["name"] or place["name"]
-                place["from_the_web"] = True
-                place["metres_away"] = round(maps.distance(lat, lon, place["lat"], place["lon"]))
-                found.append(place)
-                break
+            if not hits:
+                continue
+            place = hits[0]
+            away = round(maps.distance(lat, lon, place["lat"], place["lon"]))
+            if away > too_far:
+                log.info("dropping %r: geocoded %d km from where the search was",
+                         candidate["name"], away // 1000)
+                continue
+            place["name"] = candidate["name"] or place["name"]
+            place["from_the_web"] = True
+            place["metres_away"] = away
+            found.append(place)
+            break
     return found
