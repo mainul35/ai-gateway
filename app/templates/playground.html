@@ -179,7 +179,9 @@ a.cite{font-size:.75em;vertical-align:super;text-decoration:none;padding:0 .1rem
 .found figure{margin:0;border:1px solid var(--border);border-radius:9px;overflow:hidden;
               background:var(--card)}
 .found figure img{width:100%;height:8rem;object-fit:cover;display:block;background:var(--input)}
-.found .shot img{cursor:zoom-in}
+/* A photograph of a product is often tall and narrow, and cropping it to a square leaves a band
+   of the middle of a bottle. The whole thing, letterboxed, is what makes it recognisable. */
+.found .shot img{object-fit:contain;cursor:zoom-in}
 .found figcaption{padding:.35rem .45rem;font-size:.72rem;min-width:0}
 .found figcaption .name{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;
                         overflow:hidden;line-height:1.25}

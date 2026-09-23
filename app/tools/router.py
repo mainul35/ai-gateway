@@ -10,7 +10,8 @@ import re
 
 from app import settings
 from app.tools.chooser import CATEGORIES
-from app.tools.media import LOOK_WORDS, MADE_UP_WORDS, points_at_something
+from app.tools.media import (LOOK_WORDS, MADE_UP_WORDS, describes_a_picture,
+                             points_at_something)
 
 log = logging.getLogger("tools.router")
 
@@ -305,6 +306,11 @@ def settle_action(answered, message, allowed, has_images):
     # about. Only ever in this direction - nothing is ever turned INTO a drawing here.
     if answered == IMAGE and PHOTOS in allowed and _wants_the_real_thing(message):
         return PHOTOS, "keywords"
+    # And the same line drawn from the other side: asked for "a nice nature photo" the small model
+    # says PHOTOS, which is a reasonable reading of the words and the wrong tool. Nothing has been
+    # named, so there is nothing to go and find; that request is what the image model is for.
+    if answered == PHOTOS and IMAGE in allowed and describes_a_picture(message):
+        return IMAGE, "keywords"
     if answered and answered != CHAT:
         return answered, "model"
     if MAP in allowed and not has_images and MAP_WORDS.search(message or ""):

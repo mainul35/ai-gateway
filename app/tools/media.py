@@ -95,7 +95,24 @@ DEFINITE = re.compile(
     r"|\blook(?:s|ed|ing)?\s+like\b", re.I)
 # A brand or a model name: capitalised where a sentence would not capitalise, or letters and
 # digits run together. Not a bare number - "show me 3 photos of a sunset" names nothing.
-NAMED = re.compile(r"(?!^)\b[A-Z][A-Za-z'’-]{2,}\b|\b[A-Za-z]+\d+[A-Za-z0-9]*\b|\b\d+[A-Za-z]{2,}\b")
+# Applied to the message with its first word already removed, so there is no need to exclude the
+# capital that only means a sentence started - and excluding it here once hid the Lisa in
+# "a photo of the Mona Lisa painting", which is about as named as a thing can be.
+NAMED = re.compile(r"\b[A-Z][A-Za-z'’-]{2,}\b|\b[A-Za-z]+\d+[A-Za-z0-9]*\b|\b\d+[A-Za-z]{2,}\b")
+
+
+# A request whose subject, once the asking is stripped off, is still a kind of picture: "a nice
+# nature photo", "a good wallpaper". Nothing has been named, so there is nothing to go and find,
+# and this is what an image model is for.
+PICTURE_KIND = re.compile(r"\b(photos?|photographs?|pictures?|images?|wallpapers?|shots?|snaps?|"
+                          r"portraits?|illustrations?|drawings?|paintings?|artworks?|art|posters?|"
+                          r"backgrounds?)\s*$", re.I)
+
+
+def describes_a_picture(message):
+    """Whether the thing asked for is a kind of picture rather than a thing to photograph."""
+    subject = plain_subject(message)
+    return bool(subject) and bool(PICTURE_KIND.search(subject)) and not points_at_something(subject)
 
 
 def points_at_something(text):
