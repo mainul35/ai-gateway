@@ -1547,7 +1547,31 @@ function myLocation(){
   });
 }
 
-async function sendMap(text, decision){
+// A refusal is not final: the browser will ask again next time, and iOS in particular often
+// wants the ask to come from a button rather than from sending a message.
+function offerLocation(box, text, decision){
+  const again = document.createElement('button');
+  again.className = 'btn btn-sm';
+  again.style.marginTop = '.6rem';
+  again.textContent = 'Use my location';
+  again.addEventListener('click', async () => {
+    again.disabled = true;
+    again.textContent = 'Asking\u2026';
+    const fix = await myLocation();
+    again.remove();
+    if(!fix){
+      showError('Your browser did not give a location. On iPhone: Settings > Privacy & Security > '
+                + 'Location Services, turn it on for your browser, then allow this site.');
+      return;
+    }
+    box.remove();
+    sendMap(text, decision, Promise.resolve(fix));
+  });
+  box.querySelector('.body').appendChild(document.createElement('br'));
+  box.querySelector('.body').appendChild(again);
+}
+
+async function sendMap(text, decision, fix){
   showError('');
   try{
     await ensureConversation(text, currentModel());
@@ -1565,12 +1589,16 @@ async function sendMap(text, decision){
   busy(true);
   let here = null;
   const previous = [...history].reverse().find(h => h.role === 'user' && h.content !== text);
-  if(needsMyLocation(text, previous ? previous.content : '')){
+  if(fix){
+    setStatus(box, 'Asking your browser where you are');
+    here = await fix;
+  }else if(needsMyLocation(text, previous ? previous.content : '')){
     setStatus(box, 'Asking your browser where you are');
     here = await myLocation();
   }
   setStatus(box, 'Looking it up on the map');
   let answer = null;
+  let trouble = '';
   try{
     // The question before this one goes too: "find only the masjids" is a correction of it, and
     // on its own it says nothing about where
@@ -1581,13 +1609,16 @@ async function sendMap(text, decision){
                                                            here_lat: here ? here.lat : null,
                                                            here_lon: here ? here.lon : null})});
   }catch(e){
-    showError(errorText(e));
+    trouble = errorText(e);
+    showError(trouble);
   }finally{
     busy(false);
     setStatus(box, null);
   }
   if(!answer){
-    box.querySelector('.body').textContent = 'Nothing came back from the map.';
+    // The reason, in the answer, where the question is - not only in a banner at the top
+    box.querySelector('.body').textContent = trouble || 'Nothing came back from the map.';
+    if(/where you are|your location/i.test(trouble)) offerLocation(box, text, decision);
     return;
   }
   renderMap(box, answer);
@@ -1812,8 +1843,15 @@ async function send(){
     showError('One moment: the picture is still uploading.');
     return;
   }
+  // Asked here, in the same turn as the tap that called this. On iOS the permission prompt is
+  // tied to a gesture, and waiting for the router to answer first spends it: by then the ask is
+  // silently refused and the map is told nobody knows where you are.
+  const previous = [...history].reverse().find(h => h.role === 'user' && h.content !== text);
+  const fix = (tools.maps && caps.maps && needsMyLocation(text, previous ? previous.content : ''))
+              ? myLocation() : Promise.resolve(null);
+
   const decision = await decideAction(text, attachedPictures().length > 0);
-  if(decision.action === 'map') return sendMap(text, decision);
+  if(decision.action === 'map') return sendMap(text, decision, fix);
   if(decision.action === 'clean' || decision.action === 'blur' || decision.action === 'backdrop')
     return sendPhoto(text, decision);
   if(decision.action === 'image' || decision.action === 'edit') return sendImage(text, decision);

@@ -1189,7 +1189,7 @@ async def find_on_map(payload: MapIn, principal: Principal = Depends(authenticat
 
     if not result["places"] and not result["route"]:
         # Past the try above, so this is raised as the answer it is rather than through it
-        widest = maps.RADII[-1] // 1000
+        widest = maps.SEARCH_RADIUS // 1000
         raise HTTPException(
             status.HTTP_404_NOT_FOUND,
             f"Nothing of that kind is mapped within {widest} km of there. OpenStreetMap only "
