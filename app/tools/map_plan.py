@@ -47,6 +47,9 @@ def wants_my_location(message, plan=None):
     # "restaurants nearby" with nowhere named is about here, whatever words were used
     if plan and plan.get("intent") in ("near", "along") and not (plan.get("to") or plan.get("from")):
         return True
+    # "I want to go to X" names where to and never where from: that is here, unless told otherwise
+    if plan and plan.get("intent") in ("route", "along") and not plan.get("from"):
+        return True
     return False
 FROM_TO = re.compile(r"\bfrom\s+(.+?)\s+(?:to|towards|until)\s+(.+?)[.?!]*$", re.I)
 NEAR = re.compile(r"\b(?:near|nearest|around|close to|beside|next to)\s+(.+?)[.?!]*$", re.I)

@@ -967,6 +967,20 @@ async def _choose_model(principal, session, category, has_images, prefer=None):
 
 # --- maps -----------------------------------------------------------------------------------
 
+class _NeedsYou(maps.MapError):
+    """Answerable only with the coordinate of whoever is asking."""
+
+    def __init__(self):
+        super().__init__("This needs to know where you are starting from. Allow this page to use "
+                         "your location, or say where you are setting off from.")
+
+
+class _NotOnTheMap(maps.MapError):
+    """A place that does not exist is a bad request, not a broken upstream: 502 is for the
+    services falling over, and a proxy in front of this gateway may well replace one of those
+    with a page of its own before the reason ever reaches the browser."""
+
+
 class MapIn(BaseModel):
     message: str = Field(min_length=1, max_length=2000)
     conversation_id: int | None = None
@@ -975,7 +989,7 @@ class MapIn(BaseModel):
     here_lon: float | None = Field(default=None, ge=-180, le=180)
 
 
-async def _candidates(words, fallback_points, index):
+async def _candidates(words, fallback_points, index, near=None):
     """Everywhere a name might mean, or the one place a coordinate already is."""
     if index < len(fallback_points):
         lat, lon = fallback_points[index]
@@ -986,9 +1000,10 @@ async def _candidates(words, fallback_points, index):
                      "kind": "", "osm": None}]
     if not words:
         return []
-    found = await maps.search(words, limit=5)
+    found = await maps.find(words, near=near, limit=5)
     if not found:
-        raise maps.MapError(f"Nowhere called \u201c{words}\u201d could be found on the map.")
+        raise _NotOnTheMap(f"Nowhere called \u201c{words}\u201d could be found on the map. "
+                           "Try the name as it appears locally, or add the city.")
     return found
 
 
@@ -1026,6 +1041,11 @@ async def find_on_map(payload: MapIn, principal: Principal = Depends(authenticat
     if points and plan["intent"] == "find":
         plan["intent"] = "near" if maps.amenity_for(plan["what"] or message) else "here"
 
+    # "I want to go to X" names one place, and the small model is as likely to file it under from
+    # as under to. One place named on a journey is where the journey ends; where it begins is here.
+    if plan["intent"] in ("route", "along") and plan["from"] and not plan["to"]:
+        plan["from"], plan["to"] = "", plan["from"]
+
     about_me = map_plan.wants_my_location(message, plan)
     if about_me and standing and not points:
         # "near me" and "from here" mean the browser's coordinate, so it takes the place of the
@@ -1055,10 +1075,19 @@ async def find_on_map(payload: MapIn, principal: Principal = Depends(authenticat
             result["places"] = [await maps.reverse(*points[0])]
 
         elif plan["intent"] in ("route", "along"):
+            # A destination with no starting point means from where the person is, which is what
+            # every map application does and what "I want to go to X" plainly means
+            if not plan["from"] and not points:
+                if not standing:
+                    raise _NeedsYou()
+                points = [standing]
+                result["from_your_location"] = True
             # Both ends are resolved together, so that two vague names settle on the pairing
             # that makes a journey rather than a continent
-            start, end = maps.nearest_pair(await _candidates(plan["from"], points, 0),
-                                           await _candidates(plan["to"], points, 1))
+            start, end = maps.nearest_pair(
+                await _candidates(plan["from"], points, 0),
+                await _candidates(plan["to"], points, 1 if plan["from"] or points else 0,
+                                  near=standing))
             if not start or not end:
                 raise maps.MapError("A route needs both a start and a finish; name them as "
                                     "\u201cfrom A to B\u201d.")
@@ -1093,6 +1122,10 @@ async def find_on_map(payload: MapIn, principal: Principal = Depends(authenticat
                                                  near=(points[0] if points else None))
             if not result["places"]:
                 raise maps.MapError("Nothing on the map matched that.")
+    except _NeedsYou as e:
+        raise HTTPException(status.HTTP_428_PRECONDITION_REQUIRED, str(e))
+    except _NotOnTheMap as e:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, str(e))
     except maps.MapError as e:
         raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(e))
 
