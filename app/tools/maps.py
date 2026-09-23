@@ -39,11 +39,15 @@ USER_AGENT = "ai-gateway/0.1 (+https://github.com/mainul35/ai-gateway)"
 NOMINATIM_EVERY = 1.1        # seconds between calls, which is their published limit plus a margin
 SEARCH_TIMEOUT = 25
 ROUTE_TIMEOUT = 30
-OVERPASS_TIMEOUT = 60
-# Three kilometres is a walk; fifteen is a thing you would still travel to. A mosque, a hospital
-# or a charging point can be none of the first and several of the third, so an empty answer is
-# retried wider before it is believed.
-RADII = (3000, 8000, 15000)
+OVERPASS_TIMEOUT = 25
+# Near first, then wide. Overpass answers "out center 24" with whatever twenty-four it finds
+# first, not the twenty-four nearest - asked for restaurants within fifteen kilometres of a street
+# in Tokyo it returned none closer than seven, with hundreds nearer that it simply did not mention.
+# So the near radius is asked first and only an empty answer widens it, and the whole search runs
+# against a clock, because a proxy in front of this stops waiting long before Overpass does.
+RADII = (2000, 15000)
+SEARCH_RADIUS = RADII[-1]
+SEARCH_BUDGET = 40           # seconds for the whole search, however many requests that is
 ALONG_SAMPLES = 6            # points taken along a route to look around, kept few: each one is a
                              # separate sub-query and a dozen of them times the free server out
 MAX_RESULTS = 8
@@ -360,24 +364,28 @@ def _thin(line, wanted):
     return [line[round(i * step)] for i in range(wanted)]
 
 
-async def _overpass(query):
-    """Asks each mirror in turn. A timeout from one of these means loaded, not broken."""
+async def _overpass(query, deadline=None):
+    """Asks each mirror in turn, within whatever time is left.
+
+    Once each, and no more: every extra attempt is another half minute a person spends looking at
+    a spinner, and two refusals in a row mean the service is busy rather than unlucky.
+    """
     trouble = None
-    async with httpx.AsyncClient(timeout=OVERPASS_TIMEOUT,
-                                 headers={"User-Agent": USER_AGENT}) as client:
-        # The main server again at the end: these refuse when loaded, and a moment later they do not
-        for attempt, server in enumerate(OVERPASS_SERVERS + (OVERPASS_SERVERS[0],)):
-            if attempt == len(OVERPASS_SERVERS):
-                await asyncio.sleep(2)
-            try:
+    for server in OVERPASS_SERVERS:
+        left = OVERPASS_TIMEOUT if deadline is None else deadline - time.monotonic()
+        if left < 3:
+            break
+        try:
+            async with httpx.AsyncClient(timeout=min(OVERPASS_TIMEOUT, left),
+                                         headers={"User-Agent": USER_AGENT}) as client:
                 response = await client.post(server, data={"data": query})
                 response.raise_for_status()
                 return response.json().get("elements", [])
-            except (httpx.HTTPError, ValueError) as e:
-                trouble = e
-                log.info("overpass %s did not answer (%s)", server, e)
-    raise MapError(f"The place search did not answer ({trouble}). These are busy free services; "
-                   "trying again in a minute usually works.")
+        except (httpx.HTTPError, ValueError) as e:
+            trouble = e.__class__.__name__ if not str(e) else str(e)
+            log.info("overpass %s did not answer (%s)", server, trouble)
+    raise MapError(f"The place search did not answer ({trouble or 'out of time'}). These are busy "
+                   "free services; trying again in a minute usually works.")
 
 
 def _from_overpass(element):
@@ -409,12 +417,13 @@ async def nearby(tag, lat, lon, radius_m=None, limit=MAX_RESULTS, words=""):
     """
     where = _filters(tag)
     widths = [radius_m] if radius_m else list(RADII)
+    deadline = time.monotonic() + SEARCH_BUDGET
     elements, radius_m = [], widths[-1]
     try:
         for width in widths:
-            query = (f'[out:json][timeout:40];(node{where}(around:{int(width)},{lat},{lon});'
-                     f'way{where}(around:{int(width)},{lat},{lon}););out center {limit * 3};')
-            elements = await _overpass(query)
+            query = (f'[out:json][timeout:20];(node{where}(around:{int(width)},{lat},{lon});'
+                     f'way{where}(around:{int(width)},{lat},{lon}););out center {limit * 4};')
+            elements = await _overpass(query, deadline)
             if elements:
                 radius_m = width
                 break
@@ -426,8 +435,10 @@ async def nearby(tag, lat, lon, radius_m=None, limit=MAX_RESULTS, words=""):
         for place in found:
             place["metres_away"] = round(_metres(lat, lon, place["lat"], place["lon"]))
             place["by_name"] = True
+        # The same distance the real search would have covered, not four times it: a restaurant
+        # forty-five kilometres away is not an answer to "near me", whichever service found it
         near_enough = [p for p in sorted(found, key=lambda p: p["metres_away"])
-                       if p["metres_away"] <= radius_m * 4][:limit]
+                       if p["metres_away"] <= radius_m][:limit]
         if not near_enough:
             # The search did not happen. Saying "there is nothing there" would be inventing a
             # fact out of a failed request, and the two are not the same answer at all.
