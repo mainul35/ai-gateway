@@ -19,6 +19,11 @@ DEFAULTS = {
     "features.vision.enabled": "true",
     "features.image_generation.enabled": "true",
     "features.maps.enabled": "true",
+    # Empty means OpenStreetMap, which needs nothing. A Google Maps Platform key switches the
+    # whole feature over - results and the map together, because their terms forbid mixing.
+    "maps.google.key": "",
+    "maps.provider": "auto",            # auto, osm, google
+
     "search.searxng.url": "http://127.0.0.1:8888",
     "search.results": "6",
     "search.fetch_pages": "4",
@@ -208,6 +213,10 @@ def image_steps():
 
 def image_guidance():
     return float(get("images.guidance", "IMAGES_GUIDANCE"))
+
+
+def google_maps_key():
+    return get("maps.google.key", "GOOGLE_MAPS_KEY")
 
 
 def router_model():

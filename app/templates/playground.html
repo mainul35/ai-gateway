@@ -1426,6 +1426,61 @@ function metres(distance){
   return distance >= 1000 ? `${(distance / 1000).toFixed(1)} km away` : `${distance} m away`;
 }
 
+// Google's terms forbid drawing their places on anybody else's tiles, so when Google answered
+// the question Google's map draws it - and when that script will not load, the answer is the list
+// on its own. A map is not worth breaking the terms of the thing that found the places.
+let googleMapsReady = null;
+
+function loadGoogleMaps(key){
+  if(googleMapsReady) return googleMapsReady;
+  googleMapsReady = new Promise((resolve, reject) => {
+    if(window.google && window.google.maps) return resolve(window.google.maps);
+    const tag = document.createElement('script');
+    tag.async = true;
+    tag.src = `https://maps.googleapis.com/maps/api/js?key=${encodeURIComponent(key)}&libraries=geometry`;
+    tag.addEventListener('load', () => resolve(window.google && window.google.maps));
+    tag.addEventListener('error', () => reject(new Error('the Google Maps script did not load')));
+    document.head.appendChild(tag);
+  });
+  return googleMapsReady;
+}
+
+async function drawGoogleMap(canvas, answer){
+  const maps = await loadGoogleMaps(caps.google_maps_key);
+  if(!maps) throw new Error('Google Maps did not start');
+  const map = new maps.Map(canvas, {mapTypeControl: false, streetViewControl: false,
+                                    scrollwheel: false, zoom: 14,
+                                    center: {lat: answer.places[0]?.lat ?? answer.start?.lat ?? 0,
+                                             lng: answer.places[0]?.lon ?? answer.start?.lon ?? 0}});
+  const bounds = new maps.LatLngBounds();
+  const markers = [];
+  const pin = (place, label, colour) => {
+    const marker = new maps.Marker({
+      map, position: {lat: place.lat, lng: place.lon}, label: {text: String(label), color: '#fff'},
+      icon: {path: maps.SymbolPath.CIRCLE, scale: 11, fillColor: colour, fillOpacity: 1,
+             strokeColor: '#fff', strokeWeight: 2}});
+    const card = new maps.InfoWindow({content:
+      `<b>${escapeHtml(place.name)}</b><br>${escapeHtml(place.address || '')}`});
+    marker.addListener('click', () => card.open({anchor: marker, map}));
+    bounds.extend(marker.getPosition());
+    return marker;
+  };
+  if(answer.route && answer.route.polyline && maps.geometry){
+    const path = maps.geometry.encoding.decodePath(answer.route.polyline);
+    new maps.Polyline({map, path, strokeColor: '#6366f1', strokeWeight: 5, strokeOpacity: .85});
+    path.forEach(point => bounds.extend(point));
+  }
+  if(answer.start && answer.route) pin(answer.start, 'A', '#10b981');
+  if(answer.end && answer.route) pin(answer.end, 'B', '#ef4444');
+  answer.places.forEach((place, i) => markers.push(pin(place, i + 1, '#6366f1')));
+  if(!bounds.isEmpty()) map.fitBounds(bounds, 30);
+  return {markers, focus: marker => {
+    map.setCenter(marker.getPosition());
+    map.setZoom(Math.max(map.getZoom(), 15));
+    maps.event.trigger(marker, 'click');
+  }};
+}
+
 function renderMap(box, answer){
   const body = box.querySelector('.body');
   body.textContent = '';
@@ -1452,6 +1507,7 @@ function renderMap(box, answer){
     if(answer.searched_the_web){
       bits.push('<span class="muted">the map was thin, so the web was asked too</span>');
     }
+    if(answer.provider === 'google') bits.push('<span class="muted">from Google Maps</span>');
   }
   if(!answer.route && !answer.places.length) bits.push('nothing found');
   frame.innerHTML = `<div class="map-summary">${bits.join('<span class="muted">&middot;</span>')}
@@ -1485,11 +1541,32 @@ function renderMap(box, answer){
     </li>`).join('');
   body.appendChild(list);
 
-  if(typeof L === 'undefined'){
-    frame.querySelector('.canvas').textContent = 'The map library did not load.';
+  const canvas = frame.querySelector('.canvas');
+
+  // Google answered, so Google draws. No falling back to the other one's tiles.
+  if((answer.tiles || caps.maps_tiles) === 'google'){
+    drawGoogleMap(canvas, answer).then(({markers, focus}) => {
+      list.addEventListener('click', e => {
+        const row = e.target.closest('[data-place]');
+        if(row && !e.target.closest('a') && markers[Number(row.dataset.place)]){
+          focus(markers[Number(row.dataset.place)]);
+        }
+      });
+    }).catch(e => {
+      canvas.style.height = 'auto';
+      canvas.innerHTML = '<p class="note warn" style="margin:0">' +
+        escapeHtml(`The Google map could not be drawn (${e.message}). The places are listed below; `
+                   + 'they cannot be shown on another map, because the terms of the service that '
+                   + 'found them do not allow it.') + '</p>';
+    });
     return;
   }
-  const map = L.map(frame.querySelector('.canvas'), {scrollWheelZoom: false});
+
+  if(typeof L === 'undefined'){
+    canvas.textContent = 'The map library did not load.';
+    return;
+  }
+  const map = L.map(canvas, {scrollWheelZoom: false});
   L.tileLayer(TILES, {maxZoom: 19, attribution: CREDIT}).addTo(map);
 
   const markers = [];
