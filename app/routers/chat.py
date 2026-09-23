@@ -23,8 +23,9 @@ from app.auth import Principal, authenticate
 from app.db import get_session, session_factory
 from app.models import ChatFile, Conversation, ConversationMessage, MemoryEntry, utcnow
 from app.routers.openai_v1 import PROXY_PATHS, forward
-from app.tools import (chooser, documents, image_prompt, images, jobs, map_plan, maps, markdown,
-                        memory as memory_tool, photo, portrait, router as intent_router, web_search)
+from app.tools import (chooser, documents, image_prompt, images, jobs, map_plan, map_web, maps,
+                        markdown, memory as memory_tool, photo, portrait,
+                        router as intent_router, web_search)
 
 log = logging.getLogger("playground")
 
@@ -968,6 +969,34 @@ async def _choose_model(principal, session, category, has_images, prefer=None):
 
 # --- maps -----------------------------------------------------------------------------------
 
+async def _from_the_web(principal, kind, centre):
+    """Places of a kind near somewhere, found by searching the web and reading what it says.
+
+    For the things OpenStreetMap does not have. Every candidate still has to survive the geocoder
+    before it is shown, so what comes back is at worst a real place in the wrong order, never an
+    address a model made up.
+    """
+    if not (web_search.is_available() and intent_router.is_enabled()):
+        return []
+    area = (centre.get("address") or centre.get("name") or "").split(",")
+    area = ", ".join(part.strip() for part in area[:3] if part.strip())
+    query = map_web.build_query(kind, area)
+    try:
+        results = await web_search.search([query], limit=map_web.MAX_PAGES + 2)
+        pages = await web_search.fetch_pages(results) if results else []
+    except web_search.SearchError as e:
+        log.info("map web search failed (%s)", e)
+        return []
+    if not pages:
+        return []
+    answer = await _ask_helper(principal, map_web.build_request(settings.router_model(), kind,
+                                                                area, pages))
+    candidates = map_web.read_answer(answer)
+    if not candidates:
+        return []
+    return await map_web.locate(candidates, (centre["lat"], centre["lon"]), maps)
+
+
 class _Found(Exception):
     """Not a failure: the answer was reached down a different path and the rest is not needed."""
 
@@ -1160,6 +1189,16 @@ async def find_on_map(payload: MapIn, principal: Principal = Depends(authenticat
             else:
                 result["places"] = await maps.nearby(tag, centre["lat"], centre["lon"],
                                                      words=plan["what"] or message)
+            # The map holds only what somebody added to it, and a real mosque can simply not be
+            # there. When it comes back thin, the web is asked the same question and whatever it
+            # names has to survive the geocoder before it is shown.
+            if len(result["places"]) < map_web.THIN:
+                extra = await _from_the_web(principal, plan["what"] or message, centre)
+                known = {(round(p["lat"], 4), round(p["lon"], 4)) for p in result["places"]}
+                for place in extra:
+                    if (round(place["lat"], 4), round(place["lon"], 4)) not in known:
+                        result["places"].append(place)
+                result["searched_the_web"] = bool(extra)
 
         else:                                   # find
             # Asked to find a kind of place with somewhere to be, that is a search around here
@@ -1186,6 +1225,14 @@ async def find_on_map(payload: MapIn, principal: Principal = Depends(authenticat
         raise HTTPException(status.HTTP_404_NOT_FOUND, str(e))
     except maps.MapError as e:
         raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(e))
+
+    # Somewhere to travel from means every answer can say what the journey actually costs, which
+    # is the difference between "three kilometres away" and "twenty minutes round a river"
+    origin = result["start"] if result["intent"] in ("near", "find") else None
+    if origin and result["places"]:
+        await maps.travel_times((origin["lat"], origin["lon"]), result["places"], mode)
+        result["places"].sort(key=lambda p: (p.get("road_minutes") is None,
+                                             p.get("road_minutes", 0), p["metres_away"]))
 
     if not result["places"] and not result["route"]:
         # Past the try above, so this is raised as the answer it is rather than through it

@@ -1447,6 +1447,11 @@ function renderMap(box, answer){
   if(!answer.route && answer.places.length){
     bits.push(`<b>${answer.places.length}</b> place${answer.places.length === 1 ? '' : 's'} found`
               + (answer.searched_within_km ? ` within ${answer.searched_within_km} km` : ''));
+    // Ordered by the journey rather than the straight line, and honest about where they came from
+    if(answer.places.some(p => p.road_minutes != null)) bits.push('shortest journey first');
+    if(answer.searched_the_web){
+      bits.push('<span class="muted">the map was thin, so the web was asked too</span>');
+    }
   }
   if(!answer.route && !answer.places.length) bits.push('nothing found');
   frame.innerHTML = `<div class="map-summary">${bits.join('<span class="muted">&middot;</span>')}
@@ -1467,7 +1472,10 @@ function renderMap(box, answer){
       <span class="about">
         <span class="name">${escapeHtml(place.name)}</span>
         <span class="where">${escapeHtml(place.address || place.kind || '')}` +
-        `${place.metres_away != null ? ' \u00b7 ' + metres(place.metres_away) : ''}</span>
+        `${place.metres_away != null ? ' \u00b7 ' + metres(place.metres_away) : ''}` +
+        `${place.road_minutes != null
+            ? ` \u00b7 <b>${place.road_minutes} min</b> (${place.road_km} km by road)` : ''}` +
+        `${place.from_the_web ? ' \u00b7 <i>found on the web</i>' : ''}</span>
       </span>
       <span class="links">
         ${place.directions ? `<a href="${place.directions}" target="_blank" rel="noopener">Directions</a>` : ''}
