@@ -43,7 +43,9 @@ details.tuning label{margin-bottom:.85rem}
 /* --- messages ------------------------------------------------------------------------ */
 .chat{display:flex;flex-direction:column;gap:1.5rem}
 .msg{line-height:1.6}
-.msg .body{white-space:pre-wrap}
+/* The same line height the rendered answer uses, so the text does not reflow the moment the
+   answer finishes and the Markdown takes over from the streamed plain text */
+.msg .body{white-space:pre-wrap;line-height:1.25}
 /* The answer is the page, not a card on it; only the question is set apart */
 .msg.assistant{background:none;border:none;padding:0}
 .msg.user{background:var(--input);border-radius:12px;padding:.6rem .9rem;align-self:flex-end;max-width:85%}
