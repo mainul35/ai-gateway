@@ -942,6 +942,7 @@ async def edit_photo(payload: PhotoIn, principal: Principal = Depends(authentica
 
 
 CHOOSER_DAYS = 30      # how far back the chooser looks at a model's record
+NEAR_LIMIT = 30_000    # metres: beyond this, a result is not an answer to "near me"
 
 
 async def _choose_model(principal, session, category, has_images, prefer=None):
@@ -967,6 +968,10 @@ async def _choose_model(principal, session, category, has_images, prefer=None):
 
 # --- maps -----------------------------------------------------------------------------------
 
+class _Found(Exception):
+    """Not a failure: the answer was reached down a different path and the rest is not needed."""
+
+
 class _NeedsYou(maps.MapError):
     """Answerable only with the coordinate of whoever is asking."""
 
@@ -984,6 +989,8 @@ class _NotOnTheMap(maps.MapError):
 class MapIn(BaseModel):
     message: str = Field(min_length=1, max_length=2000)
     conversation_id: int | None = None
+    # The last thing asked, so "find only the masjids" keeps the "around me" of the question before
+    earlier: str = Field(default="", max_length=2000)
     # Where the browser says the person is, when they allowed it to say
     here_lat: float | None = Field(default=None, ge=-90, le=90)
     here_lon: float | None = Field(default=None, ge=-180, le=180)
@@ -1026,6 +1033,8 @@ async def find_on_map(payload: MapIn, principal: Principal = Depends(authenticat
         raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "Maps are turned off on this server")
 
     message = payload.message.strip()
+    # Read together for anything the follow-up left out, kept apart for anything it named
+    context = f"{payload.earlier.strip()} {message}".strip() if payload.earlier.strip() else message
     points = maps.parse_points(message)
     # A coordinate the browser supplied is used only where the question left a gap, never in place
     # of somewhere the person actually named
@@ -1055,7 +1064,7 @@ async def find_on_map(payload: MapIn, principal: Principal = Depends(authenticat
     elif towards and plan["intent"] in ("route", "along") and not plan["to"]:
         plan["to"] = towards
 
-    about_me = map_plan.wants_my_location(message, plan)
+    about_me = map_plan.wants_my_location(context, plan)
     if about_me and standing and not points:
         # "near me" and "from here" mean the browser's coordinate, so it takes the place of the
         # name the question never gave
@@ -1071,7 +1080,7 @@ async def find_on_map(payload: MapIn, principal: Principal = Depends(authenticat
                             "This needs to know where you are. Allow this page to use your "
                             "location, or name a place instead.")
 
-    tag = maps.amenity_for(plan["what"] or message)
+    tag = maps.amenity_for(plan["what"] or message) or maps.amenity_for(context)
     mode = maps.transport_for(message)
     result = {"intent": plan["intent"], "asked": message, "what": plan["what"],
               "places": [], "route": None, "start": None, "end": None, "mode": mode,
@@ -1110,23 +1119,58 @@ async def find_on_map(payload: MapIn, principal: Principal = Depends(authenticat
                 result["places"] = await maps.along(tag, result["route"]["line"])
 
         elif plan["intent"] == "near":
-            centre = await _somewhere(plan["to"] or plan["what"], points, 0)
+            # "Masjids near me" names a kind of place, not a place. Looking up the word Masjid
+            # finds a railway station in Mumbai, which is how a question asked in Tokyo came back
+            # with Maharashtra. A kind of place is what to look for, never where to look.
+            around = plan["to"] or plan["what"]
+            if around and maps.amenity_for(around):
+                around = ""
+            if not around and not points:
+                if not standing:
+                    raise _NeedsYou()
+                points = [standing]
+                result["from_your_location"] = True
+            centre = await _somewhere(around, points, 0)
             if not centre:
-                raise maps.MapError("Near where? Name a place, or give a coordinate.")
+                raise _NotOnTheMap("Near where? Name a place, or allow this page to use your "
+                                   "location.")
             result["start"] = centre
             if not tag:
-                # Not a kind of place this knows a tag for, so it is searched for by its words
-                result["places"] = await maps.search(plan["what"] or message,
-                                                     near=(centre["lat"], centre["lon"]))
-                for place in result["places"]:
-                    place["metres_away"] = round(maps.distance(centre["lat"], centre["lon"],
-                                                               place["lat"], place["lon"]))
-                result["places"].sort(key=lambda p: p["metres_away"])
+                # No tag for this kind of place, so the map is asked what near here is called
+                # something like it - and only if that finds nothing is the whole world searched
+                wanted = plan["what"] or message
+                result["places"] = await maps.named_nearby(wanted, centre["lat"], centre["lon"])
+                if not result["places"]:
+                    # Nominatim searches the planet and only leans towards a box, so asking it for
+                    # "a coworking space near me" returns one five thousand kilometres away. Near
+                    # means near: anything beyond a long day's drive is not an answer to this
+                    # question, and no answer is better than that one.
+                    found = await maps.find(wanted, near=(centre["lat"], centre["lon"]))
+                    for place in found:
+                        place["metres_away"] = round(maps.distance(centre["lat"], centre["lon"],
+                                                                   place["lat"], place["lon"]))
+                    result["places"] = sorted((p for p in found if p["metres_away"] <= NEAR_LIMIT),
+                                              key=lambda p: p["metres_away"])
+                if not result["places"]:
+                    raise _NotOnTheMap(
+                        f"Nothing within {NEAR_LIMIT // 1000} km of there is called anything like "
+                        f"“{maps.meaningful(wanted) or wanted}”. The map knows places by "
+                        "name and by kind - try the kind of place, or the name as it is written "
+                        "locally.")
             else:
                 result["places"] = await maps.nearby(tag, centre["lat"], centre["lon"],
                                                      words=plan["what"] or message)
 
         else:                                   # find
+            # Asked to find a kind of place with somewhere to be, that is a search around here
+            if tag and (points or standing):
+                centre = await _somewhere("", points or [standing], 0)
+                result["start"] = centre
+                result["from_your_location"] = not points
+                result["intent"] = "near"
+                result["places"] = await maps.nearby(tag, centre["lat"], centre["lon"],
+                                                     words=plan["what"] or message)
+                raise _Found()
             # find, not search: a name that does not resolve whole is tried in parts
             result["places"] = await maps.find(plan["what"] or message,
                                                near=(points[0] if points else standing))
@@ -1134,6 +1178,8 @@ async def find_on_map(payload: MapIn, principal: Principal = Depends(authenticat
                 raise _NotOnTheMap(
                     "Nothing on the map matched that. Try naming the place on its own - a "
                     "station, a district, a landmark - rather than in a sentence.")
+    except _Found:
+        pass
     except _NeedsYou as e:
         raise HTTPException(status.HTTP_428_PRECONDITION_REQUIRED, str(e))
     except _NotOnTheMap as e:

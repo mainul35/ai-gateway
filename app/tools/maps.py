@@ -55,37 +55,59 @@ class MapError(Exception):
 # --- what the user might be asking for ----------------------------------------------------------
 # The plain words people use, and the OpenStreetMap tag that actually finds the thing
 AMENITIES = {
-    "fuel": ("amenity", "fuel", ("petrol", "petrol station", "petrol pump", "gas station", "fuel",
-                                 "filling station", "cng")),
-    "restaurant": ("amenity", "restaurant", ("restaurant", "place to eat", "dinner", "lunch",
-                                             "food", "eatery")),
-    "cafe": ("amenity", "cafe", ("cafe", "coffee", "coffee shop", "tea")),
-    "fast_food": ("amenity", "fast_food", ("fast food", "burger", "takeaway")),
-    "hotel": ("tourism", "hotel", ("hotel", "place to stay", "accommodation", "guest house")),
-    "hospital": ("amenity", "hospital", ("hospital", "emergency")),
-    "clinic": ("amenity", "clinic", ("clinic", "doctor")),
-    "pharmacy": ("amenity", "pharmacy", ("pharmacy", "chemist", "medicine shop", "drug store")),
-    "atm": ("amenity", "atm", ("atm", "cash machine", "cash point")),
-    "bank": ("amenity", "bank", ("bank",)),
-    "toilets": ("amenity", "toilets", ("toilet", "toilets", "restroom", "washroom")),
-    "parking": ("amenity", "parking", ("parking", "car park")),
-    "charging_station": ("amenity", "charging_station", ("charging", "ev charger", "charging point")),
-    "supermarket": ("shop", "supermarket", ("supermarket", "grocery", "groceries")),
-    "convenience": ("shop", "convenience", ("convenience store", "convenience", "corner shop",
-                                            "konbini")),
-    "pharmacy_shop": ("shop", "chemist", ("chemist shop",)),
-    "school": ("amenity", "school", ("school",)),
-    "university": ("amenity", "university", ("university", "college")),
-    "place_of_worship": ("amenity", "place_of_worship", ("mosque", "masjid", "temple", "church",
-                                                         "place of worship")),
-    "park": ("leisure", "park", ("park", "green space", "playground")),
-    "viewpoint": ("tourism", "viewpoint", ("viewpoint", "scenic spot", "lookout")),
-    "attraction": ("tourism", "attraction", ("attraction", "sightseeing", "tourist spot",
-                                             "things to see")),
-    "museum": ("tourism", "museum", ("museum",)),
-    "bus_station": ("amenity", "bus_station", ("bus station", "bus stand")),
-    "railway_station": ("railway", "station", ("train station", "railway station")),
-    "airport": ("aeroway", "aerodrome", ("airport",)),
+    # A place of worship is not one kind of place. Asked for a mosque, amenity=place_of_worship on
+    # its own returns temples and churches too, which is the kind of wrong answer that is worse
+    # than no answer. The religion is part of the question, so it is part of the query.
+    "mosque": ({"amenity": "place_of_worship", "religion": "muslim"},
+               ("mosque", "masjid", "musalla", "muslim prayer room", "muslim prayer space",
+                "prayer room", "prayer space", "jamaat khana", "islamic centre", "islamic center",
+                "muslim prayer")),
+    "church": ({"amenity": "place_of_worship", "religion": "christian"},
+               ("church", "chapel", "cathedral", "christian")),
+    "hindu_temple": ({"amenity": "place_of_worship", "religion": "hindu"},
+                     ("hindu temple", "mandir", "hindu")),
+    "buddhist_temple": ({"amenity": "place_of_worship", "religion": "buddhist"},
+                        ("buddhist temple", "buddhist", "pagoda")),
+    "shinto_shrine": ({"amenity": "place_of_worship", "religion": "shinto"},
+                      ("shinto shrine", "shinto", "jinja")),
+    "synagogue": ({"amenity": "place_of_worship", "religion": "jewish"},
+                  ("synagogue", "jewish")),
+    "gurdwara": ({"amenity": "place_of_worship", "religion": "sikh"}, ("gurdwara", "sikh")),
+    # Only when no religion was named at all
+    "place_of_worship": ({"amenity": "place_of_worship"},
+                         ("place of worship", "temple", "shrine", "worship")),
+
+    "fuel": ({"amenity": "fuel"}, ("petrol", "petrol station", "petrol pump", "gas station", "fuel",
+                                   "filling station", "cng")),
+    "restaurant": ({"amenity": "restaurant"}, ("restaurant", "place to eat", "dinner", "lunch",
+                                               "food", "eatery", "somewhere to eat")),
+    "halal": ({"amenity": "restaurant", "diet:halal": "yes"}, ("halal", "halal food",
+                                                               "halal restaurant")),
+    "cafe": ({"amenity": "cafe"}, ("cafe", "coffee", "coffee shop", "tea")),
+    "fast_food": ({"amenity": "fast_food"}, ("fast food", "burger", "takeaway")),
+    "hotel": ({"tourism": "hotel"}, ("hotel", "place to stay", "accommodation", "guest house")),
+    "hospital": ({"amenity": "hospital"}, ("hospital", "emergency")),
+    "clinic": ({"amenity": "clinic"}, ("clinic", "doctor")),
+    "pharmacy": ({"amenity": "pharmacy"}, ("pharmacy", "chemist", "medicine shop", "drug store")),
+    "atm": ({"amenity": "atm"}, ("atm", "cash machine", "cash point")),
+    "bank": ({"amenity": "bank"}, ("bank",)),
+    "toilets": ({"amenity": "toilets"}, ("toilet", "toilets", "restroom", "washroom")),
+    "parking": ({"amenity": "parking"}, ("parking", "car park")),
+    "charging_station": ({"amenity": "charging_station"}, ("charging", "ev charger",
+                                                           "charging point")),
+    "supermarket": ({"shop": "supermarket"}, ("supermarket", "grocery", "groceries")),
+    "convenience": ({"shop": "convenience"}, ("convenience store", "convenience", "corner shop",
+                                              "konbini")),
+    "school": ({"amenity": "school"}, ("school",)),
+    "university": ({"amenity": "university"}, ("university", "college")),
+    "park": ({"leisure": "park"}, ("park", "green space", "playground")),
+    "viewpoint": ({"tourism": "viewpoint"}, ("viewpoint", "scenic spot", "lookout")),
+    "attraction": ({"tourism": "attraction"}, ("attraction", "sightseeing", "tourist spot",
+                                               "things to see")),
+    "museum": ({"tourism": "museum"}, ("museum",)),
+    "bus_station": ({"amenity": "bus_station"}, ("bus station", "bus stand")),
+    "railway_station": ({"railway": "station"}, ("train station", "railway station", "station")),
+    "airport": ({"aeroway": "aerodrome"}, ("airport",)),
 }
 
 TRANSPORT = {"driving": ("driving", ("drive", "driving", "car", "by road", "taxi")),
@@ -151,14 +173,18 @@ def _sane(lat, lon):
 
 
 def amenity_for(text):
-    """The OSM tag the words are asking for, or None."""
+    """The OSM tags the words are asking for, or None.
+
+    The longest wording wins, so "buddhist temple" beats "temple" and "muslim prayer room" beats
+    "prayer room": the more a person said, the more exactly they should be answered.
+    """
     lowered = (text or "").lower()
-    best = None
-    for key, (tag, value, words) in AMENITIES.items():
+    best, longest = None, 0
+    for key, (tags, words) in AMENITIES.items():
         for word in words:
-            if re.search(rf"\b{re.escape(word)}s?\b", lowered) and (best is None or len(word) > best[2]):
-                best = (tag, value, len(word))
-    return (best[0], best[1]) if best else None
+            if re.search(rf"\b{re.escape(word)}s?\b", lowered) and len(word) > longest:
+                best, longest = tags, len(word)
+    return best
 
 
 # "no taxi" and "I don't have a car" both name a car, and both mean the opposite of choosing one.
@@ -364,6 +390,11 @@ def _from_overpass(element):
             "osm": f"https://www.openstreetmap.org/{element.get('type', 'node')}/{element.get('id')}"}
 
 
+def _filters(tags):
+    """The tags as an Overpass filter: every one of them has to match."""
+    return "".join(f'["{key}"="{value}"]' for key, value in tags.items())
+
+
 async def nearby(tag, lat, lon, radius_m=3000, limit=MAX_RESULTS, words=""):
     """Things of a kind near a point.
 
@@ -372,9 +403,9 @@ async def nearby(tag, lat, lon, radius_m=3000, limit=MAX_RESULTS, words=""):
     than by tag, so there are fewer of them and they are less complete. Fewer real places beats an
     error page, as long as the answer admits which way round it was.
     """
-    key, value = tag
-    query = (f'[out:json][timeout:25];(node["{key}"="{value}"](around:{int(radius_m)},{lat},{lon});'
-             f'way["{key}"="{value}"](around:{int(radius_m)},{lat},{lon}););out center {limit * 3};')
+    where = _filters(tag)
+    query = (f'[out:json][timeout:25];(node{where}(around:{int(radius_m)},{lat},{lon});'
+             f'way{where}(around:{int(radius_m)},{lat},{lon}););out center {limit * 3};')
     try:
         elements = await _overpass(query)
     except MapError:
@@ -394,13 +425,54 @@ async def nearby(tag, lat, lon, radius_m=3000, limit=MAX_RESULTS, words=""):
     return places[:limit]
 
 
+# Words that are in the sentence but not in the name of anything: searching for them finds nothing
+FILLER = re.compile(
+    r"^(find|show|get|give|tell|me|my|a|an|the|any|some|all|only|please|near|nearby|nearest|"
+    r"closest|around|here|there|to|of|in|on|at|is|are|was|were|and|or|but|for|with|where|what|"
+    r"which|can|you|i|we|us|place|places|spot|spots|location|locations)$", re.I)
+
+
+def meaningful(words):
+    """The part of a question that could be part of a name."""
+    kept = [w for w in re.findall(r"[\w\u00c0-\uffff'-]+", words or "") if not FILLER.match(w)]
+    return " ".join(kept[:4])
+
+
+async def named_nearby(words, lat, lon, radius_m=4000, limit=MAX_RESULTS):
+    """Anything near a point whose name contains these words.
+
+    For a kind of place this has no tag for, asking Nominatim its name in the whole world and
+    nudging it towards a box gives answers from the wrong continent. Overpass can be asked the
+    honest question instead - what near this point is called something like this - which is what
+    a person means by "find X around me".
+    """
+    terms = meaningful(words)
+    if not terms:
+        return []
+    pattern = "|".join(re.escape(part) for part in terms.split())
+    query = (f'[out:json][timeout:40];'
+             f'(node["name"~"{pattern}",i](around:{int(radius_m)},{lat},{lon});'
+             f'way["name"~"{pattern}",i](around:{int(radius_m)},{lat},{lon}););'
+             f'out center {limit * 4};')
+    try:
+        elements = await _overpass(query)
+    except MapError:
+        return []
+    places = [p for p in map(_from_overpass, elements) if p]
+    for place in places:
+        place["metres_away"] = round(_metres(lat, lon, place["lat"], place["lon"]))
+        place["by_name"] = True
+    places.sort(key=lambda p: p["metres_away"])
+    return places[:limit]
+
+
 async def along(tag, line, radius_m=1500, limit=MAX_RESULTS):
     """Things of a kind strung along a route, in the order they are passed."""
-    key, value = tag
+    where = _filters(tag)
     samples = _thin(line, ALONG_SAMPLES)
     around = "".join(
-        f'node["{key}"="{value}"](around:{int(radius_m)},{lat},{lon});'
-        f'way["{key}"="{value}"](around:{int(radius_m)},{lat},{lon});'
+        f'node{where}(around:{int(radius_m)},{lat},{lon});'
+        f'way{where}(around:{int(radius_m)},{lat},{lon});'
         for lat, lon in samples)
     places = [p for p in map(_from_overpass, await _overpass(
         f"[out:json][timeout:90];({around});out center {limit * 4};")) if p]

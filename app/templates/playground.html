@@ -1523,8 +1523,9 @@ let lastFix = null;
 const WANTS_TO_GO = /\b(want|need|would like) to (go|get) to\b|\btake me to\b|\bhow (do i|to) get to\b|\b(route|directions?|way) to\b/i;
 const SAYS_WHERE_FROM = /\bfrom\s+\S/i;
 
-function needsMyLocation(text){
-  if(NEEDS_ME.test(text) || NEEDS_ME_TOO.test(text)) return true;
+function needsMyLocation(text, earlier){
+  const both = earlier ? `${earlier} ${text}` : text;
+  if(NEEDS_ME.test(both) || NEEDS_ME_TOO.test(both)) return true;
   return WANTS_TO_GO.test(text) && !SAYS_WHERE_FROM.test(text);
 }
 
@@ -1560,15 +1561,20 @@ async function sendMap(text, decision){
   noteDecision(box, decision);
   busy(true);
   let here = null;
-  if(needsMyLocation(text)){
+  const previous = [...history].reverse().find(h => h.role === 'user' && h.content !== text);
+  if(needsMyLocation(text, previous ? previous.content : '')){
     setStatus(box, 'Asking your browser where you are');
     here = await myLocation();
   }
   setStatus(box, 'Looking it up on the map');
   let answer = null;
   try{
+    // The question before this one goes too: "find only the masjids" is a correction of it, and
+    // on its own it says nothing about where
+    const before = previous;
     answer = await api('/chat/map', {method: 'POST', headers: JSON_HEADERS,
                                      body: JSON.stringify({message: text, conversation_id: currentId,
+                                                           earlier: before ? before.content : '',
                                                            here_lat: here ? here.lat : null,
                                                            here_lon: here ? here.lon : null})});
   }catch(e){
