@@ -184,6 +184,45 @@ async def add_message(conversation_id: int, payload: MessageIn, principal: Princ
 
 # --- tools ------------------------------------------------------------------------
 
+@router.delete("/conversations/{conversation_id}/messages/{message_id}/after")
+async def drop_what_followed(conversation_id: int, message_id: int,
+                             principal: Principal = Depends(authenticate),
+                             session: AsyncSession = Depends(get_session)):
+    """Removes the turns that came after a question, so that it can be asked again.
+
+    Asking an older question again leaves everything after it answering something that is no
+    longer there. What is kept is the question and its answers - the run of replies directly after
+    it, however many times it has been asked - and everything from the next question onwards goes.
+
+    The conversation's running summary goes with them: it describes turns that no longer exist,
+    and it carries a count of how many messages it stands in for, which would otherwise swallow
+    the messages that remain. It is written again after the next turn.
+    """
+    user = _require_user(principal)
+    conversation = await _owned(session, conversation_id, user, with_messages=True)
+    messages = sorted(conversation.messages, key=lambda m: m.id)
+    at = next((i for i, m in enumerate(messages) if m.id == message_id), None)
+    if at is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "That message is not in this conversation")
+    if messages[at].role != "user":
+        raise HTTPException(status.HTTP_400_BAD_REQUEST,
+                            "Only a question can be asked again, so only a question has turns "
+                            "after it to drop")
+    # Where this question's own answers end and the next question begins
+    ends = next((i for i in range(at + 1, len(messages)) if messages[i].role == "user"),
+                len(messages))
+    doomed = messages[ends:]
+    for message in doomed:
+        await session.delete(message)
+    if doomed:
+        summary = await _conversation_memory(session, user.id, conversation_id)
+        if summary is not None:
+            await session.delete(summary)
+        conversation.updated_at = utcnow()
+        await session.commit()
+    return {"removed": len(doomed)}
+
+
 @router.get("/capabilities")
 async def capabilities(principal: Principal = Depends(authenticate)):
     """Which tools this server offers; the playground only shows toggles for these."""
