@@ -1,0 +1,35 @@
+{% extends "base.html" %}
+{% block title %}Sign in &middot; Model Gateway{% endblock %}
+{% block content %}
+<div style="max-width:24rem;margin:3rem auto">
+  <h1 style="text-align:center">Model Gateway</h1>
+  <p class="sub" style="text-align:center">Sign in to manage users, keys and models.</p>
+
+  {% if error %}<div class="note err">{{ error }}</div>{% endif %}
+
+  <div class="card">
+    <form method="post" action="/login">
+      <input type="hidden" name="next" value="{{ next }}">
+      <label>
+        <span class="lbl">Username</span>
+        <input name="username" autocomplete="username" autofocus required>
+      </label>
+      <label>
+        <span class="lbl">Password</span>
+        <input name="password" type="password" autocomplete="current-password" required>
+      </label>
+      <button class="btn" type="submit" style="width:100%">Sign in</button>
+    </form>
+
+    {% if sso_configured %}
+    <div style="text-align:center;margin:1rem 0 .5rem;color:var(--muted);font-size:.85rem">or</div>
+    <a class="btn btn-secondary" href="/auth/login"
+       style="display:block;text-align:center;text-decoration:none">Sign in with {{ sso_name }}</a>
+    {% else %}
+    <p class="hint muted" style="margin:1rem 0 0;font-size:.82rem">
+      Single sign-on is not configured yet. Sign in as the admin account to set it up.
+    </p>
+    {% endif %}
+  </div>
+</div>
+{% endblock %}

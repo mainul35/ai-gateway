@@ -1,0 +1,57 @@
+services:
+  gateway:
+    build:
+      context: .
+      dockerfile: Dockerfile.gateway
+    image: model-gateway
+    container_name: model-gateway
+    # Runs as the host user that owns config/config.properties, so that file can stay non-world-readable.
+    # Set GATEWAY_UID/GATEWAY_GID in .env (see README); defaults to the image's own appuser.
+    user: "${GATEWAY_UID:-10001}:${GATEWAY_GID:-10001}"
+    ports:
+      - "9000:9000"
+    volumes:
+      - ./config:/app/config:ro
+    depends_on:
+      gateway-db:
+        condition: service_healthy
+    environment:
+      # Overridden by config/config.properties when the same key is set there.
+      # The password comes from .env, which git ignores; credentials never go in this file.
+      GATEWAY_DATABASE_URL: postgresql+asyncpg://gateway:${GATEWAY_DB_PASSWORD:?set GATEWAY_DB_PASSWORD in .env, see .env.example}@gateway-db:5432/gateway
+      # Playground tools: web search through the searxng service, images through ComfyUI on the host
+      SEARXNG_URL: http://searxng:8080
+      COMFYUI_URL: http://host.docker.internal:8188
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
+
+  gateway-db:
+    # pgvector rather than plain postgres, so retrieval features can use the same database later
+    image: pgvector/pgvector:pg18
+    container_name: model-gateway-db
+    environment:
+      POSTGRES_USER: gateway
+      POSTGRES_PASSWORD: ${GATEWAY_DB_PASSWORD:?set GATEWAY_DB_PASSWORD in .env, see .env.example}
+      POSTGRES_DB: gateway
+    volumes:
+      - gateway-db-data:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U gateway"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    restart: unless-stopped
+
+  searxng:
+    # Metasearch for the playground's web search; not published, only the gateway queries it
+    image: searxng/searxng:latest
+    container_name: model-gateway-searxng
+    environment:
+      SEARXNG_SECRET: ${SEARXNG_SECRET:?set SEARXNG_SECRET in .env, see .env.example}
+    volumes:
+      - ./config/searxng/settings.yml:/etc/searxng/settings.yml:ro
+    restart: unless-stopped
+
+volumes:
+  gateway-db-data:

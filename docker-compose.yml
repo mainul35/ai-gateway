@@ -1,0 +1,15 @@
+services:
+  ollama-model-checker:
+    build: .
+    image: ollama-model-checker
+    container_name: ollama-model-checker
+    ports:
+      - "5000:5000"
+    volumes:
+      # Edit config/config.properties on the host (e.g. ollama.host); changes apply without a restart.
+      # The folder is mounted rather than the file, so editors that replace the file on save still work.
+      - ./config:/app/config:ro
+    extra_hosts:
+      # Lets ollama.host=http://host.docker.internal:11434 reach Ollama on the Docker host (needed on Linux)
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped

@@ -1,0 +1,2634 @@
+{% extends "base.html" %}
+{% block title %}Playground &middot; Model Gateway{% endblock %}
+{% block body_class %}app{% endblock %}
+{% block content %}
+<link rel="stylesheet" href="/static/leaflet/leaflet.css">
+<script src="/static/leaflet/leaflet.js"></script>
+<style>
+/* The window is the frame: the sidebar scrolls if it must, the conversation scrolls, and nothing
+   else does. The composer stays where the hands are. */
+.pg{display:grid;grid-template-columns:17rem minmax(0, 1fr);height:100%;min-height:0}
+.side{border-right:1px solid var(--border);overflow-y:auto;padding:1rem .85rem;display:flex;
+      flex-direction:column;gap:1.5rem;background:var(--card)}
+.main{display:flex;flex-direction:column;min-width:0;min-height:0}
+/* One reading column, the same width for the conversation and the composer under it */
+.column{width:min(52rem, 100%);margin:0 auto;padding:0 1.25rem}
+.transcript{flex:1;min-height:0;overflow-y:auto;padding:1.25rem 0 .5rem}
+.composer-wrap{flex:none;border-top:1px solid var(--border);background:var(--bg);padding:.85rem 0 1rem}
+
+/* --- sidebar ------------------------------------------------------------------------- */
+.side h2{font-size:.72rem;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);margin:0}
+.side .group{display:flex;flex-direction:column;gap:.5rem}
+.side .head{display:flex;align-items:center;justify-content:space-between;gap:.5rem}
+.linkish{background:none;border:none;color:var(--muted);cursor:pointer;font-size:.8rem;font-family:inherit;padding:.1rem .3rem;border-radius:6px}
+.linkish:hover{color:var(--text);background:var(--input)}
+.convs{margin:0 -.35rem}
+.conv{display:flex;align-items:center;gap:.4rem;padding:.4rem .5rem;border-radius:8px;cursor:pointer}
+.conv:hover{background:var(--input)}
+.conv.active{background:rgba(99,102,241,.18)}
+.conv .title{flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-size:.88rem}
+.conv .when{font-size:.7rem;color:var(--muted)}
+.conv .del{visibility:hidden;background:none;border:none;color:var(--muted);cursor:pointer;font-size:1rem;padding:0 .2rem}
+.conv:hover .del{visibility:visible}
+.conv .del:hover{color:var(--danger)}
+details.tuning summary{cursor:pointer;font-size:.72rem;text-transform:uppercase;letter-spacing:.06em;
+                       color:var(--muted);list-style:none}
+details.tuning summary::-webkit-details-marker{display:none}
+details.tuning summary::before{content:"\25b8 ";display:inline-block;transition:transform .15s}
+details.tuning[open] summary::before{transform:rotate(90deg)}
+details.tuning[open]{margin-bottom:.25rem}
+details.tuning .body{padding-top:.75rem}
+details.tuning label{margin-bottom:.85rem}
+
+/* --- messages ------------------------------------------------------------------------ */
+.chat{display:flex;flex-direction:column;gap:1.5rem}
+.msg{line-height:1.6}
+/* The same line height the rendered answer uses, so the text does not reflow the moment the
+   answer finishes and the Markdown takes over from the streamed plain text */
+.msg .body{white-space:pre-wrap;line-height:1.25}
+/* The answer is the page, not a card on it; only the question is set apart */
+.msg.assistant{background:none;border:none;padding:0}
+.msg.user{background:var(--input);border-radius:12px;padding:.6rem .9rem;align-self:flex-end;max-width:85%}
+/* What you can do with something you said: copy it, or ask it again. Quiet until the message is
+   pointed at, because they are for the times something went wrong rather than every turn. */
+.turn-tools{display:flex;gap:.6rem;justify-content:flex-end;margin-top:.4rem;
+            opacity:0;transition:opacity .15s}
+.msg.user:hover .turn-tools,.msg.user:focus-within .turn-tools,.turn-tools.stay{opacity:1}
+.turn-tools button{background:none;border:none;padding:0;cursor:pointer;font:inherit;
+                   font-size:.74rem;color:var(--muted)}
+.turn-tools button:hover{color:var(--text);text-decoration:underline}
+.turn-tools button:disabled{opacity:.5;cursor:default;text-decoration:none}
+/* Answers to the same question, when it was asked more than once */
+.variants{display:inline-flex;align-items:center;gap:.3rem;margin-left:.5rem;font-weight:400}
+.variants button{background:none;border:none;padding:0 .15rem;cursor:pointer;color:var(--muted);
+                 font-size:.9rem;line-height:1}
+.variants button:hover:not(:disabled){color:var(--text)}
+.variants button:disabled{opacity:.35;cursor:default}
+/* A turn that produced nothing says so where the answer would have been, not only in a banner */
+.msg.assistant .failed{color:var(--danger);font-size:.85rem}
+.msg.user .who{display:none}
+.msg .who{font-size:.72rem;color:var(--muted);margin-bottom:.45rem;font-weight:600;letter-spacing:.02em}
+.msg .body.md{background:none;padding:0;margin:0}
+/* The conversation's name stays in view while its messages scroll under it */
+.topbar{flex:none;border-bottom:1px solid var(--border);padding:.55rem 0;background:var(--bg)}
+.chatTitle{font-size:.9rem;font-weight:600;color:var(--text);display:block;
+           white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+
+textarea{background:var(--input);border:1px solid var(--border);border-radius:8px;color:var(--text);
+         padding:.6rem .7rem;font-size:.95rem;width:100%;display:block;font-family:inherit;resize:vertical}
+textarea:focus{outline:none;border-color:var(--primary)}
+
+/* --- composer ------------------------------------------------------------------------- */
+.composer{background:var(--card);border:1px solid var(--border);border-radius:14px;padding:.65rem .75rem}
+.composer:focus-within{border-color:var(--primary)}
+.composer textarea{background:none;border:none;border-radius:0;padding:.15rem .2rem;resize:none;
+                   overflow-y:auto;min-height:1.6rem;max-height:35vh;font-size:.95rem;line-height:1.5}
+.composer textarea:focus{outline:none;border:none}
+.composer.drop{border-style:dashed;border-color:var(--primary)}
+.tools{display:flex;gap:.4rem;flex-wrap:wrap;align-items:center;margin-top:.5rem}
+.tools .spacer{margin-left:auto}
+.composer select{background:none;border:none;color:var(--muted);font-size:.8rem;padding:.2rem .2rem;width:auto;cursor:pointer}
+.composer select:hover{color:var(--text)}
+#composerError{margin:.5rem 0 0;padding:.5rem .7rem;font-size:.82rem}
+.foot{display:flex;align-items:center;gap:.75rem;justify-content:space-between;margin-top:.45rem;
+      font-size:.78rem;color:var(--muted);min-height:1.1rem}
+.foot > *{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.foot .picker{display:flex;align-items:center;gap:.5rem;flex:none}
+.foot select{background:none;border:none;color:var(--muted);font-size:.78rem;width:auto;padding:0;cursor:pointer}
+.foot select:hover{color:var(--text)}
+.foot .hint{margin:0;min-height:0;flex:1;min-width:0}
+/* A round button for attaching, like the one in the composer of every chat window */
+.icon-btn{width:1.9rem;height:1.9rem;padding:0;border-radius:50%;display:inline-flex;align-items:center;
+          justify-content:center;font-size:1.1rem;line-height:1}
+details.think,details.sources{margin-bottom:.5rem;font-size:.85rem;color:var(--muted)}
+details.think summary,details.sources summary{cursor:pointer}
+details.sources ol{margin:.35rem 0 0;padding-left:1.4rem}
+details.sources li{margin:.15rem 0}
+details.sources a{word-break:break-all}
+a.cite{font-size:.75em;vertical-align:super;text-decoration:none;padding:0 .1rem}
+.stats{font-size:.78rem;color:var(--muted);margin-top:.4rem}
+.status{font-size:.85rem;color:var(--muted);display:flex;align-items:center;gap:.5rem}
+.spinner{width:.8rem;height:.8rem;border:2px solid var(--border);border-top-color:var(--primary);border-radius:50%;
+         animation:spin .8s linear infinite;flex:none}
+@keyframes spin{to{transform:rotate(360deg)}}
+.bar{height:6px;background:var(--input);border-radius:3px;overflow:hidden;margin-top:.4rem}
+.bar div{height:100%;background:var(--primary);width:0;transition:width .3s}
+/* One + button, with the ways of attaching something listed under it rather than spread along
+   the toolbar, which is where they would keep arriving as more kinds of file are supported. */
+.attach-wrap{position:relative;display:inline-flex}
+.attach-menu{position:absolute;bottom:calc(100% + .45rem);left:0;z-index:40;min-width:14rem;
+             background:var(--card);border:1px solid var(--border);border-radius:10px;padding:.3rem;
+             box-shadow:0 .6rem 1.6rem rgba(0,0,0,.45);display:flex;flex-direction:column;gap:.1rem}
+.attach-menu button{display:flex;align-items:center;gap:.6rem;width:100%;text-align:left;
+                    background:none;border:none;color:var(--text);font-family:inherit;
+                    font-size:.88rem;padding:.45rem .55rem;border-radius:7px;cursor:pointer}
+.attach-menu button:hover:not(:disabled),.attach-menu button:focus-visible{background:var(--input)}
+.attach-menu button:disabled{opacity:.45;cursor:not-allowed}
+.attach-menu .glyph{font-size:1.15rem;flex:none}
+.attach-menu b{display:block;font-weight:600}
+.attach-menu small{display:block;color:var(--muted);font-size:.75rem}
+
+/* A map answer: the map itself, then the places under it as a list worth reading on its own */
+.mapbox{border:1px solid var(--border);border-radius:10px;overflow:hidden;margin:.3rem 0 .6rem;
+        white-space:normal}
+/* The height lives on .canvas and nowhere else. Leaflet adds .leaflet-container to this very
+   element, so a .mapbox .leaflet-container{height:100%} rule below is the same weight and written
+   later: it wins, resolves against a parent of no height at all, and the map collapses to nothing
+   while still dutifully loading its tiles. */
+.mapbox .canvas{height:min(48vh,22rem);background:var(--input)}
+.mapbox .leaflet-container{background:var(--input);font-family:inherit}
+.map-summary{display:flex;flex-wrap:wrap;gap:.5rem .9rem;align-items:baseline;
+             padding:.5rem .7rem;background:var(--card);border-bottom:1px solid var(--border);
+             font-size:.85rem}
+.map-summary .spacer{flex:1}
+.map-places{list-style:none;margin:.2rem 0 0;padding:0;display:flex;flex-direction:column;gap:.15rem}
+.map-places li{display:flex;gap:.55rem;align-items:baseline;padding:.35rem .5rem;border-radius:7px}
+.map-places li:hover{background:var(--input)}
+.map-places .pin{font-size:.72rem;font-weight:700;color:#fff;background:var(--primary);
+                 min-width:1.3rem;height:1.3rem;border-radius:50%;display:inline-flex;
+                 align-items:center;justify-content:center;flex:none}
+.map-places .about{flex:1;min-width:0}
+.map-places .name{font-weight:600;font-size:.9rem}
+.map-places .where{font-size:.78rem;color:var(--muted);white-space:nowrap;overflow:hidden;
+                   text-overflow:ellipsis}
+.map-places .links{display:flex;gap:.5rem;font-size:.76rem;flex:none}
+
+/* An attached document has nothing to show, so it says what it is instead of pretending */
+.paper{display:flex;align-items:center;gap:.5rem;height:5.5rem;width:11rem;padding:.5rem .6rem;
+       border:1px solid var(--border);border-radius:8px;background:var(--input);position:relative}
+.paper .what{min-width:0}
+.paper .who{font-size:.8rem;font-weight:600;word-break:break-word;
+            display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}
+.paper .size{font-size:.7rem;color:var(--muted)}
+.paper .glyph{font-size:1.4rem;flex:none}
+/* The camera, when one is asked for: a live picture with a shutter under it */
+.camera{position:fixed;inset:0;z-index:60;background:rgba(0,0,0,.85);display:flex;
+        flex-direction:column;align-items:center;justify-content:center;gap:1rem;padding:1rem}
+.camera video{max-width:min(100%,46rem);max-height:70vh;border-radius:12px;background:#000}
+.camera .row{display:flex;gap:.75rem;align-items:center}
+.camera .shutter{width:3.6rem;height:3.6rem;border-radius:50%;border:4px solid #fff;background:#fff2;
+                 cursor:pointer}
+.camera .shutter:active{background:#fff6}
+.thumbs{display:flex;gap:.5rem;flex-wrap:wrap;margin-bottom:.4rem}
+.thumbs img{height:5.5rem;max-width:9rem;object-fit:cover;border-radius:8px;border:1px solid var(--border);cursor:zoom-in}
+.pending{position:relative}
+.pending button{position:absolute;top:-.4rem;right:-.4rem;width:1.3rem;height:1.3rem;border-radius:50%;border:none;
+                background:var(--danger);color:#fff;cursor:pointer;font-size:.8rem;line-height:1;padding:0}
+.pending .tag{position:absolute;left:.3rem;bottom:.3rem;font-size:.65rem;background:rgba(0,0,0,.7);padding:0 .3rem;border-radius:4px}
+/* While a picture is uploading it is shown dimmed, from the file on disk, with how far it has got */
+.pending.busy img{opacity:.4}
+.pending .sending{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;
+                  justify-content:center;gap:.35rem;font-size:.7rem;color:var(--text);text-shadow:0 1px 2px #000}
+.pending .sending .track{width:70%;height:4px;background:rgba(0,0,0,.55);border-radius:2px;overflow:hidden}
+.pending .sending .track div{height:100%;width:0;background:var(--primary);transition:width .15s}
+/* Leaves room in the transcript for the question above it and the caption below */
+.generated img{max-width:100%;max-height:min(45vh,26rem);border-radius:8px;display:block;cursor:zoom-in}
+/* The description can run to sixty words; two lines of it is enough to recognise the picture by */
+.generated .caption{font-size:.82rem;color:var(--muted);margin-top:.4rem;cursor:pointer;
+                    display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.generated .caption.open{-webkit-line-clamp:unset;overflow:visible}
+.generated .actions{display:flex;gap:.5rem;margin-top:.5rem}
+/* Pictures found on the web rather than drawn. Every tile carries the site it came from, because
+   that is what tells the reader whether it is the right thing: the manufacturer's own photograph
+   and a stock library's approximation look identical until you see whose page they are on. */
+.found{white-space:normal}
+.found .subject{font-size:.85rem;font-weight:600;margin:.75rem 0 .35rem}
+.found .subject:first-child{margin-top:0}
+.found .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(8.5rem,1fr));gap:.5rem}
+.found figure{margin:0;border:1px solid var(--border);border-radius:9px;overflow:hidden;
+              background:var(--card)}
+.found figure img{width:100%;height:8rem;object-fit:cover;display:block;background:var(--input)}
+/* A photograph of a product is often tall and narrow, and cropping it to a square leaves a band
+   of the middle of a bottle. The whole thing, letterboxed, is what makes it recognisable. */
+.found .shot img{object-fit:contain;cursor:zoom-in}
+.found figcaption{padding:.35rem .45rem;font-size:.72rem;min-width:0}
+.found figcaption .name{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;
+                        overflow:hidden;line-height:1.25}
+.found figcaption .from{color:var(--muted);text-decoration:none;display:block;margin-top:.15rem;
+                        white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.found figcaption .from:hover{color:var(--primary);text-decoration:underline}
+/* A video is watched where it was published; what is kept here is the still it opens with */
+.found .play{display:block;position:relative}
+.found .play::after{content:'\25B6';position:absolute;inset:0;display:flex;align-items:center;
+                    justify-content:center;font-size:1.5rem;color:#fff;text-shadow:0 1px 6px #000;
+                    pointer-events:none}
+.found .clip{position:absolute;right:.3rem;bottom:.3rem;font-size:.65rem;background:rgba(0,0,0,.72);
+             color:#fff;padding:0 .3rem;border-radius:4px}
+.found .where-from{font-size:.75rem;color:var(--muted);margin-top:.6rem}
+/* An answer that is really a document is offered as one, the way a file would be */
+.file{display:flex;align-items:center;gap:.75rem;margin-top:.9rem;padding:.6rem .75rem;
+      border:1px solid var(--border);border-radius:10px;background:var(--card);max-width:26rem}
+.file .icon{width:2.1rem;height:2.1rem;border-radius:7px;background:var(--input);display:flex;
+            align-items:center;justify-content:center;font-size:1rem;flex:none}
+.file .about{flex:1;min-width:0}
+.file .name{font-size:.88rem;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.file .kind{font-size:.75rem;color:var(--muted)}
+/* A page the model wrote, shown as a page. The frame is sandboxed, so what is inside it cannot
+   reach this one - see the comment on preview() for why that matters. */
+/* white-space:normal because the answer body is pre-wrap: without it the newlines between these
+   elements in the markup render as real blank lines, and the frame arrives wearing a white gap */
+.preview{border:1px solid var(--border);border-radius:10px;overflow:hidden;margin:.2rem 0 .8rem;
+         background:var(--card);white-space:normal}
+.preview iframe{display:block;width:100%;border:none;background:#fff}
+.preview .bar-top{display:flex;align-items:center;gap:.5rem;padding:.35rem .6rem;background:var(--card);
+                  border-bottom:1px solid var(--border);font-size:.78rem;color:var(--muted)}
+.preview .bar-top .spacer{flex:1}
+.code-tools{display:flex;gap:.4rem;justify-content:flex-end;margin:-.4rem 0 .6rem}
+.code-tools button{background:none;border:1px solid var(--border);color:var(--muted);border-radius:6px;
+                   font-size:.72rem;padding:.12rem .45rem;cursor:pointer;font-family:inherit}
+.code-tools button:hover{color:var(--text);border-color:var(--primary)}
+.chip{display:inline-flex;align-items:center;gap:.35rem;border:1px solid var(--border);background:transparent;
+      color:var(--muted);border-radius:20px;padding:.3rem .75rem;font-size:.83rem;font-weight:600;cursor:pointer;font-family:inherit}
+.chip:hover{color:var(--text)}
+.chip[aria-pressed="true"]{background:rgba(99,102,241,.22);border-color:var(--primary);color:var(--text)}
+.chip .dot{width:.5rem;height:.5rem;border-radius:50%;background:var(--border)}
+.chip[aria-pressed="true"] .dot{background:var(--success)}
+.icon-btn{background:var(--input);border:1px solid var(--border);color:var(--text);border-radius:8px;
+          padding:.45rem .7rem;cursor:pointer;font-size:.9rem;font-family:inherit}
+.icon-btn:hover{background:var(--border)}
+.inline{display:inline-flex;gap:.4rem;align-items:center;font-size:.83rem;color:var(--muted)}
+.inline select,.inline input{width:auto;padding:.3rem .5rem;font-size:.83rem}
+.hint{font-size:.8rem;color:var(--muted);margin-top:.45rem;min-height:1.1rem}
+.hint.warn{color:var(--warning)}
+.mem{font-size:.85rem}
+.mem h3{font-size:.8rem;color:var(--muted);margin:.8rem 0 .35rem;text-transform:uppercase;letter-spacing:.04em}
+.mem h3:first-child{margin-top:0}
+.mem ul{list-style:none;margin:0;padding:0}
+.mem li{display:flex;gap:.35rem;align-items:flex-start;padding:.3rem 0;border-bottom:1px solid var(--input)}
+.mem li:last-child{border-bottom:none}
+.mem li span{flex:1;min-width:0;word-wrap:break-word}
+.mem li button{background:none;border:none;color:var(--muted);cursor:pointer;padding:0 .15rem;font-size:.85rem}
+.mem li button:hover{color:var(--text)}
+.mem .summary{white-space:pre-wrap;color:var(--text)}
+.mem .empty{color:var(--muted)}
+/* On a short screen the title and its explanation cost a fifth of the height before anything is
+   shown; the page is recognisable without them. */
+@media (max-height: 800px){
+  main{padding-top:1rem}
+  main > h1, main > h1 + p.sub{display:none}
+}
+.lightbox{position:fixed;inset:0;background:rgba(0,0,0,.85);display:flex;align-items:center;justify-content:center;
+          z-index:50;cursor:zoom-out;padding:1rem}
+.lightbox img{max-width:100%;max-height:100%;border-radius:8px}
+/* --- narrow windows ------------------------------------------------------------------------
+   Last in the file on purpose. These override the component rules above at the same specificity,
+   and CSS settles a tie by taking the one written later - so above them they did nothing at all.
+
+   The sidebar becomes a drawer over the conversation rather than a band stacked above it.
+   Stacking pushes the composer off the bottom of the screen, and the composer is the point of
+   the page; it would also hand the phone a second scrollbar, which this layout exists to avoid. */
+.drawer-btn{display:none;font-size:1.15rem;line-height:1}
+.scrim{display:none}
+@media (max-width: 860px){
+  .pg{grid-template-columns:1fr}
+  .side{position:fixed;top:0;bottom:0;left:0;width:min(20rem, 86vw);z-index:30;
+        transform:translateX(-100%);transition:transform .2s ease;
+        box-shadow:0 0 2rem rgba(0,0,0,.55)}
+  .pg.open .side{transform:none}
+  .scrim{display:block;position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:20;
+         opacity:0;pointer-events:none;transition:opacity .2s}
+  .pg.open .scrim{opacity:1;pointer-events:auto}
+  .drawer-btn{display:inline-flex}
+  .topbar .column{display:flex;align-items:center;gap:.55rem}
+  .column{padding:0 1rem}
+  .transcript{padding-top:1rem}
+  .msg.user{max-width:92%}
+  /* No hover on a phone, so the things you need when a message failed are simply there */
+  .turn-tools{opacity:1}
+  .thumbs img{height:4.5rem;max-width:7rem}
+  .generated img{max-height:min(42vh, 20rem)}
+  /* Two tiles across on a phone rather than one enormous one */
+  .found .grid{grid-template-columns:repeat(auto-fill,minmax(6.5rem,1fr));gap:.4rem}
+  .found figure img{height:6rem}
+  .file{max-width:100%}
+  /* 16px, or iOS zooms the whole page the moment the composer is tapped. The rule in base.html
+     cannot do this on its own: .composer textarea is the more specific selector. */
+  .composer textarea{max-height:30vh;font-size:16px}
+  .chip{padding:.28rem .62rem;font-size:.78rem}
+  .tools{gap:.35rem}
+  /* The help line and the model picker each get a line of their own, instead of fighting over one
+     and leaving the help line a column of single words. The help line is clipped after two: it is
+     guidance, and on a phone the conversation is worth more than the guidance. */
+  .foot{flex-wrap:wrap;align-items:flex-start;gap:.2rem .75rem;min-height:0}
+  .foot .hint{flex:1 0 100%;order:1;white-space:normal;display:-webkit-box;-webkit-line-clamp:2;
+              -webkit-box-orient:vertical;overflow:hidden;line-height:1.35}
+  .foot .picker{flex:1 0 100%;order:2;justify-content:flex-start;min-width:0}
+  .foot .picker select{max-width:100%;overflow:hidden;text-overflow:ellipsis}
+}
+@media (prefers-reduced-motion: reduce){
+  .side,.scrim{transition:none}
+}
+</style>
+
+<div class="pg" id="pg">
+  <div class="scrim" id="scrim"></div>
+  <aside class="side">
+    <div class="group">
+      <div class="head">
+        <h2>Conversations</h2>
+        <button class="linkish" id="newChat" title="Start a new conversation">+ New</button>
+      </div>
+      <div class="convs" id="convs"><span class="muted" style="padding:0 .5rem">Loading&hellip;</span></div>
+    </div>
+
+    <div class="group" id="memoryCard" hidden>
+      <div class="head">
+        <h2>Memory</h2>
+        <button class="linkish" id="addNote" title="Add something to remember">+ Note</button>
+      </div>
+      <div class="mem" id="memory"></div>
+    </div>
+
+    <details class="tuning">
+      <summary>Settings</summary>
+      <div class="body">
+        <label>
+          <span class="lbl">System prompt</span>
+          <textarea id="system" rows="3" placeholder="You are a helpful assistant."></textarea>
+        </label>
+        <label>
+          <span class="lbl">Temperature <span id="tempValue" class="muted">0.7</span></span>
+          <input type="range" id="temperature" min="0" max="2" step="0.1" value="0.7" style="padding:0">
+        </label>
+        <label style="margin-bottom:0">
+          <span class="lbl">Max tokens</span>
+          <input type="number" id="maxTokens" value="8192" min="1" max="32768">
+        </label>
+      </div>
+    </details>
+  </aside>
+
+  <section class="main">
+    <header class="topbar">
+      <div class="column">
+        <button class="linkish drawer-btn" id="drawerToggle" aria-expanded="false"
+                aria-label="Show conversations">&#9776;</button>
+        <span class="chatTitle" id="chatTitle">New conversation</span>
+      </div>
+    </header>
+
+    <div class="transcript" id="transcript">
+      <div class="column">
+        <div id="error" class="note err" hidden></div>
+        <div class="chat" id="chat">
+          <p class="muted" id="empty">Ask a question, or describe a picture to create.</p>
+        </div>
+      </div>
+    </div>
+
+    <div class="composer-wrap">
+      <div class="column">
+        <div class="composer" id="composer">
+          <div class="thumbs" id="pending"></div>
+          <textarea id="prompt" rows="1"
+                    title="Enter to send, Shift+Enter for a new line"
+                    placeholder="Ask anything&hellip;"></textarea>
+          <div class="tools">
+            <button class="chip" id="toolSearch" data-tool="web_search" aria-pressed="false" hidden
+                    title="Search the web and answer from the results, with sources"><span class="dot"></span>Web search</button>
+            <button class="chip" id="toolVision" data-tool="vision" aria-pressed="false" hidden
+                    title="Attach images for the model to look at"><span class="dot"></span>Image understanding</button>
+            <button class="chip" id="toolMaps" data-tool="maps" aria-pressed="false" hidden
+                    title="Find places, routes, and what is along the way, on OpenStreetMap"><span class="dot"></span>Maps</button>
+            <button class="chip" id="toolImage" data-tool="image_generation" aria-pressed="false" hidden
+                    title="Create a new image, or edit an attached one, instead of chatting"><span class="dot"></span>Image generation</button>
+            <span class="attach-wrap">
+              <button class="icon-btn" id="attach" aria-haspopup="menu" aria-expanded="false"
+                      title="Attach something (you can also paste or drop it)">+</button>
+              <div class="attach-menu" id="attachMenu" role="menu" hidden>
+                <button role="menuitem" data-pick="camera">
+                  <span class="glyph">&#128247;</span>
+                  <span><b>Take a photo</b><small>Use the camera now</small></span></button>
+                <button role="menuitem" data-pick="picture">
+                  <span class="glyph">&#128444;</span>
+                  <span><b>Picture</b><small>JPEG, PNG, HEIC, TIFF&hellip;</small></span></button>
+                <button role="menuitem" data-pick="document">
+                  <span class="glyph">&#128196;</span>
+                  <span><b>Document</b><small>PDF, Word, Excel, text</small></span></button>
+              </div>
+            </span>
+            <input type="file" id="fileInput" multiple hidden
+                   accept="image/*,.heic,.heif,.avif,.tif,.tiff,.bmp,.pdf,.docx,.xlsx,.xlsm,.txt,.md,.csv,.tsv,.log,.json,.yaml,.yml,.xml,.rst">
+            <input type="file" id="pictureInput" multiple hidden
+                   accept="image/*,.heic,.heif,.avif,.tif,.tiff,.bmp">
+            <input type="file" id="paperInput" multiple hidden
+                   accept=".pdf,.docx,.xlsx,.xlsm,.txt,.md,.markdown,.csv,.tsv,.log,.json,.yaml,.yml,.xml,.rst,.ini,.properties">
+            <input type="file" id="cameraInput" accept="image/*" capture="environment" hidden>
+            <span class="inline" id="sizeRow" hidden>Shape
+              <select id="imageSize"></select>
+            </span>
+            <span class="inline" id="blurRow" hidden title="How much the background is blurred">Blur
+              <input type="range" id="blurStrength" min="0.2" max="3" step="0.1" value="1"
+                     style="width:5rem">
+            </span>
+            <span class="inline" id="backdropRow" hidden
+                  title="The colour to put behind the person, for a passport or visa photo">Backdrop
+              <select id="backdropColour">
+                <option value="">from your words</option>
+                <option value="white">white</option>
+                <option value="off-white">off-white</option>
+                <option value="light blue">light blue</option>
+                <option value="sky blue">sky blue</option>
+                <option value="blue">blue</option>
+                <option value="dark blue">dark blue</option>
+                <option value="light grey">light grey</option>
+                <option value="grey">grey</option>
+                <option value="red">red</option>
+                <option value="cream">cream</option>
+                <option value="custom">pick a colour…</option>
+              </select>
+              <input type="color" id="backdropCustom" value="#ffffff" hidden
+                     style="width:2rem;height:1.6rem;padding:0;border:none;background:none">
+            </span>
+            <span class="inline" id="strengthRow" hidden title="How far the edit may move away from the original">Change
+              <input type="range" id="strength" min="0.2" max="1" step="0.05" value="0.8" style="width:5rem">
+              <span id="strengthValue">0.80</span>
+            </span>
+            <span class="spacer"></span>
+            <button class="btn btn-danger btn-sm" id="stop" hidden>Stop</button>
+            <button class="btn btn-sm" id="send">Send</button>
+          </div>
+        </div>
+        <div class="note err" id="composerError" hidden></div>
+        <div class="foot">
+          <span class="hint" id="modeHint"></span>
+          <span class="status" id="deciding" hidden>
+            <span class="spinner"></span><span>Working out what you are asking for&hellip;</span>
+          </span>
+          <span class="picker">
+            <select id="model" title="Model"></select>
+            <label id="thinkingRow" class="inline" hidden title="Slower, better reasoning">
+              <input type="checkbox" id="thinking" style="width:auto">think
+            </label>
+          </span>
+        </div>
+      </div>
+    </div>
+  </section>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+const chat = document.getElementById('chat');
+
+const transcript = document.getElementById('transcript');
+
+// A conversation is opened to see where it got to, so it opens at its end rather than its start.
+// Pictures arrive after the text and change the height as they do, so the bottom is held until they
+// have settled - and let go the moment the reader scrolls for themselves, because someone who has
+// started reading higher up should not be dragged back down by a picture finishing.
+function openAtLatest(){
+  const settling = new AbortController();
+  const stick = () => { transcript.scrollTop = transcript.scrollHeight; };
+  const release = () => settling.abort();
+  for(const event of ['wheel', 'touchmove', 'keydown']){
+    window.addEventListener(event, release, {signal: settling.signal, passive: true});
+  }
+  settling.signal.addEventListener('abort', () => clearTimeout(timer));
+  stick();
+  requestAnimationFrame(stick);
+  for(const image of chat.querySelectorAll('img')){
+    if(image.complete) continue;
+    image.addEventListener('load', stick, {signal: settling.signal});
+    image.addEventListener('error', stick, {signal: settling.signal});
+  }
+  // Nothing is still loading after this, and holding on any longer would fight the reader
+  const timer = setTimeout(release, 4000);
+}
+
+// Follows a streaming answer, but only while the reader is already at the bottom: pulling the view
+// away from someone who has scrolled up to read something is worse than not following at all.
+function followAlong(){
+  const fromBottom = transcript.scrollHeight - transcript.scrollTop - transcript.clientHeight;
+  if(fromBottom < 260) transcript.scrollTop = transcript.scrollHeight;
+}
+
+// A picture is taller than the screen more often than not, and its bottom edge is not the part worth
+// showing: put the top of the message just under the header instead.
+function revealFrom(box){
+  // From the question, not the answer: the two belong on the screen together
+  const anchor = box.previousElementSibling?.classList.contains('user') ? box.previousElementSibling : box;
+  const top = transcript.scrollTop + anchor.getBoundingClientRect().top
+              - transcript.getBoundingClientRect().top - 12;
+  const pairHeight = box.getBoundingClientRect().bottom - anchor.getBoundingClientRect().top;
+  if(pairHeight > transcript.clientHeight - 40 || top < transcript.scrollTop){
+    transcript.scrollTo({top, behavior: 'smooth'});
+  }else{
+    followAlong();
+  }
+}
+const modelSelect = document.getElementById('model');
+const systemBox = document.getElementById('system');
+const promptBox = document.getElementById('prompt');
+const JSON_HEADERS = {'Content-Type': 'application/json'};
+let history = [];        // turns sent to the model: [{role, content, images: [file ids]}]
+let models = {};         // model id -> {owned_by, capabilities}
+let conversations = [];
+let currentId = null;    // saved conversation being continued, if any
+let savedSystem = '';    // system prompt stored with the current conversation
+let controller = null;
+let caps = {web_search: false, vision: false, image_generation: false, maps: false,
+            image_sizes: [], max_upload_mb: 10};
+let tools = {web_search: false, vision: false, image_generation: false, maps: false};
+let pending = [];        // images attached to the next message: [{id, url, name, kind}]
+
+function showError(message){
+  for(const id of ['error', 'composerError']){
+    const box = document.getElementById(id);
+    box.textContent = message || '';
+    box.hidden = !message;
+  }
+  // The one by the message box is the one that gets seen; it goes away on its own
+  clearTimeout(showError.timer);
+  if(message) showError.timer = setTimeout(() => {
+    document.getElementById('composerError').hidden = true;
+  }, 12000);
+}
+
+function errorText(e){
+  return typeof e === 'string' ? e : (e && e.message) || 'something went wrong';
+}
+
+function relativeTime(iso){
+  const seconds = (Date.now() - new Date(iso).getTime()) / 1000;
+  if(seconds < 60) return 'just now';
+  if(seconds < 3600) return Math.floor(seconds / 60) + 'm ago';
+  if(seconds < 86400) return Math.floor(seconds / 3600) + 'h ago';
+  if(seconds < 86400 * 7) return Math.floor(seconds / 86400) + 'd ago';
+  return new Date(iso).toLocaleDateString();
+}
+
+const canSee = id => (models[id]?.capabilities || []).includes('vision');
+// With Auto chosen there is no model until the router has picked one, so anything that needs a name
+// now asks for one: chosenModel is what the last routing decision settled on, falling back to the
+// first model that can see, since a picture is the only case where the wrong choice simply fails.
+// Everything that asks "is there a picture attached" means a picture, not a PDF
+const attachedPictures = () => pending.filter(p => !p.document);
+const choosing = () => modelSelect.value === 'auto';
+let chosenModel = '';
+function currentModel(){
+  if(!choosing()) return modelSelect.value;
+  if(chosenModel && models[chosenModel]) return chosenModel;
+  const names = Object.keys(models);
+  return names.find(n => canSee(n)) || names[0] || '';
+}
+
+// --- models -------------------------------------------------------------
+
+async function loadModels(){
+  try{
+    const data = (await api('/v1/models')).data;
+    models = Object.fromEntries(data.map(m => [m.id, m]));
+    if(!data.length){
+      modelSelect.innerHTML = '<option value="">no models available</option>';
+      showError('You do not have access to any models yet. Ask a manager or admin to grant you some.');
+      document.getElementById('send').disabled = true;
+      return;
+    }
+    modelSelect.innerHTML = '<option value="auto">Auto · best for the question</option>'
+      + data.map(m =>
+        `<option value="${escapeHtml(m.id)}">${escapeHtml(m.id)}${canSee(m.id) ? '  · sees images' : ''}</option>`).join('');
+    let remembered = null;
+    try{ remembered = localStorage.getItem('pg.model'); }catch(e){}
+    if(remembered === 'auto' || (remembered && models[remembered])) modelSelect.value = remembered;
+    syncModel();
+  }catch(e){ showError('Could not load models: ' + errorText(e)); }
+}
+
+function syncModel(){
+  // Only our llama.cpp profiles honour the thinking switch
+  document.getElementById('thinkingRow').hidden = models[modelSelect.value]?.owned_by !== 'llamacpp';
+  syncTools();
+}
+modelSelect.addEventListener('change', () => {
+  try{ localStorage.setItem('pg.model', modelSelect.value); }catch(e){}
+  syncModel();
+});
+document.getElementById('temperature').addEventListener('input', e =>
+  document.getElementById('tempValue').textContent = e.target.value);
+
+// --- tools ----------------------------------------------------------------
+
+async function loadCapabilities(){
+  try{ caps = await api('/chat/capabilities'); }catch(e){ return; }
+  let saved = {};
+  try{ saved = JSON.parse(localStorage.getItem('pg.tools') || '{}'); }catch(e){}
+  for(const name of Object.keys(tools)) tools[name] = !!(caps[name] && saved[name]);
+  document.getElementById('toolSearch').hidden = !caps.web_search;
+  document.getElementById('toolVision').hidden = !caps.vision;
+  document.getElementById('toolImage').hidden = !caps.image_generation;
+  document.getElementById('toolMaps').hidden = !caps.maps;
+  document.getElementById('imageSize').innerHTML = caps.image_sizes.map(s =>
+    `<option value="${s}">${s[0].toUpperCase() + s.slice(1)}</option>`).join('');
+  syncTools();
+}
+
+function setTool(name, on){
+  tools[name] = on;
+  try{ localStorage.setItem('pg.tools', JSON.stringify(tools)); }catch(e){}
+  syncTools();
+}
+
+document.querySelectorAll('.chip[data-tool]').forEach(chip =>
+  chip.addEventListener('click', () => setTool(chip.dataset.tool, !tools[chip.dataset.tool])));
+
+function imageMode(){ return tools.image_generation && caps.image_generation; }
+function canAttach(){ return (tools.vision && caps.vision) || imageMode(); }
+// Qwen-Image-Edit follows instructions and can use extra reference images; the Flux fallback re-renders one
+const qwenEdits = () => caps.edit_engine === 'qwen';
+const editLimit = () => qwenEdits() ? (caps.max_edit_images || 3) : 1;
+
+function syncTools(){
+  document.querySelectorAll('.chip[data-tool]').forEach(chip =>
+    chip.setAttribute('aria-pressed', String(!!tools[chip.dataset.tool])));
+  // Always there: what is inside the menu changes with the tools, the way in does not
+  document.getElementById('sizeRow').hidden = !imageMode() || attachedPictures().length > 0;
+  document.getElementById('strengthRow').hidden = !imageMode() || pending.length === 0 || qwenEdits();
+  document.getElementById('blurRow').hidden = !imageMode() || pending.length === 0 || !caps.photo_blur;
+  document.getElementById('backdropRow').hidden =
+    !imageMode() || pending.length === 0 || !caps.photo_backdrop;
+  // Switching the picture tools off drops the pictures, not the documents: a document never
+  // needed those tools to be on in the first place
+  if(!canAttach() && attachedPictures().length){
+    for(const tile of attachedPictures()) if(tile.url) URL.revokeObjectURL(tile.url);
+    pending = pending.filter(p => p.document);
+    renderPending();
+  }
+
+  const hint = document.getElementById('modeHint');
+  const model = currentModel();
+  hint.className = 'hint';
+  if(imageMode()){
+    promptBox.placeholder = pending.length ? 'How should the picture change?' : 'Describe a picture to create…';
+    if(!pending.length){
+      // Drawing and finding are asked for in nearly the same words, so the difference is worth
+      // spelling out where the asking happens
+      const finds = caps.routing && tools.web_search && caps.media_search;
+      hint.textContent = caps.routing
+        ? 'Ask for a picture and one is created with Flux'
+          + (finds ? '; ask to see something real and real photographs of it are found instead' : '')
+          + '; ask a question and you get an answer. Attach an image (or press Edit on one) to change it.'
+        : 'Sending creates an image with Flux instead of chatting. Attach an image (or press Edit on one) to change it.';
+    }else if(qwenEdits()){
+      hint.textContent = 'Say what to do: "remove the noise", "blur the background", '
+        + (caps.photo_backdrop ? '"white background for my passport", ' : '')
+        + 'or a change like "make it night".'
+        + (pending.length > 1 ? ' Refer to the pictures as image 1 (the one edited), image 2 and image 3.'
+                              : ` You can attach up to ${editLimit() - 1} more picture(s) to use, e.g. "put the hat from image 2 on the person in image 1".`);
+    }else{
+      hint.textContent = 'Sending re-renders the attached image with Flux. Lower "Change" keeps more of the original.';
+    }
+    modelSelect.title = '';
+    return;
+  }
+  promptBox.placeholder = 'Ask anything…';
+  const notes = [];
+  if(tools.web_search) notes.push(caps.routing
+    ? 'Questions that need current information are searched on the web and cited'
+      + (caps.media_search ? '; asking to see something real finds photographs of it.' : '.')
+    : 'Answers will search the web first and cite their sources.');
+  if(tools.vision && caps.vision){
+    if(model && !canSee(model)){
+      hint.className = 'hint warn';
+      notes.push(`${model} cannot see images; pick a model marked "sees images" to send pictures.`);
+    }else{
+      notes.push('Attach, paste or drop images for the model to look at.');
+    }
+  }
+  hint.textContent = notes.join(' ');
+  modelSelect.title = model && canSee(model) ? `${model} can read images` : model;
+}
+
+document.getElementById('strength').addEventListener('input', e =>
+  document.getElementById('strengthValue').textContent = parseFloat(e.target.value).toFixed(2));
+
+// --- attachments ------------------------------------------------------------
+
+const DOCUMENT_GLYPH = {pdf: '\u{1F4D5}', docx: '\u{1F4C4}', xlsx: '\u{1F4CA}'};
+
+function paperGlyph(tile){
+  const name = (tile.name || '').toLowerCase();
+  if(name.endsWith('.pdf')) return DOCUMENT_GLYPH.pdf;
+  if(name.endsWith('.docx')) return DOCUMENT_GLYPH.docx;
+  if(name.endsWith('.xlsx') || name.endsWith('.xlsm')) return DOCUMENT_GLYPH.xlsx;
+  return '\u{1F4DD}';
+}
+
+function renderPending(){
+  document.getElementById('pending').innerHTML = pending.map((f, i) => f.document ? `
+    <div class="paper${f.uploading ? ' busy' : ''}" data-tile="${i}">
+      <span class="glyph">${paperGlyph(f)}</span>
+      <span class="what">
+        <span class="who">${escapeHtml(f.name || 'document')}</span>
+        <span class="size">${f.uploading ? uploadLabel(f)
+                             : (f.characters ? Math.round(f.characters / 1000) + 'k characters read'
+                                             : 'attached')}</span>
+      </span>
+      <button data-unattach="${i}" title="${f.uploading ? 'Stop uploading' : 'Remove'}">&times;</button>
+    </div>` : `
+    <div class="pending${f.uploading ? ' busy' : ''}" data-tile="${i}">
+      <img src="${f.url}" alt="${escapeHtml(f.name || 'image')}"${f.uploading ? '' : ` data-zoom="${f.url}"`}>
+      ${f.uploading ? `<span class="sending">
+           <span class="track"><div style="width:${Math.round((f.progress || 0) * 100)}%"></div></span>
+           <span class="says">${uploadLabel(f)}</span>
+         </span>` : ''}
+      ${imageMode() && !f.uploading ? `<span class="tag">${i === 0 ? 'edit' : 'image ' + (i + 1)}</span>` : ''}
+      <button data-unattach="${i}" title="${f.uploading ? 'Stop uploading' : 'Remove'}">&times;</button>
+    </div>`).join('');
+  syncTools();
+}
+
+function uploadLabel(tile){
+  const percent = Math.round((tile.progress || 0) * 100);
+  // Once the bytes are all sent the server still has to read it, which for a HEIC means converting it
+  return percent >= 100 ? 'finishing\u2026'
+         : `${percent}%${tile.megabytes >= 2 ? ` of ${tile.megabytes.toFixed(0)} MB` : ''}`;
+}
+
+// Only the one tile is redrawn while bytes move, so the others do not flicker
+function updateTile(tile){
+  const index = pending.indexOf(tile);
+  const node = document.querySelector(`[data-tile="${index}"]`);
+  if(!node) return renderPending();
+  if(tile.document){
+    node.querySelector('.size').textContent = uploadLabel(tile);
+    return;
+  }
+  node.querySelector('.track div').style.width = Math.round((tile.progress || 0) * 100) + '%';
+  node.querySelector('.says').textContent = uploadLabel(tile);
+}
+
+document.getElementById('pending').addEventListener('click', e => {
+  const button = e.target.closest('[data-unattach]');
+  if(!button) return;
+  const tile = pending[Number(button.dataset.unattach)];
+  if(tile?.uploading && tile.request) tile.request.abort();   // the catch removes the tile
+  else { pending.splice(Number(button.dataset.unattach), 1); renderPending(); }
+});
+
+// fetch cannot say how far an upload has got, and a photograph over a tunnel takes long enough that
+// something has to. XMLHttpRequest reports the bytes as they go.
+function sendFile(file, onProgress, onStart){
+  return new Promise((resolve, reject) => {
+    const form = new FormData();
+    form.append('file', file, file.name || 'pasted.png');
+    const request = new XMLHttpRequest();
+    request.open('POST', '/chat/files');
+    request.upload.addEventListener('progress', e => {
+      if(e.lengthComputable) onProgress(e.loaded / e.total);
+    });
+    request.addEventListener('load', () => {
+      if(request.status === 401){ location.href = '/login'; reject(new Error('signed out')); return; }
+      let body = {};
+      try{ body = JSON.parse(request.responseText); }catch(e){}
+      if(request.status >= 400) reject(new Error(body.detail || `HTTP ${request.status}`));
+      else resolve(body);
+    });
+    request.addEventListener('error', () => reject(new Error('the upload did not reach the server')));
+    request.addEventListener('abort', () => reject(new Error('cancelled')));
+    if(onStart) onStart(request);          // so it can be stopped while it is still going
+    request.send(form);
+  });
+}
+
+const PICTURE = /\.(heic|heif|avif|tiff?|bmp)$/i;
+const PAPER = /\.(pdf|docx|xlsx|xlsm|txt|md|markdown|csv|tsv|log|json|ya?ml|xml|html?|rst|ini|properties)$/i;
+const looksLikePicture = f => f.type.startsWith('image/') || PICTURE.test(f.name || '');
+const looksLikePaper = f => PAPER.test(f.name || '') || f.type === 'application/pdf';
+
+async function uploadImages(files){
+  const pictures = files.filter(looksLikePicture);
+  const papers = files.filter(f => !looksLikePicture(f) && looksLikePaper(f));
+  const neither = files.filter(f => !looksLikePicture(f) && !looksLikePaper(f));
+  // A document is only text by the time it reaches a model, so it needs neither toggle
+  if(pictures.length && !canAttach()){
+    showError('Turn on "Image understanding" or "Image generation" to attach pictures. Documents '
+              + 'can be attached either way.');
+    if(!papers.length) return;
+  }
+  if(neither.length){
+    showError(neither.length === 1
+      ? `${neither[0].name} is neither a picture nor a document this server can read.`
+      : 'Some of those are neither pictures nor documents this server can read.');
+  }
+  for(const file of [...(canAttach() ? pictures : []), ...papers]){
+    if(file.size > caps.max_upload_mb * 1024 * 1024){
+      showError(`${file.name} is ${(file.size / 1048576).toFixed(0)} MB; the limit is `
+                + `${caps.max_upload_mb} MB. Export it smaller and try again.`);
+      continue;
+    }
+    const paper = !looksLikePicture(file);
+    // The picture appears straight away, read from the file on disk, and fills as it uploads
+    const tile = {uploading: true, progress: 0, name: file.name || (paper ? 'document' : 'image'),
+                  document: paper, url: paper ? '' : URL.createObjectURL(file),
+                  megabytes: file.size / 1048576};
+    // Only pictures compete for the edit slots; a document is never one of the images being edited
+    if(!paper && imageMode() && pending.filter(p => !p.document).length >= editLimit()){
+      const papersKept = pending.filter(p => p.document);
+      pending = [...pending.filter(p => !p.document).slice(0, editLimit() - 1), ...papersKept];
+    }
+    pending.push(tile);
+    renderPending();
+    try{
+      const stored = await sendFile(file,
+        fraction => { tile.progress = fraction; updateTile(tile); },
+        request => { tile.request = request; });
+      tile.request = null;
+      if(tile.url) URL.revokeObjectURL(tile.url);
+      Object.assign(tile, stored, {uploading: false, document: paper});
+      tile.url = stored.url;
+      renderPending();
+    }catch(e){
+      pending = pending.filter(p => p !== tile);
+      if(tile.url) URL.revokeObjectURL(tile.url);
+      renderPending();
+      if(e.message !== 'cancelled') showError(`Could not attach ${tile.name}: ` + errorText(e));
+    }
+
+  }
+}
+
+// The camera, for a photograph taken now rather than found on disk. getUserMedia needs a secure
+// page and the person's permission; when either is missing, the file input with capture= is handed
+// to the phone's own camera app instead, which is the thing that actually works on iOS.
+const canOpenCamera = () => !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia
+                               && window.isSecureContext);
+
+function showCamera(stream){
+  const panel = document.createElement('div');
+  panel.className = 'camera';
+  panel.innerHTML = `
+    <video autoplay playsinline muted></video>
+    <div class="row">
+      <button class="btn btn-secondary" data-cancel>Cancel</button>
+      <button class="shutter" data-shoot title="Take the photo"></button>
+      <button class="btn btn-secondary" data-flip hidden>Flip</button>
+    </div>`;
+  document.body.appendChild(panel);
+  const video = panel.querySelector('video');
+  video.srcObject = stream;
+
+  const close = () => {
+    stream.getTracks().forEach(track => track.stop());
+    panel.remove();
+    document.removeEventListener('keydown', onKey);
+  };
+  const onKey = e => { if(e.key === 'Escape') close(); };
+  document.addEventListener('keydown', onKey);
+  panel.querySelector('[data-cancel]').addEventListener('click', close);
+  panel.addEventListener('click', e => { if(e.target === panel) close(); });
+
+  panel.querySelector('[data-shoot]').addEventListener('click', () => {
+    const canvas = document.createElement('canvas');
+    canvas.width = video.videoWidth || 1280;
+    canvas.height = video.videoHeight || 720;
+    canvas.getContext('2d').drawImage(video, 0, 0, canvas.width, canvas.height);
+    canvas.toBlob(blob => {
+      close();
+      if(!blob){ showError('The camera gave back an empty picture.'); return; }
+      const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-');
+      uploadImages([new File([blob], `photo-${stamp}.jpg`, {type: 'image/jpeg'})]);
+    }, 'image/jpeg', 0.92);
+  });
+}
+
+async function openCamera(){
+  if(!canAttach()){
+    showError('Turn on "Image understanding" to take a photo for the model to look at.');
+    return;
+  }
+  if(!canOpenCamera()){
+    document.getElementById('cameraInput').click();      // the phone's own camera app
+    return;
+  }
+  try{
+    // The back camera by preference: this is for photographing a thing, not oneself
+    const stream = await navigator.mediaDevices.getUserMedia({
+      video: {facingMode: {ideal: 'environment'}, width: {ideal: 1920}}, audio: false});
+    showCamera(stream);
+  }catch(e){
+    // Refused, or there is no camera. Either way the file input still gets a photo on a phone.
+    const refused = e && (e.name === 'NotAllowedError' || e.name === 'SecurityError');
+    showError(refused
+      ? 'The camera was not allowed. Give this page camera permission in your browser, or attach a '
+        + 'photo with +.'
+      : 'No camera was available, so the file picker is open instead.');
+    if(!refused) document.getElementById('cameraInput').click();
+  }
+}
+
+// --- the + menu --------------------------------------------------------------------------------
+const attachButton = document.getElementById('attach');
+const attachMenu = document.getElementById('attachMenu');
+
+function openAttachMenu(open){
+  // A picture needs one of the picture tools on; a document never did, so it stays available and
+  // the two that are not say why rather than vanishing and leaving the menu looking broken
+  const why = 'Turn on "Image understanding" or "Image generation" first';
+  for(const item of attachMenu.querySelectorAll('[data-pick]')){
+    const needsTools = item.dataset.pick !== 'document';
+    item.disabled = needsTools && !canAttach();
+    item.title = item.disabled ? why : '';
+  }
+  attachMenu.hidden = !open;
+  attachButton.setAttribute('aria-expanded', String(open));
+  if(open) attachMenu.querySelector('[data-pick]:not(:disabled)')?.focus();
+}
+
+attachButton.addEventListener('click', e => {
+  e.stopPropagation();
+  openAttachMenu(attachMenu.hidden);
+});
+
+attachMenu.addEventListener('click', e => {
+  const item = e.target.closest('[data-pick]');
+  if(!item || item.disabled) return;
+  openAttachMenu(false);
+  if(item.dataset.pick === 'camera') return openCamera();
+  document.getElementById(item.dataset.pick === 'picture' ? 'pictureInput' : 'paperInput').click();
+});
+
+document.addEventListener('click', () => { if(!attachMenu.hidden) openAttachMenu(false); });
+document.addEventListener('keydown', e => {
+  if(e.key === 'Escape' && !attachMenu.hidden){ openAttachMenu(false); attachButton.focus(); }
+});
+
+for(const id of ['fileInput', 'pictureInput', 'paperInput', 'cameraInput']){
+  document.getElementById(id).addEventListener('change', e => {
+    uploadImages([...e.target.files]);
+    e.target.value = '';
+  });
+}
+promptBox.addEventListener('paste', e => {
+  const files = [...(e.clipboardData?.files || [])].filter(f => f.type.startsWith('image/'));
+  if(files.length){ e.preventDefault(); uploadImages(files); }
+});
+// Anywhere on the page, not only on the message box: a file dropped elsewhere used to be opened by
+// the browser, which navigated away from the playground and looked like the upload failing.
+const composer = document.getElementById('composer');
+let dragDepth = 0;
+document.addEventListener('dragenter', e => {
+  if(![...(e.dataTransfer?.types || [])].includes('Files')) return;
+  e.preventDefault();
+  if(dragDepth++ === 0) composer.classList.add('drop');
+});
+document.addEventListener('dragover', e => {
+  if([...(e.dataTransfer?.types || [])].includes('Files')) e.preventDefault();
+});
+document.addEventListener('dragleave', () => { if(--dragDepth <= 0){ dragDepth = 0; composer.classList.remove('drop'); } });
+document.addEventListener('drop', e => {
+  if(![...(e.dataTransfer?.types || [])].includes('Files')) return;
+  e.preventDefault();
+  dragDepth = 0; composer.classList.remove('drop');
+  uploadImages([...e.dataTransfer.files]);
+});
+
+// Full-size view for any thumbnail or generated image
+document.addEventListener('click', e => {
+  const zoom = e.target.closest('[data-zoom]');
+  if(!zoom) return;
+  const box = document.createElement('div');
+  box.className = 'lightbox';
+  box.innerHTML = `<img src="${zoom.dataset.zoom}" alt="">`;
+  box.addEventListener('click', () => box.remove());
+  document.body.appendChild(box);
+});
+document.addEventListener('keydown', e => { if(e.key === 'Escape') document.querySelector('.lightbox')?.remove(); });
+
+// --- memory ---------------------------------------------------------------
+
+let memory = {enabled: false, user: [], conversation: null};
+
+async function loadMemory(){
+  try{
+    memory = await api('/chat/memory' + (currentId ? `?conversation_id=${currentId}` : ''));
+  }catch(e){ return; }
+  document.getElementById('memoryCard').hidden = !memory.enabled;
+  renderMemory();
+}
+
+function renderMemory(){
+  const target = document.getElementById('memory');
+  const notes = memory.user.map(n => `
+    <li>
+      <span data-edit-memory="${n.id}" title="${n.source === 'manual' ? 'Written by you' : 'Noticed in a chat'}">${escapeHtml(n.content)}</span>
+      <button data-forget="${n.id}" title="Forget this">&times;</button>
+    </li>`).join('');
+  const summary = memory.conversation;
+  target.innerHTML = `
+    <h3>About you</h3>
+    ${notes ? `<ul>${notes}</ul>` : '<p class="empty" style="margin:0">Nothing yet. Notes appear as you chat.</p>'}
+    ${currentId ? `<h3>This conversation</h3>${summary
+      ? `<div class="summary" data-edit-memory="${summary.id}" title="Click to edit">${escapeHtml(summary.content)}</div>
+         <div style="text-align:right"><button data-forget="${summary.id}" class="btn btn-sm btn-secondary" style="margin-top:.4rem">Forget</button></div>`
+      : '<p class="empty" style="margin:0">Summarised once this chat gets long.</p>'}` : ''}`;
+}
+
+document.getElementById('memory').addEventListener('click', async e => {
+  const forget = e.target.closest('[data-forget]');
+  if(forget){
+    if(!confirm('Forget this? It will no longer be used in your chats.')) return;
+    try{
+      await api(`/chat/memory/${forget.dataset.forget}`, {method: 'DELETE'});
+      loadMemory();
+    }catch(err){ showError(errorText(err)); }
+    return;
+  }
+  const edit = e.target.closest('[data-edit-memory]');
+  if(!edit) return;
+  const updated = prompt('Edit what is remembered', edit.textContent.trim());
+  if(updated === null || !updated.trim()) return;
+  try{
+    await api(`/chat/memory/${edit.dataset.editMemory}`, {method: 'PATCH', headers: JSON_HEADERS,
+                                                          body: JSON.stringify({content: updated.trim()})});
+    loadMemory();
+  }catch(err){ showError(errorText(err)); }
+});
+
+document.getElementById('addNote').addEventListener('click', async () => {
+  const content = prompt('What should be remembered about you in every chat?');
+  if(!content || !content.trim()) return;
+  try{
+    await api('/chat/memory', {method: 'POST', headers: JSON_HEADERS,
+                               body: JSON.stringify({content: content.trim(), scope: 'user'})});
+    loadMemory();
+  }catch(err){ showError(errorText(err)); }
+});
+
+// --- conversation list ----------------------------------------------------
+
+async function loadConversations(){
+  const target = document.getElementById('convs');
+  try{
+    conversations = await api('/chat/conversations');
+    target.innerHTML = conversations.length ? conversations.map(c => `
+      <div class="conv ${c.id === currentId ? 'active' : ''}" data-open="${c.id}" title="${escapeHtml(c.title)}">
+        <div style="flex:1;min-width:0">
+          <div class="title">${escapeHtml(c.title)}</div>
+          <div class="when">${relativeTime(c.updated_at)} &middot; ${c.message_count} msg</div>
+        </div>
+        <button class="del" data-delete="${c.id}" title="Delete">&times;</button>
+      </div>`).join('')
+      : '<span class="muted" style="padding:0 .5rem;font-size:.88rem">No saved conversations yet.</span>';
+  }catch(e){ target.innerHTML = `<span class="muted">Could not load: ${escapeHtml(errorText(e))}</span>`; }
+}
+
+function resetChat(){
+  currentId = null;
+  history = [];
+  savedSystem = '';
+  systemBox.value = '';
+  pending = []; renderPending();
+  document.getElementById('chatTitle').textContent = 'New conversation';
+  chat.innerHTML = '<p class="muted" id="empty">Pick a model and say something.</p>';
+  loadConversations();
+  loadMemory();
+}
+
+/* Puts a saved conversation back on the screen, and rebuilds what the model is told
+   from it. Its own function because the answer grouping is the fiddly part of this
+   page and needs to be testable without a conversation, a server or a login. */
+function fillTranscript(messages){
+  history = [];
+  // Answers filed under the same question are siblings: the last one asked for is the one
+  // shown, and the arrows on it reach the ones before. Anything written before answers knew
+  // which question they belonged to has no filing, so it stands on its own exactly as it did.
+  const answered = [];
+  for(const m of messages){
+    const extra = m.attachments || {};
+    const attached = (extra.images || []).map(i => ({id: i.file_id, document: !!i.document}));
+    const imageIds = attached.map(f => f.id);
+    if(m.role === 'user'){
+      // A picture that went to the image tools is kept so the question can be asked again, but is
+      // not sent on to a model as though it were part of the conversation - which is how the turn
+      // was sent in the first place
+      const forTools = extra.mode === 'image' || extra.mode === 'photo';
+      const box = addUserMessage(m.content, imageIds.map(fileUrl), attached, !forTools);
+      box._messageId = m.id;
+      box.dataset.message = m.id;
+      history.push({role: 'user', content: m.content, images: box._images});
+    }else{
+      const turn = extra.answers_to || null;
+      const box = answerBox(turn, m.model || (extra.map ? 'OpenStreetMap'
+                                              : extra.media ? 'Picture search' : ''));
+      if(extra.map) renderMap(box, extra.map);
+      else if(extra.media) renderMedia(box, extra.media);
+      else if(extra.generated) renderGenerated(box, extra.generated, m.stats);
+      else renderAssistant(box, m.content, m.reasoning, m.stats, extra.sources, m.html);
+      box._text = m.content;
+      const earlier = turn ? answered.find(a => a.turn === turn) : null;
+      if(earlier){
+        // Another answer to a question already answered: it takes the place of the one before
+        // it in what the model is told, and joins it behind the arrows
+        history[earlier.index] = {role: 'assistant', content: m.content};
+        box._historyIndex = earlier.index;
+      }else{
+        box._historyIndex = history.length;
+        history.push({role: 'assistant', content: m.content});
+        if(turn) answered.push({turn, index: box._historyIndex});
+      }
+      showAnswer(box);
+    }
+  }
+  refreshTurnTools();
+}
+
+async function openConversation(id){
+  if(controller) return;
+  try{
+    const conversation = await api(`/chat/conversations/${id}`);
+    currentId = conversation.id;
+    savedSystem = conversation.system_prompt || '';
+    systemBox.value = savedSystem;
+    if(conversation.model && models[conversation.model]){
+      modelSelect.value = conversation.model;
+      syncModel();
+    }
+    document.getElementById('chatTitle').textContent = conversation.title;
+    chat.innerHTML = '';
+    history = [];
+    fillTranscript(conversation.messages);
+    if(!conversation.messages.length) chat.innerHTML = '<p class="muted" id="empty">Empty conversation.</p>';
+    openAtLatest();
+    attachToRunningJob(conversation.id);
+    if(conversation.model && !models[conversation.model]){
+      showError(`This conversation used ${conversation.model}, which you no longer have access to. Pick another model to continue.`);
+    }else{
+      showError('');
+    }
+    loadConversations();
+    loadMemory();
+  }catch(e){ showError('Could not open conversation: ' + errorText(e)); }
+}
+
+// Work carries on in the gateway whether or not the tab that asked for it is still watching, so
+// reopening a conversation that is still busy joins the job rather than showing nothing. The stream
+// replays from its beginning, so an answer half-written while you were on another page is all there.
+async function attachToRunningJob(conversationId){
+  let job;
+  try{ ({job} = await api(`/chat/conversations/${conversationId}/job`)); }catch(e){ return; }
+  if(!job || currentId !== conversationId) return;
+
+  const box = addMessage('assistant', '', currentModel());
+  const body = box.querySelector('.body');
+  setStatus(box, job.kind === 'chat' ? 'Still writing the answer' : 'Still working on the picture');
+  let answer = '';
+  try{
+    const response = await fetch(`/chat/jobs/${job.id}/stream`);
+    if(!response.ok) throw new Error('gone');
+    await readEvents(response, chunk => {
+      const event = chunk.gateway;
+      if(event){
+        if(event.type === 'progress' || event.type === 'status'){
+          setStatus(box, event.stage || event.text,
+                    event.fraction != null ? event.fraction : undefined);
+        }
+        return;
+      }
+      const delta = chunk.choices?.[0]?.delta || {};
+      if(delta.content){
+        setStatus(box, null);
+        answer += delta.content;
+        body.textContent = answer;
+        followAlong();
+      }
+    });
+  }catch(e){
+    // The job ended while we were asking about it; the result is saved, so just show it
+  }
+  setStatus(box, null);
+  // Whatever it produced is in the database by now. Reopening renders it the same way as any other
+  // finished turn, instead of this function having to know how each kind of result is drawn.
+  if(currentId === conversationId) openConversation(conversationId);
+}
+
+document.getElementById('convs').addEventListener('click', async e => {
+  const del = e.target.closest('[data-delete]');
+  if(del){
+    e.stopPropagation();
+    if(!confirm('Delete this conversation? This cannot be undone.')) return;
+    try{
+      await api(`/chat/conversations/${del.dataset.delete}`, {method: 'DELETE'});
+      if(Number(del.dataset.delete) === currentId) resetChat(); else loadConversations();
+    }catch(err){ showError(errorText(err)); }
+    return;
+  }
+  const open = e.target.closest('[data-open]');
+  if(open) openConversation(Number(open.dataset.open));
+});
+
+document.getElementById('convs').addEventListener('dblclick', async e => {
+  const item = e.target.closest('[data-open]');
+  if(!item) return;
+  const conversation = conversations.find(c => c.id === Number(item.dataset.open));
+  const title = prompt('Rename conversation', conversation?.title || '');
+  if(!title || !title.trim()) return;
+  try{
+    await api(`/chat/conversations/${item.dataset.open}`, {method: 'PATCH', headers: JSON_HEADERS,
+                                                         body: JSON.stringify({title: title.trim()})});
+    if(Number(item.dataset.open) === currentId) document.getElementById('chatTitle').textContent = title.trim();
+    loadConversations();
+  }catch(err){ showError(errorText(err)); }
+});
+
+document.getElementById('newChat').addEventListener('click', () => { if(!controller) resetChat(); });
+
+// --- the sidebar, on a narrow screen ----------------------------------------------------------
+// It slides over the conversation instead of sitting beside it, so picking something from it is a
+// choice that is then done with: it closes behind you rather than staying in the way of the answer.
+const pg = document.getElementById('pg');
+const drawerToggle = document.getElementById('drawerToggle');
+
+function setDrawer(open){
+  pg.classList.toggle('open', open);
+  drawerToggle.setAttribute('aria-expanded', String(open));
+}
+
+drawerToggle.addEventListener('click', () => setDrawer(!pg.classList.contains('open')));
+document.getElementById('scrim').addEventListener('click', () => setDrawer(false));
+document.addEventListener('keydown', e => { if(e.key === 'Escape') setDrawer(false); });
+// Anything picked from the drawer has done its job; the wide layout never has it open to close
+document.querySelector('.side').addEventListener('click', e => {
+  if(e.target.closest('[data-open], #newChat')) setDrawer(false);
+});
+
+// --- rendering --------------------------------------------------------------
+
+const fileUrl = id => `/chat/files/${id}`;
+
+function addMessage(role, text, model){
+  document.getElementById('empty')?.remove();
+  const box = document.createElement('div');
+  box.className = `msg ${role}`;
+  box.innerHTML = `<div class="who">${role === 'user' ? 'You' : escapeHtml(model || currentModel())}</div><div class="body"></div>`;
+  box.querySelector('.body').textContent = text;
+  chat.appendChild(box);
+  followAlong();
+  return box;
+}
+
+function addUserMessage(text, imageUrls, files, asContext = true){
+  const box = addMessage('user', text);
+  box._text = text;
+  // The kind matters, not only the id: a document sent back through as a picture would be handed
+  // to the image tools, which would make nothing of it
+  box._files = files || [];
+  // A picture drawn from, or worked on by, a tool was that tool's input rather than something for
+  // a model to read later: those turns stay in the transcript as words. The files are kept either
+  // way, so that asking the question again has the same attachments to work with.
+  box._images = asContext ? box._files.map(f => f.id) : [];
+  if(imageUrls.length){
+    const strip = document.createElement('div');
+    strip.className = 'thumbs';
+    strip.innerHTML = imageUrls.map(u => `<img src="${u}" alt="attached image" data-zoom="${u}">`).join('');
+    box.insertBefore(strip, box.querySelector('.body'));
+  }
+  addTurnTools(box);
+  return box;
+}
+
+// --- what you can do with something you have already said --------------------
+
+function addTurnTools(box){
+  const row = document.createElement('div');
+  row.className = 'turn-tools';
+  row.innerHTML = '<button data-copy-turn>Copy</button><button data-resend>Ask again</button>';
+  row.querySelector('[data-copy-turn]').addEventListener('click', async e => {
+    await navigator.clipboard.writeText(box._text || '');
+    e.target.textContent = 'Copied';
+    setTimeout(() => { e.target.textContent = 'Copy'; }, 1500);
+  });
+  row.querySelector('[data-resend]').addEventListener('click', () => resend(box));
+  box.appendChild(row);
+  refreshTurnTools();
+}
+
+/* Every question can be asked again; only one that has been saved knows where to file the
+   answer. An older one says what it will cost, because everything after it answers something that
+   is about to change. */
+function refreshTurnTools(){
+  const asked = [...chat.querySelectorAll('.msg.user')];
+  asked.forEach((box, i) => {
+    const again = box.querySelector('[data-resend]');
+    if(!again) return;
+    again.hidden = !box._messageId;
+    const later = i === asked.length - 1 ? 0 : turnsAfter(box).length;
+    again.textContent = later ? 'Ask again from here' : 'Ask again';
+    again.title = later
+      ? `Asks this again and drops the ${later} message${later === 1 ? '' : 's'} that follow it`
+      : 'Asks this again and keeps the answer you already have';
+  });
+}
+
+/* Everything in the transcript from the next question onwards. The answers to this question are
+   not in it: asking again adds to those rather than replacing them. */
+function turnsAfter(box){
+  const later = [];
+  let reached = false;
+  for(const message of chat.querySelectorAll('.msg')){
+    if(message === box){ reached = true; continue; }
+    if(!reached) continue;
+    if(message.classList.contains('user')) later.push(message);
+    else if(later.length) later.push(message);
+  }
+  return later;
+}
+
+/* What the model is told, read back off the transcript. Rebuilt rather than patched whenever the
+   transcript itself changes, because an index into a list that has had a hole cut in it is the
+   kind of bookkeeping that goes wrong quietly. */
+function rebuildHistory(){
+  history = [];
+  for(const box of chat.querySelectorAll('.msg')){
+    if(box.dataset.failed) continue;           // a turn that produced nothing is not a turn
+    if(box.classList.contains('user')){
+      history.push({role: 'user', content: box._text || '', images: box._images || []});
+    }else if(!box.hidden){
+      box._historyIndex = history.length;
+      history.push({role: 'assistant', content: box._text || ''});
+    }
+  }
+  // The answers waiting behind the arrows share the place of the one on screen
+  for(const box of chat.querySelectorAll('.msg.assistant')){
+    if(!box.hidden) continue;
+    const reading = answersTo(box).find(other => !other.hidden);
+    if(reading) box._historyIndex = reading._historyIndex;
+  }
+}
+
+// --- more than one answer to the same question -------------------------------
+
+/* An answer knows which question it answers, so asking again keeps the previous one instead of
+   painting over it. Every answer to one question sits in the transcript as a sibling of the
+   others: the one being read is shown, the rest wait behind the arrows, and whichever is on
+   screen is the one the model is told about in the next turn. */
+function answersTo(box){
+  const turn = box && box.dataset.turn;
+  return turn ? [...chat.querySelectorAll(`.msg.assistant[data-turn="${turn}"]`)] : [box].filter(Boolean);
+}
+
+function recordAnswer(box, content, at){
+  // Asking again replaces the answer the model is told about, rather than reading as two replies
+  const index = at != null && at < history.length ? at : history.length;
+  history[index] = {role: 'assistant', content};
+  box._text = content;
+  for(const sibling of answersTo(box)) sibling._historyIndex = index;
+  showAnswer(box);
+  return index;
+}
+
+function showAnswer(box){
+  const group = answersTo(box);
+  for(const sibling of group) sibling.hidden = sibling !== box;
+  if(box._historyIndex != null && box._historyIndex < history.length){
+    history[box._historyIndex] = {role: 'assistant', content: box._text || ''};
+  }
+  group.forEach((sibling, i) => {
+    sibling.querySelector('.variants')?.remove();
+    if(group.length < 2) return;
+    const nav = document.createElement('span');
+    nav.className = 'variants';
+    nav.innerHTML = '<button title="The answer before this one">&lsaquo;</button>'
+                  + `<span>${i + 1}/${group.length}</span>`
+                  + '<button title="The next answer">&rsaquo;</button>';
+    const [back, forward] = nav.querySelectorAll('button');
+    back.disabled = i === 0;
+    forward.disabled = i === group.length - 1;
+    back.addEventListener('click', () => showAnswer(group[i - 1]));
+    forward.addEventListener('click', () => showAnswer(group[i + 1]));
+    sibling.querySelector('.who').appendChild(nav);
+  });
+}
+
+/* Runs the last question again. The question is already in the transcript and already saved, so
+   nothing is added to it; what comes back joins the answers that are already there. */
+async function resend(box){
+  if(controller || !box._messageId) return;
+  // An older question: everything after it was answering what this question led to, and once it
+  // is asked again none of that followed from anything. It goes, and it is said plainly first.
+  const later = turnsAfter(box);
+  if(later.length){
+    const questions = later.filter(m => m.classList.contains('user')).length;
+    if(!confirm(`Asking this again drops the ${later.length} message`
+                + `${later.length === 1 ? '' : 's'} after it`
+                + `${questions ? `, including ${questions} question${questions === 1 ? '' : 's'}` : ''}`
+                + '. This cannot be undone.')) return;
+    try{
+      await api(`/chat/conversations/${currentId}/messages/${box._messageId}/after`,
+                {method: 'DELETE'});
+    }catch(e){
+      showError('Could not drop the later messages, so nothing was asked again: ' + errorText(e));
+      return;
+    }
+    for(const message of later) message.remove();
+    rebuildHistory();
+    refreshTurnTools();
+    loadConversations();
+  }
+  // A turn that produced nothing left a note where its answer would have been. It is not an
+  // answer, so it is replaced rather than joining the ones you can page through.
+  for(let after = box.nextElementSibling; after; ){
+    const next = after.nextElementSibling;
+    if(after.dataset.failed) after.remove();
+    after = next;
+  }
+  const answered = chat.querySelectorAll(`.msg.assistant[data-turn="${box._messageId}"]`);
+  const replaceAt = answered.length ? answered[0]._historyIndex : null;
+  // The same attachments as the first time; they are uploaded already, so this is only a
+  // description of them
+  const images = (box._files || []).map(f => ({id: f.id, url: fileUrl(f.id),
+                                               name: f.name || 'attachment', document: !!f.document}));
+  await send({text: box._text || '', images, again: {messageId: box._messageId, replaceAt}});
+}
+
+const ACTION_LABELS = {chat: 'answered directly', search: 'searched the web',
+                       image: 'created an image', edit: 'edited the image',
+                       map: 'looked it up on the map', photos: 'found real pictures of it'};
+
+const CATEGORY_LABELS = {code: 'a coding question', vision: 'a question about the picture',
+                         reasoning: 'something to work out', long: 'a long read',
+                         general: 'a general question'};
+
+function noteDecision(box, decision){
+  if(!decision) return;
+  const who = box.querySelector('.who');
+  if(decision.decided_by !== 'the only tool switched on'){
+    const note = document.createElement('span');
+    note.className = 'muted';
+    note.style.fontWeight = '400';
+    note.textContent = ` · ${ACTION_LABELS[decision.action] || decision.action}`;
+    note.title = `Chosen by ${decision.decided_by || 'the gateway'} from the tools you switched on.` +
+                 ' Leave only one tool on to force it.';
+    who.appendChild(note);
+  }
+  // With Auto on, why this model and not one of the others is the thing worth saying
+  if(decision.model && decision.category){
+    const picked = document.createElement('span');
+    picked.className = 'muted';
+    picked.style.fontWeight = '400';
+    picked.textContent = ` · auto`;
+    picked.title = `Read as ${CATEGORY_LABELS[decision.category] || decision.category}`
+                 + ` by ${decision.category_by || 'the gateway'}, so ${decision.model} was picked`
+                 + `${decision.model_why ? ' (' + decision.model_why + ')' : ''}`
+                 + `${decision.considered ? ' out of ' + decision.considered + ' models' : ''}.`;
+    who.appendChild(picked);
+  }
+}
+
+function statsText(stats){
+  if(!stats) return '';
+  return [stats.ttft != null ? `${stats.ttft}s to first token` : '',
+          stats.tokens ? `${stats.tokens} tokens` : '',
+          stats.tps ? `${stats.tps} tok/s` : '',
+          stats.total != null ? `${stats.total}s total` : ''].filter(Boolean).join(' · ');
+}
+
+function setStatus(box, text, fraction){
+  let line = box.querySelector('.status');
+  if(!text){ line?.remove(); box.querySelector('.bar')?.remove(); return; }
+  if(!line){
+    line = document.createElement('div');
+    line.className = 'status';
+    line.innerHTML = '<span class="spinner"></span><span class="text"></span>';
+    box.insertBefore(line, box.querySelector('.body'));
+  }
+  line.querySelector('.text').textContent = text;
+  let bar = box.querySelector('.bar');
+  if(fraction != null){
+    if(!bar){
+      bar = document.createElement('div');
+      bar.className = 'bar';
+      bar.innerHTML = '<div></div>';
+      line.after(bar);
+    }
+    bar.firstElementChild.style.width = Math.round(fraction * 100) + '%';
+  }
+}
+
+function renderSources(box, sources){
+  if(!sources?.length) return;
+  const block = document.createElement('details');
+  block.className = 'sources';
+  block.innerHTML = `<summary>${sources.length} web source${sources.length > 1 ? 's' : ''}</summary><ol></ol>`;
+  block.querySelector('ol').innerHTML = sources.map(s =>
+    `<li><a href="${escapeHtml(s.url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(s.title)}</a></li>`).join('');
+  box.insertBefore(block, box.querySelector('.body'));
+}
+
+// Turns [1], [2] and grouped forms like [1, 2, 3] into links to the matching sources
+function fillWithCitations(target, text, sources){
+  target.textContent = '';
+  if(!sources?.length){ target.textContent = text; return; }
+  const parts = text.split(/\[(\d{1,2}(?:\s*[,;]\s*\d{1,2})*)\]/);
+  parts.forEach((part, i) => {
+    if(i % 2 === 0){ target.appendChild(document.createTextNode(part)); return; }
+    const numbers = part.split(/[,;]/).map(n => n.trim());
+    numbers.forEach((number, position) => {
+      const source = sources[Number(number) - 1];
+      if(!source){ target.appendChild(document.createTextNode(`[${number}]`)); }
+      else{
+        const link = document.createElement('a');
+        link.className = 'cite'; link.href = source.url; link.target = '_blank'; link.rel = 'noopener noreferrer';
+        link.title = `${source.title} — ${new URL(source.url).hostname}`;
+        link.textContent = `[${number}]`;
+        target.appendChild(link);
+      }
+      if(position < numbers.length - 1) target.appendChild(document.createTextNode(''));
+    });
+  });
+}
+
+function renderAssistant(box, content, reasoning, stats, sources, html){
+  const body = box.querySelector('.body');
+  renderSources(box, sources);
+  if(reasoning){
+    const think = document.createElement('details');
+    think.className = 'think';
+    think.innerHTML = '<summary>Show reasoning</summary><div style="white-space:pre-wrap"></div>';
+    think.querySelector('div').textContent = reasoning;
+    box.insertBefore(think, body);
+  }
+  const text = content || (reasoning ? '(the model only produced reasoning; raise max tokens)' : '(no answer)');
+  if(html && content){
+    // Markdown rendered by the gateway, which escapes anything the model wrote as HTML
+    body.classList.add('md');
+    body.innerHTML = html;
+    linkCitations(body, sources);
+  }else{
+    body.classList.remove('md');
+    fillWithCitations(body, text, sources);
+  }
+  offerFiles(box, content);
+  appendStats(box, stats);
+}
+
+// The gateway renders the finished answer; a half-written one is not valid Markdown
+async function renderedHtml(text){
+  if(!caps.markdown || !text) return null;
+  try{
+    return (await api('/chat/render', {method: 'POST', headers: JSON_HEADERS,
+                                       body: JSON.stringify({text})})).html;
+  }catch(e){ return null; }
+}
+
+// Turns [1], [2] inside rendered HTML into links, without rebuilding the HTML itself
+function linkCitations(root, sources){
+  if(!sources?.length) return;
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
+    acceptNode: node => node.parentElement.closest('a, code, pre')
+      ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT});
+  const targets = [];
+  while(walker.nextNode()) if(/\[\d{1,2}\]/.test(walker.currentNode.nodeValue)) targets.push(walker.currentNode);
+  for(const node of targets){
+    const replacement = document.createElement('span');
+    fillWithCitations(replacement, node.nodeValue, sources);
+    node.replaceWith(replacement);
+  }
+}
+
+// A language's usual file extension, for naming what is downloaded
+const CODE_SUFFIX = {python: 'py', py: 'py', javascript: 'js', js: 'js', typescript: 'ts', ts: 'ts',
+                     jsx: 'jsx', tsx: 'tsx', bash: 'sh', sh: 'sh', shell: 'sh', zsh: 'sh',
+                     json: 'json', yaml: 'yml', yml: 'yml', toml: 'toml', ini: 'ini', xml: 'xml',
+                     html: 'html', css: 'css', scss: 'scss', sql: 'sql', java: 'java', kotlin: 'kt',
+                     csharp: 'cs', cs: 'cs', cpp: 'cpp', c: 'c', go: 'go', rust: 'rs', rs: 'rs',
+                     php: 'php', ruby: 'rb', rb: 'rb', swift: 'swift', r: 'r', lua: 'lua',
+                     dockerfile: 'Dockerfile', makefile: 'Makefile', diff: 'diff', patch: 'patch',
+                     markdown: 'md', md: 'md', text: 'txt', properties: 'properties'};
+
+function download(text, filename, type = 'text/plain'){
+  const url = URL.createObjectURL(new Blob([text], {type: `${type};charset=utf-8`}));
+  const link = document.createElement('a');
+  link.href = url; link.download = filename;
+  document.body.appendChild(link); link.click(); link.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 10000);
+}
+
+function fileName(text, extension){
+  // The document's own title if it has one, otherwise the conversation's name
+  const heading = text.match(/^\s*#{1,3}\s+(.+)$/m);
+  const title = (heading ? heading[1] : document.getElementById('chatTitle').textContent || 'answer')
+    .replace(/[`*_#\[\]()]/g, '').trim();
+  const slug = title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 60);
+  return `${slug || 'answer'}.${extension}`;
+}
+
+// Long answers and code are things people keep, so they are offered as files rather than left to be
+// selected out of the page by hand.
+// A whole HTML document, rather than a snippet of markup
+const WHOLE_PAGE = /<!doctype html|<html[\s>]/i;
+
+// Shown in a sandboxed frame with no same-origin permission, so the page inside gets an opaque
+// origin of its own: it can run its own scripts, and it cannot read this page, its cookies, its
+// storage, or the conversation. A model writes this HTML, so it is treated as something a stranger
+// wrote - which it is.
+function preview(block, code){
+  const html = code.textContent;
+  const frame = document.createElement('div');
+  frame.className = 'preview';
+  frame.innerHTML = `
+    <div class="bar-top">
+      <span data-preview-state>Rendering&hellip;</span><span class="spacer"></span>
+      <button class="linkish" data-open-tab>Open in a tab</button>
+      <button class="linkish" data-show-code>Show the code</button>
+    </div>
+    <iframe sandbox="allow-scripts allow-modals" referrerpolicy="no-referrer" title="preview"></iframe>`;
+  const inner = frame.querySelector('iframe');
+  // Kept dark and labelled until it has painted, so that a frame which is slow, or which fails,
+  // never looks like a frame that rendered a blank page
+  const note = frame.querySelector('[data-preview-state]');
+  inner.style.visibility = 'hidden';
+  inner.addEventListener('load', () => {
+    inner.style.visibility = 'visible';
+    note.textContent = 'Preview';
+  }, {once: true});
+  inner.srcdoc = html;
+  // Grown to fit what is inside it, within reason: a worksheet is a page, not a thumbnail
+  inner.style.height = '60vh';
+
+  // A new tab can print, which a sandboxed frame cannot, and printing is usually the whole point
+  frame.querySelector('[data-open-tab]').addEventListener('click', () => {
+    const blob = new Blob([html], {type: 'text/html'});
+    const url = URL.createObjectURL(blob);
+    window.open(url, '_blank', 'noopener');
+    setTimeout(() => URL.revokeObjectURL(url), 60000);
+  });
+  const toggle = frame.querySelector('[data-show-code]');
+  toggle.addEventListener('click', () => {
+    const showCode = block.hidden;          // hidden now means the code is what we are switching to
+    block.hidden = !showCode;
+    inner.hidden = showCode;
+    toggle.textContent = showCode ? 'Show the page' : 'Show the code';
+  });
+  block.parentNode.insertBefore(frame, block);
+  block.hidden = true;
+  return frame;
+}
+
+// Tiles come from OpenStreetMap's own servers, which ask for attribution and for the traffic to
+// stay modest. Both are honoured: the credit is on every map, and a map is only drawn when one was
+// actually asked for.
+const TILES = 'https://tile.openstreetmap.org/{z}/{x}/{y}.png';
+const CREDIT = '&copy; <a href="https://www.openstreetmap.org/copyright" target="_blank" '
+             + 'rel="noopener">OpenStreetMap</a> contributors';
+
+function metres(distance){
+  return distance >= 1000 ? `${(distance / 1000).toFixed(1)} km away` : `${distance} m away`;
+}
+
+// Google's terms forbid drawing their places on anybody else's tiles, so when Google answered
+// the question Google's map draws it - and when that script will not load, the answer is the list
+// on its own. A map is not worth breaking the terms of the thing that found the places.
+let googleMapsReady = null;
+
+function loadGoogleMaps(key){
+  if(googleMapsReady) return googleMapsReady;
+  googleMapsReady = new Promise((resolve, reject) => {
+    if(window.google && window.google.maps) return resolve(window.google.maps);
+    const tag = document.createElement('script');
+    tag.async = true;
+    tag.src = `https://maps.googleapis.com/maps/api/js?key=${encodeURIComponent(key)}&libraries=geometry`;
+    tag.addEventListener('load', () => resolve(window.google && window.google.maps));
+    tag.addEventListener('error', () => reject(new Error('the Google Maps script did not load')));
+    document.head.appendChild(tag);
+  });
+  return googleMapsReady;
+}
+
+async function drawGoogleMap(canvas, answer){
+  const maps = await loadGoogleMaps(caps.google_maps_key);
+  if(!maps) throw new Error('Google Maps did not start');
+  const map = new maps.Map(canvas, {mapTypeControl: false, streetViewControl: false,
+                                    scrollwheel: false, zoom: 14,
+                                    center: {lat: answer.places[0]?.lat ?? answer.start?.lat ?? 0,
+                                             lng: answer.places[0]?.lon ?? answer.start?.lon ?? 0}});
+  const bounds = new maps.LatLngBounds();
+  const markers = [];
+  const pin = (place, label, colour) => {
+    const marker = new maps.Marker({
+      map, position: {lat: place.lat, lng: place.lon}, label: {text: String(label), color: '#fff'},
+      icon: {path: maps.SymbolPath.CIRCLE, scale: 11, fillColor: colour, fillOpacity: 1,
+             strokeColor: '#fff', strokeWeight: 2}});
+    const card = new maps.InfoWindow({content:
+      `<b>${escapeHtml(place.name)}</b><br>${escapeHtml(place.address || '')}`});
+    marker.addListener('click', () => card.open({anchor: marker, map}));
+    bounds.extend(marker.getPosition());
+    return marker;
+  };
+  if(answer.route && answer.route.polyline && maps.geometry){
+    const path = maps.geometry.encoding.decodePath(answer.route.polyline);
+    new maps.Polyline({map, path, strokeColor: '#6366f1', strokeWeight: 5, strokeOpacity: .85});
+    path.forEach(point => bounds.extend(point));
+  }
+  if(answer.start && answer.route) pin(answer.start, 'A', '#10b981');
+  if(answer.end && answer.route) pin(answer.end, 'B', '#ef4444');
+  answer.places.forEach((place, i) => markers.push(pin(place, i + 1, '#6366f1')));
+  if(!bounds.isEmpty()) map.fitBounds(bounds, 30);
+  return {markers, focus: marker => {
+    map.setCenter(marker.getPosition());
+    map.setZoom(Math.max(map.getZoom(), 15));
+    maps.event.trigger(marker, 'click');
+  }};
+}
+
+function renderMap(box, answer){
+  const body = box.querySelector('.body');
+  body.textContent = '';
+  const frame = document.createElement('div');
+  frame.className = 'mapbox';
+
+  const bits = [];
+  if(answer.route){
+    bits.push(`<b>${answer.route.distance_km} km</b>`,
+              `about <b>${answer.route.minutes} min</b> by ${escapeHtml(answer.route.mode)}`);
+  }
+  if(answer.from_your_location) bits.push('from where you are');
+  else if(answer.start) bits.push(`from ${escapeHtml(answer.start.name)}`);
+  // When the name had to be shortened to find anything, say so: it is the difference between
+  // the place asked for and the place found, and only the reader can judge whether it is right
+  const loose = (answer.end && answer.end.matched) || (answer.places[0] || {}).matched;
+  if(loose) bits.push(`<span class="muted">matched on “${escapeHtml(loose)}”</span>`);
+  if(answer.end) bits.push(`to ${escapeHtml(answer.end.name)}`);
+  if(!answer.route && answer.places.length){
+    bits.push(`<b>${answer.places.length}</b> place${answer.places.length === 1 ? '' : 's'} found`
+              + (answer.searched_within_km ? ` within ${answer.searched_within_km} km` : ''));
+    // Ordered by the journey rather than the straight line, and honest about where they came from
+    if(answer.places.some(p => p.road_minutes != null)) bits.push('shortest journey first');
+    if(answer.searched_the_web){
+      bits.push('<span class="muted">the map was thin, so the web was asked too</span>');
+    }
+    if(answer.provider === 'google') bits.push('<span class="muted">from Google Maps</span>');
+  }
+  if(!answer.route && !answer.places.length) bits.push('nothing found');
+  frame.innerHTML = `<div class="map-summary">${bits.join('<span class="muted">&middot;</span>')}
+      <span class="spacer"></span>
+      ${answer.google_route ? `<a href="${answer.google_route}" target="_blank" rel="noopener">Open in Google Maps</a>` : ''}
+    </div>
+    ${answer.route && answer.route.note
+      ? `<p class="note warn" style="margin:0;border-radius:0;border-width:0 0 1px 0;font-size:.82rem">
+           ${escapeHtml(answer.route.note)}</p>` : ''}
+    <div class="canvas"></div>`;
+  body.appendChild(frame);
+
+  const list = document.createElement('ol');
+  list.className = 'map-places';
+  list.innerHTML = answer.places.map((place, i) => `
+    <li data-place="${i}">
+      <span class="pin">${i + 1}</span>
+      <span class="about">
+        <span class="name">${escapeHtml(place.name)}</span>
+        <span class="where">${escapeHtml(place.address || place.kind || '')}` +
+        `${place.metres_away != null ? ' \u00b7 ' + metres(place.metres_away) : ''}` +
+        `${place.road_minutes != null
+            ? ` \u00b7 <b>${place.road_minutes} min</b> (${place.road_km} km by road)` : ''}` +
+        `${place.from_the_web ? ' \u00b7 <i>found on the web</i>' : ''}</span>
+      </span>
+      <span class="links">
+        ${place.directions ? `<a href="${place.directions}" target="_blank" rel="noopener">Directions</a>` : ''}
+        ${place.osm ? `<a href="${place.osm}" target="_blank" rel="noopener">OSM</a>` : ''}
+        <a href="${place.google}" target="_blank" rel="noopener">Google</a>
+      </span>
+    </li>`).join('');
+  body.appendChild(list);
+
+  const canvas = frame.querySelector('.canvas');
+
+  // Google answered, so Google draws. No falling back to the other one's tiles.
+  if((answer.tiles || caps.maps_tiles) === 'google'){
+    drawGoogleMap(canvas, answer).then(({markers, focus}) => {
+      list.addEventListener('click', e => {
+        const row = e.target.closest('[data-place]');
+        if(row && !e.target.closest('a') && markers[Number(row.dataset.place)]){
+          focus(markers[Number(row.dataset.place)]);
+        }
+      });
+    }).catch(e => {
+      canvas.style.height = 'auto';
+      canvas.innerHTML = '<p class="note warn" style="margin:0">' +
+        escapeHtml(`The Google map could not be drawn (${e.message}). The places are listed below; `
+                   + 'they cannot be shown on another map, because the terms of the service that '
+                   + 'found them do not allow it.') + '</p>';
+    });
+    return;
+  }
+
+  if(typeof L === 'undefined'){
+    canvas.textContent = 'The map library did not load.';
+    return;
+  }
+  const map = L.map(canvas, {scrollWheelZoom: false});
+  L.tileLayer(TILES, {maxZoom: 19, attribution: CREDIT}).addTo(map);
+
+  const markers = [];
+  const pin = (place, label, colour) => {
+    const marker = L.circleMarker([place.lat, place.lon], {
+      radius: 9, weight: 2, color: '#fff', fillColor: colour, fillOpacity: 1});
+    marker.bindPopup(`<b>${escapeHtml(place.name)}</b><br>${escapeHtml(place.address || '')}`);
+    marker.addTo(map);
+    marker.bindTooltip(String(label), {permanent: true, direction: 'center', className: 'map-pin'});
+    return marker;
+  };
+  if(answer.route) L.polyline(answer.route.line, {color: '#6366f1', weight: 5, opacity: .85}).addTo(map);
+  if(answer.start && answer.route) pin(answer.start, 'A', '#10b981');
+  if(answer.end && answer.route) pin(answer.end, 'B', '#ef4444');
+  answer.places.forEach((place, i) => markers.push(pin(place, i + 1, '#6366f1')));
+
+  if(answer.bounds) map.fitBounds(answer.bounds, {padding: [28, 28], maxZoom: 16});
+  else if(answer.places.length) map.setView([answer.places[0].lat, answer.places[0].lon], 14);
+  // The map is drawn into a box that has only just appeared, so it has to be told to measure again
+  setTimeout(() => map.invalidateSize(), 60);
+
+  list.addEventListener('click', e => {
+    const row = e.target.closest('[data-place]');
+    if(!row || e.target.closest('a')) return;
+    const marker = markers[Number(row.dataset.place)];
+    if(marker){ map.setView(marker.getLatLng(), Math.max(map.getZoom(), 15)); marker.openPopup(); }
+  });
+}
+
+// A question about "near me" or "the way there from here" cannot be answered by any amount of
+// geocoding: only this browser knows where its owner is, and only if they allow it. The prompt is
+// the browser's own, it is only raised when a question actually needs it, and a refusal is taken
+// as a refusal - the question is sent anyway and comes back asking for a place name instead.
+const NEEDS_ME = /\b(near|around|close to|next to|nearest to)\s+(me|here|us)\b|\bnear\s?by\b/i;
+const NEEDS_ME_TOO = /\bfrom here\b|\baround here\b|\bmy (current )?(location|position)\b|\bcurrent location\b|\bwhere am i\b|\bnearest\b|\bclosest\b/i;
+const LOCATION_GOOD_FOR = 5 * 60 * 1000;      // a fix is reused for a few minutes, not re-asked
+
+let lastFix = null;
+
+// Naming somewhere to go without saying where from means from here, which is what every map
+// application assumes and what "I want to go to X" plainly means
+const WANTS_TO_GO = /\b(want|need|would like) to (go|get) to\b|\btake me to\b|\bhow (do i|to) get to\b|\b(route|directions?|way) to\b/i;
+const SAYS_WHERE_FROM = /\bfrom\s+\S/i;
+
+// "Masjids around" is "masjids around me". The word on its own means here unless the sentence goes
+// on to say where - "restaurants near Banani" names the where and must not be answered from here.
+const VAGUELY_HERE = /\b(around|nearby|near|closest|nearest|local)\b/i;
+const NAMES_A_PLACE = /\b(?:in|near|around|at|by|close to)\s+(?:the\s+)?[A-Z぀-鿿][\w぀-鿿'-]*/;
+
+function needsMyLocation(text, earlier){
+  const both = earlier ? `${earlier} ${text}` : text;
+  if(NEEDS_ME.test(both) || NEEDS_ME_TOO.test(both)) return true;
+  if(VAGUELY_HERE.test(both) && !NAMES_A_PLACE.test(both)) return true;
+  return WANTS_TO_GO.test(text) && !SAYS_WHERE_FROM.test(text);
+}
+
+function myLocation(){
+  if(lastFix && Date.now() - lastFix.at < LOCATION_GOOD_FOR) return Promise.resolve(lastFix);
+  if(!navigator.geolocation || !window.isSecureContext) return Promise.resolve(null);
+  return new Promise(resolve => {
+    navigator.geolocation.getCurrentPosition(
+      position => {
+        lastFix = {lat: position.coords.latitude, lon: position.coords.longitude,
+                   accuracy: Math.round(position.coords.accuracy || 0), at: Date.now()};
+        resolve(lastFix);
+      },
+      () => resolve(null),                     // refused, or the device could not get a fix
+      {enableHighAccuracy: true, timeout: 12000, maximumAge: LOCATION_GOOD_FOR});
+  });
+}
+
+// A refusal is not final: the browser will ask again next time, and iOS in particular often
+// wants the ask to come from a button rather than from sending a message.
+function offerLocation(box, text, decision){
+  const again = document.createElement('button');
+  again.className = 'btn btn-sm';
+  again.style.marginTop = '.6rem';
+  again.textContent = 'Use my location';
+  again.addEventListener('click', async () => {
+    again.disabled = true;
+    again.textContent = 'Asking\u2026';
+    const fix = await myLocation();
+    again.remove();
+    if(!fix){
+      showError('Your browser did not give a location. On iPhone: Settings > Privacy & Security > '
+                + 'Location Services, turn it on for your browser, then allow this site.');
+      return;
+    }
+    box.remove();
+    sendMap(text, decision, Promise.resolve(fix));
+  });
+  box.querySelector('.body').appendChild(document.createElement('br'));
+  box.querySelector('.body').appendChild(again);
+}
+
+async function sendMap(text, decision, fix, again){
+  showError('');
+  try{
+    await ensureConversation(text, currentModel());
+  }catch(e){
+    showError('Could not save the conversation: ' + errorText(e));
+    return;
+  }
+  if(!again){ promptBox.value = ''; fitComposer(); history.push({role: 'user', content: text, images: []}); }
+  const asked = await askedNow(text, [], [], null, again);
+
+  const box = answerBox(again ? again.messageId : asked?._messageId, 'OpenStreetMap');
+  noteDecision(box, decision);
+  busy(true);
+  let here = null;
+  const previous = [...history].reverse().find(h => h.role === 'user' && h.content !== text);
+  if(fix){
+    setStatus(box, 'Asking your browser where you are');
+    here = await fix;
+  }else if(needsMyLocation(text, previous ? previous.content : '')){
+    setStatus(box, 'Asking your browser where you are');
+    here = await myLocation();
+  }
+  setStatus(box, 'Looking it up on the map');
+  let answer = null;
+  let trouble = '';
+  try{
+    // The question before this one goes too: "find only the masjids" is a correction of it, and
+    // on its own it says nothing about where
+    const before = previous;
+    answer = await api('/chat/map', {method: 'POST', headers: JSON_HEADERS,
+                                     body: JSON.stringify({message: text, conversation_id: currentId,
+                                                           earlier: before ? before.content : '',
+                                                           here_lat: here ? here.lat : null,
+                                                           here_lon: here ? here.lon : null})});
+  }catch(e){
+    trouble = errorText(e);
+    showError(trouble);
+  }finally{
+    busy(false);
+    setStatus(box, null);
+  }
+  if(!answer){
+    // The reason, in the answer, where the question is - not only in a banner at the top
+    failedTurn(box, trouble || 'Nothing came back from the map.');
+    if(/where you are|your location/i.test(trouble)) offerLocation(box, text, decision);
+    return;
+  }
+  renderMap(box, answer);
+  const named = answer.places.slice(0, 5).map(p => p.name).join(', ');
+  const said = answer.route
+    ? `(${answer.route.distance_km} km, about ${answer.route.minutes} minutes`
+      + `${named ? '; ' + named : ''})`
+    : `(${named || 'nothing found'})`;
+  recordAnswer(box, said, again ? again.replaceAt : null);
+  await saveMessage({role: 'assistant', content: said, model: 'OpenStreetMap',
+                     attachments: {map: answer, answers_to: box.dataset.turn ? Number(box.dataset.turn) : null}});
+  revealFrom(box);
+  loadConversations();
+}
+
+async function sendMedia(text, decision, again){
+  showError('');
+  try{
+    await ensureConversation(text, currentModel());
+  }catch(e){
+    showError('Could not save the conversation: ' + errorText(e));
+    return;
+  }
+  if(!again){ promptBox.value = ''; fitComposer(); history.push({role: 'user', content: text, images: []}); }
+  const asked = await askedNow(text, [], [], null, again);
+
+  const box = answerBox(again ? again.messageId : asked?._messageId, 'Picture search');
+  noteDecision(box, decision);
+  busy(true);
+  setStatus(box, 'Working out what to look for');
+  // The search, the fetching and the checking take a while, and one unchanging line for half a
+  // minute reads like something has hung
+  const later = setTimeout(() => setStatus(box, 'Searching, then checking each picture is really there'), 3000);
+  let answer = null;
+  let trouble = '';
+  try{
+    answer = await api('/chat/media', {method: 'POST', headers: JSON_HEADERS,
+                                       body: JSON.stringify({message: text, kind: 'auto',
+                                                             conversation_id: currentId})});
+  }catch(e){
+    trouble = errorText(e);
+    showError(trouble);
+  }finally{
+    clearTimeout(later);
+    busy(false);
+    setStatus(box, null);
+  }
+  if(!answer){
+    failedTurn(box, trouble || 'Nothing came back from the picture search.');
+    return;
+  }
+  renderMedia(box, answer);
+  const counted = (answer.groups || []).filter(g => g.items.length)
+    .map(g => `${g.items.length} of ${g.subject}`).join(', ');
+  const said = counted
+    ? `(found ${answer.kind === 'videos' ? 'videos' : 'pictures'} on the web: ${counted})`
+    : `(no ${answer.kind === 'videos' ? 'videos' : 'pictures'} found for `
+      + `${(answer.groups || []).map(g => g.subject).join(', ') || text})`;
+  recordAnswer(box, said, again ? again.replaceAt : null);
+  await saveMessage({role: 'assistant', content: said, model: 'Picture search',
+                     attachments: {media: answer, answers_to: box.dataset.turn ? Number(box.dataset.turn) : null}});
+  revealFrom(box);
+  loadConversations();
+}
+
+function offerFiles(box, text){
+  if(!text) return;
+  const body = box.querySelector('.body');
+  for(const block of body.querySelectorAll('pre')){
+    const code = block.querySelector('code');
+    const language = (code?.className.match(/language-([\w+#-]+)/) || [])[1] || '';
+    const suffix = CODE_SUFFIX[language.toLowerCase()] || 'txt';
+    const tools = document.createElement('div');
+    tools.className = 'code-tools';
+    tools.innerHTML = `<button data-copy-code>Copy</button>
+      <button data-save-code>Save as .${suffix.replace(/^[A-Z]/, m => m.toLowerCase())}</button>`;
+    tools.querySelector('[data-copy-code]').addEventListener('click', async e => {
+      await navigator.clipboard.writeText(code.textContent);
+      e.target.textContent = 'Copied';
+      setTimeout(() => { e.target.textContent = 'Copy'; }, 1500);
+    });
+    tools.querySelector('[data-save-code]').addEventListener('click', () => {
+      const named = /^[A-Z]/.test(suffix) ? suffix : fileName(text, suffix);
+      download(code.textContent, named);
+    });
+    block.parentNode.insertBefore(tools, block);
+    // A complete page is worth seeing as a page. A fragment is not: it would render as a scrap
+    // of markup with no styles around it, which tells you less than the markup does.
+    // An unlabelled block counts too: models often emit a bare fence around a whole page
+    if((suffix === 'html' || !language) && WHOLE_PAGE.test(code.textContent)) preview(block, code);
+  }
+
+  // A document, rather than a reply: long, or with headings to navigate by
+  const headings = body.querySelectorAll('h1, h2, h3').length;
+  if(text.length < 1200 && headings < 2) return;
+  const name = fileName(text, 'md');
+  const card = document.createElement('div');
+  card.className = 'file';
+  card.innerHTML = `
+    <span class="icon">&#128196;</span>
+    <span class="about">
+      <span class="name"></span>
+      <span class="kind">Document &middot; MD &middot; ${(text.length / 1024).toFixed(1)} KB</span>
+    </span>
+    <button class="btn btn-sm btn-secondary" data-copy-all>Copy</button>
+    <button class="btn btn-sm" data-save-all>Download</button>`;
+  card.querySelector('.name').textContent = name;
+  card.querySelector('[data-save-all]').addEventListener('click', () => download(text, name, 'text/markdown'));
+  card.querySelector('[data-copy-all]').addEventListener('click', async e => {
+    await navigator.clipboard.writeText(text);
+    e.target.textContent = 'Copied';
+    setTimeout(() => { e.target.textContent = 'Copy'; }, 1500);
+  });
+  box.appendChild(card);
+}
+
+function appendStats(box, stats){
+  const text = typeof stats === 'string' ? stats : statsText(stats);
+  if(!text) return;
+  const line = document.createElement('div');
+  line.className = 'stats';
+  line.textContent = text;
+  box.appendChild(line);
+}
+
+// --- pictures found rather than drawn ---------------------------------------
+
+function mediaTile(item, video){
+  const page = escapeHtml(item.page || '');
+  const title = escapeHtml(item.title || '');
+  const site = escapeHtml(item.site || 'source');
+  const caption = `<figcaption><div class="name" title="${title}">${title}</div>` +
+    `<a class="from" href="${page}" target="_blank" rel="noopener noreferrer nofollow"` +
+    ` title="Open ${site}">${site}${item.author ? ' · ' + escapeHtml(item.author) : ''}</a></figcaption>`;
+  if(video){
+    return `<figure><a class="play" href="${page}" target="_blank" rel="noopener noreferrer nofollow">` +
+      `<img src="${item.url}" alt="${title}" loading="lazy">` +
+      `${item.length ? `<span class="clip">${escapeHtml(item.length)}</span>` : ''}</a>${caption}</figure>`;
+  }
+  return `<figure class="shot"><img src="${item.url}" alt="${title}" data-zoom="${item.url}"` +
+         ` loading="lazy">${caption}</figure>`;
+}
+
+function renderMedia(box, answer){
+  const video = answer.kind === 'videos';
+  box.querySelector('.who').textContent = video ? 'Video search' : 'Picture search';
+  const body = box.querySelector('.body');
+  body.className = 'body found';
+  body.innerHTML = '';
+  const shown = (answer.groups || []).filter(group => group.items.length);
+  for(const group of shown){
+    // The heading matters: it is what was actually searched for, which is how you tell a search
+    // that misread the question from one that simply found nothing
+    const heading = document.createElement('div');
+    heading.className = 'subject';
+    heading.textContent = group.subject;
+    body.appendChild(heading);
+    const grid = document.createElement('div');
+    grid.className = 'grid';
+    grid.innerHTML = group.items.map(item => mediaTile(item, video)).join('');
+    body.appendChild(grid);
+  }
+  const note = document.createElement('p');
+  note.className = 'where-from';
+  if(!shown.length){
+    note.textContent = answer.note || 'Nothing came back for that.';
+  }else{
+    note.textContent = video
+      ? 'Found on the web. Each one opens where it was published.'
+      : 'Found on the web, not drawn. Each one links to the page it came from, which is worth a '
+        + 'look before trusting that it is the right thing.';
+  }
+  body.appendChild(note);
+}
+
+function renderGenerated(box, generated, stats){
+  box.querySelector('.who').textContent = generated.source_file_id ? 'Image edit' : 'Image generation';
+  const body = box.querySelector('.body');
+  body.className = 'body generated';
+  body.innerHTML = `
+    <img src="${fileUrl(generated.file_id)}" alt="${escapeHtml(generated.prompt)}" data-zoom="${fileUrl(generated.file_id)}">
+    <div class="caption"></div>
+    <div class="actions">
+      <button class="btn btn-sm btn-secondary" data-edit="${generated.file_id}">Edit this image</button>
+      <a class="btn btn-sm btn-secondary" style="text-decoration:none" href="${fileUrl(generated.file_id)}"
+         download="image-${generated.seed || generated.file_id}.png">Download</a>
+    </div>`;
+  body.querySelector('.caption').textContent = generated.prompt;
+  if(generated.asked && generated.asked !== generated.prompt){
+    body.querySelector('.caption').title = 'You asked: ' + generated.asked;
+  }
+  if(stats) appendStats(box, stats.total != null ? `${stats.total}s` + (generated.seed ? ` · seed ${generated.seed}` : '') : '');
+}
+
+chat.addEventListener('click', e => {
+  const caption = e.target.closest('.generated .caption');
+  if(caption) caption.classList.toggle('open');
+});
+
+// "Edit this image" puts a generated image into the composer as the one to change
+chat.addEventListener('click', e => {
+  const edit = e.target.closest('[data-edit]');
+  if(!edit || controller) return;
+  if(!caps.image_generation){ showError('Image generation is turned off on this server.'); return; }
+  const id = Number(edit.dataset.edit);
+  pending = [{id, url: fileUrl(id), name: 'image', kind: 'generated'}];
+  if(!tools.image_generation) setTool('image_generation', true);
+  renderPending();
+  promptBox.focus();
+});
+
+// --- saving -----------------------------------------------------------------
+
+async function ensureConversation(firstMessage, model){
+  const system = systemBox.value.trim();
+  if(currentId){
+    if(system !== savedSystem){
+      await api(`/chat/conversations/${currentId}`, {method: 'PATCH', headers: JSON_HEADERS,
+                                                     body: JSON.stringify({system_prompt: system})});
+      savedSystem = system;
+    }
+    return;
+  }
+  const created = await api('/chat/conversations', {method: 'POST', headers: JSON_HEADERS,
+    body: JSON.stringify({title: firstMessage.slice(0, 80) || 'Images', model, system_prompt: system || null})});
+  currentId = created.id;
+  savedSystem = system;
+  document.getElementById('chatTitle').textContent = created.title;
+}
+
+async function saveMessage(message){
+  // Saving must never break the chat itself; report and carry on. What comes back carries the id
+  // the answers to this question are filed under, so asking again can keep them together.
+  try{
+    return await api(`/chat/conversations/${currentId}/messages`, {method: 'POST', headers: JSON_HEADERS,
+                                                                   body: JSON.stringify(message)});
+  }catch(e){ showError('Reply shown but not saved: ' + errorText(e)); return null; }
+}
+
+/* Puts the question in the transcript, saves it, and remembers which id its answers belong to.
+   When the question is being asked again it is already both of those, so nothing happens. */
+async function askedNow(text, imageUrls, files, attachments, again, asContext = true){
+  if(again) return chat.querySelector(`.msg.user[data-message="${again.messageId}"]`);
+  const box = addUserMessage(text, imageUrls, files, asContext);
+  const saved = await saveMessage({role: 'user', content: text, attachments: attachments || null});
+  if(saved){
+    box._messageId = saved.id;
+    box.dataset.message = saved.id;
+  }
+  refreshTurnTools();
+  return box;
+}
+
+/* The box an answer goes in, filed under the question it answers. */
+function answerBox(turnId, model){
+  const box = addMessage('assistant', '', model);
+  if(turnId) box.dataset.turn = turnId;
+  return box;
+}
+
+// Reads an SSE response, calling onData for each JSON payload
+async function readEvents(response, onData){
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  while(true){
+    const {value, done} = await reader.read();
+    if(done) break;
+    buffer += decoder.decode(value, {stream: true});
+    const lines = buffer.split('\n');
+    buffer = lines.pop();
+    for(const line of lines){
+      if(!line.startsWith('data:')) continue;
+      const data = line.slice(5).trim();
+      if(!data || data === '[DONE]') continue;
+      let chunk;
+      try{ chunk = JSON.parse(data); }catch(e){ continue; }
+      if(chunk.error) throw new Error(chunk.error.message || 'model error');
+      onData(chunk);
+    }
+  }
+}
+
+async function postStream(path, payload){
+  const response = await fetch(path, {method: 'POST', signal: controller.signal,
+                                      headers: JSON_HEADERS, body: JSON.stringify(payload)});
+  if(response.status === 401){ location.href = '/login'; throw new Error('signed out'); }
+  if(!response.ok){
+    const err = await response.json().catch(() => ({}));
+    const detail = Array.isArray(err.detail) ? err.detail.map(d => d.msg).join('; ') : err.detail;
+    throw new Error(detail || err.error?.message || `HTTP ${response.status}`);
+  }
+  return response;
+}
+
+function busy(on){
+  document.getElementById('send').hidden = on;
+  document.getElementById('stop').hidden = !on;
+}
+
+// --- sending ----------------------------------------------------------------
+
+// With more than one tool switched on, a small model decides what this message asks for
+async function decideAction(text, hasImages){
+  const searchOn = tools.web_search && caps.web_search;
+  // Even with no tool to choose between, Auto still has a model to choose
+  if(!imageMode() && !searchOn && !choosing()) return {action: 'chat'};
+  if(!caps.routing && !choosing()) return {action: imageMode() ? (hasImages ? 'edit' : 'image') : 'search'};
+  setDeciding(true);
+  try{
+    const decision = await api('/chat/route', {method: 'POST', headers: JSON_HEADERS, body: JSON.stringify({
+      message: text, has_images: hasImages, web_search: searchOn, image_generation: imageMode(),
+      maps: tools.maps && caps.maps,
+      choose_model: choosing(), current_model: chosenModel,
+      history: history.slice(-4).map(h => ({role: h.role, content: h.content}))})});
+    if(decision.model) chosenModel = decision.model;
+    return decision;
+  }catch(e){
+    // Falling back to what the toggles alone would have done
+    return {action: imageMode() && !searchOn ? (hasImages ? 'edit' : 'image') : 'chat', decided_by: 'toggles'};
+  }finally{ setDeciding(false); }
+}
+
+// An empty answer means the sentence decides the colour, which is usually what was typed anyway
+function chosenBackdrop(){
+  const picked = document.getElementById('backdropColour').value;
+  return picked === 'custom' ? document.getElementById('backdropCustom').value : picked;
+}
+
+document.getElementById('backdropColour').addEventListener('change', e => {
+  document.getElementById('backdropCustom').hidden = e.target.value !== 'custom';
+});
+
+function setDeciding(on){
+  document.getElementById('send').disabled = on;
+  document.getElementById('deciding').hidden = !on;
+}
+
+/* One turn. Normally it takes what is in the composer; asking a question again passes the words
+   and the attachments back in, along with the question they belong to, and the answer joins the
+   ones already filed under it. */
+async function send(redo = null){
+  const text = redo ? redo.text : promptBox.value.trim();
+  if(controller) return;
+  if(redo) pending = redo.images || [];
+  if(!text && !pending.length) return;
+  if(pending.some(p => p.uploading)){
+    showError('One moment: the picture is still uploading.');
+    return;
+  }
+  const asking = redo ? redo.again : null;
+  // Asked here, in the same turn as the tap that called this. On iOS the permission prompt is
+  // tied to a gesture, and waiting for the router to answer first spends it: by then the ask is
+  // silently refused and the map is told nobody knows where you are.
+  const previous = [...history].reverse().find(h => h.role === 'user' && h.content !== text);
+  const fix = (tools.maps && caps.maps && needsMyLocation(text, previous ? previous.content : ''))
+              ? myLocation() : Promise.resolve(null);
+
+  const decision = await decideAction(text, attachedPictures().length > 0);
+  if(decision.action === 'map') return sendMap(text, decision, fix, asking);
+  if(decision.action === 'photos') return sendMedia(text, decision, asking);
+  if(decision.action === 'clean' || decision.action === 'blur' || decision.action === 'backdrop')
+    return sendPhoto(text, decision, asking);
+  if(decision.action === 'image' || decision.action === 'edit') return sendImage(text, decision, asking);
+  return sendChat(text, decision, asking);
+}
+
+async function sendChat(text, decision, again){
+  const model = decision.model || currentModel();
+  if(attachedPictures().length && !canSee(model)){
+    showError(choosing()
+      ? `None of your models can see images, so ${model} cannot read this attachment.`
+      : `${model} cannot see images. Pick a model marked "sees images", or remove the attachment.`);
+    return;
+  }
+  showError('');
+
+  try{
+    await ensureConversation(text || 'Image question', model);
+  }catch(e){
+    showError('Could not save the conversation: ' + errorText(e));
+    return;
+  }
+  const files = pending.map(f => ({id: f.id, name: f.name, document: !!f.document}));
+  const images = files.map(f => f.id);
+  pending = []; renderPending();
+  if(!again){ promptBox.value = ''; fitComposer(); history.push({role: 'user', content: text, images}); }
+  const asked = await askedNow(text, images.map(fileUrl), files,
+                               files.length ? {images: files.map(f => ({file_id: f.id, document: f.document}))} : null,
+                               again);
+
+  const box = answerBox(again ? again.messageId : asked?._messageId, model);
+  noteDecision(box, decision);
+  const body = box.querySelector('.body');
+  // Three dots sit there looking the same whether the model is working or has died. The spinner is
+  // the same one every other job on this page uses, and it stops the moment the first word arrives.
+  setStatus(box, 'Waiting for the first words');
+  let thinkBlock = null, thinking = '', answer = '', firstTokenAt = null, usage = null, sources = null;
+  const started = performance.now();
+
+  const messages = [];
+  if(savedSystem) messages.push({role: 'system', content: savedSystem});
+  messages.push(...history.map(h => ({role: h.role, content: h.content, images: h.images || []})));
+
+  const payload = {model, messages, conversation_id: currentId,
+                   // The server writes the answer down, so it is the one that has to file it
+                   // under the question; without this, asking again would paint over the old one
+                   answers_to: box.dataset.turn ? Number(box.dataset.turn) : null,
+                   temperature: parseFloat(document.getElementById('temperature').value),
+                   max_tokens: parseInt(document.getElementById('maxTokens').value, 10) || 8192,
+                   web_search: decision.action === 'search',
+                   vision: tools.vision && caps.vision};
+  if(models[model]?.owned_by === 'llamacpp') payload.thinking = document.getElementById('thinking').checked;
+
+  controller = new AbortController();
+  busy(true);
+  let trouble = '';
+  try{
+    const response = await postStream('/chat/complete', payload);
+    await readEvents(response, chunk => {
+      if(chunk.gateway){
+        const event = chunk.gateway;
+        if(event.type === 'status') setStatus(box, event.text);
+        else if(event.type === 'notice') showError(event.text);
+        else if(event.type === 'sources'){ sources = event.sources; renderSources(box, sources); }
+        return;
+      }
+      if(chunk.usage) usage = chunk.usage;
+      const delta = chunk.choices?.[0]?.delta || {};
+      // llama.cpp calls it reasoning_content and Ollama calls it reasoning; the same thing
+      const thought = delta.reasoning_content || delta.reasoning;
+      if(thought){
+        firstTokenAt ??= performance.now();
+        setStatus(box, null);
+        thinking += thought;
+        if(!thinkBlock){
+          thinkBlock = document.createElement('details');
+          thinkBlock.className = 'think';
+          thinkBlock.innerHTML = '<summary>Thinking&hellip;</summary><div style="white-space:pre-wrap"></div>';
+          box.insertBefore(thinkBlock, body);
+        }
+        thinkBlock.querySelector('div').textContent = thinking;
+      }
+      if(delta.content){
+        firstTokenAt ??= performance.now();
+        setStatus(box, null);
+        answer += delta.content;
+        body.textContent = answer;   // rendered once it is complete, below
+      }
+      followAlong();
+    });
+  }catch(e){
+    if(e.name !== 'AbortError'){ trouble = errorText(e); showError(trouble); }
+  }finally{
+    controller = null;
+    busy(false);
+  }
+
+  // Replace the live rendering with the final one, so saved and live messages look the same
+  setStatus(box, null);
+  thinkBlock?.remove();
+  box.querySelector('details.sources')?.remove();
+  const total = (performance.now() - started) / 1000;
+  const genSeconds = firstTokenAt ? (performance.now() - firstTokenAt) / 1000 : total;
+  const tokens = usage?.completion_tokens;
+  const stats = {
+    ttft: firstTokenAt ? +((firstTokenAt - started) / 1000).toFixed(1) : null,
+    tokens: tokens || null,
+    tps: tokens && genSeconds > 0 ? +(tokens / genSeconds).toFixed(1) : null,
+    total: +total.toFixed(1),
+  };
+  if(!answer && !thinking){
+    // Nothing came back, so nothing was saved either. Say why here, where the question is, and
+    // leave the question itself alone: it is still in the transcript with Copy and Ask again on
+    // it, which is the whole point of a turn that failed.
+    failedTurn(box, trouble);
+    loadConversations();
+    return;
+  }
+  renderAssistant(box, answer, thinking, stats, sources, await renderedHtml(answer));
+
+  recordAnswer(box, answer, again ? again.replaceAt : null);
+  // The server writes the answer down itself as the job finishes, so that walking away mid-answer
+  // does not throw the turn away. Saving it from here as well would store it twice.
+  // The summary is written in the background once a chat gets long
+  if(memory.enabled) setTimeout(loadMemory, 4000);
+  loadConversations();
+}
+
+/* A turn that produced nothing. The reason belongs where the answer would have been - a banner at
+   the top of the page is gone by the time you scroll back to the question it is about. */
+function failedTurn(box, trouble){
+  const body = box.querySelector('.body');
+  // Not an answer, so it neither joins the ones you can page through nor stands in for one
+  delete box.dataset.turn;
+  box.dataset.failed = '1';
+  body.className = 'body failed';
+  body.textContent = trouble
+    ? `That did not go through: ${trouble}`
+    : 'That did not go through, and nothing came back to show.';
+  const again = document.createElement('div');
+  again.className = 'turn-tools stay';
+  again.innerHTML = '<button data-try-again>Try again</button>';
+  again.querySelector('button').addEventListener('click', () => {
+    const asked = [...chat.querySelectorAll('.msg.user')].pop();
+    if(asked) resend(asked);
+  });
+  box.appendChild(again);
+}
+
+// A photograph, not a drawing: noise taken off, or the background blurred. Never both at once.
+async function sendPhoto(text, decision, again){
+  const source = pending[0];
+  if(!source){ showError('Attach a photo first.'); return; }
+  showError('');
+  const cleaning = decision.action === 'clean';
+  const backdrop = decision.action === 'backdrop';
+  try{
+    await ensureConversation(text, currentModel());
+  }catch(e){
+    showError('Could not save the conversation: ' + errorText(e));
+    return;
+  }
+  const references = pending.slice(1);
+  pending = []; renderPending();
+  if(!again){ promptBox.value = ''; fitComposer(); history.push({role: 'user', content: text, images: []}); }
+  const asked = await askedNow(text, [source, ...references].map(f => f.url),
+                               [{id: source.id, name: source.name}],
+                               {mode: 'photo', images: [{file_id: source.id}]}, again, false);
+
+  const box = answerBox(again ? again.messageId : asked?._messageId,
+                        backdrop ? 'Background colour' : cleaning ? 'Clean-up' : 'Background blur');
+  noteDecision(box, decision);
+  setStatus(box, 'Starting');
+  const started = performance.now();
+  let result = null;
+  controller = new AbortController();
+  busy(true);
+  try{
+    const response = await postStream('/chat/photo', {
+      file_id: source.id, action: decision.action, conversation_id: currentId,
+      answers_to: box.dataset.turn ? Number(box.dataset.turn) : null,
+      request: text, upscale: cleaning, colour: chosenBackdrop(),
+      strength: parseFloat(document.getElementById('blurStrength').value)});
+    await readEvents(response, chunk => {
+      const event = chunk.gateway;
+      if(!event) return;
+      if(event.type === 'progress'){
+        setStatus(box, event.fraction != null ? `${event.stage} · ${Math.round(event.fraction * 100)}%` : event.stage,
+                  event.fraction);
+      }else if(event.type === 'image'){
+        result = event;
+      }
+    });
+  }catch(e){
+    if(e.name !== 'AbortError') showError(errorText(e));
+  }finally{
+    controller = null;
+    busy(false);
+  }
+  setStatus(box, null);
+  if(!result){
+    box.querySelector('.body').textContent =
+      'The connection dropped before the picture came back. If it finished, it is saved in this '
+      + 'conversation: open it again from the list to see.';
+    loadConversations();
+    return;
+  }
+  // The server says what it actually did, since the words decide it
+  const done = result.did || (backdrop ? 'Background changed'
+                              : cleaning ? 'Cleaned up' : 'Background blurred by distance');
+  const generated = {file_id: result.file.id, prompt: done, source_file_id: source.id};
+  renderGenerated(box, generated, {total: +((performance.now() - started) / 1000).toFixed(1)});
+  box.querySelector('.generated img')?.addEventListener('load', () => revealFrom(box), {once: true});
+  revealFrom(box);
+  // The server saved this one, so that a dropped connection cannot lose it
+  recordAnswer(box, `(${done.toLowerCase()})`, again ? again.replaceAt : null);
+  loadConversations();
+}
+
+async function sendImage(text, decision, again){
+  if(!text){ showError('Describe the image you want.'); return; }
+  showError('');
+  const source = pending[0] || null;
+  const references = pending.slice(1, editLimit());
+  const size = document.getElementById('imageSize').value;
+  const strength = parseFloat(document.getElementById('strength').value);
+  try{
+    await ensureConversation(text, currentModel());
+  }catch(e){
+    showError('Could not save the conversation: ' + errorText(e));
+    return;
+  }
+  pending = []; renderPending();
+  // Image turns are kept in the transcript as text only, so a chat model later knows what was made
+  if(!again){ promptBox.value = ''; fitComposer(); history.push({role: 'user', content: text, images: []}); }
+  const asked = await askedNow(text, source ? [source, ...references].map(f => f.url) : [],
+                               source ? [source, ...references].map(f => ({id: f.id, name: f.name})) : [],
+                               {mode: 'image', images: source ? [source, ...references].map(f => ({file_id: f.id})) : []},
+                               again, false);
+
+  const box = answerBox(again ? again.messageId : asked?._messageId,
+                        source ? 'Image edit' : 'Image generation');
+  noteDecision(box, decision);
+  setStatus(box, 'Working out what to draw');
+  const started = performance.now();
+  let result = null, drawn = null;
+  controller = new AbortController();
+  busy(true);
+  try{
+    const response = await postStream('/chat/images', {prompt: text, size, strength,
+                                                       conversation_id: currentId,
+                                                       answers_to: box.dataset.turn ? Number(box.dataset.turn) : null,
+                                                       source_file_id: source ? source.id : null,
+                                                       reference_file_ids: references.map(f => f.id)});
+    await readEvents(response, chunk => {
+      const event = chunk.gateway;
+      if(!event) return;
+      if(event.type === 'prompt'){
+        drawn = event.text;
+        setStatus(box, 'Drawing: ' + event.text);
+      }else if(event.type === 'progress'){
+        setStatus(box, event.fraction != null ? `${event.stage} · ${Math.round(event.fraction * 100)}%` : event.stage,
+                  event.fraction);
+      }else if(event.type === 'image'){
+        result = event;
+      }
+      followAlong();
+    });
+  }catch(e){
+    if(e.name !== 'AbortError') showError(errorText(e));
+  }finally{
+    controller = null;
+    busy(false);
+  }
+  setStatus(box, null);
+  if(!result){
+    box.querySelector('.body').textContent =
+      'The connection dropped before the picture came back. If it finished, it is saved in this '
+      + 'conversation: open it again from the list to see.';
+    loadConversations();
+    return;
+  }
+  // The caption shows what was actually drawn, which is what a later edit or retry builds on
+  const generated = {file_id: result.file.id, prompt: drawn || text, asked: text, seed: result.seed, size,
+                     source_file_id: source ? source.id : null, reference_file_ids: references.map(f => f.id),
+                     strength: source && !qwenEdits() ? strength : null};
+  const stats = {total: +((performance.now() - started) / 1000).toFixed(1)};
+  renderGenerated(box, generated, stats);
+  box.querySelector('.generated img')?.addEventListener('load', () => revealFrom(box), {once: true});
+  revealFrom(box);
+  recordAnswer(box, `(${source ? 'edited the image' : 'generated an image'}: ${drawn || text})`,
+               again ? again.replaceAt : null);
+  loadConversations();   // saved by the server, so a dropped connection cannot lose it
+}
+
+// Wrapped, not passed straight in: a click handler is called with the event, and send now
+// takes an argument - the button would have handed it a MouseEvent to re-ask
+document.getElementById('send').addEventListener('click', () => send());
+document.getElementById('stop').addEventListener('click', () => controller?.abort());
+function fitComposer(){
+  promptBox.style.height = 'auto';
+  promptBox.style.height = promptBox.scrollHeight + 'px';
+}
+promptBox.addEventListener('input', fitComposer);
+promptBox.addEventListener('keydown', e => {
+  if(e.key === 'Enter' && !e.shiftKey){ e.preventDefault(); send(); }
+});
+
+fitComposer();
+Promise.all([loadModels(), loadCapabilities()]).then(() => Promise.all([loadConversations(), loadMemory()]));
+</script>
+{% endblock %}
