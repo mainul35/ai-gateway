@@ -1100,11 +1100,14 @@ function fillTranscript(messages){
     const attached = (extra.images || []).map(i => ({id: i.file_id, document: !!i.document}));
     const imageIds = attached.map(f => f.id);
     if(m.role === 'user'){
-      const box = addUserMessage(m.content, imageIds.map(fileUrl),
-                                 extra.mode === 'image' ? [] : attached);
+      // A picture that went to the image tools is kept so the question can be asked again, but is
+      // not sent on to a model as though it were part of the conversation - which is how the turn
+      // was sent in the first place
+      const forTools = extra.mode === 'image' || extra.mode === 'photo';
+      const box = addUserMessage(m.content, imageIds.map(fileUrl), attached, !forTools);
       box._messageId = m.id;
       box.dataset.message = m.id;
-      history.push({role: 'user', content: m.content, images: extra.mode === 'image' ? [] : imageIds});
+      history.push({role: 'user', content: m.content, images: box._images});
     }else{
       const turn = extra.answers_to || null;
       const box = answerBox(turn, m.model || (extra.map ? 'OpenStreetMap'
@@ -1265,13 +1268,16 @@ function addMessage(role, text, model){
   return box;
 }
 
-function addUserMessage(text, imageUrls, files){
+function addUserMessage(text, imageUrls, files, asContext = true){
   const box = addMessage('user', text);
   box._text = text;
   // The kind matters, not only the id: a document sent back through as a picture would be handed
   // to the image tools, which would make nothing of it
   box._files = files || [];
-  box._images = box._files.map(f => f.id);
+  // A picture drawn from, or worked on by, a tool was that tool's input rather than something for
+  // a model to read later: those turns stay in the transcript as words. The files are kept either
+  // way, so that asking the question again has the same attachments to work with.
+  box._images = asContext ? box._files.map(f => f.id) : [];
   if(imageUrls.length){
     const strip = document.createElement('div');
     strip.className = 'thumbs';
@@ -1298,15 +1304,57 @@ function addTurnTools(box){
   refreshTurnTools();
 }
 
-/* Asking again replaces the answer to a question rather than adding a turn, so it is offered on
-   the last thing you said and nowhere else: re-running an older question would leave everything
-   after it answering something that is no longer there. */
+/* Every question can be asked again; only one that has been saved knows where to file the
+   answer. An older one says what it will cost, because everything after it answers something that
+   is about to change. */
 function refreshTurnTools(){
   const asked = [...chat.querySelectorAll('.msg.user')];
   asked.forEach((box, i) => {
     const again = box.querySelector('[data-resend]');
-    if(again) again.hidden = i !== asked.length - 1 || !box._messageId;
+    if(!again) return;
+    again.hidden = !box._messageId;
+    const later = i === asked.length - 1 ? 0 : turnsAfter(box).length;
+    again.textContent = later ? 'Ask again from here' : 'Ask again';
+    again.title = later
+      ? `Asks this again and drops the ${later} message${later === 1 ? '' : 's'} that follow it`
+      : 'Asks this again and keeps the answer you already have';
   });
+}
+
+/* Everything in the transcript from the next question onwards. The answers to this question are
+   not in it: asking again adds to those rather than replacing them. */
+function turnsAfter(box){
+  const later = [];
+  let reached = false;
+  for(const message of chat.querySelectorAll('.msg')){
+    if(message === box){ reached = true; continue; }
+    if(!reached) continue;
+    if(message.classList.contains('user')) later.push(message);
+    else if(later.length) later.push(message);
+  }
+  return later;
+}
+
+/* What the model is told, read back off the transcript. Rebuilt rather than patched whenever the
+   transcript itself changes, because an index into a list that has had a hole cut in it is the
+   kind of bookkeeping that goes wrong quietly. */
+function rebuildHistory(){
+  history = [];
+  for(const box of chat.querySelectorAll('.msg')){
+    if(box.dataset.failed) continue;           // a turn that produced nothing is not a turn
+    if(box.classList.contains('user')){
+      history.push({role: 'user', content: box._text || '', images: box._images || []});
+    }else if(!box.hidden){
+      box._historyIndex = history.length;
+      history.push({role: 'assistant', content: box._text || ''});
+    }
+  }
+  // The answers waiting behind the arrows share the place of the one on screen
+  for(const box of chat.querySelectorAll('.msg.assistant')){
+    if(!box.hidden) continue;
+    const reading = answersTo(box).find(other => !other.hidden);
+    if(reading) box._historyIndex = reading._historyIndex;
+  }
 }
 
 // --- more than one answer to the same question -------------------------------
@@ -1357,6 +1405,27 @@ function showAnswer(box){
    nothing is added to it; what comes back joins the answers that are already there. */
 async function resend(box){
   if(controller || !box._messageId) return;
+  // An older question: everything after it was answering what this question led to, and once it
+  // is asked again none of that followed from anything. It goes, and it is said plainly first.
+  const later = turnsAfter(box);
+  if(later.length){
+    const questions = later.filter(m => m.classList.contains('user')).length;
+    if(!confirm(`Asking this again drops the ${later.length} message`
+                + `${later.length === 1 ? '' : 's'} after it`
+                + `${questions ? `, including ${questions} question${questions === 1 ? '' : 's'}` : ''}`
+                + '. This cannot be undone.')) return;
+    try{
+      await api(`/chat/conversations/${currentId}/messages/${box._messageId}/after`,
+                {method: 'DELETE'});
+    }catch(e){
+      showError('Could not drop the later messages, so nothing was asked again: ' + errorText(e));
+      return;
+    }
+    for(const message of later) message.remove();
+    rebuildHistory();
+    refreshTurnTools();
+    loadConversations();
+  }
   // A turn that produced nothing left a note where its answer would have been. It is not an
   // answer, so it is replaced rather than joining the ones you can page through.
   for(let after = box.nextElementSibling; after; ){
@@ -2131,9 +2200,9 @@ async function saveMessage(message){
 
 /* Puts the question in the transcript, saves it, and remembers which id its answers belong to.
    When the question is being asked again it is already both of those, so nothing happens. */
-async function askedNow(text, imageUrls, files, attachments, again){
+async function askedNow(text, imageUrls, files, attachments, again, asContext = true){
   if(again) return chat.querySelector(`.msg.user[data-message="${again.messageId}"]`);
-  const box = addUserMessage(text, imageUrls, files);
+  const box = addUserMessage(text, imageUrls, files, asContext);
   const saved = await saveMessage({role: 'user', content: text, attachments: attachments || null});
   if(saved){
     box._messageId = saved.id;
@@ -2418,7 +2487,7 @@ async function sendPhoto(text, decision, again){
   if(!again){ promptBox.value = ''; fitComposer(); history.push({role: 'user', content: text, images: []}); }
   const asked = await askedNow(text, [source, ...references].map(f => f.url),
                                [{id: source.id, name: source.name}],
-                               {mode: 'photo', images: [{file_id: source.id}]}, again);
+                               {mode: 'photo', images: [{file_id: source.id}]}, again, false);
 
   const box = answerBox(again ? again.messageId : asked?._messageId,
                         backdrop ? 'Background colour' : cleaning ? 'Clean-up' : 'Background blur');
@@ -2489,7 +2558,7 @@ async function sendImage(text, decision, again){
   const asked = await askedNow(text, source ? [source, ...references].map(f => f.url) : [],
                                source ? [source, ...references].map(f => ({id: f.id, name: f.name})) : [],
                                {mode: 'image', images: source ? [source, ...references].map(f => ({file_id: f.id})) : []},
-                               again);
+                               again, false);
 
   const box = answerBox(again ? again.messageId : asked?._messageId,
                         source ? 'Image edit' : 'Image generation');
