@@ -1,0 +1,123 @@
+{% extends "base.html" %}
+{% block title %}Tool servers &middot; Model Gateway{% endblock %}
+{% block content %}
+<h1>Tool servers</h1>
+<p class="sub">MCP servers this gateway can call. Published ones and your own, side by side.</p>
+
+<div id="error" class="note err" hidden></div>
+
+<div class="note">
+  Servers are listed in <code id="file">config/mcp.yaml</code> on the gateway. Secrets do not go in
+  it: write <code>${NAME}</code> and it is read from the environment or from
+  <code>config/config.properties</code>, neither of which is in the repository.
+  <br><span style="font-size:.85rem">
+    This host has <b>uvx</b> and <b>Docker</b> but no <b>node</b>, so Python servers run directly,
+    and anything published to npm runs in a container.
+  </span>
+</div>
+
+<div id="servers"></div>
+
+<script>
+const box = document.getElementById('servers');
+const JSON_HEADERS = {'Content-Type': 'application/json'};
+
+function showError(message){
+  const where = document.getElementById('error');
+  where.textContent = message; where.hidden = false;
+}
+const errorText = e => (e && e.message) ? e.message : String(e);
+
+function pill(server){
+  if(server.trouble) return '<span class="pill off">cannot run</span>';
+  return server.enabled ? '<span class="pill on">on</span>'
+                        : '<span class="pill off">off</span>';
+}
+
+function card(server){
+  return `
+    <div class="card" data-server="${escapeHtml(server.name)}">
+      <h2>${escapeHtml(server.name)} ${pill(server)}</h2>
+      <p class="sub">${escapeHtml(server.description || 'No description in the file.')}</p>
+      <table>
+        <tr><td class="muted" style="width:9rem">Speaks</td><td>${server.transport === 'stdio'
+            ? 'over its own standard input and output' : 'Streamable HTTP'}</td></tr>
+        <tr><td class="muted" style="width:9rem">${server.transport === 'stdio' ? 'Runs' : 'Address'}</td>
+            <td><code>${escapeHtml(server.runs)}</code></td></tr>
+        ${server.only.length ? `<tr><td class="muted" style="width:9rem">Limited to</td><td><code>${
+            server.only.map(escapeHtml).join('</code>, <code>')}</code></td></tr>` : ''}
+      </table>
+      ${server.trouble ? `<div class="note err" style="margin-top:.75rem">${escapeHtml(server.trouble)}</div>` : ''}
+      <div class="row" style="margin-top:.75rem">
+        <button class="btn btn-sm" data-check>Check it</button>
+        <span class="muted" data-status></span>
+      </div>
+      <div data-tools></div>
+    </div>`;
+}
+
+function renderTools(where, server){
+  if(server.trouble){
+    where.innerHTML = `<div class="note err" style="margin-top:.75rem">${escapeHtml(server.trouble)}</div>`;
+    return;
+  }
+  const tools = server.tools || [];
+  if(!tools.length){
+    where.innerHTML = '<div class="note warn" style="margin-top:.75rem">It answered, but offers no tools.</div>';
+    return;
+  }
+  // A tool's name and description are written by whoever wrote the server: text to read, never
+  // anything this page acts on
+  where.innerHTML = `
+    <p class="sub" style="margin-top:.9rem"><b>${tools.length}</b> tool${tools.length === 1 ? '' : 's'}:</p>
+    <table>
+      ${tools.map(tool => `
+        <tr>
+          <td class="muted" style="width:9rem"><code>${escapeHtml(tool.name)}</code></td>
+          <td>${escapeHtml(tool.description || '')}
+            <br><span class="muted" style="font-size:.78rem">takes ${
+              Object.keys((tool.schema || {}).properties || {}).map(escapeHtml).join(', ') || 'nothing'}</span>
+          </td>
+        </tr>`).join('')}
+    </table>`;
+}
+
+async function load(){
+  try{
+    const answer = await api('/admin/mcp');
+    document.getElementById('file').textContent = answer.file;
+    if(!answer.servers.length){
+      box.innerHTML = '<div class="card"><p class="sub">No servers are configured yet. '
+        + 'Add one to the file above and reload this page.</p></div>';
+      return;
+    }
+    box.innerHTML = answer.servers.map(card).join('');
+    if(!answer.enabled){
+      box.insertAdjacentHTML('afterbegin',
+        '<div class="note warn">Tool servers are switched off for the whole gateway '
+        + '(<code>features.mcp.enabled</code>), so none of these will be called.</div>');
+    }
+  }catch(e){ showError('Could not read the server list: ' + errorText(e)); }
+}
+
+box.addEventListener('click', async e => {
+  const button = e.target.closest('[data-check]');
+  if(!button) return;
+  const card = button.closest('[data-server]');
+  const status = card.querySelector('[data-status]');
+  button.disabled = true;
+  status.textContent = 'starting it and asking what it offers…';
+  try{
+    const answer = await api('/admin/mcp/check', {method: 'POST', headers: JSON_HEADERS,
+                                                  body: JSON.stringify({name: card.dataset.server})});
+    status.textContent = answer.trouble ? 'it did not answer' : 'it answered';
+    renderTools(card.querySelector('[data-tools]'), answer);
+  }catch(err){
+    status.textContent = '';
+    showError('Could not check it: ' + errorText(err));
+  }finally{ button.disabled = false; }
+});
+
+load();
+</script>
+{% endblock %}

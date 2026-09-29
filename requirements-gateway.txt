@@ -24,3 +24,5 @@ pillow-heif>=0.18
 pypdf>=6.0
 python-docx>=1.1
 openpyxl>=3.1
+# Speaks MCP to tool servers, published and hand-written alike
+mcp>=2.2

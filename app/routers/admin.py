@@ -14,7 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app import access, backends, catalogue, fitting, settings, usage as usage_log
-from app.tools import jobs
+from app.tools import jobs, mcp_client
 from app.auth import Principal, generate_key, hash_key, require_admin, require_manager
 from app import config_writer
 from app.engine.supervisor import supervisor
@@ -668,3 +668,37 @@ async def system_overview(_: Principal = Depends(require_admin), session: AsyncS
         "counts": {"users": users, "active_keys": keys,
                    "requests_24h": requests_today, "tokens_24h": int(tokens_today)},
     }
+
+
+# --- tool servers ---------------------------------------------------------------------------
+
+@router.get("/mcp")
+async def list_mcp_servers(_: Principal = Depends(require_admin)):
+    """Every configured tool server, and whether this host could run it at all.
+
+    Deliberately does not connect: launching a dozen child processes to draw a page is not what a
+    page load should do. The tools come from checking one, which is a thing the admin asks for.
+    """
+    return {
+        "enabled": mcp_client.is_enabled(),
+        "file": settings.get("mcp.servers.file", "MCP_SERVERS_FILE") or "config/mcp.yaml",
+        "servers": [server.as_json(trouble=server.trouble()) for server in mcp_client.servers()],
+    }
+
+
+class McpCheck(BaseModel):
+    name: str = Field(min_length=1, max_length=128)
+
+
+@router.post("/mcp/check")
+async def check_mcp_server(payload: McpCheck, _: Principal = Depends(require_admin)):
+    """Connects to one server and asks what it offers.
+
+    This is the whole answer to "is my server working": it starts it the way the gateway will,
+    speaks the protocol, and shows what came back - or exactly what went wrong instead.
+    """
+    server = mcp_client.find(payload.name)
+    if server is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND,
+                            f"No server called {payload.name!r} is configured")
+    return await mcp_client.probe(server)
