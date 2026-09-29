@@ -108,8 +108,17 @@ fi
 REMOTE
 
 step "Checking the public URL"
-code=$(curl -s -m 20 -o /dev/null -w '%{http_code}' "$PUBLIC_URL/health" || true)
-echo "$PUBLIC_URL/health -> $code"
-[ "$code" = "200" ] || { echo "public check failed (the server itself is healthy)"; exit 1; }
+# Several times, not once. The tunnel keeps a pool of connections to this server, and restarting it
+# leaves every one of them pointing at a process that is gone. One request opens one fresh
+# connection and proves nothing about the rest: the next person through gets a stale one, waits,
+# and is shown a 524 by Cloudflare while the gateway sits here perfectly healthy. Going round the
+# pool here means the deploy finds those, not somebody trying to use the thing.
+failures=0
+for attempt in 1 2 3 4 5 6; do
+    result=$(curl -s -m 25 -o /dev/null -w '%{http_code} in %{time_total}s' "$PUBLIC_URL/health" || echo "no answer")
+    echo "  $attempt: $PUBLIC_URL/health -> $result"
+    case "$result" in 200*) ;; *) failures=$((failures + 1)) ;; esac
+done
+[ "$failures" = "0" ] || { echo "public check failed $failures of 6 times (the server itself is healthy,";     echo "so this is between Cloudflare and here)"; exit 1; }
 
 printf '\nDeployed %s\n' "$STAMP"
