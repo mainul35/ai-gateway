@@ -49,6 +49,23 @@ details.tuning label{margin-bottom:.85rem}
 /* The answer is the page, not a card on it; only the question is set apart */
 .msg.assistant{background:none;border:none;padding:0}
 .msg.user{background:var(--input);border-radius:12px;padding:.6rem .9rem;align-self:flex-end;max-width:85%}
+/* What you can do with something you said: copy it, or ask it again. Quiet until the message is
+   pointed at, because they are for the times something went wrong rather than every turn. */
+.turn-tools{display:flex;gap:.6rem;justify-content:flex-end;margin-top:.4rem;
+            opacity:0;transition:opacity .15s}
+.msg.user:hover .turn-tools,.msg.user:focus-within .turn-tools,.turn-tools.stay{opacity:1}
+.turn-tools button{background:none;border:none;padding:0;cursor:pointer;font:inherit;
+                   font-size:.74rem;color:var(--muted)}
+.turn-tools button:hover{color:var(--text);text-decoration:underline}
+.turn-tools button:disabled{opacity:.5;cursor:default;text-decoration:none}
+/* Answers to the same question, when it was asked more than once */
+.variants{display:inline-flex;align-items:center;gap:.3rem;margin-left:.5rem;font-weight:400}
+.variants button{background:none;border:none;padding:0 .15rem;cursor:pointer;color:var(--muted);
+                 font-size:.9rem;line-height:1}
+.variants button:hover:not(:disabled){color:var(--text)}
+.variants button:disabled{opacity:.35;cursor:default}
+/* A turn that produced nothing says so where the answer would have been, not only in a banner */
+.msg.assistant .failed{color:var(--danger);font-size:.85rem}
 .msg.user .who{display:none}
 .msg .who{font-size:.72rem;color:var(--muted);margin-bottom:.45rem;font-weight:600;letter-spacing:.02em}
 .msg .body.md{background:none;padding:0;margin:0}
@@ -276,6 +293,8 @@ a.cite{font-size:.75em;vertical-align:super;text-decoration:none;padding:0 .1rem
   .column{padding:0 1rem}
   .transcript{padding-top:1rem}
   .msg.user{max-width:92%}
+  /* No hover on a phone, so the things you need when a message failed are simply there */
+  .turn-tools{opacity:1}
   .thumbs img{height:4.5rem;max-width:7rem}
   .generated img{max-height:min(42vh, 20rem)}
   /* Two tiles across on a phone rather than one enormous one */
@@ -1067,6 +1086,51 @@ function resetChat(){
   loadMemory();
 }
 
+/* Puts a saved conversation back on the screen, and rebuilds what the model is told
+   from it. Its own function because the answer grouping is the fiddly part of this
+   page and needs to be testable without a conversation, a server or a login. */
+function fillTranscript(messages){
+  history = [];
+  // Answers filed under the same question are siblings: the last one asked for is the one
+  // shown, and the arrows on it reach the ones before. Anything written before answers knew
+  // which question they belonged to has no filing, so it stands on its own exactly as it did.
+  const answered = [];
+  for(const m of messages){
+    const extra = m.attachments || {};
+    const attached = (extra.images || []).map(i => ({id: i.file_id, document: !!i.document}));
+    const imageIds = attached.map(f => f.id);
+    if(m.role === 'user'){
+      const box = addUserMessage(m.content, imageIds.map(fileUrl),
+                                 extra.mode === 'image' ? [] : attached);
+      box._messageId = m.id;
+      box.dataset.message = m.id;
+      history.push({role: 'user', content: m.content, images: extra.mode === 'image' ? [] : imageIds});
+    }else{
+      const turn = extra.answers_to || null;
+      const box = answerBox(turn, m.model || (extra.map ? 'OpenStreetMap'
+                                              : extra.media ? 'Picture search' : ''));
+      if(extra.map) renderMap(box, extra.map);
+      else if(extra.media) renderMedia(box, extra.media);
+      else if(extra.generated) renderGenerated(box, extra.generated, m.stats);
+      else renderAssistant(box, m.content, m.reasoning, m.stats, extra.sources, m.html);
+      box._text = m.content;
+      const earlier = turn ? answered.find(a => a.turn === turn) : null;
+      if(earlier){
+        // Another answer to a question already answered: it takes the place of the one before
+        // it in what the model is told, and joins it behind the arrows
+        history[earlier.index] = {role: 'assistant', content: m.content};
+        box._historyIndex = earlier.index;
+      }else{
+        box._historyIndex = history.length;
+        history.push({role: 'assistant', content: m.content});
+        if(turn) answered.push({turn, index: box._historyIndex});
+      }
+      showAnswer(box);
+    }
+  }
+  refreshTurnTools();
+}
+
 async function openConversation(id){
   if(controller) return;
   try{
@@ -1081,27 +1145,7 @@ async function openConversation(id){
     document.getElementById('chatTitle').textContent = conversation.title;
     chat.innerHTML = '';
     history = [];
-    for(const m of conversation.messages){
-      const extra = m.attachments || {};
-      const imageIds = (extra.images || []).map(i => i.file_id);
-      if(m.role === 'user'){
-        addUserMessage(m.content, imageIds.map(fileUrl));
-        history.push({role: 'user', content: m.content, images: extra.mode === 'image' ? [] : imageIds});
-      }else if(extra.map){
-        renderMap(addMessage('assistant', '', m.model || 'OpenStreetMap'), extra.map);
-        history.push({role: 'assistant', content: m.content});
-      }else if(extra.media){
-        renderMedia(addMessage('assistant', '', m.model || 'Picture search'), extra.media);
-        history.push({role: 'assistant', content: m.content});
-      }else if(extra.generated){
-        renderGenerated(addMessage('assistant', '', m.model), extra.generated, m.stats);
-        history.push({role: 'assistant', content: m.content});
-      }else{
-        const box = addMessage('assistant', '', m.model);
-        renderAssistant(box, m.content, m.reasoning, m.stats, extra.sources, m.html);
-        history.push({role: 'assistant', content: m.content});
-      }
-    }
+    fillTranscript(conversation.messages);
     if(!conversation.messages.length) chat.innerHTML = '<p class="muted" id="empty">Empty conversation.</p>';
     openAtLatest();
     attachToRunningJob(conversation.id);
@@ -1221,15 +1265,112 @@ function addMessage(role, text, model){
   return box;
 }
 
-function addUserMessage(text, imageUrls){
+function addUserMessage(text, imageUrls, files){
   const box = addMessage('user', text);
+  box._text = text;
+  // The kind matters, not only the id: a document sent back through as a picture would be handed
+  // to the image tools, which would make nothing of it
+  box._files = files || [];
+  box._images = box._files.map(f => f.id);
   if(imageUrls.length){
     const strip = document.createElement('div');
     strip.className = 'thumbs';
     strip.innerHTML = imageUrls.map(u => `<img src="${u}" alt="attached image" data-zoom="${u}">`).join('');
     box.insertBefore(strip, box.querySelector('.body'));
   }
+  addTurnTools(box);
   return box;
+}
+
+// --- what you can do with something you have already said --------------------
+
+function addTurnTools(box){
+  const row = document.createElement('div');
+  row.className = 'turn-tools';
+  row.innerHTML = '<button data-copy-turn>Copy</button><button data-resend>Ask again</button>';
+  row.querySelector('[data-copy-turn]').addEventListener('click', async e => {
+    await navigator.clipboard.writeText(box._text || '');
+    e.target.textContent = 'Copied';
+    setTimeout(() => { e.target.textContent = 'Copy'; }, 1500);
+  });
+  row.querySelector('[data-resend]').addEventListener('click', () => resend(box));
+  box.appendChild(row);
+  refreshTurnTools();
+}
+
+/* Asking again replaces the answer to a question rather than adding a turn, so it is offered on
+   the last thing you said and nowhere else: re-running an older question would leave everything
+   after it answering something that is no longer there. */
+function refreshTurnTools(){
+  const asked = [...chat.querySelectorAll('.msg.user')];
+  asked.forEach((box, i) => {
+    const again = box.querySelector('[data-resend]');
+    if(again) again.hidden = i !== asked.length - 1 || !box._messageId;
+  });
+}
+
+// --- more than one answer to the same question -------------------------------
+
+/* An answer knows which question it answers, so asking again keeps the previous one instead of
+   painting over it. Every answer to one question sits in the transcript as a sibling of the
+   others: the one being read is shown, the rest wait behind the arrows, and whichever is on
+   screen is the one the model is told about in the next turn. */
+function answersTo(box){
+  const turn = box && box.dataset.turn;
+  return turn ? [...chat.querySelectorAll(`.msg.assistant[data-turn="${turn}"]`)] : [box].filter(Boolean);
+}
+
+function recordAnswer(box, content, at){
+  // Asking again replaces the answer the model is told about, rather than reading as two replies
+  const index = at != null && at < history.length ? at : history.length;
+  history[index] = {role: 'assistant', content};
+  box._text = content;
+  for(const sibling of answersTo(box)) sibling._historyIndex = index;
+  showAnswer(box);
+  return index;
+}
+
+function showAnswer(box){
+  const group = answersTo(box);
+  for(const sibling of group) sibling.hidden = sibling !== box;
+  if(box._historyIndex != null && box._historyIndex < history.length){
+    history[box._historyIndex] = {role: 'assistant', content: box._text || ''};
+  }
+  group.forEach((sibling, i) => {
+    sibling.querySelector('.variants')?.remove();
+    if(group.length < 2) return;
+    const nav = document.createElement('span');
+    nav.className = 'variants';
+    nav.innerHTML = '<button title="The answer before this one">&lsaquo;</button>'
+                  + `<span>${i + 1}/${group.length}</span>`
+                  + '<button title="The next answer">&rsaquo;</button>';
+    const [back, forward] = nav.querySelectorAll('button');
+    back.disabled = i === 0;
+    forward.disabled = i === group.length - 1;
+    back.addEventListener('click', () => showAnswer(group[i - 1]));
+    forward.addEventListener('click', () => showAnswer(group[i + 1]));
+    sibling.querySelector('.who').appendChild(nav);
+  });
+}
+
+/* Runs the last question again. The question is already in the transcript and already saved, so
+   nothing is added to it; what comes back joins the answers that are already there. */
+async function resend(box){
+  if(controller || !box._messageId) return;
+  // A turn that produced nothing left a note where its answer would have been. It is not an
+  // answer, so it is replaced rather than joining the ones you can page through.
+  for(let after = box.nextElementSibling; after; ){
+    const next = after.nextElementSibling;
+    if(after.dataset.failed) after.remove();
+    after = next;
+  }
+  const answered = chat.querySelectorAll(`.msg.assistant[data-turn="${box._messageId}"]`);
+  const replaceAt = answered.length ? answered[0]._historyIndex : null;
+  // The same attachments as the first time; they are uploaded already, so this is only a
+  // description of them
+  const images = (box._files || []).map(f => ({id: f.id, url: fileUrl(f.id),
+                                               name: f.name || 'attachment', document: !!f.document}));
+  await send({text: box._text || '', images, again: {messageId: box._messageId, replaceAt}});
 }
 
 const ACTION_LABELS = {chat: 'answered directly', search: 'searched the web',
@@ -1703,7 +1844,7 @@ function offerLocation(box, text, decision){
   box.querySelector('.body').appendChild(again);
 }
 
-async function sendMap(text, decision, fix){
+async function sendMap(text, decision, fix, again){
   showError('');
   try{
     await ensureConversation(text, currentModel());
@@ -1711,12 +1852,10 @@ async function sendMap(text, decision, fix){
     showError('Could not save the conversation: ' + errorText(e));
     return;
   }
-  promptBox.value = ''; fitComposer();
-  addUserMessage(text, []);
-  history.push({role: 'user', content: text, images: []});
-  await saveMessage({role: 'user', content: text});
+  if(!again){ promptBox.value = ''; fitComposer(); history.push({role: 'user', content: text, images: []}); }
+  const asked = await askedNow(text, [], [], null, again);
 
-  const box = addMessage('assistant', '', 'OpenStreetMap');
+  const box = answerBox(again ? again.messageId : asked?._messageId, 'OpenStreetMap');
   noteDecision(box, decision);
   busy(true);
   let here = null;
@@ -1749,7 +1888,7 @@ async function sendMap(text, decision, fix){
   }
   if(!answer){
     // The reason, in the answer, where the question is - not only in a banner at the top
-    box.querySelector('.body').textContent = trouble || 'Nothing came back from the map.';
+    failedTurn(box, trouble || 'Nothing came back from the map.');
     if(/where you are|your location/i.test(trouble)) offerLocation(box, text, decision);
     return;
   }
@@ -1759,14 +1898,14 @@ async function sendMap(text, decision, fix){
     ? `(${answer.route.distance_km} km, about ${answer.route.minutes} minutes`
       + `${named ? '; ' + named : ''})`
     : `(${named || 'nothing found'})`;
-  history.push({role: 'assistant', content: said});
+  recordAnswer(box, said, again ? again.replaceAt : null);
   await saveMessage({role: 'assistant', content: said, model: 'OpenStreetMap',
-                     attachments: {map: answer}});
+                     attachments: {map: answer, answers_to: box.dataset.turn ? Number(box.dataset.turn) : null}});
   revealFrom(box);
   loadConversations();
 }
 
-async function sendMedia(text, decision){
+async function sendMedia(text, decision, again){
   showError('');
   try{
     await ensureConversation(text, currentModel());
@@ -1774,12 +1913,10 @@ async function sendMedia(text, decision){
     showError('Could not save the conversation: ' + errorText(e));
     return;
   }
-  promptBox.value = ''; fitComposer();
-  addUserMessage(text, []);
-  history.push({role: 'user', content: text, images: []});
-  await saveMessage({role: 'user', content: text});
+  if(!again){ promptBox.value = ''; fitComposer(); history.push({role: 'user', content: text, images: []}); }
+  const asked = await askedNow(text, [], [], null, again);
 
-  const box = addMessage('assistant', '', 'Picture search');
+  const box = answerBox(again ? again.messageId : asked?._messageId, 'Picture search');
   noteDecision(box, decision);
   busy(true);
   setStatus(box, 'Working out what to look for');
@@ -1801,7 +1938,7 @@ async function sendMedia(text, decision){
     setStatus(box, null);
   }
   if(!answer){
-    box.querySelector('.body').textContent = trouble || 'Nothing came back from the picture search.';
+    failedTurn(box, trouble || 'Nothing came back from the picture search.');
     return;
   }
   renderMedia(box, answer);
@@ -1811,9 +1948,9 @@ async function sendMedia(text, decision){
     ? `(found ${answer.kind === 'videos' ? 'videos' : 'pictures'} on the web: ${counted})`
     : `(no ${answer.kind === 'videos' ? 'videos' : 'pictures'} found for `
       + `${(answer.groups || []).map(g => g.subject).join(', ') || text})`;
-  history.push({role: 'assistant', content: said});
+  recordAnswer(box, said, again ? again.replaceAt : null);
   await saveMessage({role: 'assistant', content: said, model: 'Picture search',
-                     attachments: {media: answer}});
+                     attachments: {media: answer, answers_to: box.dataset.turn ? Number(box.dataset.turn) : null}});
   revealFrom(box);
   loadConversations();
 }
@@ -1984,11 +2121,33 @@ async function ensureConversation(firstMessage, model){
 }
 
 async function saveMessage(message){
-  // Saving must never break the chat itself; report and carry on
+  // Saving must never break the chat itself; report and carry on. What comes back carries the id
+  // the answers to this question are filed under, so asking again can keep them together.
   try{
-    await api(`/chat/conversations/${currentId}/messages`, {method: 'POST', headers: JSON_HEADERS,
-                                                           body: JSON.stringify(message)});
-  }catch(e){ showError('Reply shown but not saved: ' + errorText(e)); }
+    return await api(`/chat/conversations/${currentId}/messages`, {method: 'POST', headers: JSON_HEADERS,
+                                                                   body: JSON.stringify(message)});
+  }catch(e){ showError('Reply shown but not saved: ' + errorText(e)); return null; }
+}
+
+/* Puts the question in the transcript, saves it, and remembers which id its answers belong to.
+   When the question is being asked again it is already both of those, so nothing happens. */
+async function askedNow(text, imageUrls, files, attachments, again){
+  if(again) return chat.querySelector(`.msg.user[data-message="${again.messageId}"]`);
+  const box = addUserMessage(text, imageUrls, files);
+  const saved = await saveMessage({role: 'user', content: text, attachments: attachments || null});
+  if(saved){
+    box._messageId = saved.id;
+    box.dataset.message = saved.id;
+  }
+  refreshTurnTools();
+  return box;
+}
+
+/* The box an answer goes in, filed under the question it answers. */
+function answerBox(turnId, model){
+  const box = addMessage('assistant', '', model);
+  if(turnId) box.dataset.turn = turnId;
+  return box;
 }
 
 // Reads an SSE response, calling onData for each JSON payload
@@ -2069,14 +2228,19 @@ function setDeciding(on){
   document.getElementById('deciding').hidden = !on;
 }
 
-async function send(){
-  const text = promptBox.value.trim();
+/* One turn. Normally it takes what is in the composer; asking a question again passes the words
+   and the attachments back in, along with the question they belong to, and the answer joins the
+   ones already filed under it. */
+async function send(redo = null){
+  const text = redo ? redo.text : promptBox.value.trim();
   if(controller) return;
+  if(redo) pending = redo.images || [];
   if(!text && !pending.length) return;
   if(pending.some(p => p.uploading)){
     showError('One moment: the picture is still uploading.');
     return;
   }
+  const asking = redo ? redo.again : null;
   // Asked here, in the same turn as the tap that called this. On iOS the permission prompt is
   // tied to a gesture, and waiting for the router to answer first spends it: by then the ask is
   // silently refused and the map is told nobody knows where you are.
@@ -2085,15 +2249,15 @@ async function send(){
               ? myLocation() : Promise.resolve(null);
 
   const decision = await decideAction(text, attachedPictures().length > 0);
-  if(decision.action === 'map') return sendMap(text, decision, fix);
-  if(decision.action === 'photos') return sendMedia(text, decision);
+  if(decision.action === 'map') return sendMap(text, decision, fix, asking);
+  if(decision.action === 'photos') return sendMedia(text, decision, asking);
   if(decision.action === 'clean' || decision.action === 'blur' || decision.action === 'backdrop')
-    return sendPhoto(text, decision);
-  if(decision.action === 'image' || decision.action === 'edit') return sendImage(text, decision);
-  return sendChat(text, decision);
+    return sendPhoto(text, decision, asking);
+  if(decision.action === 'image' || decision.action === 'edit') return sendImage(text, decision, asking);
+  return sendChat(text, decision, asking);
 }
 
-async function sendChat(text, decision){
+async function sendChat(text, decision, again){
   const model = decision.model || currentModel();
   if(attachedPictures().length && !canSee(model)){
     showError(choosing()
@@ -2109,15 +2273,15 @@ async function sendChat(text, decision){
     showError('Could not save the conversation: ' + errorText(e));
     return;
   }
-  const images = pending.map(f => f.id);
+  const files = pending.map(f => ({id: f.id, name: f.name, document: !!f.document}));
+  const images = files.map(f => f.id);
   pending = []; renderPending();
-  promptBox.value = ''; fitComposer();
-  history.push({role: 'user', content: text, images});
-  addUserMessage(text, images.map(fileUrl));
-  await saveMessage({role: 'user', content: text,
-                     attachments: images.length ? {images: images.map(id => ({file_id: id}))} : null});
+  if(!again){ promptBox.value = ''; fitComposer(); history.push({role: 'user', content: text, images}); }
+  const asked = await askedNow(text, images.map(fileUrl), files,
+                               files.length ? {images: files.map(f => ({file_id: f.id, document: f.document}))} : null,
+                               again);
 
-  const box = addMessage('assistant', '', model);
+  const box = answerBox(again ? again.messageId : asked?._messageId, model);
   noteDecision(box, decision);
   const body = box.querySelector('.body');
   // Three dots sit there looking the same whether the model is working or has died. The spinner is
@@ -2131,6 +2295,9 @@ async function sendChat(text, decision){
   messages.push(...history.map(h => ({role: h.role, content: h.content, images: h.images || []})));
 
   const payload = {model, messages, conversation_id: currentId,
+                   // The server writes the answer down, so it is the one that has to file it
+                   // under the question; without this, asking again would paint over the old one
+                   answers_to: box.dataset.turn ? Number(box.dataset.turn) : null,
                    temperature: parseFloat(document.getElementById('temperature').value),
                    max_tokens: parseInt(document.getElementById('maxTokens').value, 10) || 8192,
                    web_search: decision.action === 'search',
@@ -2139,6 +2306,7 @@ async function sendChat(text, decision){
 
   controller = new AbortController();
   busy(true);
+  let trouble = '';
   try{
     const response = await postStream('/chat/complete', payload);
     await readEvents(response, chunk => {
@@ -2174,7 +2342,7 @@ async function sendChat(text, decision){
       followAlong();
     });
   }catch(e){
-    if(e.name !== 'AbortError') showError(errorText(e));
+    if(e.name !== 'AbortError'){ trouble = errorText(e); showError(trouble); }
   }finally{
     controller = null;
     busy(false);
@@ -2193,20 +2361,47 @@ async function sendChat(text, decision){
     tps: tokens && genSeconds > 0 ? +(tokens / genSeconds).toFixed(1) : null,
     total: +total.toFixed(1),
   };
+  if(!answer && !thinking){
+    // Nothing came back, so nothing was saved either. Say why here, where the question is, and
+    // leave the question itself alone: it is still in the transcript with Copy and Ask again on
+    // it, which is the whole point of a turn that failed.
+    failedTurn(box, trouble);
+    loadConversations();
+    return;
+  }
   renderAssistant(box, answer, thinking, stats, sources, await renderedHtml(answer));
 
-  history.push({role: 'assistant', content: answer});
+  recordAnswer(box, answer, again ? again.replaceAt : null);
   // The server writes the answer down itself as the job finishes, so that walking away mid-answer
   // does not throw the turn away. Saving it from here as well would store it twice.
-  if(answer || thinking){
-    // The summary is written in the background once a chat gets long
-    if(memory.enabled) setTimeout(loadMemory, 4000);
-  }
+  // The summary is written in the background once a chat gets long
+  if(memory.enabled) setTimeout(loadMemory, 4000);
   loadConversations();
 }
 
+/* A turn that produced nothing. The reason belongs where the answer would have been - a banner at
+   the top of the page is gone by the time you scroll back to the question it is about. */
+function failedTurn(box, trouble){
+  const body = box.querySelector('.body');
+  // Not an answer, so it neither joins the ones you can page through nor stands in for one
+  delete box.dataset.turn;
+  box.dataset.failed = '1';
+  body.className = 'body failed';
+  body.textContent = trouble
+    ? `That did not go through: ${trouble}`
+    : 'That did not go through, and nothing came back to show.';
+  const again = document.createElement('div');
+  again.className = 'turn-tools stay';
+  again.innerHTML = '<button data-try-again>Try again</button>';
+  again.querySelector('button').addEventListener('click', () => {
+    const asked = [...chat.querySelectorAll('.msg.user')].pop();
+    if(asked) resend(asked);
+  });
+  box.appendChild(again);
+}
+
 // A photograph, not a drawing: noise taken off, or the background blurred. Never both at once.
-async function sendPhoto(text, decision){
+async function sendPhoto(text, decision, again){
   const source = pending[0];
   if(!source){ showError('Attach a photo first.'); return; }
   showError('');
@@ -2220,14 +2415,13 @@ async function sendPhoto(text, decision){
   }
   const references = pending.slice(1);
   pending = []; renderPending();
-  promptBox.value = ''; fitComposer();
-  addUserMessage(text, [source, ...references].map(f => f.url));
-  history.push({role: 'user', content: text, images: []});
-  await saveMessage({role: 'user', content: text,
-                     attachments: {mode: 'photo', images: [{file_id: source.id}]}});
+  if(!again){ promptBox.value = ''; fitComposer(); history.push({role: 'user', content: text, images: []}); }
+  const asked = await askedNow(text, [source, ...references].map(f => f.url),
+                               [{id: source.id, name: source.name}],
+                               {mode: 'photo', images: [{file_id: source.id}]}, again);
 
-  const box = addMessage('assistant', '',
-                         backdrop ? 'Background colour' : cleaning ? 'Clean-up' : 'Background blur');
+  const box = answerBox(again ? again.messageId : asked?._messageId,
+                        backdrop ? 'Background colour' : cleaning ? 'Clean-up' : 'Background blur');
   noteDecision(box, decision);
   setStatus(box, 'Starting');
   const started = performance.now();
@@ -2237,6 +2431,7 @@ async function sendPhoto(text, decision){
   try{
     const response = await postStream('/chat/photo', {
       file_id: source.id, action: decision.action, conversation_id: currentId,
+      answers_to: box.dataset.turn ? Number(box.dataset.turn) : null,
       request: text, upscale: cleaning, colour: chosenBackdrop(),
       strength: parseFloat(document.getElementById('blurStrength').value)});
     await readEvents(response, chunk => {
@@ -2271,11 +2466,11 @@ async function sendPhoto(text, decision){
   box.querySelector('.generated img')?.addEventListener('load', () => revealFrom(box), {once: true});
   revealFrom(box);
   // The server saved this one, so that a dropped connection cannot lose it
-  history.push({role: 'assistant', content: `(${done.toLowerCase()})`});
+  recordAnswer(box, `(${done.toLowerCase()})`, again ? again.replaceAt : null);
   loadConversations();
 }
 
-async function sendImage(text, decision){
+async function sendImage(text, decision, again){
   if(!text){ showError('Describe the image you want.'); return; }
   showError('');
   const source = pending[0] || null;
@@ -2289,14 +2484,15 @@ async function sendImage(text, decision){
     return;
   }
   pending = []; renderPending();
-  promptBox.value = ''; fitComposer();
-  addUserMessage(text, source ? [source, ...references].map(f => f.url) : []);
   // Image turns are kept in the transcript as text only, so a chat model later knows what was made
-  history.push({role: 'user', content: text, images: []});
-  await saveMessage({role: 'user', content: text,
-                     attachments: {mode: 'image', images: source ? [source, ...references].map(f => ({file_id: f.id})) : []}});
+  if(!again){ promptBox.value = ''; fitComposer(); history.push({role: 'user', content: text, images: []}); }
+  const asked = await askedNow(text, source ? [source, ...references].map(f => f.url) : [],
+                               source ? [source, ...references].map(f => ({id: f.id, name: f.name})) : [],
+                               {mode: 'image', images: source ? [source, ...references].map(f => ({file_id: f.id})) : []},
+                               again);
 
-  const box = addMessage('assistant', '', source ? 'Image edit' : 'Image generation');
+  const box = answerBox(again ? again.messageId : asked?._messageId,
+                        source ? 'Image edit' : 'Image generation');
   noteDecision(box, decision);
   setStatus(box, 'Working out what to draw');
   const started = performance.now();
@@ -2306,6 +2502,7 @@ async function sendImage(text, decision){
   try{
     const response = await postStream('/chat/images', {prompt: text, size, strength,
                                                        conversation_id: currentId,
+                                                       answers_to: box.dataset.turn ? Number(box.dataset.turn) : null,
                                                        source_file_id: source ? source.id : null,
                                                        reference_file_ids: references.map(f => f.id)});
     await readEvents(response, chunk => {
@@ -2344,11 +2541,14 @@ async function sendImage(text, decision){
   renderGenerated(box, generated, stats);
   box.querySelector('.generated img')?.addEventListener('load', () => revealFrom(box), {once: true});
   revealFrom(box);
-  history.push({role: 'assistant', content: `(${source ? 'edited the image' : 'generated an image'}: ${drawn || text})`});
+  recordAnswer(box, `(${source ? 'edited the image' : 'generated an image'}: ${drawn || text})`,
+               again ? again.replaceAt : null);
   loadConversations();   // saved by the server, so a dropped connection cannot lose it
 }
 
-document.getElementById('send').addEventListener('click', send);
+// Wrapped, not passed straight in: a click handler is called with the event, and send now
+// takes an argument - the button would have handed it a MouseEvent to re-ask
+document.getElementById('send').addEventListener('click', () => send());
 document.getElementById('stop').addEventListener('click', () => controller?.abort());
 function fitComposer(){
   promptBox.style.height = 'auto';
