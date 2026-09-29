@@ -41,7 +41,7 @@ STAMP=$(date +%Y%m%d-%H%M%S)
 
 step "Backing up the current server code ($STAMP)"
 ssh -o BatchMode=yes "$HOST" "cd $REMOTE_DIR && mkdir -p .deploy-backup && \
-  tar czf .deploy-backup/$STAMP.tar.gz app utils bin config/engines.yaml config/models.yaml config/searxng \
+  tar czf .deploy-backup/$STAMP.tar.gz app utils bin config/engines.yaml config/models.yaml config/mcp.yaml config/searxng \
       docker-compose.gateway.yml docker-compose.homelab.yml requirements.txt requirements-gateway.txt 2>/dev/null; \
   ls -1t .deploy-backup/*.tar.gz | tail -n +6 | xargs -r rm -f; \
   echo \"kept \$(ls .deploy-backup | wc -l) backup(s)\""
@@ -50,7 +50,7 @@ step "Syncing the project"
 tar czf - \
     --exclude='__pycache__' --exclude='*.pyc' \
     --exclude='config/config.properties' \
-    app utils bin config/engines.yaml config/models.yaml config/searxng scripts \
+    app utils bin config/engines.yaml config/models.yaml config/mcp.yaml config/searxng scripts \
     docker-compose.gateway.yml docker-compose.homelab.yml .env.example \
     requirements.txt requirements-gateway.txt \
   | ssh -o BatchMode=yes "$HOST" "tar xzf - -C $REMOTE_DIR && echo synced"
