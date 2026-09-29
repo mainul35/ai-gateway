@@ -23,9 +23,9 @@ from app.auth import Principal, authenticate
 from app.db import get_session, session_factory
 from app.models import ChatFile, Conversation, ConversationMessage, MemoryEntry, utcnow
 from app.routers.openai_v1 import PROXY_PATHS, forward
-from app.tools import (chooser, documents, image_prompt, images, jobs, map_plan, map_web, maps,
-                        markdown, media, memory as memory_tool, photo, places, portrait,
-                        router as intent_router, web_search)
+from app.tools import (agent, chooser, documents, image_prompt, images, jobs, map_plan,
+                        map_web, maps, markdown, mcp_client, media, memory as memory_tool,
+                        photo, places, portrait, router as intent_router, web_search)
 
 log = logging.getLogger("playground")
 
@@ -241,6 +241,9 @@ async def capabilities(principal: Principal = Depends(authenticate)):
         "photo_blur": images.is_available() and photo.is_depth_available(),
         "photo_backdrop": images.is_available() and portrait.is_available(),
         "maps": settings.feature_enabled("maps"),
+        # Whether there is anything to be agentic with: the feature on, and a tool server
+        # that this host could actually run
+        "agent": agent.is_available(),
         # Which map the browser must draw on, and the browser key for it when that is Google's.
         # The two are never mixed: Google's terms forbid their places on anybody else's tiles.
         "maps_tiles": places.tiles() if settings.feature_enabled("maps") else "osm",
@@ -1679,5 +1682,169 @@ async def generate_image(payload: ImageIn, principal: Principal = Depends(authen
         job = jobs.start(user.id, payload.conversation_id, "image", (payload.prompt or "")[:120], stream())
         return StreamingResponse(jobs.follow(job), media_type="text/event-stream",
                                  headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+    return StreamingResponse(stream(), media_type="text/event-stream",
+                             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+
+# --- the agent ----------------------------------------------------------------------------------
+
+class AgentIn(BaseModel):
+    model: str = Field(max_length=256)
+    conversation_id: int | None = None
+    messages: list[ChatMessageIn]
+    temperature: float | None = None
+    max_tokens: int | None = None
+    answers_to: int | None = None
+
+
+async def _one_round(principal, body):
+    """One call to the model. Returns its message, or raises Stop with something to show."""
+    try:
+        response = await forward(principal, "chat_completions", PROXY_PATHS["chat_completions"], body)
+        answer = json.loads(response.body)
+    except HTTPException as e:
+        raise agent.Stop(str(e.detail))
+    except (ValueError, TypeError) as e:
+        raise agent.Stop(f"the model's reply could not be read ({e}).")
+    choices = answer.get("choices") or []
+    if not choices:
+        raise agent.Stop("the model returned nothing.")
+    return choices[0].get("message") or {}, answer.get("usage") or {}
+
+
+@router.post("/agent")
+async def run_agent(payload: AgentIn, principal: Principal = Depends(authenticate),
+                    session: AsyncSession = Depends(get_session)):
+    """Runs a model with the tool servers in reach, and streams what it does.
+
+    Every step is sent as it happens - which tool, with what arguments, what came back - because an
+    agent that works silently for two minutes and then produces an answer is impossible to trust
+    and impossible to debug. The same events are what gets saved, so the transcript of a turn can
+    be read again later.
+    """
+    user = _require_user(principal)
+    if not agent.is_available():
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE,
+                            "No tool servers are switched on, so there is nothing to be agentic "
+                            "with. Add one on the Tools page.")
+    if not access.can_use_model(principal, payload.model):
+        raise HTTPException(status.HTTP_403_FORBIDDEN,
+                            f"You do not have access to model '{payload.model}'")
+    backend = await backends.resolve(payload.model)
+    if backend is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, f"Model '{payload.model}' is not available")
+    if "tools" not in backend.capabilities:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST,
+                            f"{payload.model} cannot call tools. Pick a model marked as able to.")
+    if payload.conversation_id is not None:
+        await _owned(session, payload.conversation_id, user)
+
+    user_id = user.id
+    steps = []          # what happened, kept so the turn can be saved and read again
+
+    async def stream():
+        yield _event("status", text="Asking the tool servers what they offer")
+        try:
+            tools, where, trouble = await agent.offered()
+        except Exception as e:
+            yield _error(f"The tool servers could not be reached ({e.__class__.__name__}).")
+            return
+        for problem in trouble:
+            yield _event("notice", text=f"Leaving out {problem}")
+        if not tools:
+            yield _error("None of the switched-on tool servers answered, so there are no tools "
+                         "to use. Check them on the Tools page.")
+            return
+        yield _event("tools", tools=[t["function"]["name"] for t in tools])
+
+        messages = agent.with_system([{"role": m.role, "content": m.content} for m in payload.messages])
+        budget = agent.Budget()
+        answer, finished = "", None
+
+        for round_number in range(agent.MAX_ROUNDS):
+            stopping = budget.why_stop()
+            if stopping:
+                finished = stopping
+                break
+            yield _event("status", text="Thinking" if round_number == 0
+                         else f"Thinking again, with what the tools said (round {round_number + 1})")
+            body = agent.request(payload.model, messages, tools, payload.temperature,
+                                 payload.max_tokens)
+            try:
+                message, usage = await _one_round(principal, body)
+            except agent.Stop as e:
+                yield _error(str(e))
+                return
+
+            calls = agent.wanted(message)
+            answer = (message.get("content") or "").strip()
+            if not calls:
+                break
+
+            # Keep the model's own turn exactly as it sent it, so the tool replies line up with it
+            messages.append({"role": "assistant", "content": message.get("content") or "",
+                             "tool_calls": message.get("tool_calls") or []})
+            if len(calls) > agent.MAX_CALLS_PER_ROUND:
+                calls = calls[:agent.MAX_CALLS_PER_ROUND]
+                yield _event("notice", text=f"It asked for more than {agent.MAX_CALLS_PER_ROUND} "
+                                            f"tools at once; the rest were left for the next round.")
+
+            for call in calls:
+                known = where.get(call["name"])
+                began = time.monotonic()
+                yield _event("call", round=round_number + 1, tool=call["name"],
+                             arguments=str(call.get("arguments") or "")[:2000])
+                if not known:
+                    # The model invented a tool. Telling it so is more useful than failing.
+                    text, bad = (f"There is no tool called {call['name']}. The ones you have are: "
+                                 f"{', '.join(sorted(where))}."), True
+                else:
+                    server, tool = known
+                    try:
+                        text, bad = await mcp_client.call(server, tool,
+                                                          agent.arguments(call.get("arguments")))
+                    except agent.Stop as e:
+                        text, bad = str(e), True
+                    except mcp_client.McpError as e:
+                        text, bad = str(e), True
+                    except Exception as e:
+                        log.info("tool %s failed: %s", call["name"], e)
+                        text, bad = f"{e.__class__.__name__}: {e}", True
+                seconds = round(time.monotonic() - began, 1)
+                budget.take(text)
+                # The same field names the live event uses, so one renderer draws both: a turn
+                # being watched and the same turn read back tomorrow
+                steps.append({"tool": call["name"], "failed": bad, "seconds": seconds,
+                              "arguments": str(call.get("arguments") or "")[:2000],
+                              "text": agent.summarise(text, 2000)})
+                yield _event("result", tool=call["name"], failed=bad, seconds=seconds,
+                             text=agent.summarise(text))
+                messages.append({"role": "tool", "tool_call_id": call["id"],
+                                 "name": call["name"], "content": text})
+        else:
+            finished = (f"It reached {agent.MAX_ROUNDS} rounds of tool calls, which is as far as "
+                        f"this goes. What it had at that point is below.")
+
+        if finished:
+            yield _event("notice", text=finished)
+        if not answer:
+            answer = ("It stopped without an answer in words. What the tools returned is above.")
+        yield _event("answer", text=answer, html=markdown.render(answer),
+                     calls=budget.calls, seconds=round(budget.spent, 1))
+
+        if payload.conversation_id is not None:
+            async with session_factory()() as db:
+                conversation = await db.get(Conversation, payload.conversation_id)
+                if conversation is not None and conversation.user_id == user_id:
+                    filed = {"agent": {"steps": steps, "seconds": round(budget.spent, 1)}}
+                    if payload.answers_to is not None:
+                        filed["answers_to"] = payload.answers_to
+                    db.add(ConversationMessage(
+                        conversation_id=payload.conversation_id, role="assistant", content=answer,
+                        model=payload.model, stats=json.dumps({"total": round(budget.spent, 1)}),
+                        attachments=json.dumps(filed)))
+                    conversation.updated_at = utcnow()
+                    await db.commit()
+
     return StreamingResponse(stream(), media_type="text/event-stream",
                              headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
