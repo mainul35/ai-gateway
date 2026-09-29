@@ -23,7 +23,7 @@ import logging
 import re
 import time
 
-from app import settings
+from app import access, settings
 from app.tools import mcp_client
 
 log = logging.getLogger("tools.agent")
@@ -84,13 +84,22 @@ def _openai_tool(entry):
     }
 
 
-async def offered():
-    """Every tool the enabled servers have, and where each one came from.
+def is_available_to(principal):
+    """Whether this person has any tool server at all, which is what the Agent chip turns on."""
+    return bool(mcp_client.is_enabled()
+                and access.tool_servers_for(principal, mcp_client.available()))
 
-    Servers are asked in parallel and one that will not answer is left out with a note rather than
+
+async def offered(servers=None):
+    """Every tool the given servers have, and where each one came from.
+
+    The servers are decided before this is called and never by anything a server says, so a tool
+    cannot talk its way into a list it was left out of.
+
+    They are asked in parallel and one that will not answer is left out with a note rather than
     taking the turn down with it: an agent with three tools is better than an agent with none.
     """
-    servers = mcp_client.available()
+    servers = mcp_client.available() if servers is None else servers
     if not servers:
         return [], {}, []
 

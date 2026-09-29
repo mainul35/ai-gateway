@@ -1,4 +1,6 @@
 """Login through the OAuth2 provider, plus self-service API keys for logged-in users."""
+import json
+
 from fastapi import APIRouter, Cookie, Depends, HTTPException, Request, status
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from pydantic import BaseModel, Field
@@ -77,6 +79,10 @@ async def callback(request: Request, code: str | None = None, state: str | None 
         raise HTTPException(status.HTTP_502_BAD_GATEWAY, problem)
 
     identity = sso.identity_from_userinfo(userinfo)
+    # Kept whole, and refreshed at every sign-in, so a capability granted or taken away on the auth
+    # server is reflected here the next time the person signs in rather than whenever someone
+    # remembers to look
+    claims = sso.capability_claims(userinfo, tokens.get("scope", ""))
     if not identity["name"]:
         raise HTTPException(status.HTTP_502_BAD_GATEWAY, "Auth server returned no usable identity claims")
 
@@ -95,6 +101,8 @@ async def callback(request: Request, code: str | None = None, state: str | None 
         # Listed admin emails are always promoted; otherwise keep the role assigned in the UI
         if sso.role_for(identity["email"]) == "admin":
             user.role = "admin"
+    user.claims = json.dumps(claims) if claims else None
+    user.claims_seen_at = utcnow()
     await session.commit()
     await session.refresh(user)
 

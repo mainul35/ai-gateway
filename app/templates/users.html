@@ -103,6 +103,22 @@ function showCreated(html){
 }
 function canManage(target){ return me.role === 'admin' || (me.role === 'manager' && target.role === 'user'); }
 
+/* What the auth server sent about this person, exactly as it sent it. Folded away, because it is
+   for the times somebody is wiring permissions up to it rather than for every glance at the page.
+   Shown to admins only, which is who can read this page at all. */
+function saidByAuthServer(u){
+  if(!u.claims) return '';
+  const granted = (u.tool_capabilities || []);
+  const when = u.claims_seen_at ? new Date(u.claims_seen_at).toLocaleString() : '';
+  return `<details style="margin-top:.3rem">
+    <summary class="muted" style="font-size:.78rem;cursor:pointer">what the auth server said${
+      granted.length ? ` &middot; ${granted.length} capability${granted.length === 1 ? '' : 'ies'}` : ''}</summary>
+    <div class="muted" style="font-size:.74rem;margin-top:.25rem">at ${escapeHtml(when)}</div>
+    <pre style="font-size:.74rem;white-space:pre-wrap;word-break:break-word;margin:.25rem 0 0">${
+      escapeHtml(JSON.stringify(u.claims, null, 1))}</pre>
+  </details>`;
+}
+
 function accessSummary(u){
   if(u.role === 'admin') return '<span class="muted">all (admin)</span>';
   if(u.model_access === 'all') return 'all models';
@@ -130,7 +146,8 @@ async function loadUsers(){
         const keys = u.keys.filter(k => k.is_active);
         return `<tr>
           <td>${escapeHtml(u.name)}${u.email && u.email !== u.name ? `<br><span class="muted" style="font-size:.82rem">${escapeHtml(u.email)}</span>` : ''}
-              <br><span class="muted" style="font-size:.78rem">${escapeHtml(u.sign_in)}</span></td>
+              <br><span class="muted" style="font-size:.78rem">${escapeHtml(u.sign_in)}</span>
+              ${saidByAuthServer(u)}</td>
           <td>${roleCell(u)}</td>
           <td>${accessSummary(u)}</td>
           <td>${keys.length ? keys.map(k => `<code>${escapeHtml(k.prefix)}&hellip;</code>${manageable
