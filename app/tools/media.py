@@ -104,15 +104,22 @@ NAMED = re.compile(r"\b[A-Z][A-Za-z'’-]{2,}\b|\b[A-Za-z]+\d+[A-Za-z0-9]*\b|\b\
 # A request whose subject, once the asking is stripped off, is still a kind of picture: "a nice
 # nature photo", "a good wallpaper". Nothing has been named, so there is nothing to go and find,
 # and this is what an image model is for.
-PICTURE_KIND = re.compile(r"\b(photos?|photographs?|pictures?|images?|wallpapers?|shots?|snaps?|"
-                          r"portraits?|illustrations?|drawings?|paintings?|artworks?|art|posters?|"
-                          r"backgrounds?)\s*$", re.I)
+KINDS = (r"photos?|photographs?|pictures?|images?|wallpapers?|shots?|snaps?|portraits?|"
+         r"illustrations?|drawings?|paintings?|artworks?|art|posters?|banners?|logos?|icons?|"
+         r"covers?|avatars?|backgrounds?")
+PICTURE_KIND = re.compile(rf"\b({KINDS})\s*$", re.I)
+# The same thing said the other way round: "a poster for the school fair", "a logo for my bakery".
+# The word comes first and what follows is what it is for, which is not a thing anybody has
+# photographed. "the poster for Dune" is the exception that proves it, and names itself.
+PICTURE_KIND_FIRST = re.compile(rf"^\s*(?:an?|the|some)?\s*(?:{KINDS})\b", re.I)
 
 
 def describes_a_picture(message):
     """Whether the thing asked for is a kind of picture rather than a thing to photograph."""
     subject = plain_subject(message)
-    return bool(subject) and bool(PICTURE_KIND.search(subject)) and not points_at_something(subject)
+    if not subject or points_at_something(subject):
+        return False
+    return bool(PICTURE_KIND.search(subject) or PICTURE_KIND_FIRST.match(subject))
 
 
 def points_at_something(text):
