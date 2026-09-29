@@ -27,7 +27,11 @@ SEARCH - needs current or factual information from the web about the world: news
          versions, dates, "latest", "today", anything you could not answer reliably from memory.
 CHAT   - can be answered or discussed directly: explanations, opinions, maths, writing, and anything
          about the user's own code, configuration, logs, machine or earlier messages, including
-         troubleshooting. Questions about a picture the user attached are also CHAT.
+         troubleshooting. Questions about a picture the user attached are also CHAT, and so is a
+         message that simply puts a picture forward as evidence - "here is what I found", "notice
+         this error", "this is what it looks like now", a screenshot with no request at all. That
+         is showing you something so you can read it. Attaching a picture is not asking for it to
+         be changed; only words asking for a change make it one.
 IMAGE  - asks for a picture to be created that nobody has ever photographed: "draw", "generate an
          image of", "make me a picture of". A message that only describes a picture, with no
          question and no instruction, is also IMAGE.
@@ -95,6 +99,10 @@ Examples:
 "put a plain grey backdrop behind me" -> BACKDROP
 "what is in this image?" -> CHAT
 "can you read the text in this screenshot?" -> CHAT
+"Here is what I found in FontSubstitute" -> CHAT
+"notice that the font looks broken" -> CHAT
+"this is the error I am getting" -> CHAT
+"I found these entries in the registry" -> CHAT
 
 Allowed answers this time: {allowed}. Answer with one of those words only."""
 
@@ -187,6 +195,32 @@ def candidates(tools, has_images):
     return allowed
 
 
+# Putting a picture in front of somebody is not asking them to redraw it. "Here is what I found
+# in FontSubstitute", under a screenshot of the registry, is evidence: the answer is to read it.
+# Taken as an edit, the gateway spends a minute of GPU redrawing the screenshot and hands back a
+# picture of a registry editor that never existed, which answers nothing and costs the most of any
+# wrong answer this router can give.
+SHOWING_ME = re.compile(
+    r"^\s*(here\s+(is|are|'s)|here's|this\s+is|these\s+are|that\s+is|it\s+is)"
+    r"|(notice|note)\s+(that|this|the|how|it)"
+    r"|(as you can see|look at (this|the|it)|have a look|see (this|the) (one|picture|image|screenshot))"
+    r"|i\s+(found|got|see|attached|uploaded|am seeing|am getting)"
+    r"|this\s+(shows|is what|screenshot|picture|image|photo|error)"
+    r"|\?\s*$", re.I)
+
+
+def _asks_for_a_change(text):
+    """Whether anything in the words asks for the picture itself to be different."""
+    return bool(EDIT_WORDS.search(text) or CLEAN_WORDS.search(text)
+                or BLUR_WORDS.search(text) or BACKDROP_WORDS.search(text))
+
+
+def _only_showing(text):
+    """The picture is evidence: it is being shown, and nothing asks for it to be changed."""
+    text = text or ""
+    return bool(SHOWING_ME.search(text)) and not _asks_for_a_change(text)
+
+
 def _wants_the_real_thing(text):
     """Asking to be shown one particular thing that exists, in words that do not ask for a drawing.
 
@@ -223,6 +257,86 @@ def by_keywords(message, allowed, has_images):
     if SEARCH in allowed and SEARCH_WORDS.search(text):
         return SEARCH
     return CHAT
+
+
+# A picture came with the message. The seven-way choice above asks a small model to weigh
+# reading against four different ways of changing a picture all at once, and it is the reading that
+# loses: "Here is what I found in FontSubstitute", under a screenshot of the registry, came back as
+# an edit. Asked on its own, as the one question it really is, the same model gets it right - and
+# this is the question worth spending a second call on, because taking evidence for an edit spends
+# a minute of GPU redrawing a screenshot and answers nothing.
+PICTURE_PROMPT = """A picture is attached to the user's message. Say what they want done with it.
+Answer with one word and nothing else.
+
+READ   - the picture is there to be looked at. Evidence, a screenshot of a problem, a photograph of
+         something to identify, a document to read, a chart to explain. The message may describe
+         what is in it, point at part of it, ask a question about it, or simply put it forward
+         with no request at all.
+CHANGE - the message asks for the picture itself to come back different: something added, removed
+         or altered in it, the background replaced or recoloured, the quality improved, the
+         background blurred.
+
+The test is whether words would satisfy them. If what they want back is an answer, it is READ.
+Only if what they want back is a new picture is it CHANGE. A picture with no request attached to
+it is READ: attaching something is not asking for it to be redrawn.
+
+Examples:
+"Here is what I found in FontSubstitute" -> READ
+"notice that the font looks broken" -> READ
+"this is the error I am getting" -> READ
+"what is in this image?" -> READ
+"can you read the text in this screenshot?" -> READ
+"why does my registry look like this" -> READ
+"is this the right setting?" -> READ
+"make it night with northern lights" -> CHANGE
+"remove the car" -> CHANGE
+"white background for my passport photo" -> CHANGE
+"too grainy, clean it up" -> CHANGE
+"blur the background so the bird stands out" -> CHANGE
+
+Answer with READ or CHANGE."""
+
+READ, CHANGE = "read", "change"
+
+
+def build_picture_request(message, history=()):
+    """The one question that matters when a picture is attached: read it, or change it?"""
+    recent = "\n".join(f"{m['role']}: {m['content'][:200]}" for m in list(history)[-2:])
+    context = f"Earlier in the conversation:\n{recent}\n\n" if recent else ""
+    return {
+        "model": settings.router_model(),
+        "stream": False,
+        "temperature": 0,
+        "max_tokens": 200,
+        "reasoning_effort": "none",
+        "messages": [
+            {"role": "system", "content": PICTURE_PROMPT},
+            {"role": "user", "content": f"{context}Message: {message}\n\nAnswer:"},
+        ],
+    }
+
+
+def read_picture_answer(text):
+    """READ or CHANGE out of the model's reply, or None when it named neither."""
+    words = re.findall(r"[a-z]+", re.sub(r"<think>.*?</think>", "", (text or ""), flags=re.S).lower())
+    for word in words:
+        if word in (READ, CHANGE):
+            return word
+    return None
+
+
+def settle_picture(action, by, wanted, message):
+    """Reading beats changing when the model says the picture was given to be looked at.
+
+    Only ever in that direction. The two wrong answers are not equal: reading a picture that was
+    meant to be edited wastes a sentence, and editing a picture that was meant to be read spends a
+    minute of GPU and hands back a fabricated screenshot in place of the evidence.
+    """
+    if wanted is None or action not in (EDIT, CLEAN, BLUR, BACKDROP):
+        return action, by
+    if wanted == READ and not _asks_for_a_change(message or ""):
+        return CHAT, settings.router_model() or "keywords"
+    return action, by
 
 
 def build_category_request(message, history=()):
@@ -311,6 +425,10 @@ def settle_action(answered, message, allowed, has_images):
     # named, so there is nothing to go and find; that request is what the image model is for.
     if answered == PHOTOS and IMAGE in allowed and describes_a_picture(message):
         return IMAGE, "keywords"
+    # And the same care with a picture that was attached rather than asked for: when the words
+    # only put it forward and ask for no change to it, reading it is the answer
+    if answered in (EDIT, CLEAN, BLUR, BACKDROP) and has_images and _only_showing(message):
+        return CHAT, "keywords"
     if answered and answered != CHAT:
         return answered, "model"
     if MAP in allowed and not has_images and MAP_WORDS.search(message or ""):
