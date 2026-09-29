@@ -33,6 +33,10 @@ if failed:
 print("all Python files compile")
 PY
 
+# Compiling is not enough: a backslash eaten by a shell leaves a backspace inside a regular
+# expression that compiles perfectly and matches nothing it was written to match.
+python scripts/check_control_chars.py app utils scripts
+
 STAMP=$(date +%Y%m%d-%H%M%S)
 
 step "Backing up the current server code ($STAMP)"
