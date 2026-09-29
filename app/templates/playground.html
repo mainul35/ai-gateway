@@ -188,6 +188,28 @@ a.cite{font-size:.75em;vertical-align:super;text-decoration:none;padding:0 .1rem
                     display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
 .generated .caption.open{-webkit-line-clamp:unset;overflow:visible}
 .generated .actions{display:flex;gap:.5rem;margin-top:.5rem}
+/* What the agent did, above what it concluded. A step is added the moment a tool is called and
+   completed when it answers, so a slow one reads as something in progress rather than as nothing
+   happening at all. Quiet by design: this is the working, not the answer. */
+.trace{border-left:2px solid var(--border);padding:.1rem 0 .1rem .7rem;margin:.1rem 0 .7rem;
+       white-space:normal;font-size:.8rem}
+.trace .step{display:grid;grid-template-columns:auto 1fr auto;gap:.2rem .5rem;
+             align-items:baseline;padding:.15rem 0}
+.trace .mark{width:.5rem;height:.5rem;border-radius:50%;background:var(--muted);align-self:center}
+.trace .step.done .mark{background:var(--success)}
+.trace .step.failed .mark{background:var(--danger)}
+.trace .step[data-waiting] .mark{background:var(--primary);animation:pulse 1s ease-in-out infinite}
+@keyframes pulse{50%{opacity:.25}}
+.trace .what{font-weight:600;font-family:var(--mono,ui-monospace,monospace)}
+.trace .detail{grid-column:2;color:var(--muted);word-break:break-word;
+               display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.trace .took{color:var(--muted);font-variant-numeric:tabular-nums}
+.trace .said{grid-column:2;color:var(--muted);margin:.15rem 0 .35rem;padding-left:.1rem;
+             border-left:1px solid var(--border);padding-left:.5rem;
+             display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}
+.trace .step.notice .what{font-weight:400;color:var(--warning);font-family:inherit}
+.trace .step.tools .what{font-weight:400;color:var(--muted);font-family:inherit}
+
 /* Pictures found on the web rather than drawn. Every tile carries the site it came from, because
    that is what tells the reader whether it is the right thing: the manufacturer's own photograph
    and a stock library's approximation look identical until you see whose page they are on. */
@@ -392,6 +414,8 @@ a.cite{font-size:.75em;vertical-align:super;text-decoration:none;padding:0 .1rem
                     title="Find places, routes, and what is along the way, on OpenStreetMap"><span class="dot"></span>Maps</button>
             <button class="chip" id="toolImage" data-tool="image_generation" aria-pressed="false" hidden
                     title="Create a new image, or edit an attached one, instead of chatting"><span class="dot"></span>Image generation</button>
+            <button class="chip" id="toolAgent" data-tool="agent" aria-pressed="false" hidden
+                    title="Let the model use the tool servers: call one, read what came back, call another, then answer"><span class="dot"></span>Agent</button>
             <span class="attach-wrap">
               <button class="icon-btn" id="attach" aria-haspopup="menu" aria-expanded="false"
                       title="Attach something (you can also paste or drop it)">+</button>
@@ -530,7 +554,8 @@ let savedSystem = '';    // system prompt stored with the current conversation
 let controller = null;
 let caps = {web_search: false, vision: false, image_generation: false, maps: false,
             image_sizes: [], max_upload_mb: 10};
-let tools = {web_search: false, vision: false, image_generation: false, maps: false};
+let tools = {web_search: false, vision: false, image_generation: false, maps: false,
+             agent: false};
 let pending = [];        // images attached to the next message: [{id, url, name, kind}]
 
 function showError(message){
@@ -619,6 +644,7 @@ async function loadCapabilities(){
   document.getElementById('toolVision').hidden = !caps.vision;
   document.getElementById('toolImage').hidden = !caps.image_generation;
   document.getElementById('toolMaps').hidden = !caps.maps;
+  document.getElementById('toolAgent').hidden = !caps.agent;
   document.getElementById('imageSize').innerHTML = caps.image_sizes.map(s =>
     `<option value="${s}">${s[0].toUpperCase() + s.slice(1)}</option>`).join('');
   syncTools();
@@ -682,8 +708,13 @@ function syncTools(){
     modelSelect.title = '';
     return;
   }
-  promptBox.placeholder = 'Ask anything…';
+  promptBox.placeholder = tools.agent ? 'Ask for something that needs looking up or working out…'
+                                     : 'Ask anything…';
   const notes = [];
+  if(tools.agent){
+    notes.push('The model can use the tool servers: it calls one, reads what came back, and goes '
+               + 'again until it can answer. Every step is shown.');
+  }
   if(tools.web_search) notes.push(caps.routing
     ? 'Questions that need current information are searched on the web and cited'
       + (caps.media_search ? '; asking to see something real finds photographs of it.' : '.')
@@ -1112,7 +1143,8 @@ function fillTranscript(messages){
       const turn = extra.answers_to || null;
       const box = answerBox(turn, m.model || (extra.map ? 'OpenStreetMap'
                                               : extra.media ? 'Picture search' : ''));
-      if(extra.map) renderMap(box, extra.map);
+      if(extra.agent) renderAgent(box, extra.agent, m.content, m.html, m.stats);
+      else if(extra.map) renderMap(box, extra.map);
       else if(extra.media) renderMedia(box, extra.media);
       else if(extra.generated) renderGenerated(box, extra.generated, m.stats);
       else renderAssistant(box, m.content, m.reasoning, m.stats, extra.sources, m.html);
@@ -1913,6 +1945,121 @@ function offerLocation(box, text, decision){
   box.querySelector('.body').appendChild(again);
 }
 
+/* One agent turn. What it does is shown as it does it - which tool, with what arguments, what
+   came back - because an agent that works silently for a minute and then speaks is one you can
+   neither trust nor debug. The same record is saved, so the turn reads the same way tomorrow. */
+async function sendAgent(text, again){
+  showError('');
+  try{
+    await ensureConversation(text, currentModel());
+  }catch(e){
+    showError('Could not save the conversation: ' + errorText(e));
+    return;
+  }
+  const model = currentModel();
+  if(!models[model] || !(models[model].capabilities || []).includes('tools')){
+    showError(`${model} cannot call tools. Pick a model marked "calls tools" to use the agent.`);
+    return;
+  }
+  if(!again){ promptBox.value = ''; fitComposer(); history.push({role: 'user', content: text, images: []}); }
+  const asked = await askedNow(text, [], [], null, again);
+
+  const box = answerBox(again ? again.messageId : asked?._messageId, model);
+  const body = box.querySelector('.body');
+  body.className = 'body agent';
+  const trace = document.createElement('div');
+  trace.className = 'trace';
+  box.insertBefore(trace, body);
+  setStatus(box, 'Starting');
+
+  const steps = [];
+  let answer = null, trouble = '';
+  controller = new AbortController();
+  busy(true);
+  const started = performance.now();
+  try{
+    const response = await postStream('/chat/agent', {
+      model, conversation_id: currentId,
+      messages: history.map(h => ({role: h.role, content: h.content, images: []})),
+      temperature: parseFloat(document.getElementById('temperature').value),
+      max_tokens: parseInt(document.getElementById('maxTokens').value, 10) || 8192,
+      answers_to: box.dataset.turn ? Number(box.dataset.turn) : null});
+    await readEvents(response, chunk => {
+      const event = chunk.gateway;
+      if(!event) return;
+      if(event.type === 'status') setStatus(box, event.text);
+      else if(event.type === 'tools') addTrace(trace, 'tools', `${event.tools.length} tools in reach`,
+                                               event.tools.join(', '));
+      else if(event.type === 'notice') addTrace(trace, 'notice', event.text, '');
+      else if(event.type === 'call') addTrace(trace, 'call', event.tool, event.arguments, event.round);
+      else if(event.type === 'result'){
+        finishTrace(trace, event);
+        steps.push(event);
+      }else if(event.type === 'answer') answer = event;
+      else if(event.type === 'error') trouble = event.message || 'The agent stopped.';
+      followAlong();
+    });
+  }catch(e){
+    if(e.name !== 'AbortError') trouble = errorText(e);
+  }finally{
+    controller = null;
+    busy(false);
+    setStatus(box, null);
+  }
+
+  if(!answer){
+    failedTurn(box, trouble || 'The agent stopped without an answer.');
+    loadConversations();
+    return;
+  }
+  renderAssistant(box, answer.text, null, {total: answer.seconds}, null, answer.html);
+  box.insertBefore(trace, box.querySelector('.body'));   // the trace stays above the answer
+  recordAnswer(box, answer.text, again ? again.replaceAt : null);
+  // The server writes the turn down itself, the way the other long jobs do
+  revealFrom(box);
+  loadConversations();
+}
+
+/* One line of the trace. A call is added when it starts and completed when it comes back, so a
+   slow tool shows as something in progress rather than as nothing at all. */
+function addTrace(where, kind, title, detail, round){
+  const line = document.createElement('div');
+  line.className = `step ${kind}`;
+  if(kind === 'call') line.dataset.waiting = '1';
+  line.innerHTML = `<span class="mark"></span><span class="what"></span>`
+                 + `<span class="detail"></span><span class="took"></span>`;
+  line.querySelector('.what').textContent = round ? `${title}` : title;
+  line.querySelector('.detail').textContent = detail || '';
+  if(kind === 'call') line.querySelector('.took').textContent = '…';
+  where.appendChild(line);
+  return line;
+}
+
+function finishTrace(where, event){
+  const line = [...where.querySelectorAll('.step[data-waiting]')].pop();
+  if(!line) return;
+  delete line.dataset.waiting;
+  line.classList.add(event.failed ? 'failed' : 'done');
+  line.querySelector('.took').textContent = `${event.seconds}s`;
+  const result = document.createElement('div');
+  result.className = 'said';
+  result.textContent = event.text;
+  line.appendChild(result);
+}
+
+/* A finished agent turn, read back from a saved conversation. */
+function renderAgent(box, saved, content, html, stats){
+  const trace = document.createElement('div');
+  trace.className = 'trace';
+  for(const step of saved.steps || []){
+    addTrace(trace, 'call', step.tool, step.arguments);
+    finishTrace(trace, step);
+  }
+  box.insertBefore(trace, box.querySelector('.body'));
+  renderAssistant(box, content, null, stats, null, html);
+  box.insertBefore(trace, box.querySelector('.body'));
+}
+
 async function sendMap(text, decision, fix, again){
   showError('');
   try{
@@ -2318,6 +2465,8 @@ async function send(redo = null){
               ? myLocation() : Promise.resolve(null);
 
   const decision = await decideAction(text, attachedPictures().length > 0);
+  // The agent is a choice, not a guess: switched on, it takes the turn
+  if(tools.agent && caps.agent) return sendAgent(text, asking);
   if(decision.action === 'map') return sendMap(text, decision, fix, asking);
   if(decision.action === 'photos') return sendMedia(text, decision, asking);
   if(decision.action === 'clean' || decision.action === 'blur' || decision.action === 'backdrop')
