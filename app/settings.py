@@ -19,6 +19,10 @@ DEFAULTS = {
     "features.vision.enabled": "true",
     "features.image_generation.enabled": "true",
     "features.maps.enabled": "true",
+    "features.mcp.enabled": "true",
+    # Tool servers the gateway may call. Secrets are not in it; it names environment
+    # variables or config.properties keys, and those are read at connect time.
+    "mcp.servers.file": "config/mcp.yaml",
     # Empty means OpenStreetMap, which needs nothing. A Google Maps Platform key switches the
     # whole feature over - results and the map together, because their terms forbid mixing.
     "maps.google.key": "",
