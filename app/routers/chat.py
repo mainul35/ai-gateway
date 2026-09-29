@@ -1501,8 +1501,23 @@ async def route(payload: RouteIn, principal: Principal = Depends(authenticate),
         category, by = intent_router.settle_category(found, payload.message, payload.has_images)
         return category, settings.router_model() if by == "model" else "keywords"
 
-    (action, decided_by), (category, category_by) = await asyncio.gather(decide_action(),
-                                                                        decide_category())
+    async def look_or_change():
+        """With a picture attached, the one question the seven-way choice keeps getting wrong.
+
+        Asked on its own, at the same time as the others, so it costs no extra wait: the three
+        calls go out together and the answer arrives with the rest.
+        """
+        changes = (intent_router.EDIT, intent_router.CLEAN, intent_router.BLUR,
+                   intent_router.BACKDROP)
+        if not (payload.has_images and asking_model and any(a in allowed for a in changes)):
+            return None
+        answer = await _ask_helper(principal,
+                                   intent_router.build_picture_request(payload.message, history))
+        return intent_router.read_picture_answer(answer)
+
+    (action, decided_by), (category, category_by), wanted = await asyncio.gather(
+        decide_action(), decide_category(), look_or_change())
+    action, decided_by = intent_router.settle_picture(action, decided_by, wanted, payload.message)
     decision = {"action": action, "decided_by": decided_by}
     if category is None:
         return decision
