@@ -438,6 +438,11 @@ class CompleteIn(BaseModel):
     thinking: bool | None = None
     web_search: bool = False
     vision: bool = False
+    # Which question this answers. The playground can be asked to run a question again, and
+    # the answers are kept side by side rather than one painting over the other; that only
+    # works if each answer says which question it belongs to, and the answer is written down
+    # here rather than by the browser.
+    answers_to: int | None = None
 
 
 async def _ask_helper(principal, body):
@@ -586,11 +591,16 @@ async def complete(payload: CompleteIn, principal: Principal = Depends(authentic
             conversation = await db.get(Conversation, payload.conversation_id)
             if conversation is None or conversation.user_id != user.id:
                 return
+            filed = {}
+            if answer.sources:
+                filed["sources"] = answer.sources
+            if payload.answers_to is not None:
+                filed["answers_to"] = payload.answers_to
             db.add(ConversationMessage(
                 conversation_id=payload.conversation_id, role="assistant", content=answer.text,
                 reasoning=answer.reasoning or None, model=payload.model,
                 stats=json.dumps(answer.stats()),
-                attachments=json.dumps({"sources": answer.sources}) if answer.sources else None))
+                attachments=json.dumps(filed) if filed else None))
             conversation.updated_at = utcnow()
             conversation.model = payload.model
             await db.commit()
@@ -808,7 +818,8 @@ WANTS_DEHAZE = re.compile(r"\b(haz\w*|mist\w*|foggy|fog|smog|milky|washed out|fl
 WANTS_DENOISE = re.compile(r"\b(noise|noisy|grain|grainy|denoise|speckl\w*|iso|clean)\b", re.I)
 
 
-async def _save_result(db, user_id, conversation_id, png, name, prompt, extra=None, stats=None):
+async def _save_result(db, user_id, conversation_id, png, name, prompt, extra=None, stats=None,
+                       answers_to=None):
     """Stores the picture and, when it belongs to a conversation, the message that shows it.
 
     Written by the server rather than the browser so that a dropped connection cannot lose it: the
@@ -821,12 +832,15 @@ async def _save_result(db, user_id, conversation_id, png, name, prompt, extra=No
     await db.refresh(stored)
     if conversation_id is not None:
         generated = {"file_id": stored.id, "prompt": prompt, **(extra or {})}
+        filed = {"generated": generated}
+        if answers_to is not None:
+            filed["answers_to"] = answers_to
         conversation = await db.get(Conversation, conversation_id)
         if conversation is not None and conversation.user_id == user_id:
             db.add(ConversationMessage(conversation_id=conversation_id, role="assistant",
                                        content=f"({prompt.lower()})",
                                        stats=json.dumps(stats) if stats else None,
-                                       attachments=json.dumps({"generated": generated})))
+                                       attachments=json.dumps(filed)))
             conversation.updated_at = utcnow()
             await db.commit()
     return stored
@@ -969,6 +983,7 @@ class PhotoIn(BaseModel):
     # blur: 0 the nearest thing, 1 the furthest; unset means wherever the photo is already sharp
     focus: float | None = Field(default=None, ge=0.0, le=1.0)
     conversation_id: int | None = None
+    answers_to: int | None = None          # the question this answers, for asking it again
 
 
 @router.post("/photo")
@@ -1070,7 +1085,8 @@ async def edit_photo(payload: PhotoIn, principal: Principal = Depends(authentica
             seconds = round(time.monotonic() - started, 1)
             stored = await _save_result(db, user_id, payload.conversation_id, png,
                                         f"photo-{payload.action}.png", done,
-                                        {"source_file_id": payload.file_id}, {"total": seconds})
+                                        {"source_file_id": payload.file_id}, {"total": seconds},
+                                        answers_to=payload.answers_to)
             yield _event("image", file=_file_json(stored), action=payload.action,
                          did=done[:1].upper() + done[1:], saved=True, seconds=seconds)
 
@@ -1534,6 +1550,7 @@ class ImageIn(BaseModel):
     source_file_id: int | None = None      # the picture to edit
     reference_file_ids: list[int] = Field(default_factory=list, max_length=2)  # extra pictures it may use
     strength: float = Field(default=0.75, ge=0.05, le=1.0)
+    answers_to: int | None = None          # the question this answers, for asking it again
 
 
 @router.post("/images")
@@ -1601,7 +1618,7 @@ async def generate_image(payload: ImageIn, principal: Principal = Depends(authen
                                         {"seed": seed, "size": payload.size,
                                          "asked": payload.prompt,
                                          "source_file_id": payload.source_file_id},
-                                        {"total": seconds})
+                                        {"total": seconds}, answers_to=payload.answers_to)
             yield _event("image", file=_file_json(stored), seed=seed, saved=True, seconds=seconds)
 
     if payload.conversation_id is not None:
