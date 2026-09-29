@@ -14,7 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app import access, backends, catalogue, fitting, settings, usage as usage_log
-from app.tools import jobs, mcp_client
+from app.tools import jobs, mcp_client, mcp_config
 from app.auth import Principal, generate_key, hash_key, require_admin, require_manager
 from app import config_writer
 from app.engine.supervisor import supervisor
@@ -672,6 +672,24 @@ async def system_overview(_: Principal = Depends(require_admin), session: AsyncS
 
 # --- tool servers ---------------------------------------------------------------------------
 
+class McpServerIn(BaseModel):
+    """One tool server as the Tools page sends it.
+
+    Everything except the name is optional on a change, so toggling one switch does not require
+    the browser to send back a server it is not editing.
+    """
+    name: str = Field(min_length=1, max_length=64)
+    description: str | None = Field(default=None, max_length=300)
+    transport: str | None = Field(default=None, pattern="^(stdio|http)$")
+    enabled: bool | None = None
+    command: str | None = Field(default=None, max_length=300)
+    args: list[str] | None = Field(default=None, max_length=40)
+    url: str | None = Field(default=None, max_length=500)
+    env: dict[str, str] | None = None
+    headers: dict[str, str] | None = None
+    only: list[str] | None = Field(default=None, max_length=100)
+
+
 @router.get("/mcp")
 async def list_mcp_servers(_: Principal = Depends(require_admin)):
     """Every configured tool server, and whether this host could run it at all.
@@ -682,8 +700,40 @@ async def list_mcp_servers(_: Principal = Depends(require_admin)):
     return {
         "enabled": mcp_client.is_enabled(),
         "file": settings.get("mcp.servers.file", "MCP_SERVERS_FILE") or "config/mcp.yaml",
-        "servers": [server.as_json(trouble=server.trouble()) for server in mcp_client.servers()],
+        "servers": mcp_config.everything(),
     }
+
+
+@router.post("/mcp", status_code=status.HTTP_201_CREATED)
+async def add_mcp_server(payload: McpServerIn, _: Principal = Depends(require_admin)):
+    """Adds a server to config/mcp.yaml.
+
+    A stdio server is a command this gateway will run as its own user, so this is an admin-only
+    endpoint in the same sense that installing a model is: it is a way to run something on the
+    machine, and it is only in the hands of people who already have that.
+    """
+    try:
+        return mcp_config.add(payload.model_dump(exclude_none=True))
+    except mcp_config.ConfigError as e:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(e))
+
+
+@router.patch("/mcp/{name}")
+async def update_mcp_server(name: str, payload: McpServerIn,
+                            _: Principal = Depends(require_admin)):
+    """Changes one server. Anything not sent keeps the value it had."""
+    try:
+        return mcp_config.update(name, payload.model_dump(exclude_none=True))
+    except mcp_config.ConfigError as e:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(e))
+
+
+@router.delete("/mcp/{name}")
+async def remove_mcp_server(name: str, _: Principal = Depends(require_admin)):
+    try:
+        return {"removed": mcp_config.remove(name)}
+    except mcp_config.ConfigError as e:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, str(e))
 
 
 class McpCheck(BaseModel):

@@ -5,119 +5,353 @@
 <p class="sub">MCP servers this gateway can call. Published ones and your own, side by side.</p>
 
 <div id="error" class="note err" hidden></div>
+<div id="saved" class="note ok" hidden></div>
+<div id="warning" class="note warn" hidden></div>
 
-<div class="note">
-  Servers are listed in <code id="file">config/mcp.yaml</code> on the gateway. Secrets do not go in
-  it: write <code>${NAME}</code> and it is read from the environment or from
-  <code>config/config.properties</code>, neither of which is in the repository.
-  <br><span style="font-size:.85rem">
-    This host has <b>uvx</b> and <b>Docker</b> but no <b>node</b>, so Python servers run directly,
-    and anything published to npm runs in a container.
-  </span>
+<div class="row" style="margin-bottom:1rem">
+  <button class="btn" id="addOne">Add a server</button>
+  <button class="btn btn-secondary" id="checkAll">Check the ones that are on</button>
+  <span class="muted" id="counts"></span>
 </div>
 
 <div id="servers"></div>
+
+<div class="note" style="margin-top:1.5rem">
+  Saved to <code id="file">config/mcp.yaml</code> on the gateway, which stays readable and editable
+  by hand. Secrets do not go in it: write <code>${NAME}</code> and the value is read at connect time
+  from the environment or from <code>config/config.properties</code>, neither of which is in the
+  repository.
+  <br><span style="font-size:.85rem">
+    This host has <b>uvx</b> and <b>Docker</b> but no <b>node</b>: Python servers run directly,
+    anything published to npm runs in a container. A stdio server is a command this gateway runs as
+    its own user.
+  </span>
+</div>
+
+<dialog id="editor">
+  <form method="dialog" id="editForm">
+    <h2 id="editTitle">Add a server</h2>
+    <label><span class="lbl">Name</span>
+      <input name="name" autocomplete="off" placeholder="github" required>
+      <span class="hint">What you will see it called. Letters, digits, dots, dashes, underscores.</span>
+    </label>
+    <label><span class="lbl">What it does</span>
+      <input name="description" autocomplete="off" placeholder="Reads issues and pull requests">
+    </label>
+    <label><span class="lbl">How it is spoken to</span>
+      <select name="transport">
+        <option value="stdio">A command this gateway runs (stdio)</option>
+        <option value="http">A server already running (Streamable HTTP)</option>
+      </select>
+    </label>
+
+    <div data-when="stdio">
+      <label><span class="lbl">Command</span>
+        <input name="command" autocomplete="off" placeholder="uvx" list="commonCommands">
+        <datalist id="commonCommands">
+          <option value="uvx"></option><option value="docker"></option>
+          <option value="python3"></option><option value="bash"></option>
+        </datalist>
+        <span class="hint">Must be installed on the gateway. <b>uvx</b> for anything published to
+          PyPI, <b>docker</b> for anything published to npm.</span>
+      </label>
+      <label><span class="lbl">Arguments</span>
+        <input name="args" autocomplete="off" placeholder="mcp-server-git --repository /srv/thing">
+        <span class="hint">Separated by spaces. Quote anything containing one.</span>
+      </label>
+      <label><span class="lbl">Environment</span>
+        <input name="env" autocomplete="off" placeholder="GITHUB_TOKEN=${GITHUB_TOKEN}">
+        <span class="hint">NAME=value pairs separated by spaces. The child gets these and nothing
+          else &mdash; not this gateway's own environment. Use <code>${NAME}</code> for anything
+          secret.</span>
+      </label>
+    </div>
+
+    <div data-when="http" hidden>
+      <label><span class="lbl">Address</span>
+        <input name="url" autocomplete="off" placeholder="http://127.0.0.1:9100/mcp">
+      </label>
+      <label><span class="lbl">Headers</span>
+        <input name="headers" autocomplete="off" placeholder="Authorization=${MY_TOKEN}">
+        <span class="hint">Name=value pairs separated by spaces.</span>
+      </label>
+    </div>
+
+    <label><span class="lbl">Limit to these tools</span>
+      <input name="only" autocomplete="off" placeholder="git_log git_diff">
+      <span class="hint">Separated by spaces. Leave empty and every tool it offers is available.</span>
+    </label>
+    <label class="check">
+      <input type="checkbox" name="enabled"> <span>On &mdash; the gateway may call it</span>
+    </label>
+
+    <div class="note err" id="editError" hidden></div>
+    <div class="row" style="margin-top:1rem">
+      <button class="btn" value="save">Save</button>
+      <button class="btn btn-secondary" value="cancel" formnovalidate>Cancel</button>
+      <span style="flex:1"></span>
+      <button class="btn btn-danger" value="delete" id="deleteOne" formnovalidate hidden>Delete</button>
+    </div>
+  </form>
+</dialog>
 {% endblock %}
 
 {% block scripts %}
+<style>
+dialog{border:1px solid var(--border);border-radius:12px;background:var(--card);color:var(--text);
+       width:min(46rem,92vw);padding:1.25rem 1.4rem}
+dialog::backdrop{background:rgba(0,0,0,.6)}
+dialog h2{margin:0 0 1rem}
+dialog label{display:block;margin-bottom:.85rem}
+dialog label.check{display:flex;align-items:center;gap:.5rem}
+.server-head{display:flex;align-items:center;gap:.6rem;flex-wrap:wrap}
+.server-head .spacer{flex:1}
+.tools-list{margin-top:.9rem}
+</style>
 <script>
-const box = document.getElementById('servers');
 const JSON_HEADERS = {'Content-Type': 'application/json'};
+const box = document.getElementById('servers');
+const editor = document.getElementById('editor');
+const form = document.getElementById('editForm');
+let servers = [];
+let editing = null;          // the name being changed, or null when adding
 
-function showError(message){
-  const where = document.getElementById('error');
-  where.textContent = message; where.hidden = false;
-}
 const errorText = e => (e && e.message) ? e.message : String(e);
+function note(id, message){
+  const where = document.getElementById(id);
+  where.textContent = message || '';
+  where.hidden = !message;
+}
+const showError = m => note('error', m);
+function said(message){
+  note('saved', message);
+  setTimeout(() => note('saved', ''), 4000);
+}
+
+// --- what is in a text box, and what comes back out ---------------------------------------------
+
+function words(text){
+  // Quoted runs stay together, which matters for a path with a space in it
+  return ((text || '').match(/"[^"]*"|'[^']*'|\S+/g) || []).map(w => w.replace(/^["']|["']$/g, ''));
+}
+function pairs(text){
+  const out = {};
+  for(const word of words(text)){
+    const at = word.indexOf('=');
+    if(at > 0) out[word.slice(0, at)] = word.slice(at + 1);
+  }
+  return out;
+}
+const unpair = obj => Object.entries(obj || {}).map(([k, v]) => `${k}=${v}`).join(' ');
+
+// --- the list -----------------------------------------------------------------------------------
 
 function pill(server){
-  if(server.trouble) return '<span class="pill off">cannot run</span>';
-  return server.enabled ? '<span class="pill on">on</span>'
-                        : '<span class="pill off">off</span>';
+  if(server.trouble) return '<span class="pill err">cannot run</span>';
+  return server.enabled ? '<span class="pill on">on</span>' : '<span class="pill off">off</span>';
 }
 
 function card(server){
+  const detail = server.transport === 'stdio'
+    ? `<tr><td class="muted" style="width:9rem">Runs</td><td><code>${escapeHtml(server.runs)}</code></td></tr>`
+      + (Object.keys(server.env).length
+          ? `<tr><td class="muted">Environment</td><td><code>${escapeHtml(unpair(server.env))}</code></td></tr>` : '')
+    : `<tr><td class="muted" style="width:9rem">Address</td><td><code>${escapeHtml(server.url)}</code></td></tr>`
+      + (Object.keys(server.headers).length
+          ? `<tr><td class="muted">Headers</td><td><code>${escapeHtml(unpair(server.headers))}</code></td></tr>` : '');
   return `
     <div class="card" data-server="${escapeHtml(server.name)}">
-      <h2>${escapeHtml(server.name)} ${pill(server)}</h2>
-      <p class="sub">${escapeHtml(server.description || 'No description in the file.')}</p>
+      <div class="server-head">
+        <h2 style="margin:0">${escapeHtml(server.name)}</h2>
+        ${pill(server)}
+        <span class="spacer"></span>
+        <button class="btn btn-sm btn-secondary" data-edit>Edit</button>
+        <button class="btn btn-sm btn-secondary" data-toggle>${server.enabled ? 'Turn off' : 'Turn on'}</button>
+        <button class="btn btn-sm" data-check>Check it</button>
+      </div>
+      <p class="sub">${escapeHtml(server.description || 'No description.')}</p>
       <table>
         <tr><td class="muted" style="width:9rem">Speaks</td><td>${server.transport === 'stdio'
             ? 'over its own standard input and output' : 'Streamable HTTP'}</td></tr>
-        <tr><td class="muted" style="width:9rem">${server.transport === 'stdio' ? 'Runs' : 'Address'}</td>
-            <td><code>${escapeHtml(server.runs)}</code></td></tr>
-        ${server.only.length ? `<tr><td class="muted" style="width:9rem">Limited to</td><td><code>${
-            server.only.map(escapeHtml).join('</code>, <code>')}</code></td></tr>` : ''}
+        ${detail}
+        ${server.only.length ? `<tr><td class="muted">Limited to</td><td><code>${
+            server.only.map(escapeHtml).join('</code> <code>')}</code></td></tr>` : ''}
       </table>
       ${server.trouble ? `<div class="note err" style="margin-top:.75rem">${escapeHtml(server.trouble)}</div>` : ''}
-      <div class="row" style="margin-top:.75rem">
-        <button class="btn btn-sm" data-check>Check it</button>
-        <span class="muted" data-status></span>
-      </div>
-      <div data-tools></div>
+      <div class="muted" data-status style="margin-top:.5rem"></div>
+      <div class="tools-list" data-tools></div>
     </div>`;
 }
 
-function renderTools(where, server){
-  if(server.trouble){
-    where.innerHTML = `<div class="note err" style="margin-top:.75rem">${escapeHtml(server.trouble)}</div>`;
+function renderTools(where, answer){
+  if(answer.trouble){
+    where.innerHTML = `<div class="note err">${escapeHtml(answer.trouble)}</div>`;
     return;
   }
-  const tools = server.tools || [];
+  const tools = answer.tools || [];
   if(!tools.length){
-    where.innerHTML = '<div class="note warn" style="margin-top:.75rem">It answered, but offers no tools.</div>';
+    where.innerHTML = '<div class="note warn">It answered, but offers no tools.</div>';
     return;
   }
   // A tool's name and description are written by whoever wrote the server: text to read, never
   // anything this page acts on
   where.innerHTML = `
-    <p class="sub" style="margin-top:.9rem"><b>${tools.length}</b> tool${tools.length === 1 ? '' : 's'}:</p>
-    <table>
-      ${tools.map(tool => `
-        <tr>
-          <td class="muted" style="width:9rem"><code>${escapeHtml(tool.name)}</code></td>
-          <td>${escapeHtml(tool.description || '')}
-            <br><span class="muted" style="font-size:.78rem">takes ${
-              Object.keys((tool.schema || {}).properties || {}).map(escapeHtml).join(', ') || 'nothing'}</span>
-          </td>
-        </tr>`).join('')}
-    </table>`;
+    <p class="sub"><b>${tools.length}</b> tool${tools.length === 1 ? '' : 's'}:</p>
+    <table>${tools.map(tool => `
+      <tr>
+        <td class="muted" style="width:9rem"><code>${escapeHtml(tool.name)}</code></td>
+        <td>${escapeHtml(tool.description || '')}
+          <br><span class="muted" style="font-size:.78rem">takes ${
+            Object.keys((tool.schema || {}).properties || {}).map(escapeHtml).join(', ') || 'nothing'}</span>
+        </td>
+      </tr>`).join('')}</table>`;
 }
 
 async function load(){
   try{
     const answer = await api('/admin/mcp');
+    servers = answer.servers;
     document.getElementById('file').textContent = answer.file;
-    if(!answer.servers.length){
-      box.innerHTML = '<div class="card"><p class="sub">No servers are configured yet. '
-        + 'Add one to the file above and reload this page.</p></div>';
-      return;
-    }
-    box.innerHTML = answer.servers.map(card).join('');
-    if(!answer.enabled){
-      box.insertAdjacentHTML('afterbegin',
-        '<div class="note warn">Tool servers are switched off for the whole gateway '
-        + '(<code>features.mcp.enabled</code>), so none of these will be called.</div>');
-    }
+    note('warning', answer.enabled ? '' :
+      'Tool servers are switched off for the whole gateway (features.mcp.enabled), so none of '
+      + 'these will be called.');
+    const on = servers.filter(s => s.enabled && !s.trouble).length;
+    document.getElementById('counts').textContent =
+      servers.length ? `${servers.length} configured, ${on} on` : '';
+    box.innerHTML = servers.length ? servers.map(card).join('')
+      : '<div class="card"><p class="sub">Nothing configured yet. Add a server, or write one into '
+        + 'the file by hand.</p></div>';
+    showError('');
   }catch(e){ showError('Could not read the server list: ' + errorText(e)); }
 }
 
-box.addEventListener('click', async e => {
-  const button = e.target.closest('[data-check]');
-  if(!button) return;
-  const card = button.closest('[data-server]');
+// --- adding and changing --------------------------------------------------------------------------
+
+function showTransport(){
+  const kind = form.transport.value;
+  form.querySelector('[data-when="stdio"]').hidden = kind !== 'stdio';
+  form.querySelector('[data-when="http"]').hidden = kind !== 'http';
+}
+form.transport.addEventListener('change', showTransport);
+
+function openEditor(server){
+  editing = server ? server.name : null;
+  document.getElementById('editTitle').textContent = server ? `Edit ${server.name}` : 'Add a server';
+  document.getElementById('deleteOne').hidden = !server;
+  note('editError', '');
+  form.name.value = server ? server.name : '';
+  form.description.value = server ? server.description : '';
+  form.transport.value = server ? server.transport : 'stdio';
+  form.command.value = server ? server.command : '';
+  form.args.value = server ? server.args.join(' ') : '';
+  form.env.value = server ? unpair(server.env) : '';
+  form.url.value = server ? server.url : '';
+  form.headers.value = server ? unpair(server.headers) : '';
+  form.only.value = server ? server.only.join(' ') : '';
+  form.enabled.checked = server ? server.enabled : false;
+  showTransport();
+  editor.showModal();
+}
+
+function fromForm(){
+  const kind = form.transport.value;
+  const entry = {
+    name: form.name.value.trim(),
+    description: form.description.value.trim(),
+    transport: kind,
+    enabled: form.enabled.checked,
+    only: words(form.only.value),
+  };
+  if(kind === 'stdio'){
+    entry.command = form.command.value.trim();
+    entry.args = words(form.args.value);
+    entry.env = pairs(form.env.value);
+  }else{
+    entry.url = form.url.value.trim();
+    entry.headers = pairs(form.headers.value);
+  }
+  return entry;
+}
+
+form.addEventListener('submit', async e => {
+  const how = e.submitter && e.submitter.value;
+  if(how === 'cancel') return;
+  e.preventDefault();               // the dialog stays open when the gateway refuses what it sent
+  if(how === 'delete'){
+    if(!confirm(`Remove ${editing}? Whatever it runs is untouched; only this entry goes.`)) return;
+    try{
+      await api(`/admin/mcp/${encodeURIComponent(editing)}`, {method: 'DELETE'});
+      editor.close(); said(`${editing} removed.`); await load();
+    }catch(err){ note('editError', errorText(err)); }
+    return;
+  }
+  const entry = fromForm();
+  try{
+    if(editing){
+      await api(`/admin/mcp/${encodeURIComponent(editing)}`,
+                {method: 'PATCH', headers: JSON_HEADERS, body: JSON.stringify(entry)});
+    }else{
+      await api('/admin/mcp', {method: 'POST', headers: JSON_HEADERS, body: JSON.stringify(entry)});
+    }
+    editor.close();
+    said(`${entry.name} saved. Check it to see what it offers.`);
+    await load();
+  }catch(err){ note('editError', errorText(err)); }
+});
+
+document.getElementById('addOne').addEventListener('click', () => openEditor(null));
+
+// --- checking -------------------------------------------------------------------------------------
+
+async function check(name, card){
   const status = card.querySelector('[data-status]');
-  button.disabled = true;
   status.textContent = 'starting it and asking what it offers…';
   try{
     const answer = await api('/admin/mcp/check', {method: 'POST', headers: JSON_HEADERS,
-                                                  body: JSON.stringify({name: card.dataset.server})});
+                                                  body: JSON.stringify({name})});
     status.textContent = answer.trouble ? 'it did not answer' : 'it answered';
     renderTools(card.querySelector('[data-tools]'), answer);
+    return !answer.trouble;
   }catch(err){
     status.textContent = '';
-    showError('Could not check it: ' + errorText(err));
-  }finally{ button.disabled = false; }
+    showError(`Could not check ${name}: ` + errorText(err));
+    return false;
+  }
+}
+
+document.getElementById('checkAll').addEventListener('click', async e => {
+  e.target.disabled = true;
+  // One after another: several uvx servers starting at once is a lot of machine for one button
+  for(const server of servers.filter(s => s.enabled && !s.trouble)){
+    const card = box.querySelector(`[data-server="${CSS.escape(server.name)}"]`);
+    if(card) await check(server.name, card);
+  }
+  e.target.disabled = false;
+});
+
+box.addEventListener('click', async e => {
+  const card = e.target.closest('[data-server]');
+  if(!card) return;
+  const name = card.dataset.server;
+  const server = servers.find(s => s.name === name);
+  if(e.target.closest('[data-edit]')) return openEditor(server);
+  if(e.target.closest('[data-check]')){
+    const button = e.target.closest('[data-check]');
+    button.disabled = true;
+    await check(name, card);
+    button.disabled = false;
+    return;
+  }
+  if(e.target.closest('[data-toggle]')){
+    const button = e.target.closest('[data-toggle]');
+    button.disabled = true;
+    try{
+      await api(`/admin/mcp/${encodeURIComponent(name)}`,
+                {method: 'PATCH', headers: JSON_HEADERS,
+                 body: JSON.stringify({name, enabled: !server.enabled})});
+      await load();
+    }catch(err){ showError(errorText(err)); button.disabled = false; }
+  }
 });
 
 load();
