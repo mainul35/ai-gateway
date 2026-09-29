@@ -26,6 +26,12 @@ class User(Base):
     model_access: Mapped[str] = mapped_column(String(16), default="all")
     # JSON list of model names or patterns, used when model_access is "selected"
     allowed_models: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Everything the auth server said at the last sign-in, as it said it. Kept whole rather than
+    # picked apart: what a provider puts in a token changes, and a gateway that reads three fields
+    # and throws the rest away cannot answer "what does it actually send us" - which is the first
+    # question anybody asks when wiring permissions up to it.
+    claims: Mapped[str | None] = mapped_column(Text, nullable=True)
+    claims_seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 

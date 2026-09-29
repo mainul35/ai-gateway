@@ -20,6 +20,13 @@ DEFAULTS = {
     "features.image_generation.enabled": "true",
     "features.maps.enabled": "true",
     "features.mcp.enabled": "true",
+    # Who may reach the tool servers: "open", "claims" (the auth server decides) or "none".
+    # In claims mode, tools.access.claim names the claim to read from what the auth server
+    # sent at sign-in, and tools.access.capability is what a grant for one server looks like
+    # in it - {server} is replaced by the server's name, and a "*" entry means all of them.
+    "tools.access.mode": "open",
+    "tools.access.claim": "scope",
+    "tools.access.capability": "mcp:{server}",
     # Tool servers the gateway may call. Secrets are not in it; it names environment
     # variables or config.properties keys, and those are read at connect time.
     "mcp.servers.file": "config/mcp.yaml",

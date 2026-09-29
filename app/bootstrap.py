@@ -19,6 +19,10 @@ async def ensure_schema():
         # Existing accounts keep the access they effectively had before access control existed
         await connection.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS model_access VARCHAR(16) DEFAULT 'all'"))
         await connection.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS allowed_models TEXT"))
+        # What the auth server sent at the last sign-in, kept so permissions can be built on it
+        await connection.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS claims TEXT"))
+        await connection.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS claims_seen_at "
+                                      "TIMESTAMPTZ"))
         await connection.execute(text("ALTER TABLE conversation_messages ADD COLUMN IF NOT EXISTS attachments TEXT"))
         # One running summary per conversation, whatever races to write it
         await connection.execute(text("DELETE FROM memory_entries WHERE scope = 'conversation' AND id NOT IN "

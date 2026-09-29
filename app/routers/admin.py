@@ -58,6 +58,12 @@ def _user_json(user):
         "model_access": user.model_access or "all",
         "allowed_models": access.parse_patterns(user.allowed_models),
         "sign_in": "local password" if user.password_hash else "single sign-on",
+        # What the auth server said at their last sign-in, kept whole and shown as it arrived.
+        # While permissions are being wired up to it, "what does it actually send us" is the
+        # question, and a gateway that cannot answer it is no help at all.
+        "claims": json.loads(user.claims) if user.claims else None,
+        "claims_seen_at": user.claims_seen_at.isoformat() if user.claims_seen_at else None,
+        "tool_capabilities": access.capabilities_of(user),
         "keys": [
             {"id": k.id, "name": k.name, "prefix": k.key_prefix, "is_active": k.is_active,
              "last_used_at": k.last_used_at.isoformat() if k.last_used_at else None}

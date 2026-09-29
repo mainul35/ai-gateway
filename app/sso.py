@@ -108,6 +108,27 @@ async def fetch_userinfo(access_token):
         return None, "Userinfo endpoint did not return JSON"
 
 
+# Claims that say who somebody is, which are already kept in their own columns, and the ones a
+# token carries about itself. Everything else is what an auth server has chosen to tell us, which
+# is where a capability would arrive.
+IDENTITY_CLAIMS = ("sub", "iss", "aud", "exp", "iat", "nbf", "jti", "at_hash", "auth_time", "azp",
+                   "nonce", "sid", "typ", "session_state")
+
+
+def capability_claims(userinfo, granted_scope=""):
+    """What the auth server says about a user beyond their name, ready to build rules on.
+
+    Nothing is interpreted here. The shapes providers use differ - a space-separated scope string,
+    a list of roles, a nested object per client - and guessing at one is how an integration ends up
+    quietly allowing everything. This keeps what arrived, and something that understands the
+    provider decides what it means.
+    """
+    kept = {key: value for key, value in (userinfo or {}).items() if key not in IDENTITY_CLAIMS}
+    if granted_scope:
+        kept.setdefault("scope", granted_scope)
+    return kept
+
+
 def identity_from_userinfo(userinfo):
     """Maps provider claims onto our user fields, using the configured claim names."""
     subject = str(userinfo.get(settings.sso_claim_id()) or "").strip()

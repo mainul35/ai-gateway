@@ -243,7 +243,7 @@ async def capabilities(principal: Principal = Depends(authenticate)):
         "maps": settings.feature_enabled("maps"),
         # Whether there is anything to be agentic with: the feature on, and a tool server
         # that this host could actually run
-        "agent": agent.is_available(),
+        "agent": agent.is_available_to(principal),
         # Which map the browser must draw on, and the browser key for it when that is Google's.
         # The two are never mixed: Google's terms forbid their places on anybody else's tiles.
         "maps_tiles": places.tiles() if settings.feature_enabled("maps") else "osm",
@@ -1723,10 +1723,10 @@ async def run_agent(payload: AgentIn, principal: Principal = Depends(authenticat
     be read again later.
     """
     user = _require_user(principal)
-    if not agent.is_available():
+    if not agent.is_available_to(principal):
         raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE,
-                            "No tool servers are switched on, so there is nothing to be agentic "
-                            "with. Add one on the Tools page.")
+                            "You have no tool servers to use. Either none are switched on, or none "
+                            "of them are yours to reach.")
     if not access.can_use_model(principal, payload.model):
         raise HTTPException(status.HTTP_403_FORBIDDEN,
                             f"You do not have access to model '{payload.model}'")
@@ -1745,7 +1745,10 @@ async def run_agent(payload: AgentIn, principal: Principal = Depends(authenticat
     async def stream():
         yield _event("status", text="Asking the tool servers what they offer")
         try:
-            tools, where, trouble = await agent.offered()
+            # Settled here, from the configuration and who is asking, before the model sees
+            # anything: a user gets the tools of the servers they may reach and no others
+            mine = access.tool_servers_for(principal, mcp_client.available())
+            tools, where, trouble = await agent.offered(mine)
         except Exception as e:
             yield _error(f"The tool servers could not be reached ({e.__class__.__name__}).")
             return
