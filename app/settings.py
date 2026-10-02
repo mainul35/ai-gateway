@@ -27,6 +27,8 @@ DEFAULTS = {
     "tools.access.mode": "open",
     "tools.access.claim": "scope",
     "tools.access.capability": "mcp:{server}",
+    # The gateway's own read-only tools (status, models, services) for managers and admins
+    "tools.self.enabled": "true",
     # Tool servers the gateway may call. Secrets are not in it; it names environment
     # variables or config.properties keys, and those are read at connect time.
     "mcp.servers.file": "config/mcp.yaml",

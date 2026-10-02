@@ -24,7 +24,7 @@ import re
 import time
 
 from app import access, settings
-from app.tools import mcp_client
+from app.tools import mcp_client, self_tools
 
 log = logging.getLogger("tools.agent")
 
@@ -86,22 +86,31 @@ def _openai_tool(entry):
 
 def is_available_to(principal):
     """Whether this person has any tool server at all, which is what the Agent chip turns on."""
+    if self_tools.is_available_to(principal):
+        return True
     return bool(mcp_client.is_enabled()
                 and access.tool_servers_for(principal, mcp_client.available()))
 
 
-async def offered(servers=None):
+async def offered(servers=None, builtin=False):
     """Every tool the given servers have, and where each one came from.
 
     The servers are decided before this is called and never by anything a server says, so a tool
-    cannot talk its way into a list it was left out of.
+    cannot talk its way into a list it was left out of. `builtin` adds the gateway's own tools,
+    which the caller decides from who is asking.
 
     They are asked in parallel and one that will not answer is left out with a note rather than
     taking the turn down with it: an agent with three tools is better than an agent with none.
     """
     servers = mcp_client.available() if servers is None else servers
+    tools, where, trouble = [], {}, []
+    if builtin:
+        for entry in self_tools.listing():
+            name = tool_name(entry["server"], entry["name"])
+            where[name] = (self_tools.BUILTIN, entry["name"])
+            tools.append(_openai_tool(entry))
     if not servers:
-        return [], {}, []
+        return tools, where, trouble
 
     async def ask(server):
         try:
@@ -112,15 +121,14 @@ async def offered(servers=None):
             log.info("listing tools of %s failed: %s", server.name, e)
             return server, [], f"{e.__class__.__name__}: {e}"
 
-    tools, where, trouble = [], {}, []
     for server, found, problem in await asyncio.gather(*(ask(s) for s in servers)):
         if problem:
             trouble.append(f"{server.name}: {problem}")
             continue
         for entry in found:
             name = tool_name(entry["server"], entry["name"])
-            if name in where:                       # two servers, one tool name: first one wins
-                continue
+            if name in where:                       # two servers, one tool name: first one wins,
+                continue                            # and the gateway's own come first
             where[name] = (server, entry["name"])
             tools.append(_openai_tool(entry))
     return tools, where, trouble
@@ -166,6 +174,18 @@ def request(model, messages, tools, temperature=None, max_tokens=None):
     if max_tokens:
         body["max_tokens"] = max_tokens
     return body
+
+
+ABOUT_SELF = """You are running inside an AI model gateway: a self-hosted, OpenAI-compatible service
+that serves local models (through Ollama and llama.cpp) to its users, with a playground, single
+sign-on, usage accounting, image generation and tool servers. The tools named {server}{sep}... are the
+gateway looking at itself. When asked about this gateway, its models, the machine it runs on, or
+whether something is up or slow, check with them rather than guessing - what is loaded and what is
+free changes from minute to minute."""
+
+
+def about_self():
+    return ABOUT_SELF.format(server=self_tools.SERVER, sep=SEPARATOR)
 
 
 def with_system(messages, extra=""):
