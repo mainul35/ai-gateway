@@ -25,7 +25,7 @@ from app.models import ChatFile, Conversation, ConversationMessage, MemoryEntry,
 from app.routers.openai_v1 import PROXY_PATHS, forward
 from app.tools import (agent, chooser, documents, image_prompt, images, jobs, map_plan,
                         map_web, maps, markdown, mcp_client, media, memory as memory_tool,
-                        photo, places, portrait, router as intent_router, web_search)
+                        photo, places, portrait, router as intent_router, self_tools, web_search)
 
 log = logging.getLogger("playground")
 
@@ -1747,8 +1747,10 @@ async def run_agent(payload: AgentIn, principal: Principal = Depends(authenticat
         try:
             # Settled here, from the configuration and who is asking, before the model sees
             # anything: a user gets the tools of the servers they may reach and no others
-            mine = access.tool_servers_for(principal, mcp_client.available())
-            tools, where, trouble = await agent.offered(mine)
+            mine = (access.tool_servers_for(principal, mcp_client.available())
+                    if mcp_client.is_enabled() else [])
+            own = self_tools.is_available_to(principal)
+            tools, where, trouble = await agent.offered(mine, builtin=own)
         except Exception as e:
             yield _error(f"The tool servers could not be reached ({e.__class__.__name__}).")
             return
@@ -1760,7 +1762,8 @@ async def run_agent(payload: AgentIn, principal: Principal = Depends(authenticat
             return
         yield _event("tools", tools=[t["function"]["name"] for t in tools])
 
-        messages = agent.with_system([{"role": m.role, "content": m.content} for m in payload.messages])
+        messages = agent.with_system([{"role": m.role, "content": m.content} for m in payload.messages],
+                                     agent.about_self() if own else "")
         budget = agent.Budget()
         answer, finished = "", None
 
@@ -1804,8 +1807,11 @@ async def run_agent(payload: AgentIn, principal: Principal = Depends(authenticat
                 else:
                     server, tool = known
                     try:
-                        text, bad = await mcp_client.call(server, tool,
-                                                          agent.arguments(call.get("arguments")))
+                        if server is self_tools.BUILTIN:
+                            text, bad = await self_tools.call(tool, agent.arguments(call.get("arguments")))
+                        else:
+                            text, bad = await mcp_client.call(server, tool,
+                                                              agent.arguments(call.get("arguments")))
                     except agent.Stop as e:
                         text, bad = str(e), True
                     except mcp_client.McpError as e:
