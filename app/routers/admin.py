@@ -13,7 +13,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from app import access, backends, catalogue, fitting, settings, usage as usage_log
+from app import access, backends, catalogue, fitting, knowledge, settings, usage as usage_log
 from app.tools import jobs, mcp_client, mcp_config
 from app.auth import Principal, generate_key, hash_key, require_admin, require_manager
 from app import config_writer
@@ -674,6 +674,26 @@ async def system_overview(_: Principal = Depends(require_admin), session: AsyncS
         "counts": {"users": users, "active_keys": keys,
                    "requests_24h": requests_today, "tokens_24h": int(tokens_today)},
     }
+
+
+# --- knowledge base -------------------------------------------------------------------------
+
+
+@router.get("/knowledge")
+async def knowledge_overview(_: Principal = Depends(require_manager)):
+    """What is indexed, and how the current or last indexing run went."""
+    return {"enabled": knowledge.is_enabled(), "embedding_model": knowledge.embedding_model(),
+            "sources": await knowledge.list_sources(), "progress": knowledge.progress}
+
+
+@router.post("/knowledge/reindex")
+async def knowledge_reindex(only: str | None = None, _: Principal = Depends(require_admin)):
+    """Starts an indexing run in the background; `only` limits it to sources matching a pattern."""
+    if not knowledge.is_enabled():
+        raise HTTPException(status.HTTP_409_CONFLICT, "The knowledge base is switched off (knowledge.enabled)")
+    started = knowledge.start_reindex(only)
+    return {"started": started, "progress": knowledge.progress,
+            **({} if started else {"detail": "An indexing run is already going"})}
 
 
 # --- tool servers ---------------------------------------------------------------------------

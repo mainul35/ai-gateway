@@ -10,7 +10,9 @@ managers and admins only, decided from who is asking before the model sees a too
 the MCP servers are.
 
 To the agent loop they look like one more tool server, named "gateway", so its tools are
-gateway__status, gateway__models and gateway__services.
+gateway__status, gateway__models and gateway__services, and - for what the gateway and its owner's
+projects are rather than how they are doing - gateway__knowledge_sources, gateway__knowledge_search
+and gateway__read_file over the index in app/knowledge.py.
 """
 import asyncio
 import json
@@ -23,7 +25,7 @@ import httpx
 import psutil
 from sqlalchemy import func, select, text
 
-from app import backends, settings, usage
+from app import backends, knowledge, settings, usage
 from app.db import session_factory
 from app.engine.profiles import load_profiles
 from app.engine.supervisor import supervisor
@@ -236,6 +238,33 @@ async def services():
     return {"services": rows, "all_ok": all(row["ok"] for row in rows)}
 
 
+# --- knowledge ---------------------------------------------------------------------------------
+
+
+async def knowledge_sources():
+    sources = await knowledge.list_sources()
+    return {"sources": sources, "indexing_now": knowledge.progress["running"],
+            "note": "Search them with knowledge_search; a source name or pattern narrows it."}
+
+
+async def knowledge_search(args):
+    query = str(args.get("query") or "").strip()
+    if not query:
+        raise ValueError("give a query: a question or the words to look for")
+    hits = await knowledge.search(query, str(args.get("source") or "").strip() or None,
+                                  int(args.get("limit") or 8))
+    if not hits:
+        return {"results": [], "note": "Nothing indexed matches. knowledge_sources shows what is indexed."}
+    return {"results": [{"source": h["source"], "path": h["path"],
+                         "lines": f'{h["start_line"]}-{h["end_line"]}', "content": h["content"]} for h in hits],
+            "note": "Passages, best first. read_file shows more of a file around a passage."}
+
+
+async def read_file(args):
+    return await knowledge.read_file(str(args.get("source") or ""), str(args.get("path") or ""),
+                                     args.get("start_line") or 1, args.get("end_line"))
+
+
 # --- the tool list -----------------------------------------------------------------------------
 
 TOOLS = {
@@ -261,13 +290,50 @@ TOOLS = {
         "schema": {"type": "object", "properties": {}},
         "run": lambda args: services(),
     },
+    "knowledge_sources": {
+        "description": ("What the knowledge base holds: this gateway's own code, the owner's other "
+                        "projects (their GitHub repositories) and the homelab handbook - with a one-line "
+                        "description of each, file counts, and when each was last indexed. Use it to see "
+                        "which projects exist before searching."),
+        "schema": {"type": "object", "properties": {}},
+        "run": lambda args: knowledge_sources(),
+    },
+    "knowledge_search": {
+        "description": ("Searches the code and documents of this gateway, the owner's other projects and "
+                        "the homelab handbook (servers, services, ports, deploys, backups), by meaning and "
+                        "by exact words. Use it for how something works, where something is defined, "
+                        "how a project is built or deployed, or anything about the owner's projects and "
+                        "machines. Returns passages with their file and line numbers."),
+        "schema": {"type": "object", "properties": {
+            "query": {"type": "string", "description": "A question, or names and words to find."},
+            "source": {"type": "string", "description": ("Optional: only this source, e.g. ai-gateway or "
+                                                         "mainul35/homelab-handbook; * works as a wildcard.")},
+            "limit": {"type": "integer", "description": "How many passages, 1-20. Default 8."}},
+            "required": ["query"]},
+        "run": knowledge_search,
+    },
+    "read_file": {
+        "description": ("Reads lines of a file that is in the knowledge base, for when a search passage is "
+                        "not enough. Up to 400 lines at a time."),
+        "schema": {"type": "object", "properties": {
+            "source": {"type": "string", "description": "The source, as knowledge_search returned it."},
+            "path": {"type": "string", "description": "The file's path, as knowledge_search returned it."},
+            "start_line": {"type": "integer", "description": "First line, 1-based. Default 1."},
+            "end_line": {"type": "integer", "description": "Last line. Default start_line + 199."}},
+            "required": ["source", "path"]},
+        "run": read_file,
+    },
 }
+
+
+KNOWLEDGE_TOOLS = {"knowledge_sources", "knowledge_search", "read_file"}
 
 
 def listing():
     """The tools, in the shape the agent loop turns into function definitions."""
     return [{"server": SERVER, "name": name, "description": tool["description"], "schema": tool["schema"]}
-            for name, tool in TOOLS.items()]
+            for name, tool in TOOLS.items()
+            if name not in KNOWLEDGE_TOOLS or knowledge.is_enabled()]
 
 
 async def call(tool, args):
@@ -277,6 +343,8 @@ async def call(tool, args):
         return f"{SERVER} has no tool called {tool}.", True
     try:
         result = await entry["run"](args or {})
+    except ValueError as e:                 # the model asked for something that is not there
+        return str(e), True
     except Exception as e:
         log.warning("gateway tool %s failed: %s", tool, e, exc_info=True)
         return f"{e.__class__.__name__}: {e}", True
