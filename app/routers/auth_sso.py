@@ -1,5 +1,6 @@
 """Login through the OAuth2 provider, plus self-service API keys for logged-in users."""
 import json
+import logging
 
 from fastapi import APIRouter, Cookie, Depends, HTTPException, Request, status
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
@@ -16,6 +17,14 @@ from app.db import get_session
 from app.models import ApiKey, UsageRecord, User, utcnow
 
 router = APIRouter(prefix="/auth", tags=["auth"])
+log = logging.getLogger("sso")
+
+
+def _auth_server_failed(problem):
+    """A 502 from here reaches the browser as Cloudflare's own error page, which hides the reason,
+    so the auth server's answer has to land in the log to be seen at all."""
+    log.warning("Sign-in failed at the auth server: %s", problem)
+    return HTTPException(status.HTTP_502_BAD_GATEWAY, problem)
 
 
 def _redirect_uri(request: Request):
@@ -72,11 +81,11 @@ async def callback(request: Request, code: str | None = None, state: str | None 
 
     tokens, problem = await sso.exchange_code(code, state_data["redirect_uri"], state_data["verifier"])
     if problem:
-        raise HTTPException(status.HTTP_502_BAD_GATEWAY, problem)
+        raise _auth_server_failed(problem)
 
     userinfo, problem = await sso.fetch_userinfo(tokens.get("access_token", ""))
     if problem:
-        raise HTTPException(status.HTTP_502_BAD_GATEWAY, problem)
+        raise _auth_server_failed(problem)
 
     identity = sso.identity_from_userinfo(userinfo)
     # Kept whole, and refreshed at every sign-in, so a capability granted or taken away on the auth
@@ -84,7 +93,7 @@ async def callback(request: Request, code: str | None = None, state: str | None 
     # remembers to look
     claims = sso.capability_claims(userinfo, tokens.get("scope", ""))
     if not identity["name"]:
-        raise HTTPException(status.HTTP_502_BAD_GATEWAY, "Auth server returned no usable identity claims")
+        raise _auth_server_failed("Auth server returned no usable identity claims")
 
     result = await session.execute(select(User).where(User.name == identity["name"]))
     user = result.scalar_one_or_none()
