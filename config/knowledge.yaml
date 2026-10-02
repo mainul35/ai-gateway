@@ -1,0 +1,37 @@
+# What the gateway's agent can look up with gateway__knowledge_search: code and documents, split
+# into passages, embedded, and searched by meaning and by exact words together. Managers and admins
+# only, like the rest of the gateway's own tools.
+#
+# Two kinds of source:
+#
+#   kind: folder   a directory on this machine. Paths are relative to the gateway's own folder
+#                  unless absolute.
+#   kind: github   every repository of the named owners, cloned (shallow) into checkout_dir and
+#                  refreshed on a schedule. Needs a read-only token in config/config.properties,
+#                  which is not in the repository:
+#                    knowledge.github.token.<owner>=github_pat_...   one per owner, because a
+#                                                                    fine-grained token has one
+#                    knowledge.github.token=...                       or one for all of them
+#                  Fine-grained, "Contents: read-only" and "Metadata: read-only" is all it needs.
+#
+# Whatever is indexed can be read back by any manager through the agent. Files that look like they
+# hold credentials (.env, keys, *.properties with a password in them...) are never indexed, and a
+# passage that matches a credential pattern is dropped, but do not point this at anything you
+# would not show a manager.
+
+checkout_dir: /home/mainul35/knowledge/repos
+
+sources:
+  # This gateway, as deployed: the code that is actually running
+  - name: ai-gateway
+    kind: folder
+    path: .
+    description: This AI model gateway itself - FastAPI app, llama.cpp engine supervisor, playground, SSO
+
+  - name: github
+    kind: github
+    owners: [mainul35, Visual-Site-Designer-VSD]
+    exclude: [ai-gateway]          # indexed above from the deployed copy
+    include_forks: false
+    include_archived: false
+    max_repo_mb: 300

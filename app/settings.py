@@ -29,6 +29,12 @@ DEFAULTS = {
     "tools.access.capability": "mcp:{server}",
     # The gateway's own read-only tools (status, models, services) for managers and admins
     "tools.self.enabled": "true",
+    # The searchable index of code and documents behind gateway__knowledge_search (app/knowledge.py).
+    # Per-owner GitHub tokens go in as knowledge.github.token.<owner>, never in the repository.
+    "knowledge.enabled": "true",
+    "knowledge.file": "config/knowledge.yaml",
+    "knowledge.embedding.model": "qwen3-embedding:0.6b",
+    "knowledge.refresh.hours": "12",
     # Tool servers the gateway may call. Secrets are not in it; it names environment
     # variables or config.properties keys, and those are read at connect time.
     "mcp.servers.file": "config/mcp.yaml",

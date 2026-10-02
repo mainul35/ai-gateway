@@ -27,6 +27,7 @@ EDITABLE_KEYS = [
     "features.image_generation.enabled", "features.maps.enabled",
     "maps.provider", "maps.google.key",
     "tools.access.mode", "tools.access.claim", "tools.access.capability", "tools.self.enabled",
+    "knowledge.enabled", "knowledge.refresh.hours", "knowledge.github.token",
     "router.enabled",
     "router.model",
     "search.searxng.url",
@@ -57,7 +58,7 @@ EDITABLE_KEYS = [
     "memory.keep.recent",
     "memory.max.user.notes",
 ]
-SECRET_KEYS = {"sso.client.secret"}
+SECRET_KEYS = {"sso.client.secret", "knowledge.github.token"}
 
 
 def read_settings():
