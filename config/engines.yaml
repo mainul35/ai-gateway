@@ -39,3 +39,18 @@ models:
     chat_template_kwargs: '{"enable_thinking": false}' 
     # Headroom left over: ~4 GB. For 128k context set ctx_size 131072 (22.0 GB, tight).
     # For better KV quality at 64k use cache_type_k/v f16 (21.3 GB).
+
+  # 80B MoE (3B active) that does not fit in 24 GB, so it is split over the network: the 3090 here
+  # plus the laptop's RTX A4000 (8 GB) through llama.cpp's RPC server on 192.168.50.52:50052 (WSL on
+  # the laptop, started at Windows logon). Whatever does not fit on the two GPUs stays in this
+  # machine's RAM. n_gpu_layers is left unset so llama-server's --fit places layers and experts itself.
+  # The laptop's RPC server also offers its CPU/RAM as RPC1, but leave it out: --fit then spreads
+  # weights onto it even when the GPUs have room (qwen3-coder 30B: 33.6 t/s without it, 15.8 with).
+  # The split itself costs ~23 ms per token in RPC round trips (qwen3-coder 30B on the 3090 alone:
+  # 214 t/s), so it is for models that cannot fit otherwise. If the laptop is off, starting this
+  # profile fails with the RPC connection error.
+  - name: qwen3-next-80b
+    model_path: /home/mainul35/models/Qwen3-Next-80B-A3B-Instruct-UD-Q4_K_XL.gguf
+    ctx_size: 32768
+    cache_reuse: 256
+    extra_args: [--rpc, "192.168.50.52:50052", --device, "CUDA0,RPC0"]
