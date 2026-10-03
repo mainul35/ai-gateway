@@ -48,11 +48,15 @@ models:
   #   3090 + laptop A4000 over llama.cpp RPC: 3.2 t/s generation, 102 t/s prompt, 121 s load
   # So no --rpc here: the network split is ~13x slower for this model. The laptop's RPC server
   # (192.168.50.52:50052) is still up if a dense model that needs the extra VRAM comes along.
-  # 64k context costs nothing measurable (2026-10-03): 22.7 GB on the 3090 either way, 50 s load,
-  # 42-45 t/s generation and 450 t/s prompt on a 19.5k-token prompt, same as at 32k. Most of its
-  # layers are linear attention with no KV cache, so the context is cheap. Coding tasks use it:
-  # they fold old tool results away later the more context the model has.
+  # Context, measured 2026-10-03 (22.7 GB on the 3090 in every case; most layers are linear
+  # attention with no KV cache, so context is cheap):
+  #   32k/64k:  42-45 t/s generation, ~450 t/s prompt
+  #   128k:     25 t/s on a short reply, 33 t/s at 104k tokens; 506 t/s prompt - a 104k-token
+  #             conversation takes 205 s to read once, and its next turn 5 s, from the prompt cache
+  # 128k, for long chats in desktop clients (Qwen Code through ACP UI). Reading a long conversation
+  # cold takes longer than Cloudflare allows a silent request; streamed requests are kept alive with
+  # SSE comments while that happens (app/routers/openai_v1.py, _streamed).
   - name: qwen3-next-80b
     model_path: /home/mainul35/models/Qwen3-Next-80B-A3B-Instruct-UD-Q4_K_XL.gguf
-    ctx_size: 65536
+    ctx_size: 131072
     cache_reuse: 256
