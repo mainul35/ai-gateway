@@ -43,7 +43,8 @@ log = logging.getLogger("coding.runner")
 MAX_ATTEMPTS = 4                # the first edit and three more after a failed check
 TOOL_RESULT_CHARS = 12_000
 CONTEXT_CHARS = 90_000          # past this, older tool results are folded away
-NUDGES = 4                      # replies in a row with no tool call before a step is given up
+FOLDED = "\n[... folded away to save room; read it again if needed]"
+NUDGES = 4                     # replies in a row with no tool call before a step is given up
 REPEATS_ALLOWED = 2             # the same call a third time is not run again
 REPEATS_BEFORE_STOP = 8         # refused repeats in one stage before it is called stuck
 
@@ -271,7 +272,7 @@ def _compact(messages):
             break
         content = str(messages[i].get("content") or "")
         if len(content) > 300:
-            messages[i]["content"] = content[:200] + "\n[... folded away to save room; read it again if needed]"
+            messages[i]["content"] = content[:200] + FOLDED
             total -= len(content) - len(messages[i]["content"])
 
 
@@ -283,6 +284,7 @@ async def _stage(task_id, principal, model, messages, offered, toolbox, exit_too
     exits = {exit_tool} if isinstance(exit_tool, str) else set(exit_tool)
     exit_tool = " or ".join(sorted(exits))          # for the messages below
     edited, nudges, seen, refused = set(), 0, {}, 0
+    latest = {}                 # each call's most recent answer, as the message the model sees
     limit = max_seconds()
     while True:
         _check_cancelled(task_id)
@@ -341,9 +343,12 @@ async def _stage(task_id, principal, model, messages, offered, toolbox, exit_too
             elif name == "finish" and must_have_edited is not None and not (edited or must_have_edited):
                 text, failed, outcome = ("Nothing has been changed yet. Make the changes with edit_file or "
                                          "create_file first, then call finish."), True, None
-            elif seen.get(signature := _signature(name, args), 0) >= REPEATS_ALLOWED and name not in exits:
-                # Asked again for exactly what it already has: the answer would be the same, and a
-                # model going round in a circle is the one thing an unlimited number of rounds must stop
+            elif (seen.get(signature := _signature(name, args), 0) >= REPEATS_ALLOWED and name not in exits
+                  and _still_visible(latest.get(signature))):
+                # Asked again for exactly what it already has in front of it: the answer would be the
+                # same, and a model going round in a circle is what an unlimited number of rounds must
+                # stop. Only while that answer is still there - once it has been folded away to make
+                # room, asking again is exactly what the model was told to do.
                 refused += 1
                 if refused > REPEATS_BEFORE_STOP:
                     raise Stop("it kept asking for the same things over again without making progress")
@@ -361,7 +366,10 @@ async def _stage(task_id, principal, model, messages, offered, toolbox, exit_too
                 text = text[:TOOL_RESULT_CHARS] + f"\n[... {len(text) - TOOL_RESULT_CHARS} more characters]"
             if name not in exits or failed:
                 await event(task_id, "result", text[:2000], tool=name, failed=failed)
-            messages.append({"role": "tool", "tool_call_id": call_id, "name": name, "content": text})
+            reply = {"role": "tool", "tool_call_id": call_id, "name": name, "content": text}
+            messages.append(reply)
+            if not failed:
+                latest[_signature(name, args)] = reply
             if outcome and outcome.get("edited"):
                 edited.add(outcome["edited"])
             if outcome and name in exits:
@@ -370,6 +378,11 @@ async def _stage(task_id, principal, model, messages, offered, toolbox, exit_too
             return finished, edited
         if on_round:
             await on_round()        # saved after every round, so a stopped task can be continued
+
+
+def _still_visible(reply):
+    """Whether an earlier tool answer is still in the conversation in full."""
+    return reply is not None and FOLDED not in str(reply.get("content") or "")
 
 
 def _signature(name, args):
