@@ -22,7 +22,6 @@ import time
 from datetime import timedelta
 
 import httpx
-import psutil
 from sqlalchemy import func, select, text
 
 from app import backends, knowledge, settings, usage
@@ -32,7 +31,7 @@ from app.engine.supervisor import supervisor
 from app.models import ApiKey, UsageRecord, User, utcnow
 from app.tools import mcp_client
 from utils.ollama_client import ollama_host
-from utils.system_info import detect_gpus, get_system_info
+from utils.system_info import measure_hardware
 
 log = logging.getLogger("tools.self")
 
@@ -71,19 +70,15 @@ async def _get_json(client, url):
 
 
 def _measured():
-    """GPU and memory as they are now. get_system_info() returns ollama.server.vram.gb / ram.gb
-    instead when those are set, which suits sizing advice and is wrong for "how much is free": a
-    full card reads as empty. Measure, and say so when only the configured figures are available."""
-    info = get_system_info()
-    gpus = detect_gpus()
-    memory = psutil.virtual_memory()
+    """GPU and memory as they are now, in GB, saying so when only the configured sizes are known."""
+    info = measure_hardware()
     return {
         "gpus": [{"name": g["name"], "vram_total_gb": _gb(g["vram_total"]), "vram_free_gb": _gb(g["vram_free"])}
-                 for g in gpus] or
-                [{"name": g["name"], "vram_total_gb": _gb(g["vram_total"]),
+                 if info["gpu_source"] == "detected" else
+                 {"name": g["name"], "vram_total_gb": _gb(g["vram_total"]),
                   "note": "configured size, not measured: no GPU is visible to the gateway"}
                  for g in info["gpu_info"]],
-        "ram": {"total_gb": _gb(memory.total), "available_gb": _gb(memory.available),
+        "ram": {"total_gb": _gb(info["total_ram"]), "available_gb": _gb(info["available_ram"]),
                 "swap_used_gb": _gb(info["swap_used"])},
         "cpu": {"cores": info["cpu_count"], "busy_percent": info["cpu_percent"]},
     }

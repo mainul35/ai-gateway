@@ -69,3 +69,28 @@ def get_system_info():
         "cpu_count": psutil.cpu_count(),
         "platform": sys.platform,
     }
+
+
+def measure_hardware():
+    """GPU and memory as they are now, for "how much is free".
+
+    get_system_info() returns ollama.server.vram.gb / ram.gb instead when those are set, which suits
+    sizing advice and is wrong here: a full card reads as empty. This measures, and only when no GPU
+    is visible falls back to the configured size, with vram_free None and gpu_source "config"."""
+    gpus, source = detect_gpus(), "detected"
+    if not gpus:
+        configured_vram_gb = config.get_float("ollama.server.vram.gb", "OLLAMA_SERVER_VRAM_GB")
+        if configured_vram_gb:
+            gpus, source = [{"name": "Ollama server GPU", "vram_total": int(configured_vram_gb * 1024**3),
+                             "vram_free": None, "index": 0}], "config"
+    mem = psutil.virtual_memory()
+    return {
+        "gpu_info": gpus,
+        "gpu_source": source,
+        "total_vram": sum(gpu["vram_total"] for gpu in gpus),
+        "total_ram": mem.total,
+        "available_ram": mem.available,
+        "swap_used": psutil.swap_memory().used,
+        "cpu_percent": psutil.cpu_percent(interval=0.1),
+        "cpu_count": psutil.cpu_count(),
+    }

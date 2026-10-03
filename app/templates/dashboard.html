@@ -153,7 +153,9 @@ async function loadAdmin(){
 
     document.getElementById('hardware').innerHTML = (system.gpus.length
         ? system.gpus.map(g => `<p style="margin:.2rem 0">${escapeHtml(g.name)}<br>
-            <span class="muted" style="font-size:.85rem">${formatBytes(g.vram_free)} free of ${formatBytes(g.vram_total)}</span></p>`).join('')
+            <span class="muted" style="font-size:.85rem">${g.vram_free == null
+              ? `${formatBytes(g.vram_total)} (configured size, not measured)`
+              : `${formatBytes(g.vram_free)} free of ${formatBytes(g.vram_total)}`}</span></p>`).join('')
         : '<p class="muted" style="margin:.2rem 0">No GPU detected</p>')
       + `<p style="margin:.6rem 0 .2rem">RAM<br><span class="muted" style="font-size:.85rem">
          ${formatBytes(system.available_ram)} free of ${formatBytes(system.total_ram)}</span></p>`;

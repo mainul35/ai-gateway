@@ -21,8 +21,7 @@ from app.engine.supervisor import supervisor
 from utils import hf_client
 from utils.ollama_client import (StreamCancellation, check_ollama_status, ollama_host,
                                  stream_create_model, stream_pull_model)
-from utils.system_info import get_system_info
-from utils.system_info import get_system_info
+from utils.system_info import get_system_info, measure_hardware
 from app.db import get_session
 from app.models import ApiKey, UsageRecord, User, utcnow
 
@@ -655,7 +654,8 @@ async def write_settings(payload: dict, _: Principal = Depends(require_admin)):
 
 @router.get("/system")
 async def system_overview(_: Principal = Depends(require_admin), session: AsyncSession = Depends(get_session)):
-    info = get_system_info()
+    # Measured, not get_system_info(): its configured sizes would show a loaded card as empty
+    info = await asyncio.to_thread(measure_hardware)   # psutil and nvidia-smi block
     users = (await session.execute(select(func.count(User.id)))).scalar() or 0
     keys = (await session.execute(select(func.count(ApiKey.id)).where(ApiKey.is_active.is_(True)))).scalar() or 0
     requests_today = (await session.execute(
@@ -668,6 +668,7 @@ async def system_overview(_: Principal = Depends(require_admin), session: AsyncS
         "ollama": {**check_ollama_status(), "host": ollama_host()},
         "engine": supervisor.status(),
         "gpus": info["gpu_info"],
+        "gpu_source": info["gpu_source"],
         "total_vram": info["total_vram"],
         "total_ram": info["total_ram"],
         "available_ram": info["available_ram"],
