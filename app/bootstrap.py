@@ -28,6 +28,7 @@ async def ensure_schema():
         await connection.execute(text("ALTER TABLE projects ADD COLUMN IF NOT EXISTS kind VARCHAR(16) DEFAULT 'git'"))
         await connection.execute(text("ALTER TABLE projects ADD COLUMN IF NOT EXISTS client VARCHAR(16)"))
         await connection.execute(text("ALTER TABLE coding_tasks ADD COLUMN IF NOT EXISTS originals TEXT"))
+        await connection.execute(text("ALTER TABLE coding_tasks ADD COLUMN IF NOT EXISTS state TEXT"))
         # One running summary per conversation, whatever races to write it
         await connection.execute(text("DELETE FROM memory_entries WHERE scope = 'conversation' AND id NOT IN "
                                       "(SELECT min(id) FROM memory_entries WHERE scope = 'conversation' "
