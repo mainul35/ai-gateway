@@ -1436,7 +1436,13 @@ function showAnswer(box){
 /* Runs the last question again. The question is already in the transcript and already saved, so
    nothing is added to it; what comes back joins the answers that are already there. */
 async function resend(box){
-  if(controller || !box._messageId) return;
+  if(turning || controller || !box._messageId) return;
+  turning = true;
+  try{ await resendTurn(box); }
+  finally{ turning = false; }
+}
+
+async function resendTurn(box){
   // An older question: everything after it was answering what this question led to, and once it
   // is asked again none of that followed from anything. It goes, and it is said plainly first.
   const later = turnsAfter(box);
@@ -1471,7 +1477,7 @@ async function resend(box){
   // description of them
   const images = (box._files || []).map(f => ({id: f.id, url: fileUrl(f.id),
                                                name: f.name || 'attachment', document: !!f.document}));
-  await send({text: box._text || '', images, again: {messageId: box._messageId, replaceAt}});
+  await send({text: box._text || '', images, again: {messageId: box._messageId, replaceAt}}, true);
 }
 
 const ACTION_LABELS = {chat: 'answered directly', search: 'searched the web',
@@ -2444,10 +2450,25 @@ function setDeciding(on){
   document.getElementById('deciding').hidden = !on;
 }
 
+/* One turn at a time. `controller` only exists once an answer is streaming, and before that a turn
+   spends seconds asking the router what the message is - long enough for three taps on Try again
+   to start three turns, each routed and answered separately. This is set from the first tap to
+   the end of the turn, whatever kind of turn it turns out to be. */
+let turning = false;
+
+async function send(redo = null, claimed = false){
+  if(!claimed){
+    if(turning || controller) return;
+    turning = true;
+  }
+  try{ await sendTurn(redo); }
+  finally{ if(!claimed) turning = false; }
+}
+
 /* One turn. Normally it takes what is in the composer; asking a question again passes the words
    and the attachments back in, along with the question they belong to, and the answer joins the
    ones already filed under it. */
-async function send(redo = null){
+async function sendTurn(redo = null){
   const text = redo ? redo.text : promptBox.value.trim();
   if(controller) return;
   if(redo) pending = redo.images || [];
