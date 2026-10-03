@@ -16,7 +16,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app import access, backends, github_access, knowledge
+from app import github_access, knowledge
 from app.auth import Principal, require_admin, require_manager
 from app.coding import detect, remote, runner, workspace
 from app.db import get_session
@@ -338,25 +338,16 @@ class TaskIn(BaseModel):
 async def create_task(payload: TaskIn, principal: Principal = Depends(require_manager),
                       session: AsyncSession = Depends(get_session)):
     _enabled()
-    if principal.user is None:
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Start tasks while signed in, not with the master key")
     project = await session.get(Project, payload.project_id)
     if project is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "No such project")
-    if not access.can_use_model(principal, payload.model):
-        raise HTTPException(status.HTTP_403_FORBIDDEN, f"You do not have access to model '{payload.model}'")
-    backend = await backends.resolve(payload.model)
-    if backend is None:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, f"Model '{payload.model}' is not available")
-    if "tools" not in backend.capabilities:
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, f"{payload.model} cannot call tools; pick one that can")
-    task = CodingTask(project_id=project.id, user_id=principal.user.id, conversation_id=payload.conversation_id,
-                      description=payload.description.strip(), model=payload.model)
-    session.add(task)
-    await session.commit()
-    await session.refresh(task)
-    await runner.event(task.id, "note", f"Queued by {principal.user.email or principal.user.name}")
-    runner.submit(task.id)
+    try:
+        task = await runner.create(session, principal, project, payload.description, payload.model,
+                                   payload.conversation_id)
+    except PermissionError as e:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, str(e))
+    except ValueError as e:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(e))
     return _task_out(task, project)
 
 

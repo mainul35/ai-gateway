@@ -29,7 +29,7 @@ import time
 from fastapi import HTTPException
 from sqlalchemy import select, update
 
-from app import backends, knowledge, settings
+from app import access, backends, knowledge, settings
 from app.auth import Principal
 from app.coding import remote, sandbox, tools as task_tools, workspace
 from app.db import session_factory
@@ -155,6 +155,36 @@ async def _load(task_id):
 
 def is_enabled():
     return settings.get_bool("coding.enabled", "CODING_ENABLED", True)
+
+
+# --- starting one ------------------------------------------------------------------------------
+
+
+async def create(session, principal, project, description, model, conversation_id=None, by=""):
+    """Queues a task: the one place the rules for starting one live, used by the Tasks page and by
+    the playground agent. PermissionError or ValueError say why it cannot start."""
+    if principal.user is None:
+        raise ValueError("Start tasks while signed in, not with the master key")
+    if not principal.is_manager:
+        raise PermissionError("Only managers and admins can start coding tasks")
+    if not access.can_use_model(principal, model):
+        raise PermissionError(f"You do not have access to model '{model}'")
+    backend = await backends.resolve(model)
+    if backend is None:
+        raise ValueError(f"Model '{model}' is not available")
+    if "tools" not in backend.capabilities:
+        raise ValueError(f"{model} cannot call tools; pick one that can")
+    description = (description or "").strip()
+    if len(description) < 5:
+        raise ValueError("Say what the task should do")
+    task = CodingTask(project_id=project.id, user_id=principal.user.id, conversation_id=conversation_id,
+                      description=description[:20_000], model=model)
+    session.add(task)
+    await session.commit()
+    await session.refresh(task)
+    await event(task.id, "note", f"Queued by {principal.user.email or principal.user.name}" + (f" {by}" if by else ""))
+    submit(task.id)
+    return task
 
 
 # --- the queue ---------------------------------------------------------------------------------
@@ -320,13 +350,13 @@ def _compact(messages, budget=CONTEXT_CHARS):
 
 
 async def _stage(task_id, principal, model, messages, offered, toolbox, exit_tool, began,
-                 must_have_edited=None, on_round=None, memory=None, budget=CONTEXT_CHARS):
+                 must_have_edited=None, on_round=None, memory=None, budget=CONTEXT_CHARS, question=False):
     """Runs the model with a stage's tools until it calls an exit tool, for as many rounds as that
     takes. `exit_tool` is one name, or several (exploring ends with a plan or with an answer).
     Returns the exit call's outcome and the files edited along the way."""
     exits = {exit_tool} if isinstance(exit_tool, str) else set(exit_tool)
     exit_tool = " or ".join(sorted(exits))          # for the messages below
-    edited, nudges, seen, refused = set(), 0, {}, 0
+    edited, nudges, seen, refused, empty_finishes = set(), 0, {}, 0, 0
     latest = {}                 # each call's most recent answer, as the message the model sees
     calls_made, reflections = 0, 0
     limit = max_seconds()
@@ -351,6 +381,11 @@ async def _stage(task_id, principal, model, messages, offered, toolbox, exit_too
             # Small models often say the step's result in words instead of calling its exit tool.
             # When the words are that result - a plan, or a summary after the edits are made - take
             # them: making the model say it again through a tool adds nothing but a chance to fail.
+            # For a task that asks a question, words at the end of exploring are the answer: taken
+            # as a plan, a question was sent on to the edit step, where there was nothing to change
+            if "answer" in exits and question and len(said) >= 60 and not _thinking_aloud(said):
+                messages.append({"role": "assistant", "content": said})
+                return {"answer": said}, edited
             if "submit_plan" in exits and len(said) >= 60 and not _thinking_aloud(said):
                 messages.append({"role": "assistant", "content": said})
                 return {"plan": said}, edited
@@ -364,6 +399,10 @@ async def _stage(task_id, principal, model, messages, offered, toolbox, exit_too
             # answering in words, reminder after reminder, has stopped working.
             nudges += 1
             if nudges > NUDGES:
+                # Saying, reminder after reminder, that the work is done when nothing was changed is
+                # a conclusion - nothing needs changing - not a model that stopped working
+                if "finish" in exits and not (edited or must_have_edited) and said:
+                    return {"answer": said}, edited
                 raise Stop(f"the model stopped calling tools before {exit_tool}")
             if said:
                 messages.append({"role": "assistant", "content": said})
@@ -385,8 +424,16 @@ async def _stage(task_id, principal, model, messages, offered, toolbox, exit_too
                 text, failed, outcome = (f"{name} is not available in this step. You have: "
                                          + ", ".join(t["function"]["name"] for t in offered)), True, None
             elif name == "finish" and must_have_edited is not None and not (edited or must_have_edited):
-                text, failed, outcome = ("Nothing has been changed yet. Make the changes with edit_file or "
-                                         "create_file first, then call finish."), True, None
+                empty_finishes += 1
+                if empty_finishes >= 2:
+                    # Asked twice to change something and it still says it is done: it has concluded
+                    # that nothing needs changing, and that is an answer
+                    finished = {"answer": str(args.get("summary") or "No change was needed.")}
+                    text, failed, outcome = "Finished without changes.", False, None
+                else:
+                    text, failed, outcome = ("Nothing has been changed yet. Make the changes with edit_file or "
+                                             "create_file first, then call finish. If you are sure nothing needs "
+                                             "to change, call finish again and say why."), True, None
             elif (seen.get(signature := _signature(name, args), 0) >= REPEATS_ALLOWED and name not in exits
                   and _still_visible(latest.get(signature))):
                 # Asked again for exactly what it already has in front of it: the answer would be the
@@ -566,14 +613,11 @@ async def run(task_id):
             await event(task_id, "stage", "Exploring the project")
             outcome, _ = await _stage(task_id, principal, task.model, messages, explore_set, toolbox,
                                       ("submit_plan", "answer"), began, on_round=checkpoint,
-                                      memory=memory, budget=budget)
+                                      memory=memory, budget=budget, question=is_question(task.description))
             if "answer" in outcome:
-                await set_task(task_id, status="done", stage=None, summary=outcome["answer"])
-                await event(task_id, "answer", outcome["answer"])
-                await checkpoint(stage="answered")
-                if worktree:
-                    await workspace.discard(project, task_id)
+                await _answered(task_id, project, worktree, outcome["answer"], checkpoint)
                 return
+            progress["plan"] = outcome["plan"]
             await set_task(task_id, plan=outcome["plan"])
             await event(task_id, "plan", outcome["plan"])
             messages.append({"role": "user", "content": EDIT_ASK})
@@ -589,6 +633,14 @@ async def run(task_id):
                 outcome, edited = await _stage(task_id, principal, task.model, messages, edit_set, toolbox,
                                                "finish", began, must_have_edited=progress["changed"],
                                                on_round=checkpoint, memory=memory, budget=budget)
+                if "answer" in outcome:
+                    # It concluded nothing needs changing, and nothing was changed. For a question
+                    # whose answer was taken for a plan, that "plan" is the answer - better than
+                    # "I have already answered this" from the step that had nothing to do
+                    plan = progress.get("plan") or task.plan
+                    final = plan if is_question(task.description) and plan else outcome["answer"]
+                    await _answered(task_id, project, worktree, final, checkpoint)
+                    return
                 progress["changed"] |= edited
                 await checkpoint(summary=outcome["finish"])
                 await event(task_id, "summary", outcome["finish"])
@@ -667,6 +719,26 @@ async def run(task_id):
         await event(task_id, "error", f"Stopped: {e}")
     finally:
         _cancelled.discard(task_id)
+
+
+_QUESTION = re.compile(r"^\s*(what|how|why|where|which|who|when|is|are|does|do|can|could|explain|describe|tell me|"
+                       r"show me|summari[sz]e|understand|give me an overview|walk me through|list)\b|\?\s*$",
+                       re.I | re.M)
+
+
+def is_question(description):
+    """Whether a task asks for information rather than a change. Used only to read words the model
+    wrote instead of calling a tool: as an answer for a question, as a plan for anything else."""
+    return bool(_QUESTION.search(description or ""))
+
+
+async def _answered(task_id, project, worktree, answer, checkpoint):
+    """Ends a task with an answer and no change."""
+    await set_task(task_id, status="done", stage=None, summary=answer)
+    await event(task_id, "answer", answer)
+    await checkpoint(stage="answered")
+    if worktree:
+        await workspace.discard(project, task_id)
 
 
 async def _stopped(task_id, project, worktree, toolbox, progress, status, reason):
