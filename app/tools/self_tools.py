@@ -28,7 +28,7 @@ from app import backends, knowledge, settings, usage
 from app.db import session_factory
 from app.engine.profiles import load_profiles
 from app.engine.supervisor import supervisor
-from app.models import ApiKey, UsageRecord, User, utcnow
+from app.models import ApiKey, CodingTask, CodingTaskEvent, Project, UsageRecord, User, utcnow
 from app.tools import mcp_client
 from utils.ollama_client import ollama_host
 from utils.system_info import measure_hardware
@@ -318,27 +318,148 @@ TOOLS = {
             "required": ["source", "path"]},
         "run": read_file,
     },
+    "coding_projects": {
+        "description": ("The projects coding tasks can work on: GitHub repositories cloned on the server and "
+                        "folders on people's own computers, with whether each folder is connected right now."),
+        "schema": {"type": "object", "properties": {}},
+        "run": lambda args, context: coding_projects(),
+        "context": True,
+    },
+    "start_coding_task": {
+        "description": ("Starts a coding task: the gateway works on a project in the background - explores it, "
+                        "makes the change, runs its checks - and ends with a pull request to approve, changes to "
+                        "keep or undo in a local folder, or an answer. Use it only when the person asks for a "
+                        "change to a project, or for a question about one to be worked out, and say which "
+                        "project. Give the task in full, as the person put it. Returns the task's number and a "
+                        "link; tell the person the link. It does not wait for the task to finish."),
+        "schema": {"type": "object", "properties": {
+            "project": {"type": "string", "description": "The project's name, or part of it, from coding_projects."},
+            "task": {"type": "string", "description": "What should change, or what should be found out."}},
+            "required": ["project", "task"]},
+        "run": lambda args, context: start_coding_task(args, context),
+        "context": True,
+    },
+    "coding_task_status": {
+        "description": ("Where a coding task is: its status and stage, its last steps, and when it is done its "
+                        "answer, summary, pull request or changed files."),
+        "schema": {"type": "object", "properties": {"task_id": {"type": "integer"}}, "required": ["task_id"]},
+        "run": lambda args, context: coding_task_status(args),
+        "context": True,
+    },
 }
 
 
+# --- coding tasks ------------------------------------------------------------------------------
+
+DEFAULT_TASK_MODEL = "qwen3-next-80b"
+
+
+async def coding_projects():
+    from app.coding import remote, workspace
+    async with session_factory()() as db:
+        projects = (await db.execute(select(Project).order_by(Project.name))).scalars().all()
+    rows = []
+    for p in projects:
+        kind = ("folder on a computer" if p.kind == "local" else
+                "GitHub repository" if workspace.github_of(p.clone_url) else "git repository on the server")
+        row = {"name": p.name, "kind": kind,
+               "checked_with": p.verify_command or None}
+        if p.kind == "local":
+            row["connected"] = bool(remote.connection(p.id))
+        rows.append(row)
+    return {"projects": rows, "note": "Projects are added on the Tasks page (/tasks)."}
+
+
+async def _project_named(db, wanted):
+    wanted = (wanted or "").strip().lower()
+    projects = (await db.execute(select(Project))).scalars().all()
+    exact = [p for p in projects if p.name.lower() == wanted or p.name.lower().split("/")[-1] == wanted]
+    found = exact or [p for p in projects if wanted and wanted in p.name.lower()]
+    if len(found) != 1:
+        names = ", ".join(p.name for p in projects) or "none yet"
+        raise ValueError(("No project matches" if not found else f"{len(found)} projects match")
+                         + f" {wanted!r}. The projects are: {names}.")
+    return found[0]
+
+
+async def start_coding_task(args, context):
+    from app.coding import runner as coding_runner
+    principal = context.get("principal")
+    if principal is None:
+        raise PermissionError("Coding tasks can be started only from a signed-in chat")
+    available = await backends.available_models()
+    model = context.get("model")
+    # The chat's own model when it can do the work, otherwise the one that has done it best here
+    if not (model in available and "tools" in available[model].capabilities):
+        model = DEFAULT_TASK_MODEL if DEFAULT_TASK_MODEL in available else model
+    async with session_factory()() as db:
+        project = await _project_named(db, args.get("project"))
+        task = await coding_runner.create(db, principal, project, str(args.get("task") or ""), model,
+                                          context.get("conversation_id"), by="from a playground chat")
+    link = f"{settings.public_base_url() or ''}/tasks?task={task.id}"
+    note = ""
+    if project.kind == "local":
+        from app.coding import remote
+        if not remote.connection(project.id):
+            note = (" The folder is not connected at the moment, so the task will stop at once: open the Tasks "
+                    "page on that computer and connect it, or start the helper there, then press Continue.")
+    return {"task_id": task.id, "project": project.name, "model": model, "status": "queued", "link": link,
+            "note": "It runs in the background; check on it with coding_task_status." + note}
+
+
+async def coding_task_status(args):
+    try:
+        task_id = int(args.get("task_id"))
+    except (TypeError, ValueError):
+        raise ValueError("Give the task's number")
+    async with session_factory()() as db:
+        task = await db.get(CodingTask, task_id)
+        if task is None:
+            raise ValueError(f"There is no coding task #{task_id}")
+        project = await db.get(Project, task.project_id)
+        steps = (await db.execute(select(CodingTaskEvent).where(CodingTaskEvent.task_id == task_id,
+                                                                CodingTaskEvent.kind.in_(("stage", "note", "error",
+                                                                                          "review", "done", "verify")))
+                                  .order_by(CodingTaskEvent.id.desc()).limit(6))).scalars().all()
+    out = {"task_id": task.id, "project": project.name if project else None, "status": task.status,
+           "stage": task.stage, "last_steps": [f"{e.kind}: {e.text[:300]}" for e in reversed(steps)],
+           "link": f"{settings.public_base_url() or ''}/tasks?task={task.id}"}
+    if task.error:
+        out["error"] = task.error
+    if task.summary:
+        out["answer" if task.status == "done" and not task.diff else "summary"] = task.summary[:6000]
+    if task.pr_url:
+        out["pull_request"] = task.pr_url
+    if task.diff:
+        out["files_changed"] = sorted({line[6:] for line in task.diff.splitlines() if line.startswith("+++ b/")})
+    return out
+
+
 KNOWLEDGE_TOOLS = {"knowledge_sources", "knowledge_search", "read_file"}
+CODING_TOOLS = {"coding_projects", "start_coding_task", "coding_task_status"}
 
 
 def listing():
     """The tools, in the shape the agent loop turns into function definitions."""
+    from app.coding import runner as coding_runner
     return [{"server": SERVER, "name": name, "description": tool["description"], "schema": tool["schema"]}
             for name, tool in TOOLS.items()
-            if name not in KNOWLEDGE_TOOLS or knowledge.is_enabled()]
+            if (name not in KNOWLEDGE_TOOLS or knowledge.is_enabled())
+            and (name not in CODING_TOOLS or coding_runner.is_enabled())]
 
 
-async def call(tool, args):
-    """Runs one tool. Returns (text, failed), like mcp_client.call."""
+async def call(tool, args, context=None):
+    """Runs one tool. Returns (text, failed), like mcp_client.call. `context` is who is asking, with
+    which model, in which conversation - what the coding tools need to start a task as that person."""
     entry = TOOLS.get(tool)
     if entry is None:
         return f"{SERVER} has no tool called {tool}.", True
     try:
-        result = await entry["run"](args or {})
-    except ValueError as e:                 # the model asked for something that is not there
+        if entry.get("context"):
+            result = await entry["run"](args or {}, context or {})
+        else:
+            result = await entry["run"](args or {})
+    except (ValueError, PermissionError) as e:     # the model asked for something that is not there
         return str(e), True
     except Exception as e:
         log.warning("gateway tool %s failed: %s", tool, e, exc_info=True)

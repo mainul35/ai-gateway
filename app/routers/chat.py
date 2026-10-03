@@ -1808,7 +1808,10 @@ async def run_agent(payload: AgentIn, principal: Principal = Depends(authenticat
                     server, tool = known
                     try:
                         if server is self_tools.BUILTIN:
-                            text, bad = await self_tools.call(tool, agent.arguments(call.get("arguments")))
+                            text, bad = await self_tools.call(
+                                tool, agent.arguments(call.get("arguments")),
+                                {"principal": principal, "model": payload.model,
+                                 "conversation_id": payload.conversation_id})
                         else:
                             text, bad = await mcp_client.call(server, tool,
                                                               agent.arguments(call.get("arguments")))
