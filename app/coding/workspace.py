@@ -17,7 +17,7 @@ import re
 
 import httpx
 
-from app import knowledge, settings
+from app import github_access, knowledge, settings
 
 log = logging.getLogger("coding.workspace")
 
@@ -43,8 +43,8 @@ def token_for(clone_url):
     found = github_of(clone_url)
     if not found:
         return ""
-    return (settings.get(f"coding.github.token.{found[0]}")
-            or settings.get("coding.github.token", "CODING_GITHUB_TOKEN") or "")
+    # Set on the Tasks page (GitHub access), or by hand in config.properties
+    return github_access.token(found[0], "write") or settings.get("coding.github.token", "CODING_GITHUB_TOKEN") or ""
 
 
 def clone_path(name):
@@ -177,8 +177,8 @@ async def open_pull_request(project, branch, title, body):
         return None, None
     token = token_for(project.clone_url)
     if not token:
-        raise GitError(f"no GitHub token to open a pull request on {found[0]}: set "
-                       f"coding.github.token.{found[0]} in config.properties")
+        raise GitError(f"no GitHub token to open a pull request on {found[0]}: add one on the Tasks page, "
+                       f"under GitHub access")
     owner, repo = found
     existing = await _github("GET", f"/repos/{owner}/{repo}/pulls", token,
                              params={"head": f"{owner}:{branch}", "state": "open"})

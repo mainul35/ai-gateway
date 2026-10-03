@@ -8,13 +8,15 @@ import asyncio
 import json
 import re
 
+import httpx
+
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app import access, backends
+from app import access, backends, github_access, knowledge
 from app.auth import Principal, require_admin, require_manager
 from app.coding import detect, remote, runner, workspace
 from app.db import get_session
@@ -182,6 +184,63 @@ async def add_local_project(payload: LocalProjectIn, principal: Principal = Depe
     await session.commit()
     await session.refresh(project)
     return _project_out(project, principal, detected=found["kind"])
+
+
+# --- GitHub access -----------------------------------------------------------------------------
+
+
+@router.get("/github")
+async def github_tokens(_: Principal = Depends(require_admin), session: AsyncSession = Depends(get_session)):
+    """Owners with a token (masked), and owners that projects or the knowledge base use without one."""
+    have = github_access.owners()
+    named = {o["owner"].lower() for o in have}
+    wanted = set()
+    for (url,) in (await session.execute(select(Project.clone_url).where(Project.kind == "git"))).all():
+        found = workspace.github_of(url)
+        if found:
+            wanted.add(found[0])
+    for spec in knowledge.load_config().get("sources") or []:
+        if spec.get("kind") == "github":
+            wanted.update(spec.get("owners") or [])
+    return {"tokens": have, "missing": sorted(o for o in wanted if o.lower() not in named)}
+
+
+class TokenIn(BaseModel):
+    token: str = Field(min_length=20, max_length=400)
+
+
+@router.put("/github/{owner}")
+async def set_github_token(owner: str, payload: TokenIn, _: Principal = Depends(require_admin)):
+    """Checks the token with GitHub, then saves it. Never echoed back."""
+    try:
+        found = await github_access.save(owner, payload.token)
+    except ValueError as e:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(e))
+    except httpx.HTTPError as e:
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, f"GitHub could not be reached: {e}")
+    return {"owner": owner, **found}
+
+
+@router.post("/github/{owner}/check")
+async def check_github_token(owner: str, _: Principal = Depends(require_admin)):
+    value = github_access.token(owner, "write") or github_access.token(owner, "read")
+    if not value:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, f"No token for {owner}")
+    try:
+        return {"owner": owner, **await github_access.check(owner, value)}
+    except ValueError as e:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(e))
+    except httpx.HTTPError as e:
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, f"GitHub could not be reached: {e}")
+
+
+@router.delete("/github/{owner}")
+async def remove_github_token(owner: str, _: Principal = Depends(require_admin)):
+    try:
+        github_access.remove(owner)
+    except ValueError as e:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(e))
+    return {"removed": owner}
 
 
 # --- the relay to a folder on somebody's computer ----------------------------------------------

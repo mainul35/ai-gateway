@@ -59,3 +59,8 @@ def get_float(key, env_var=None):
         return float(value) if value else None
     except ValueError:
         return None
+
+
+def properties():
+    """Every property in the file, for settings whose keys are not known in advance."""
+    return dict(_properties())
