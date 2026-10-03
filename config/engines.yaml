@@ -48,7 +48,11 @@ models:
   #   3090 + laptop A4000 over llama.cpp RPC: 3.2 t/s generation, 102 t/s prompt, 121 s load
   # So no --rpc here: the network split is ~13x slower for this model. The laptop's RPC server
   # (192.168.50.52:50052) is still up if a dense model that needs the extra VRAM comes along.
+  # 64k context costs nothing measurable (2026-10-03): 22.7 GB on the 3090 either way, 50 s load,
+  # 42-45 t/s generation and 450 t/s prompt on a 19.5k-token prompt, same as at 32k. Most of its
+  # layers are linear attention with no KV cache, so the context is cheap. Coding tasks use it:
+  # they fold old tool results away later the more context the model has.
   - name: qwen3-next-80b
     model_path: /home/mainul35/models/Qwen3-Next-80B-A3B-Instruct-UD-Q4_K_XL.gguf
-    ctx_size: 32768
+    ctx_size: 65536
     cache_reuse: 256
