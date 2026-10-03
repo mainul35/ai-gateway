@@ -35,6 +35,11 @@ DEFAULTS = {
     "knowledge.file": "config/knowledge.yaml",
     "knowledge.embedding.model": "qwen3-embedding:0.6b",
     "knowledge.refresh.hours": "12",
+    # Coding tasks (app/coding): projects are cloned under this folder, one worktree per task.
+    # Write tokens go in as coding.github.token.<owner> (Contents + Pull requests, read and write).
+    "coding.enabled": "true",
+    "coding.projects.dir": "~/projects",
+    "coding.author.email": "",
     # Tool servers the gateway may call. Secrets are not in it; it names environment
     # variables or config.properties keys, and those are read at connect time.
     "mcp.servers.file": "config/mcp.yaml",

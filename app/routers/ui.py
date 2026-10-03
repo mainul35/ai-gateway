@@ -119,6 +119,11 @@ async def playground_page(request: Request, user: User | None = Depends(current_
     return _require_login(user, "/playground") or _page(request, "playground.html", user)
 
 
+@router.get("/tasks")
+async def tasks_page(request: Request, user: User | None = Depends(current_user)):
+    return _require_role(user, "/tasks", ("manager", "admin")) or _page(request, "tasks.html", user)
+
+
 @router.get("/mcp")
 async def mcp_page(request: Request, user: User | None = Depends(current_user)):
     return _require_role(user, "/mcp", ("admin",)) or _page(request, "mcp.html", user)
