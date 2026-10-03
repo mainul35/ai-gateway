@@ -68,7 +68,12 @@ details.tuning label{margin-bottom:.85rem}
 .msg.assistant .failed{color:var(--danger);font-size:.85rem}
 .msg.user .who{display:none}
 .msg .who{font-size:.72rem;color:var(--muted);margin-bottom:.45rem;font-weight:600;letter-spacing:.02em}
-.msg .body.md{background:none;padding:0;margin:0}
+/* white-space:normal is the important one. The body is pre-wrap so that a streaming answer keeps
+   its line breaks before anything has rendered it; once the Markdown is in, the newlines between
+   </p> and <p> are still being honoured as real line breaks, which lands a blank line on top of
+   every paragraph margin. Two lines of intended gap read as three, and no amount of adjusting the
+   margin fixes it, because the extra line is not a margin. */
+.msg .body.md{background:none;padding:0;margin:0;white-space:normal}
 /* The conversation's name stays in view while its messages scroll under it */
 .topbar{flex:none;border-bottom:1px solid var(--border);padding:.55rem 0;background:var(--bg)}
 .chatTitle{font-size:.9rem;font-weight:600;color:var(--text);display:block;
