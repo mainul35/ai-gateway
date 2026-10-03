@@ -1326,7 +1326,7 @@ async def find_on_map(payload: MapIn, principal: Principal = Depends(authenticat
     try:
         if plan["intent"] == "here":
             if not points:
-                raise maps.MapError("No coordinate was given to look up.")
+                raise _NotOnTheMap("No coordinate was given to look up.")
             result["places"] = [await atlas.reverse(*points[0])]
 
         elif plan["intent"] in ("route", "along"):
@@ -1344,14 +1344,14 @@ async def find_on_map(payload: MapIn, principal: Principal = Depends(authenticat
                 await _candidates(plan["to"], points, 1 if plan["from"] or points else 0,
                                   near=standing, atlas=atlas))
             if not start or not end:
-                raise maps.MapError("A route needs both a start and a finish; name them as "
+                raise _NotOnTheMap("A route needs both a start and a finish; name them as "
                                     "\u201cfrom A to B\u201d.")
             result["start"], result["end"] = start, end
             result["route"] = await atlas.route([(start["lat"], start["lon"]),
                                                 (end["lat"], end["lon"])], mode)
             if plan["intent"] == "along":
                 if not tag:
-                    raise maps.MapError("What should be looked for along the way? Name a kind of "
+                    raise _NotOnTheMap("What should be looked for along the way? Name a kind of "
                                         "place, such as petrol stations or restaurants.")
                 result["places"] = await atlas.along(tag, result["route"]["line"])
 

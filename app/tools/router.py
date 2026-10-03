@@ -113,6 +113,8 @@ Examples:
 "notice that the font looks broken" -> CHAT
 "this is the error I am getting" -> CHAT
 "I found these entries in the registry" -> CHAT
+"clicking Try again three times started three answers at once" -> CHAT
+"it should wait until the first one is done before starting another" -> CHAT
 
 Allowed answers this time: {allowed}. Answer with one of those words only."""
 
@@ -423,6 +425,17 @@ FACT_ABOUT_PLACE = re.compile(
     r"history|weather|climate|time zone|country|continent|mean|called)\b", re.I)
 
 
+COORDINATES = re.compile(r"-?\d{1,3}\.\d+\s*,\s*-?\d{1,3}\.\d+")
+FROM_TO = re.compile(r"\bfrom\b.{1,80}\bto\b", re.I | re.S)
+
+
+def names_somewhere(message):
+    """Whether anything in the words could be answered by a map: a way to get somewhere, a place
+    asked after, a coordinate, from-here-to-there."""
+    text = message or ""
+    return bool(MAP_WORDS.search(text) or COORDINATES.search(text) or FROM_TO.search(text))
+
+
 def settle_action(answered, message, allowed, has_images):
     """The model's answer, unless it fell back to CHAT while the words plainly asked for a map.
 
@@ -433,6 +446,13 @@ def settle_action(answered, message, allowed, has_images):
     question ends up as a picture.
     """
     if answered == MAP and FACT_ABOUT_PLACE.search(message or ""):
+        return CHAT, "keywords"
+    # After a few turns about something else the small model says MAP for messages that name no
+    # place at all - "clicking Try again three times started three answers" went to the map four
+    # times running, which looked it up as a coordinate and failed. A map can only answer words
+    # that point somewhere, so without any, MAP is not believed. A bare place name with no other
+    # words ("Shinjuku station") is lost to CHAT by this, which answers it in words, not wrongly.
+    if answered == MAP and not names_somewhere(message):
         return CHAT, "keywords"
     # The one other place the model is overruled, for the same reason: "show me a photo of it" and
     # "draw me a photo of it" are one word apart, and answering the first by drawing produces a
