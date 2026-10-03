@@ -10,7 +10,8 @@ from fastapi.staticfiles import StaticFiles
 
 from app import bootstrap, db, knowledge, settings, sso
 from app.engine.supervisor import supervisor
-from app.routers import admin, auth_sso, chat, openai_v1, ui
+from app.coding import runner as coding_runner
+from app.routers import admin, auth_sso, chat, coding, openai_v1, ui
 from utils.ollama_client import ollama_host
 
 # Without this our own INFO logs never reach the console; uvicorn only configures its own loggers
@@ -35,7 +36,9 @@ async def lifespan(_: FastAPI):
     except Exception as e:
         # A database without pgvector loses the knowledge base, not the gateway
         log.warning("knowledge base unavailable: %s", e)
+    await coding_runner.start()
     yield
+    await coding_runner.stop()
     if refresher:
         refresher.cancel()
     await supervisor.shutdown()
@@ -54,6 +57,7 @@ app.include_router(openai_v1.router)
 app.include_router(admin.router)
 app.include_router(auth_sso.router)
 app.include_router(chat.router)
+app.include_router(coding.router)
 app.include_router(ui.router)
 app.mount("/static", StaticFiles(directory=os.path.join(os.path.dirname(__file__), "static")), name="static")
 

@@ -1,0 +1,288 @@
+{% extends "base.html" %}
+{% block title %}Tasks &middot; Model Gateway{% endblock %}
+{% block content %}
+<style>
+dialog{border:1px solid var(--border);border-radius:12px;background:var(--card);color:var(--text);
+       width:min(46rem,92vw);padding:1.25rem 1.4rem}
+dialog::backdrop{background:rgba(0,0,0,.6)}
+dialog label{display:block;margin-bottom:.8rem}
+dialog input,dialog textarea,dialog select,#newTask textarea,#newTask select{width:100%}
+.tasks-layout{display:grid;grid-template-columns:minmax(16rem,22rem) 1fr;gap:1.25rem;align-items:start}
+@media (max-width:900px){.tasks-layout{grid-template-columns:1fr}}
+.task-row{display:block;width:100%;text-align:left;background:none;border:1px solid var(--border);border-radius:10px;
+          padding:.6rem .75rem;margin-bottom:.5rem;color:var(--text);cursor:pointer}
+.task-row:hover,.task-row.active{border-color:var(--accent,#6366f1)}
+.task-row .what{display:block;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.task-row .meta{font-size:.8rem;color:var(--muted)}
+.events{max-height:28rem;overflow:auto;font-size:.88rem;border:1px solid var(--border);border-radius:10px;padding:.5rem .75rem}
+.ev{padding:.25rem 0;border-bottom:1px solid var(--border);white-space:pre-wrap;word-break:break-word}
+.ev:last-child{border-bottom:none}
+.ev .k{font-size:.72rem;text-transform:uppercase;letter-spacing:.04em;color:var(--muted);margin-right:.4rem}
+.ev.stage{font-weight:600}.ev.error{color:var(--danger)}.ev.review,.ev.done{color:var(--success)}
+.ev details summary{cursor:pointer;color:var(--muted)}
+pre.diff{max-height:32rem;overflow:auto;font-size:.8rem;border:1px solid var(--border);border-radius:10px;padding:.6rem}
+pre.diff .add{color:var(--success)}pre.diff .del{color:var(--danger)}pre.diff .hunk{color:var(--muted)}
+.actions{display:flex;gap:.5rem;flex-wrap:wrap;margin:.8rem 0}
+.prose{white-space:pre-wrap}
+</style>
+
+<h1>Coding tasks</h1>
+<p class="sub">Give the gateway a change to make in one of your projects. It explores the code, makes the
+  change on its own branch, runs the project's checks in a sandbox, and opens a pull request. Nothing is
+  merged or deployed until an admin approves it here.</p>
+
+<div id="error" class="note err" hidden></div>
+<div id="ok" class="note ok" hidden></div>
+
+<div class="card" id="newTask" style="margin-bottom:1.25rem">
+  <h2>New task</h2>
+  <div class="row" style="gap:.75rem;margin-bottom:.6rem">
+    <label style="flex:1;min-width:12rem;margin:0"><span class="lbl">Project</span>
+      <select id="taskProject"></select></label>
+    <label style="flex:1;min-width:12rem;margin:0"><span class="lbl">Model</span>
+      <select id="taskModel"></select></label>
+  </div>
+  <label style="margin:0"><span class="lbl">What should change</span>
+    <textarea id="taskText" rows="4" placeholder="Fix: clicking Try again three times starts three answers. Only one turn should run at a time."></textarea>
+  </label>
+  <div class="row" style="margin-top:.7rem">
+    <button class="btn" id="startTask">Start</button>
+    <button class="btn btn-secondary" id="addProject">Add a project</button>
+    <span class="muted" id="projectNote"></span>
+  </div>
+</div>
+
+<div class="tasks-layout">
+  <div>
+    <h2 style="font-size:1rem">Tasks</h2>
+    <div id="taskList" class="muted">Loading&hellip;</div>
+  </div>
+  <div class="card" id="detail"><span class="muted">Pick a task to see what it did.</span></div>
+</div>
+
+<dialog id="projectDialog">
+  <form method="dialog" id="projectForm">
+    <h2 id="projectTitle">Add a project</h2>
+    <input type="hidden" name="id">
+    <label><span class="lbl">GitHub address</span>
+      <input name="clone_url" placeholder="https://github.com/mainul35/ai-gateway" autocomplete="off" required>
+      <span class="hint">It is cloned on the gateway's server. Pushing needs a write token for its owner:
+        <code>coding.github.token.&lt;owner&gt;</code> in config.properties.</span></label>
+    <label><span class="lbl">Base branch</span>
+      <input name="base_branch" placeholder="(the repository's default branch)" autocomplete="off">
+      <span class="hint">Tasks branch from this, and pull requests go into it.</span></label>
+    <label><span class="lbl">Verify command</span>
+      <input name="verify_command" placeholder="python -m pytest -q" autocomplete="off">
+      <span class="hint">Run in the sandbox after the changes; it has to exit 0 for the task to be ready.
+        Empty means nothing is checked.</span></label>
+    <div class="row" style="gap:.75rem">
+      <label style="flex:2"><span class="lbl">Sandbox image</span>
+        <input name="sandbox_image" value="python:3.12-slim" list="images" autocomplete="off">
+        <datalist id="images"><option value="python:3.12-slim"><option value="node:22-slim">
+          <option value="maven:3-eclipse-temurin-21"><option value="golang:1.23"><option value="model-gateway:latest"></datalist></label>
+      <label style="flex:1;align-self:end"><input type="checkbox" name="sandbox_network" style="width:auto">
+        Network in the sandbox</label>
+    </div>
+    <label {% if user.role != 'admin' %}hidden{% endif %}><span class="lbl">Deploy command (admin)</span>
+      <input name="deploy_command" placeholder="DEPLOY_HOST=local bin/deploy.sh" autocomplete="off">
+      <span class="hint">Runs on the server, in the project's clone, after an approved task is merged.</span></label>
+    <label><span class="lbl">Notes for the model</span>
+      <textarea name="notes" rows="3" placeholder="How the project is laid out, conventions to keep, what not to touch."></textarea></label>
+    <div class="row">
+      <button class="btn" value="save" id="saveProject">Save</button>
+      <button class="btn btn-secondary" value="cancel" formnovalidate>Cancel</button>
+    </div>
+  </form>
+</dialog>
+{% endblock %}
+
+{% block scripts %}
+<script>
+const isAdmin = {{ 'true' if user.role == 'admin' else 'false' }};
+const LIVE = ['queued', 'running', 'approved', 'merged', 'deploying'];
+let projects = [], tasks = [], shown = null, lastEvent = 0, polling = null, acting = false;
+
+function showError(message){ const b = document.getElementById('error'); b.textContent = message; b.hidden = !message; }
+function showOk(message){ const b = document.getElementById('ok'); b.textContent = message; b.hidden = !message; }
+
+function pill(state){
+  const kind = {review: 'on', done: 'on', merged: 'on', failed: 'err', rejected: 'err', cancelled: 'err'}[state] || 'off';
+  return `<span class="pill ${kind}">${escapeHtml(state)}</span>`;
+}
+
+async function loadProjects(){
+  projects = (await api('/coding/projects')).projects;
+  const select = document.getElementById('taskProject');
+  select.innerHTML = projects.map(p => `<option value="${p.id}">${escapeHtml(p.name)}</option>`).join('')
+                     || '<option value="">Add a project first</option>';
+  const p = projects.find(p => String(p.id) === select.value);
+  document.getElementById('projectNote').innerHTML = p
+    ? `${escapeHtml(p.name)} &middot; into ${escapeHtml(p.base_branch)} &middot; `
+      + (p.verify_command ? `checked with <code>${escapeHtml(p.verify_command)}</code>` : 'no checks set')
+      + (p.can_push ? '' : ' &middot; <b>no write token yet</b>')
+      + ` &middot; <a href="#" data-edit="${p.id}">edit</a>` : '';
+}
+
+async function loadModels(){
+  const data = (await api('/v1/models')).data.filter(m => (m.capabilities || []).includes('tools'));
+  const select = document.getElementById('taskModel');
+  // The ones that have done this work best first; the rest in the order the gateway lists them
+  const preferred = ['qwen3-next-80b', 'qwen3-coder:30b'];
+  const rank = m => { const i = preferred.indexOf(m.id); return i < 0 ? preferred.length : i; };
+  data.sort((a, b) => rank(a) - rank(b));
+  select.innerHTML = data.map(m => `<option>${escapeHtml(m.id)}</option>`).join('');
+}
+
+async function loadTasks(){
+  tasks = (await api('/coding/tasks')).tasks;
+  document.getElementById('taskList').innerHTML = tasks.length ? tasks.map(t => `
+    <button class="task-row ${shown === t.id ? 'active' : ''}" data-task="${t.id}">
+      <span class="what">#${t.id} ${escapeHtml(t.description.split('\n')[0])}</span>
+      <span class="meta">${pill(t.status)} ${escapeHtml(t.project)} &middot; ${escapeHtml(t.model)}</span>
+    </button>`).join('') : '<span class="muted">No tasks yet.</span>';
+}
+
+function renderDiff(diff){
+  return escapeHtml(diff).split('\n').map(line =>
+    line.startsWith('+') && !line.startsWith('+++') ? `<span class="add">${line}</span>`
+    : line.startsWith('-') && !line.startsWith('---') ? `<span class="del">${line}</span>`
+    : line.startsWith('@@') ? `<span class="hunk">${line}</span>` : line).join('\n');
+}
+
+function renderEvent(e){
+  const d = e.data || {};
+  if(e.kind === 'call'){
+    const args = JSON.stringify(d.arguments || {});
+    return `<div class="ev"><span class="k">tool</span>${escapeHtml(e.text)} <span class="muted">${escapeHtml(args.slice(0, 220))}</span></div>`;
+  }
+  if(e.kind === 'result'){
+    return `<div class="ev ${d.failed ? 'error' : ''}"><details><summary><span class="k">${d.failed ? 'failed' : 'result'}</span>${escapeHtml(d.tool || '')}</summary>${escapeHtml(e.text)}</details></div>`;
+  }
+  if(e.kind === 'verify'){
+    return `<div class="ev ${d.passed ? 'done' : 'error'}"><details ${d.passed ? '' : 'open'}><summary><span class="k">checks</span>${d.passed ? 'passed' : 'failed'}</summary>${escapeHtml(e.text)}</details></div>`;
+  }
+  return `<div class="ev ${escapeHtml(e.kind)}"><span class="k">${escapeHtml(e.kind)}</span>${escapeHtml(e.text)}</div>`;
+}
+
+async function showTask(id){
+  shown = id; lastEvent = 0;
+  clearInterval(polling);
+  document.querySelectorAll('.task-row').forEach(r => r.classList.toggle('active', Number(r.dataset.task) === id));
+  const t = await api(`/coding/tasks/${id}`);
+  const box = document.getElementById('detail');
+  const actions = [];
+  if(t.status === 'review' && isAdmin) actions.push('<button class="btn" data-act="approve">Approve: merge and deploy</button>');
+  if(['review', 'failed'].includes(t.status)) actions.push('<button class="btn btn-danger" data-act="reject">Reject</button>');
+  if(['queued', 'running'].includes(t.status)) actions.push('<button class="btn btn-danger" data-act="cancel">Cancel</button>');
+  if(['failed', 'cancelled', 'rejected'].includes(t.status)) actions.push('<button class="btn btn-secondary" data-act="retry">Retry</button>');
+  box.innerHTML = `
+    <h2 style="margin-top:0">#${t.id} ${pill(t.status)} ${t.stage ? `<span class="muted">${escapeHtml(t.stage)}</span>` : ''}</h2>
+    <p class="prose">${escapeHtml(t.description)}</p>
+    <p class="muted" style="font-size:.88rem">${escapeHtml(t.project)} &middot; ${escapeHtml(t.model)}
+      ${t.branch ? ` &middot; branch <code>${escapeHtml(t.branch)}</code>` : ''}
+      ${t.pr_url ? ` &middot; <a href="${escapeHtml(t.pr_url)}" target="_blank" rel="noopener">pull request</a>` : ''}</p>
+    ${t.error ? `<div class="note err">${escapeHtml(t.error)}</div>` : ''}
+    <div class="actions">${actions.join('')}</div>
+    ${t.summary ? `<h3>Summary</h3><p class="prose">${escapeHtml(t.summary)}</p>` : ''}
+    ${t.plan ? `<details><summary>Plan</summary><p class="prose">${escapeHtml(t.plan)}</p></details>` : ''}
+    ${t.diff ? `<details open><summary>Changes</summary><pre class="diff">${renderDiff(t.diff)}</pre></details>` : ''}
+    <h3>What it did</h3><div class="events" id="events"></div>`;
+  await pollEvents(t.status);
+  if(LIVE.includes(t.status)) polling = setInterval(() => pollEvents(), 2500);
+}
+
+async function pollEvents(knownStatus){
+  if(!shown) return;
+  const id = shown;
+  const answer = await api(`/coding/tasks/${id}/events?after=${lastEvent}`);
+  if(id !== shown) return;
+  const list = document.getElementById('events');
+  for(const e of answer.events){ list.insertAdjacentHTML('beforeend', renderEvent(e)); lastEvent = e.id; }
+  if(answer.events.length) list.scrollTop = list.scrollHeight;
+  // The task moved on (finished, waiting for review...): draw it again with its new buttons and diff
+  if(knownStatus === undefined && !LIVE.includes(answer.status)){
+    clearInterval(polling);
+    await loadTasks();
+    await showTask(id);
+  }
+}
+
+document.addEventListener('click', async e => {
+  const row = e.target.closest('[data-task]');
+  if(row){ showTask(Number(row.dataset.task)); return; }
+  const edit = e.target.closest('[data-edit]');
+  if(edit){ e.preventDefault(); openProject(projects.find(p => p.id === Number(edit.dataset.edit))); return; }
+  const act = e.target.closest('[data-act]');
+  if(!act || acting) return;
+  const what = act.dataset.act;
+  if(what === 'approve' && !confirm('Merge this pull request and run the deploy command?')) return;
+  if(what === 'reject' && !confirm('Reject this task? Its branch is left as it is.')) return;
+  acting = true; act.disabled = true;
+  try{
+    await api(`/coding/tasks/${shown}/${what}`, {method: 'POST'});
+    await loadTasks(); await showTask(shown);
+  }catch(err){ showError(err.message); }
+  finally{ acting = false; }
+});
+
+document.getElementById('taskProject').addEventListener('change', loadProjects);
+
+document.getElementById('startTask').addEventListener('click', async e => {
+  if(acting) return;
+  const description = document.getElementById('taskText').value.trim();
+  const project_id = Number(document.getElementById('taskProject').value);
+  if(!project_id){ showError('Add a project first.'); return; }
+  if(description.length < 5){ showError('Say what should change.'); return; }
+  acting = true; e.target.disabled = true; showError('');
+  try{
+    const task = await api('/coding/tasks', {method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({project_id, description, model: document.getElementById('taskModel').value})});
+    document.getElementById('taskText').value = '';
+    await loadTasks(); await showTask(task.id);
+  }catch(err){ showError(err.message); }
+  finally{ acting = false; e.target.disabled = false; }
+});
+
+function openProject(project){
+  const form = document.getElementById('projectForm');
+  form.reset();
+  document.getElementById('projectTitle').textContent = project ? `Change ${project.name}` : 'Add a project';
+  form.clone_url.readOnly = !!project;
+  for(const key of ['id', 'clone_url', 'base_branch', 'verify_command', 'sandbox_image', 'deploy_command', 'notes'])
+    if(project && project[key] != null) form[key].value = project[key];
+  form.sandbox_network.checked = !!(project && project.sandbox_network);
+  document.getElementById('projectDialog').showModal();
+}
+document.getElementById('addProject').addEventListener('click', () => openProject(null));
+
+document.getElementById('projectForm').addEventListener('submit', async e => {
+  if(e.submitter && e.submitter.value === 'cancel') return;
+  e.preventDefault();
+  const form = e.target, save = document.getElementById('saveProject');
+  const body = {base_branch: form.base_branch.value.trim() || null, verify_command: form.verify_command.value,
+                sandbox_image: form.sandbox_image.value.trim(), sandbox_network: form.sandbox_network.checked,
+                notes: form.notes.value || null};
+  if(isAdmin) body.deploy_command = form.deploy_command.value.trim() || null;
+  save.disabled = true; save.textContent = form.id.value ? 'Saving…' : 'Cloning…';
+  try{
+    if(form.id.value){
+      await api(`/coding/projects/${form.id.value}`, {method: 'PATCH', headers: {'Content-Type': 'application/json'},
+                                                      body: JSON.stringify(body)});
+    }else{
+      await api('/coding/projects', {method: 'POST', headers: {'Content-Type': 'application/json'},
+                                     body: JSON.stringify({...body, clone_url: form.clone_url.value.trim()})});
+    }
+    document.getElementById('projectDialog').close();
+    showOk('Saved.'); await loadProjects();
+  }catch(err){ showError(err.message); document.getElementById('projectDialog').close(); }
+  finally{ save.disabled = false; save.textContent = 'Save'; }
+});
+
+(async () => {
+  try{ await Promise.all([loadProjects(), loadModels(), loadTasks()]); }
+  catch(e){ showError('Could not load: ' + e.message); }
+  const wanted = Number(new URLSearchParams(location.search).get('task'));
+  if(wanted) showTask(wanted);
+})();
+</script>
+{% endblock %}

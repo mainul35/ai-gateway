@@ -4,7 +4,8 @@
 #   bin/deploy.sh
 #
 # Settings (environment variables):
-#   DEPLOY_HOST        ssh target                  (default: mainul35@homelabai)
+#   DEPLOY_HOST        ssh target, or "local" to deploy on this machine without ssh - how the
+#                      gateway deploys itself from a clone on its own server (default: mainul35@homelabai)
 #   DEPLOY_DIR         project directory on it     (default: model-gateway, relative to the remote home)
 #   DEPLOY_PUBLIC_URL  public URL to check after   (default: https://ai-gateway.mainul35.dev)
 #
@@ -17,10 +18,22 @@ PUBLIC_URL=${DEPLOY_PUBLIC_URL:-https://ai-gateway.mainul35.dev}
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 cd "$ROOT"
 
+PYTHON=${PYTHON:-$(command -v python || command -v python3)}
+
 step() { printf '\n==> %s\n' "$*"; }
 
+# Runs a command on the server, from the home directory, with this script's stdin: over ssh, or here
+# when the server is this machine
+on_server() {
+    if [ "$HOST" = local ]; then
+        (cd "$HOME" && bash -c "$*")
+    else
+        ssh -o BatchMode=yes "$HOST" "$*"
+    fi
+}
+
 step "Checking the code compiles before sending anything"
-python - <<'PY'
+"$PYTHON" - <<'PY'
 import pathlib, sys
 failed = []
 for path in list(pathlib.Path("app").rglob("*.py")) + list(pathlib.Path("utils").rglob("*.py")):
@@ -35,12 +48,12 @@ PY
 
 # Compiling is not enough: a backslash eaten by a shell leaves a backspace inside a regular
 # expression that compiles perfectly and matches nothing it was written to match.
-python scripts/check_control_chars.py app utils scripts
+"$PYTHON" scripts/check_control_chars.py app utils scripts
 
 STAMP=$(date +%Y%m%d-%H%M%S)
 
 step "Backing up the current server code ($STAMP)"
-ssh -o BatchMode=yes "$HOST" "cd $REMOTE_DIR && mkdir -p .deploy-backup && \
+on_server "cd $REMOTE_DIR && mkdir -p .deploy-backup && \
   tar czf .deploy-backup/$STAMP.tar.gz app utils bin config/engines.yaml config/models.yaml config/mcp.yaml config/knowledge.yaml config/searxng \
       docker-compose.gateway.yml docker-compose.homelab.yml requirements.txt requirements-gateway.txt 2>/dev/null; \
   ls -1t .deploy-backup/*.tar.gz | tail -n +6 | xargs -r rm -f; \
@@ -53,10 +66,10 @@ tar czf - \
     app utils bin config/engines.yaml config/models.yaml config/mcp.yaml config/knowledge.yaml config/searxng scripts \
     docker-compose.gateway.yml docker-compose.homelab.yml .env.example \
     requirements.txt requirements-gateway.txt \
-  | ssh -o BatchMode=yes "$HOST" "tar xzf - -C $REMOTE_DIR && echo synced"
+  | on_server "tar xzf - -C $REMOTE_DIR && echo synced"
 
 step "Installing dependencies if they changed, restarting, checking health"
-ssh -o BatchMode=yes "$HOST" "REMOTE_DIR=$REMOTE_DIR STAMP=$STAMP bash -s" <<'REMOTE'
+on_server "REMOTE_DIR=$REMOTE_DIR STAMP=$STAMP bash -s" <<'REMOTE'
 set -u
 cd "$REMOTE_DIR" || exit 1
 
