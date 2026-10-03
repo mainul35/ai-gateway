@@ -30,7 +30,7 @@ import httpx
 import yaml
 from sqlalchemy import text
 
-from app import settings
+from app import github_access, settings
 from app.db import engine
 from utils.ollama_client import ollama_host
 
@@ -97,8 +97,8 @@ def load_config():
 
 
 def github_token(owner):
-    return (settings.get(f"knowledge.github.token.{owner}")
-            or settings.get("knowledge.github.token", "KNOWLEDGE_GITHUB_TOKEN") or "")
+    """Set on the Tasks page (GitHub access), or by hand in config.properties."""
+    return github_access.token(owner, "read") or settings.get("knowledge.github.token", "KNOWLEDGE_GITHUB_TOKEN") or ""
 
 
 # --- schema ------------------------------------------------------------------------------------
@@ -263,8 +263,7 @@ async def _github_repos(client, owner, spec):
     """Every repository of a user or an organisation that the token can see."""
     token = github_token(owner)
     if not token:
-        raise RuntimeError(f"no GitHub token for {owner}: set knowledge.github.token.{owner} "
-                           f"in config.properties")
+        raise RuntimeError(f"no GitHub token for {owner}: add one on the Tasks page, under GitHub access")
     headers = {"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json"}
     repos, page = [], 1
     while True:
