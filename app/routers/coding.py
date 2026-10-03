@@ -16,7 +16,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app import access, backends, github_access, knowledge
+from app import github_access, knowledge
 from app.auth import Principal, require_admin, require_manager
 from app.coding import detect, remote, runner, workspace
 from app.db import get_session
@@ -55,9 +55,21 @@ def _task_out(task, project=None, full=False):
            "description": task.description, "model": task.model, "status": task.status, "stage": task.stage,
            "branch": task.branch, "pr_url": task.pr_url, "error": task.error,
            "created_at": task.created_at.isoformat(), "updated_at": task.updated_at.isoformat()}
+    out["can_continue"] = _can_continue(task)
     if full:
         out.update(plan=task.plan, summary=task.summary, diff=task.diff, verify_output=task.verify_output)
     return out
+
+
+def _can_continue(task):
+    """Stopped part-way with its conversation saved, in a stage it can be picked up from."""
+    if task.status not in ("failed", "cancelled") or not task.state:
+        return False
+    try:
+        state = json.loads(task.state)
+    except ValueError:
+        return False
+    return bool(state.get("messages")) and state.get("stage") in ("explore", "edit", "ship")
 
 
 # --- projects ----------------------------------------------------------------------------------
@@ -326,25 +338,16 @@ class TaskIn(BaseModel):
 async def create_task(payload: TaskIn, principal: Principal = Depends(require_manager),
                       session: AsyncSession = Depends(get_session)):
     _enabled()
-    if principal.user is None:
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Start tasks while signed in, not with the master key")
     project = await session.get(Project, payload.project_id)
     if project is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "No such project")
-    if not access.can_use_model(principal, payload.model):
-        raise HTTPException(status.HTTP_403_FORBIDDEN, f"You do not have access to model '{payload.model}'")
-    backend = await backends.resolve(payload.model)
-    if backend is None:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, f"Model '{payload.model}' is not available")
-    if "tools" not in backend.capabilities:
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, f"{payload.model} cannot call tools; pick one that can")
-    task = CodingTask(project_id=project.id, user_id=principal.user.id, conversation_id=payload.conversation_id,
-                      description=payload.description.strip(), model=payload.model)
-    session.add(task)
-    await session.commit()
-    await session.refresh(task)
-    await runner.event(task.id, "note", f"Queued by {principal.user.email or principal.user.name}")
-    runner.submit(task.id)
+    try:
+        task = await runner.create(session, principal, project, payload.description, payload.model,
+                                   payload.conversation_id)
+    except PermissionError as e:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, str(e))
+    except ValueError as e:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(e))
     return _task_out(task, project)
 
 
@@ -465,10 +468,28 @@ async def retry_task(task_id: int, _: Principal = Depends(require_manager), sess
     if project.kind == "local" and task.originals and task.originals != "{}" and task.status != "rejected":
         raise HTTPException(status.HTTP_409_CONFLICT, "Its earlier changes are still in the folder. Undo them "
                                                       "first, then retry.")
-    task.status, task.stage, task.error, task.pr_url = "queued", None, None, None
+    task.status, task.stage, task.error, task.pr_url, task.state = "queued", None, None, None, None
+    task.branch = None if project.kind == "git" else task.branch
     if project.kind == "local":
         task.originals, task.diff = None, None
     await session.commit()
     await runner.event(task_id, "note", "Retrying from the start")
+    runner.submit(task_id)
+    return {"status": "queued"}
+
+
+@router.post("/tasks/{task_id}/continue")
+async def continue_task(task_id: int, _: Principal = Depends(require_manager),
+                        session: AsyncSession = Depends(get_session)):
+    """Picks a stopped task up where it stopped: same conversation, same files, same branch, with the
+    reason it stopped told to the model. Retry is the one that starts again from nothing."""
+    task, _project = await _task(session, task_id)
+    if not _can_continue(task):
+        raise HTTPException(status.HTTP_409_CONFLICT, "This task has nothing saved to continue from; use Retry")
+    state = json.loads(task.state)
+    state["resume"] = True
+    task.status, task.stage, task.error, task.state = "queued", None, None, json.dumps(state)
+    await session.commit()
+    await runner.event(task_id, "note", "Continuing from where it stopped")
     runner.submit(task_id)
     return {"status": "queued"}

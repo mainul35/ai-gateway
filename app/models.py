@@ -198,6 +198,9 @@ class CodingTask(Base):
     # For a local project, JSON {path: text before the task, or null for a file it created}: what
     # the diff is measured against, and what Undo puts back
     originals: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # JSON: where the task had got to - its stage, the whole conversation with the model, its
+    # attempts - saved after every step, so a failed or stopped task can be continued, not restarted
+    state: Mapped[str | None] = mapped_column(Text, nullable=True)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
     approved_by: Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)

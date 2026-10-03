@@ -47,6 +47,13 @@ KNOWLEDGE = _spec("knowledge_search", "Searches the indexed code and documentati
 SUBMIT_PLAN = _spec("submit_plan", "Ends exploring. Give the plan: which files change, what changes in each, "
                                    "and how you will know it works.",
                     {"plan": {"type": "string"}}, ["plan"])
+NOTE = _spec("note", "Writes down something you will need later in this task - what a file does, where "
+                     "something is defined, what you decided - in a sentence or two. Notes are kept for the "
+                     "whole task, even after older tool results are folded away to save room.",
+             {"text": {"type": "string"}}, ["text"])
+ANSWER = _spec("answer", "Ends the task without changing anything, for a task that only asks a question about "
+                         "the project. Give the full answer, naming the files it comes from.",
+               {"answer": {"type": "string"}}, ["answer"])
 EDITING = [
     _spec("edit_file", "Changes a file by replacing one exact snippet. `search` must be copied from the file "
                        "as it is now (read it first) and must match in only one place; include a few "
@@ -63,11 +70,11 @@ FINISH = _spec("finish", "Ends editing once every change in the plan is made. Th
 
 
 def explore_tools(with_knowledge):
-    return READING + ([KNOWLEDGE] if with_knowledge else []) + [SUBMIT_PLAN]
+    return READING + ([KNOWLEDGE] if with_knowledge else []) + [NOTE, SUBMIT_PLAN, ANSWER]
 
 
 def edit_tools(with_knowledge):
-    return READING + ([KNOWLEDGE] if with_knowledge else []) + EDITING + [FINISH]
+    return READING + ([KNOWLEDGE] if with_knowledge else []) + [NOTE] + EDITING + [FINISH]
 
 
 class Tools:
@@ -177,6 +184,12 @@ class Tools:
     async def _finish(self, summary):
         return "Finished editing.", False, {"finish": str(summary)}
 
+    async def _note(self, text):
+        return "Noted.", False, {"note": str(text)}
+
+    async def _answer(self, answer):
+        return "Answer received.", False, {"answer": str(answer)}
+
 
 class RemoteTools(Tools):
     """The same tools for a folder on somebody's computer, done through app/coding/remote.py.
@@ -185,11 +198,11 @@ class RemoteTools(Tools):
     written. The text of every file before the task first changed it is kept in `originals` (None for
     a file the task created): the diff is measured against it, and Undo writes it back."""
 
-    def __init__(self, project, can_run, originals=None):
+    def __init__(self, project, can_run, originals=None, current=None):
         super().__init__(project, None)
         self.can_run = can_run
         self.originals = dict(originals or {})
-        self.current = {}
+        self.current = dict(current or {})       # what this task wrote, kept so a continued task diffs right
         self._listing = None
 
     async def _list_dir(self, path="."):
@@ -269,7 +282,7 @@ def remote_tools_for(stage, can_run):
     """A local project's tools: no knowledge base (it is not indexed), and run_command only when a
     helper, not a browser, is connected."""
     base = [t for t in READING if can_run or t["function"]["name"] != "run_command"]
-    return base + ([SUBMIT_PLAN] if stage == "explore" else EDITING + [FINISH])
+    return base + [NOTE] + ([SUBMIT_PLAN, ANSWER] if stage == "explore" else EDITING + [FINISH])
 
 
 def arguments(raw):
