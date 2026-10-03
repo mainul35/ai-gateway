@@ -20,11 +20,12 @@ router = APIRouter(prefix="/auth", tags=["auth"])
 log = logging.getLogger("sso")
 
 
-def _auth_server_failed(problem):
-    """A 502 from here reaches the browser as Cloudflare's own error page, which hides the reason,
-    so the auth server's answer has to land in the log to be seen at all."""
+def _auth_server_failed(problem, code=status.HTTP_503_SERVICE_UNAVAILABLE):
+    """Never a 502: the Cloudflare tunnel in front of the gateway replaces a 502 (and a 504) with
+    its own error page, and the auth server's reason goes with it. A 503 passes through intact.
+    Logged as well, since a sign-in that fails is often reported long after the page is gone."""
     log.warning("Sign-in failed at the auth server: %s", problem)
-    return HTTPException(status.HTTP_502_BAD_GATEWAY, problem)
+    return HTTPException(code, problem)
 
 
 def _redirect_uri(request: Request):
@@ -79,9 +80,10 @@ async def callback(request: Request, code: str | None = None, state: str | None 
     if not state_data:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Sign-in expired; start again")
 
-    tokens, problem = await sso.exchange_code(code, state_data["redirect_uri"], state_data["verifier"])
+    tokens, problem, answer = await sso.exchange_code(code, state_data["redirect_uri"],
+                                                      state_data["verifier"])
     if problem:
-        raise _auth_server_failed(problem)
+        raise _auth_server_failed(problem, answer)
 
     userinfo, problem = await sso.fetch_userinfo(tokens.get("access_token", ""))
     if problem:

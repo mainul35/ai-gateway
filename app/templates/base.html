@@ -124,7 +124,12 @@ async function api(path, options){
   const response = await fetch(path, options);
   if(response.status === 401){ location.href = '/login'; throw new Error('signed out'); }
   const body = response.headers.get('content-type')?.includes('json') ? await response.json() : null;
-  if(!response.ok) throw new Error((body && (body.detail || body.error)) || `HTTP ${response.status}`);
+  if(!response.ok){
+    // FastAPI's detail is a string, or a list for a request that failed validation; /v1 answers
+    // in OpenAI's shape, {error: {message}}
+    const detail = Array.isArray(body?.detail) ? body.detail.map(d => d.msg).join('; ') : body?.detail;
+    throw new Error(detail || body?.error?.message || body?.error || `HTTP ${response.status}`);
+  }
   return body;
 }
 </script>

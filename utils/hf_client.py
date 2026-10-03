@@ -63,7 +63,7 @@ def get_model_info(model_id):
             "createdAt": data.get("createdAt", ""),
         }
     except requests.exceptions.RequestException as e:
-        return {"error": f"Failed to reach HuggingFace: {e}", "status_code": 502}
+        return {"error": f"Failed to reach HuggingFace: {e}", "status_code": 503}
 
 
 def search_gguf(model_id, limit=6):
