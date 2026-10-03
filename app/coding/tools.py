@@ -11,7 +11,7 @@ import json
 import os
 
 from app import knowledge
-from app.coding import edits, sandbox, workspace
+from app.coding import edits, remote, sandbox, workspace
 
 MAX_READ_LINES = 300
 MAX_HITS = 80
@@ -90,6 +90,10 @@ class Tools:
             return f"Wrong arguments for {name}: {e}", True, None
         except (OSError, workspace.GitError, ValueError) as e:
             return f"{e.__class__.__name__}: {e}", True, None
+        except remote.NotConnected:
+            raise                               # the task cannot go on; the runner stops it
+        except remote.ClientError as e:
+            return f"The computer could not do it: {e}", True, None
 
     # --- reading -------------------------------------------------------------------------------
 
@@ -172,6 +176,100 @@ class Tools:
 
     async def _finish(self, summary):
         return "Finished editing.", False, {"finish": str(summary)}
+
+
+class RemoteTools(Tools):
+    """The same tools for a folder on somebody's computer, done through app/coding/remote.py.
+
+    Edits are worked out here, from the text the computer sends, and only the result goes back to be
+    written. The text of every file before the task first changed it is kept in `originals` (None for
+    a file the task created): the diff is measured against it, and Undo writes it back."""
+
+    def __init__(self, project, can_run, originals=None):
+        super().__init__(project, None)
+        self.can_run = can_run
+        self.originals = dict(originals or {})
+        self.current = {}
+        self._listing = None
+
+    async def _list_dir(self, path="."):
+        path = "" if path in ("", ".", "./") else edits.check_relative(path)
+        names = await remote.call(self.project.id, "list", path=path)
+        return "\n".join(names[:300]) or "(empty)", False, None
+
+    async def _files(self):
+        if self._listing is None:
+            self._listing = await remote.call(self.project.id, "files")
+        return self._listing
+
+    async def _search(self, text, path=None, regex=False):
+        lines = await remote.call(self.project.id, "search", text=text, regex=bool(regex),
+                                  path=edits.check_relative(path) if path else "")
+        if not lines:
+            return f"Nothing matches {text!r}.", False, None
+        more = f"\n(... {len(lines) - MAX_HITS} more; narrow it with path)" if len(lines) > MAX_HITS else ""
+        return "\n".join(line[:240] for line in lines[:MAX_HITS]) + more, False, None
+
+    async def _text(self, path):
+        path = edits.check_relative(path)
+        if path in self.current:
+            return path, self.current[path]
+        return path, await remote.call(self.project.id, "read", path=path)
+
+    async def _read_file(self, path, start_line=1, end_line=None):
+        path, content = await self._text(path)
+        if content is None:
+            return f"{path} does not exist.", True, None
+        lines = content.splitlines()
+        start = max(1, int(start_line or 1))
+        end = min(len(lines), int(end_line or start + MAX_READ_LINES - 1), start + MAX_READ_LINES - 1)
+        body = "\n".join(f"{n}: {lines[n - 1]}" for n in range(start, end + 1))
+        return (body or "(empty file)") + f"\n(lines {start}-{end} of {len(lines)})", False, None
+
+    async def _run_command(self, command):
+        if not self.can_run:
+            return ("Commands cannot run here: this folder is connected through a browser, which can "
+                    "read and write files but not run programs. Check the change by reading it instead."), True, None
+        result = await remote.call(self.project.id, "run", command=command)
+        code = result.get("code")
+        status = "not run: the owner declined it" if result.get("declined") else (
+            "timed out" if code is None else f"exit code {code}")
+        return f"[{status}]\n{result.get('output', '')}", False, None
+
+    async def _write(self, path, before, after):
+        if path not in self.originals:
+            self.originals[path] = before
+        await remote.call(self.project.id, "write", path=path, content=after)
+        self.current[path] = after
+        if self._listing is not None and before is None:
+            self._listing.append(path)
+
+    async def _edit_file(self, path, search, replace):
+        path, original = await self._text(path)
+        if original is None:
+            return f"{path} does not exist; use create_file for a new file", True, None
+        updated, diff = edits.apply_text(original, path, search, replace)
+        await self._write(path, original, updated)
+        return f"Changed {path}:\n{diff[-3000:]}", False, {"edited": path}
+
+    async def _create_file(self, path, content):
+        path, existing = await self._text(path)
+        if existing is not None:
+            return f"{path} already exists; change it with edit_file", True, None
+        content = content if content.endswith("\n") else content + "\n"
+        await self._write(path, None, content)
+        return f"Created {path}.", False, {"edited": path}
+
+    def diff(self):
+        return "\n".join(edits.diff_of(path, before, self.current.get(path, before))
+                         for path, before in sorted(self.originals.items()) if self.current.get(path) != before)
+
+
+def remote_tools_for(stage, can_run):
+    """A local project's tools: no knowledge base (it is not indexed), and run_command only when a
+    helper, not a browser, is connected."""
+    base = [t for t in READING if can_run or t["function"]["name"] != "run_command"]
+    return base + ([SUBMIT_PLAN] if stage == "explore" else EDITING + [FINISH])
 
 
 def arguments(raw):

@@ -31,7 +31,7 @@ from sqlalchemy import select, update
 
 from app import knowledge, settings
 from app.auth import Principal
-from app.coding import sandbox, tools as task_tools, workspace
+from app.coding import remote, sandbox, tools as task_tools, workspace
 from app.db import session_factory
 from app.models import CodingTask, CodingTaskEvent, Project, User, utcnow
 
@@ -298,32 +298,46 @@ async def run(task_id):
         return
     principal = Principal(user=user)
     began = time.monotonic()
-    worktree = None
+    local = project.kind == "local"
+    worktree, toolbox, branch = None, None, None
     await set_task(task_id, status="running", stage="prepare", error=None)
     try:
         # --- prepare
         await event(task_id, "stage", f"Getting {project.name} ready")
-        await workspace.clone(project.name, project.clone_url)
-        if not await sandbox.image_present(project.sandbox_image):
-            await event(task_id, "note", f"Downloading the sandbox image {project.sandbox_image}")
-            await sandbox.pull(project.sandbox_image)
-        branch = task.branch or workspace.branch_name(task_id, task.description)
-        worktree = await workspace.start(project, task_id, branch)
-        await set_task(task_id, branch=branch)
-        await event(task_id, "note", f"Working on branch {branch}, from {project.base_branch}")
+        if local:
+            # The folder is on somebody's computer: nothing to clone, but somebody has to be there
+            connected = remote.connection(project.id)
+            if connected is None:
+                raise Stop("the folder is not connected. Open the Tasks page on the computer it is on and "
+                           "connect it, or start the helper there.")
+            toolbox = task_tools.RemoteTools(project, connected["can_run"])
+            how = "the helper" if connected["can_run"] else "the browser"
+            await event(task_id, "note", f"Working directly in the folder on the owner's computer, through {how}")
+            explore_set = task_tools.remote_tools_for("explore", connected["can_run"])
+            edit_set = task_tools.remote_tools_for("edit", connected["can_run"])
+        else:
+            await workspace.clone(project.name, project.clone_url)
+            if not await sandbox.image_present(project.sandbox_image):
+                await event(task_id, "note", f"Downloading the sandbox image {project.sandbox_image}")
+                await sandbox.pull(project.sandbox_image)
+            branch = task.branch or workspace.branch_name(task_id, task.description)
+            worktree = await workspace.start(project, task_id, branch)
+            await set_task(task_id, branch=branch)
+            await event(task_id, "note", f"Working on branch {branch}, from {project.base_branch}")
+            toolbox = task_tools.Tools(project, worktree)
+            repo = project.name.split("/")[-1]
+            indexed = knowledge.is_enabled() and any(
+                s["name"].endswith(repo) for s in await knowledge.list_sources())
+            explore_set, edit_set = task_tools.explore_tools(indexed), task_tools.edit_tools(indexed)
 
-        repo = project.name.split("/")[-1]
-        indexed = knowledge.is_enabled() and any(
-            s["name"].endswith(repo) for s in await knowledge.list_sources())
         notes = f"\nNotes about this project from its owner:\n{project.notes}" if project.notes else ""
         messages = [{"role": "system", "content": SYSTEM.format(name=project.name, notes=notes)},
                     {"role": "user", "content": EXPLORE_ASK.format(task=task.description)}]
-        toolbox = task_tools.Tools(project, worktree)
 
         # --- explore
         await set_task(task_id, stage="explore")
         await event(task_id, "stage", "Exploring the project")
-        outcome, _ = await _stage(task_id, principal, task.model, messages, task_tools.explore_tools(indexed),
+        outcome, _ = await _stage(task_id, principal, task.model, messages, explore_set,
                                   toolbox, "submit_plan", EXPLORE_ROUNDS, began)
         await set_task(task_id, plan=outcome["plan"])
         await event(task_id, "plan", outcome["plan"])
@@ -335,20 +349,33 @@ async def run(task_id):
             await set_task(task_id, stage="edit")
             await event(task_id, "stage", "Making the changes" if attempt == 1
                         else f"Fixing what the checks found (attempt {attempt} of {MAX_ATTEMPTS})")
-            outcome, edited = await _stage(task_id, principal, task.model, messages,
-                                           task_tools.edit_tools(indexed), toolbox, "finish", EDIT_ROUNDS,
-                                           began, must_have_edited=changed)
+            outcome, edited = await _stage(task_id, principal, task.model, messages, edit_set, toolbox,
+                                           "finish", EDIT_ROUNDS, began, must_have_edited=changed)
             changed |= edited
             summary = outcome["finish"]
             await event(task_id, "summary", summary)
+            if local:
+                await _keep_originals(task_id, toolbox)
 
-            if not project.verify_command.strip():
+            command = project.verify_command.strip()
+            if not command:
                 await event(task_id, "note", "This project has no verify command, so nothing was run to check it.")
+                break
+            if local and not toolbox.can_run:
+                await event(task_id, "note", "Connected through the browser, which cannot run programs, so the "
+                                             "checks were not run. Run them yourself before keeping the change.")
                 break
             await set_task(task_id, stage="verify")
             await event(task_id, "stage", "Running the project's checks")
-            code, output = await sandbox.run(worktree, project.sandbox_image, project.verify_command,
-                                             network=project.sandbox_network)
+            if local:
+                result = await remote.call(project.id, "run", command=command)
+                if result.get("declined"):
+                    await event(task_id, "note", "The checks were declined on the computer, so they were not run.")
+                    break
+                code, output = result.get("code"), result.get("output", "")
+            else:
+                code, output = await sandbox.run(worktree, project.sandbox_image, command,
+                                                 network=project.sandbox_network)
             passed = code == 0
             await set_task(task_id, verify_output=output[-8000:])
             await event(task_id, "verify", output[-4000:], passed=passed, exit_code=code)
@@ -356,10 +383,17 @@ async def run(task_id):
                 break
             if attempt == MAX_ATTEMPTS:
                 raise Stop(f"the checks still failed after {MAX_ATTEMPTS} attempts")
-            messages.append({"role": "user", "content": RETRY_ASK.format(
-                command=project.verify_command, output=output[-6000:])})
+            messages.append({"role": "user", "content": RETRY_ASK.format(command=command, output=output[-6000:])})
 
         # --- ship
+        if local:
+            diff = toolbox.diff()
+            if not diff.strip():
+                raise Stop("it finished without changing anything")
+            await set_task(task_id, status="review", stage=None, summary=summary, diff=diff[:400_000])
+            await event(task_id, "review", "The changes are in your folder. Keep them, or undo them to put "
+                                           "every file back as it was.")
+            return
         await set_task(task_id, stage="ship")
         await event(task_id, "stage", "Committing and opening a pull request")
         stat, diff = await workspace.changes(worktree, project.base_branch)
@@ -381,21 +415,60 @@ async def run(task_id):
         await set_task(task_id, status="review", stage=None, summary=summary, diff=diff[:400_000], pr_url=pr_url)
         await event(task_id, "review", "Ready for review" + (f": {pr_url}" if pr_url else ""), pr_url=pr_url)
     except Cancelled:
-        await set_task(task_id, status="cancelled", stage=None)
-        await event(task_id, "error", "Cancelled.")
+        await set_task(task_id, status="cancelled", stage=None,
+                       **await _changes_so_far(project, worktree, toolbox))
+        undo_note = (" Its changes so far are in your folder; Undo puts them back."
+                     if local and toolbox and toolbox.originals else "")
+        await event(task_id, "error", "Cancelled." + undo_note)
         if worktree:
             await workspace.discard(project, task_id)
-    except (Stop, workspace.GitError, RuntimeError, OSError) as e:
-        diff = ""
-        if worktree:
-            try:
-                _, diff = await workspace.changes(worktree, project.base_branch)
-            except Exception:
-                pass
-        await set_task(task_id, status="failed", stage=None, error=str(e)[:2000], diff=diff[:400_000] or None)
+    except (Stop, workspace.GitError, remote.NotConnected, remote.ClientError, RuntimeError, OSError) as e:
+        await set_task(task_id, status="failed", stage=None, error=str(e)[:2000],
+                       **await _changes_so_far(project, worktree, toolbox))
         await event(task_id, "error", f"Stopped: {e}")
     finally:
         _cancelled.discard(task_id)
+
+
+async def _keep_originals(task_id, toolbox):
+    """Saved after every round of edits, so Undo works even if the gateway restarts mid-task."""
+    await set_task(task_id, originals=json.dumps(toolbox.originals))
+
+
+async def _changes_so_far(project, worktree, toolbox):
+    """What a stopped task had changed, so it can be looked at - and for a local folder, undone."""
+    if toolbox is not None and project.kind == "local":
+        return {"diff": toolbox.diff()[:400_000] or None, "originals": json.dumps(toolbox.originals)}
+    if worktree:
+        try:
+            _, diff = await workspace.changes(worktree, project.base_branch)
+            return {"diff": diff[:400_000] or None}
+        except Exception:
+            pass
+    return {}
+
+
+async def keep_local(task_id, who):
+    """A local project's changes are already in the folder; keeping them is only saying so."""
+    await set_task(task_id, status="done", stage=None, approved_by=who.id)
+    await event(task_id, "done", f"Kept by {who.email or who.name}. The changes stay in the folder.")
+
+
+async def undo_local(task_id, who):
+    """Writes every file a local task touched back as it was, and removes the files it created."""
+    task, project, _ = await _load(task_id)
+    originals = json.loads(task.originals or "{}")
+    if not originals:
+        await set_task(task_id, status="rejected", stage=None)
+        await event(task_id, "note", "Nothing to undo.")
+        return
+    for path, before in originals.items():
+        if before is None:
+            await remote.call(project.id, "delete", path=path)
+        else:
+            await remote.call(project.id, "write", path=path, content=before)
+    await set_task(task_id, status="rejected", stage=None)
+    await event(task_id, "note", f"Undone by {who.email or who.name}: {len(originals)} file(s) put back as they were.")
 
 
 # --- after review ------------------------------------------------------------------------------

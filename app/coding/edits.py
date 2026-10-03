@@ -132,13 +132,11 @@ def _diff(relative, before, after):
                                           fromfile=f"a/{relative}", tofile=f"b/{relative}", lineterm=""))
 
 
-def apply_edit(root, relative, search, replace):
-    path = inside(root, relative)
-    if not path.is_file():
-        raise EditError(f"{relative} does not exist; use create_file for a new file")
+def apply_text(original, relative, search, replace):
+    """The file's new text after one edit, and its diff. Pure: what reads and writes the file is up
+    to the caller - this server's disk, or a folder on somebody's computer reached through a relay."""
     if not search:
         raise EditError("the search block is empty; copy the lines to replace from the file")
-    original = path.read_text(encoding="utf-8")
     start, end, fuzzy = _find(original, search)
     if fuzzy:
         replace = _reindent(replace, original[start:end])
@@ -148,8 +146,33 @@ def apply_edit(root, relative, search, replace):
     updated = original[:start] + replace + original[end:]
     if updated == original:
         raise EditError("the edit changes nothing")
+    return updated, _diff(relative, original, updated)
+
+
+def check_relative(relative):
+    """The same path rules as inside(), for a folder this server cannot resolve itself."""
+    if not relative or os.path.isabs(relative) or relative.startswith(("/", "\\")) or ":" in relative:
+        raise EditError(f"use a path relative to the project root, not {relative!r}")
+    parts = relative.replace("\\", "/").split("/")
+    if ".." in parts:
+        raise EditError(f"{relative} is outside the project")
+    if ".git" in parts:
+        raise EditError("the .git directory is not to be edited")
+    return "/".join(p for p in parts if p not in ("", "."))
+
+
+def diff_of(relative, before, after):
+    return _diff(relative, before or "", after or "")
+
+
+def apply_edit(root, relative, search, replace):
+    path = inside(root, relative)
+    if not path.is_file():
+        raise EditError(f"{relative} does not exist; use create_file for a new file")
+    original = path.read_text(encoding="utf-8")
+    updated, diff = apply_text(original, relative, search, replace)
     _write(path, updated)
-    return EditResult(relative, _diff(relative, original, updated))
+    return EditResult(relative, diff)
 
 
 def create_file(root, relative, content):

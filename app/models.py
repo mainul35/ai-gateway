@@ -157,7 +157,11 @@ class Project(Base):
 
     id: Mapped[int] = mapped_column(primary_key=True)
     name: Mapped[str] = mapped_column(String(128), unique=True, index=True)   # owner/repo
-    clone_url: Mapped[str] = mapped_column(String(512))
+    # "git": cloned on this server, worked on in worktrees. "local": a folder on the computer of the
+    # person who added it, reached through their browser or the helper - edited where it is.
+    kind: Mapped[str] = mapped_column(String(16), default="git")
+    client: Mapped[str | None] = mapped_column(String(16), nullable=True)    # "browser" or "helper"
+    clone_url: Mapped[str] = mapped_column(String(512), default="")
     base_branch: Mapped[str] = mapped_column(String(128), default="main")
     # Run in the sandbox after every round of edits; non-zero exit means the fix is not done
     verify_command: Mapped[str] = mapped_column(Text, default="")
@@ -191,6 +195,9 @@ class CodingTask(Base):
     diff: Mapped[str | None] = mapped_column(Text, nullable=True)
     verify_output: Mapped[str | None] = mapped_column(Text, nullable=True)
     pr_url: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    # For a local project, JSON {path: text before the task, or null for a file it created}: what
+    # the diff is measured against, and what Undo puts back
+    originals: Mapped[str | None] = mapped_column(Text, nullable=True)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
     approved_by: Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)

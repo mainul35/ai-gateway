@@ -22,14 +22,22 @@ dialog input,dialog textarea,dialog select,#newTask textarea,#newTask select{wid
 .ev details summary{cursor:pointer;color:var(--muted)}
 pre.diff{max-height:32rem;overflow:auto;font-size:.8rem;border:1px solid var(--border);border-radius:10px;padding:.6rem}
 pre.diff .add{color:var(--success)}pre.diff .del{color:var(--danger)}pre.diff .hunk{color:var(--muted)}
-.actions{display:flex;gap:.5rem;flex-wrap:wrap;margin:.8rem 0}
+.actions{display:flex;gap:.5rem;flex-wrap:wrap;margin:.8rem 0;align-items:center}
 .prose{white-space:pre-wrap}
+.tabs{display:flex;gap:.4rem;margin-bottom:1rem;border-bottom:1px solid var(--border)}
+.tabs button{background:none;border:none;border-bottom:2px solid transparent;color:var(--muted);font-weight:600;
+             padding:.5rem .8rem;cursor:pointer;font-size:.95rem}
+.tabs button.on{color:var(--text);border-bottom-color:var(--accent,#6366f1)}
+.choice{border:1px solid var(--border);border-radius:10px;padding:.8rem 1rem;margin-bottom:.8rem}
+.choice h3{margin:0 0 .3rem;font-size:1rem}
+pre.cmd{white-space:pre-wrap;word-break:break-all;font-size:.82rem;border:1px solid var(--border);border-radius:8px;padding:.5rem .7rem}
+details.more summary{cursor:pointer;color:var(--muted);margin-bottom:.6rem}
 </style>
 
 <h1>Coding tasks</h1>
 <p class="sub">Give the gateway a change to make in one of your projects. It explores the code, makes the
-  change on its own branch, runs the project's checks in a sandbox, and opens a pull request. Nothing is
-  merged or deployed until an admin approves it here.</p>
+  change, and runs the project's checks. A project on GitHub gets a pull request that an admin approves;
+  a folder on your computer is changed where it is, and you keep or undo the change.</p>
 
 <div id="error" class="note err" hidden></div>
 <div id="ok" class="note ok" hidden></div>
@@ -61,35 +69,64 @@ pre.diff .add{color:var(--success)}pre.diff .del{color:var(--danger)}pre.diff .h
 </div>
 
 <dialog id="projectDialog">
-  <form method="dialog" id="projectForm">
-    <h2 id="projectTitle">Add a project</h2>
-    <input type="hidden" name="id">
-    <label><span class="lbl">GitHub address</span>
-      <input name="clone_url" placeholder="https://github.com/mainul35/ai-gateway" autocomplete="off" required>
-      <span class="hint">It is cloned on the gateway's server. Pushing needs a write token for its owner:
-        <code>coding.github.token.&lt;owner&gt;</code> in config.properties.</span></label>
-    <label><span class="lbl">Base branch</span>
-      <input name="base_branch" placeholder="(the repository's default branch)" autocomplete="off">
-      <span class="hint">Tasks branch from this, and pull requests go into it.</span></label>
-    <label><span class="lbl">Verify command</span>
-      <input name="verify_command" placeholder="python -m pytest -q" autocomplete="off">
-      <span class="hint">Run in the sandbox after the changes; it has to exit 0 for the task to be ready.
-        Empty means nothing is checked.</span></label>
-    <div class="row" style="gap:.75rem">
-      <label style="flex:2"><span class="lbl">Sandbox image</span>
-        <input name="sandbox_image" value="python:3.12-slim" list="images" autocomplete="off">
-        <datalist id="images"><option value="python:3.12-slim"><option value="node:22-slim">
-          <option value="maven:3-eclipse-temurin-21"><option value="golang:1.23"><option value="model-gateway:latest"></datalist></label>
-      <label style="flex:1;align-self:end"><input type="checkbox" name="sandbox_network" style="width:auto">
-        Network in the sandbox</label>
+  <h2 id="projectTitle" style="margin-top:0">Add a project</h2>
+  <div class="tabs" id="addTabs">
+    <button type="button" class="on" data-tab="git">From GitHub</button>
+    <button type="button" data-tab="local">From this computer</button>
+  </div>
+
+  <div data-pane="local" hidden>
+    <div class="choice">
+      <h3>Connect a folder in this browser</h3>
+      <p class="muted" style="margin:.2rem 0 .6rem;font-size:.9rem">The browser lets the gateway read and change
+        the files of one folder you choose, while this page is open. Nothing is installed, but programs cannot
+        run this way, so the project's checks are not run. Edge and Chrome only.</p>
+      <button class="btn" type="button" id="chooseFolder">Choose a folder</button>
     </div>
-    <label {% if user.role != 'admin' %}hidden{% endif %}><span class="lbl">Deploy command (admin)</span>
-      <input name="deploy_command" placeholder="DEPLOY_HOST=local bin/deploy.sh" autocomplete="off">
-      <span class="hint">Runs on the server, in the project's clone, after an approved task is merged.</span></label>
-    <label><span class="lbl">Notes for the model</span>
-      <textarea name="notes" rows="3" placeholder="How the project is laid out, conventions to keep, what not to touch."></textarea></label>
+    <div class="choice">
+      <h3>Use the helper</h3>
+      <p class="muted" style="margin:.2rem 0 .6rem;font-size:.9rem">A small Python program you run on your
+        computer. It does the same work there, keeps going with this page closed, and can run the project's
+        checks - asking you before every command. Make an API key on the
+        <a href="/dashboard">Dashboard</a> first, then:</p>
+      <pre class="cmd" id="helperCommand"></pre>
+      <a class="btn btn-secondary" href="/static/gateway-helper.py" download>Download the helper</a>
+      <span class="muted" style="font-size:.85rem">It shows up here as a project once it is running.</span>
+    </div>
+    <div class="row"><button class="btn btn-secondary" type="button" data-close>Close</button></div>
+  </div>
+
+  <form method="dialog" id="projectForm" data-pane="git">
+    <input type="hidden" name="id">
+    <label data-git-only><span class="lbl">GitHub address</span>
+      <input name="clone_url" placeholder="https://github.com/mainul35/ai-gateway" autocomplete="off" required>
+      <span class="hint">That is all it needs: the rest is worked out from the project's files, and you can
+        change it afterwards. Pushing needs a write token for its owner in config.properties
+        (<code>coding.github.token.&lt;owner&gt;</code>).</span></label>
+    <details class="more" id="moreOptions">
+      <summary>More options</summary>
+      <label data-git-only><span class="lbl">Base branch</span>
+        <input name="base_branch" placeholder="(the repository's default branch)" autocomplete="off">
+        <span class="hint">Tasks branch from this, and pull requests go into it.</span></label>
+      <label><span class="lbl">Check command</span>
+        <input name="verify_command" placeholder="(worked out from the project)" autocomplete="off">
+        <span class="hint" id="checkHint">Has to exit 0 for a change to count as working. Empty means nothing is checked.</span></label>
+      <div class="row" style="gap:.75rem" data-git-only>
+        <label style="flex:2"><span class="lbl">Sandbox image</span>
+          <input name="sandbox_image" placeholder="(worked out from the project)" list="images" autocomplete="off">
+          <datalist id="images"><option value="python:3.12-slim"><option value="node:22-slim">
+            <option value="maven:3-eclipse-temurin-21"><option value="golang:1.23"></datalist></label>
+        <label style="flex:1;align-self:end"><input type="checkbox" name="sandbox_network" style="width:auto">
+          Network in the sandbox</label>
+      </div>
+      <label data-git-only {% if user.role != 'admin' %}hidden{% endif %}><span class="lbl">Deploy command (admin)</span>
+        <input name="deploy_command" placeholder="DEPLOY_HOST=local bin/deploy.sh" autocomplete="off">
+        <span class="hint">Runs on the server, in the project's clone, after an approved task is merged.</span></label>
+      <label><span class="lbl">Notes for the model</span>
+        <textarea name="notes" rows="3" placeholder="How the project is laid out, conventions to keep, what not to touch."></textarea></label>
+    </details>
     <div class="row">
-      <button class="btn" value="save" id="saveProject">Save</button>
+      <button class="btn" value="save" id="saveProject">Add</button>
       <button class="btn btn-secondary" value="cancel" formnovalidate>Cancel</button>
     </div>
   </form>
@@ -104,33 +141,260 @@ let projects = [], tasks = [], shown = null, lastEvent = 0, polling = null, acti
 
 function showError(message){ const b = document.getElementById('error'); b.textContent = message; b.hidden = !message; }
 function showOk(message){ const b = document.getElementById('ok'); b.textContent = message; b.hidden = !message; }
+const sleep = ms => new Promise(r => setTimeout(r, ms));
 
 function pill(state){
   const kind = {review: 'on', done: 'on', merged: 'on', failed: 'err', rejected: 'err', cancelled: 'err'}[state] || 'off';
   return `<span class="pill ${kind}">${escapeHtml(state)}</span>`;
 }
 
-async function loadProjects(){
+// --- a folder on this computer, served from this tab ------------------------------------------
+// The gateway sends one small operation at a time (list, read, write, search); this page does it
+// on the folder the browser was given, and sends the answer back. Edits are worked out on the
+// gateway; only finished text comes here to be written.
+
+const SKIP_DIRS = new Set(['.git', 'node_modules', '.venv', 'venv', 'env', 'dist', 'build', 'target', 'out', '.next',
+  '__pycache__', '.idea', '.vscode', '.gradle', 'coverage', '.mypy_cache', '.pytest_cache', '.angular', '.cache', 'obj']);
+const KEY_FILES = ['package.json', 'package-lock.json', 'pnpm-lock.yaml', 'yarn.lock', 'pom.xml', 'mvnw', 'build.gradle',
+  'build.gradle.kts', 'gradlew', 'go.mod', 'Cargo.toml', 'pyproject.toml', 'setup.py', 'requirements.txt',
+  'requirements-dev.txt', 'pytest.ini', 'conftest.py', 'tests/conftest.py', 'tests', 'test', 'app'];
+const READ_FILES = ['package.json', 'pyproject.toml', 'requirements.txt', 'requirements-dev.txt'];
+const MAX_READ = 2000000;
+const served = new Map();           // project id -> {handle, endings}
+const waitingForPermission = new Map();
+
+const folderStore = {
+  open(){
+    return new Promise((resolve, reject) => {
+      const request = indexedDB.open('gateway-folders', 1);
+      request.onupgradeneeded = () => request.result.createObjectStore('handles');
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+    });
+  },
+  async get(id){
+    const db = await this.open();
+    return new Promise(resolve => {
+      const request = db.transaction('handles').objectStore('handles').get(String(id));
+      request.onsuccess = () => resolve(request.result || null);
+      request.onerror = () => resolve(null);
+    });
+  },
+  async put(id, handle){
+    const db = await this.open();
+    return new Promise(resolve => {
+      const tx = db.transaction('handles', 'readwrite');
+      tx.objectStore('handles').put(handle, String(id));
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => resolve();
+    });
+  },
+};
+
+function cleanPath(path){
+  const parts = String(path || '').replace(/\\/g, '/').split('/').filter(p => p && p !== '.');
+  if(parts.includes('..') || /^[a-z]:/i.test(String(path || ''))) throw new Error(`${path} is outside the folder`);
+  if(parts.includes('.git')) throw new Error('the .git directory is not to be touched');
+  return parts;
+}
+
+async function dirOf(root, parts, create = false){
+  let dir = root;
+  for(const part of parts) dir = await dir.getDirectoryHandle(part, {create});
+  return dir;
+}
+
+async function fileOf(root, path, create = false){
+  const parts = cleanPath(path);
+  if(!parts.length) throw new Error('a file path is needed');
+  const dir = await dirOf(root, parts.slice(0, -1), create);
+  return dir.getFileHandle(parts[parts.length - 1], {create});
+}
+
+async function* walk(dir, prefix = ''){
+  for await (const [name, entry] of dir.entries()){
+    if(entry.kind === 'directory'){
+      if(!SKIP_DIRS.has(name)) yield* walk(entry, prefix + name + '/');
+    } else yield [prefix + name, entry];
+  }
+}
+
+async function readText(entry){
+  const file = await entry.getFile();
+  if(file.size > MAX_READ) throw new Error(`larger than ${MAX_READ / 1e6} MB`);
+  const buffer = new Uint8Array(await file.arrayBuffer());
+  if(buffer.subarray(0, 8000).includes(0)) throw new Error('not a text file');
+  return new TextDecoder().decode(buffer);
+}
+
+const ops = {
+  async list(folder, {path = ''}){
+    const dir = await dirOf(folder.handle, cleanPath(path));
+    const names = [];
+    for await (const [name, entry] of dir.entries())
+      if(name !== '.git') names.push(name + (entry.kind === 'directory' ? '/' : ''));
+    return names.sort();
+  },
+  async files(folder){
+    const out = [];
+    for await (const [path] of walk(folder.handle)){ out.push(path); if(out.length >= 20000) break; }
+    return out.sort();
+  },
+  async read(folder, {path}){
+    let entry;
+    try{ entry = await fileOf(folder.handle, path); }
+    catch(e){ if(e.name === 'NotFoundError' || e.name === 'TypeMismatchError') return null; throw e; }
+    let text = await readText(entry);
+    // Kept with \n here, and written back with the line endings the file had
+    if(text.includes('\r\n')){ folder.endings[path] = '\r\n'; text = text.replace(/\r\n/g, '\n'); }
+    return text;
+  },
+  async write(folder, {path, content}){
+    if(!(path in folder.endings)){
+      try{ await ops.read(folder, {path}); }catch(e){}
+    }
+    if(folder.endings[path] === '\r\n') content = content.replace(/\r?\n/g, '\r\n');
+    const writable = await (await fileOf(folder.handle, path, true)).createWritable();
+    await writable.write(content);
+    await writable.close();
+    return true;
+  },
+  async delete(folder, {path}){
+    const parts = cleanPath(path);
+    const dir = await dirOf(folder.handle, parts.slice(0, -1));
+    try{ await dir.removeEntry(parts[parts.length - 1]); }catch(e){ if(e.name !== 'NotFoundError') throw e; }
+    return true;
+  },
+  async search(folder, {text, regex = false, path = ''}){
+    const pattern = new RegExp(regex ? text : text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
+    const base = cleanPath(path).join('/');
+    const found = [];
+    for await (const [relative, entry] of walk(folder.handle)){
+      if(base && relative !== base && !relative.startsWith(base + '/')) continue;
+      let content;
+      try{ content = await readText(entry); }catch(e){ continue; }
+      content.split(/\r?\n/).forEach((line, i) => {
+        if(found.length < 500 && pattern.test(line)) found.push(`${relative}:${i + 1}:${line.slice(0, 200)}`);
+      });
+      if(found.length >= 500) break;
+    }
+    return found;
+  },
+  async run(){ throw new Error('a browser cannot run programs'); },
+};
+
+async function snapshotOf(handle){
+  const present = [], contents = {};
+  for(const name of KEY_FILES){
+    const parts = name.split('/');
+    try{
+      const dir = await dirOf(handle, parts.slice(0, -1));
+      const last = parts[parts.length - 1];
+      try{ await dir.getFileHandle(last); present.push(name); }
+      catch(e){ await dir.getDirectoryHandle(last); present.push(name); }
+    }catch(e){}
+  }
+  for(const name of READ_FILES){
+    if(!present.includes(name)) continue;
+    try{ contents[name] = (await readText(await handle.getFileHandle(name))).slice(0, 200000); }catch(e){}
+  }
+  let hasPython = false, seen = 0;
+  for await (const [path] of walk(handle)){
+    if(path.endsWith('.py')){ hasPython = true; break; }
+    if(++seen > 5000) break;
+  }
+  return {present, contents, has_python: hasPython};
+}
+
+async function serve(projectId, handle){
+  if(served.has(projectId)) return;
+  served.set(projectId, {handle, endings: {}});
+  waitingForPermission.delete(projectId);
+  renderProjectNote();
+  while(served.has(projectId)){
+    try{
+      const {request} = await api(`/coding/remote/${projectId}/next?client=browser`);
+      if(!request) continue;
+      let answer;
+      try{
+        const op = ops[request.op];
+        if(!op) throw new Error(`unknown operation ${request.op}`);
+        answer = {id: request.id, ok: true, result: await op(served.get(projectId), request.args || {})};
+      }catch(e){ answer = {id: request.id, ok: false, error: e.message || String(e)}; }
+      await api(`/coding/remote/${projectId}/answer`, {method: 'POST', headers: {'Content-Type': 'application/json'},
+                                                     body: JSON.stringify(answer)});
+    }catch(e){ await sleep(5000); }
+  }
+}
+
+async function restoreFolders(){
+  if(!window.showDirectoryPicker) return;
+  for(const p of projects.filter(p => p.kind === 'local' && p.mine && p.client === 'browser')){
+    const handle = await folderStore.get(p.id).catch(() => null);
+    if(!handle) continue;
+    const permission = await handle.queryPermission({mode: 'readwrite'});
+    if(permission === 'granted') serve(p.id, handle);
+    else waitingForPermission.set(p.id, handle);       // asking again needs a click
+  }
+  renderProjectNote();
+}
+
+async function chooseFolder(){
+  if(!window.showDirectoryPicker){
+    showError('This browser cannot give a page access to a folder. Use Edge or Chrome, or the helper.');
+    return;
+  }
+  let handle;
+  try{ handle = await window.showDirectoryPicker({mode: 'readwrite'}); }
+  catch(e){ return; }                                  // closed the picker
+  document.getElementById('projectDialog').close();
+  showOk(`Reading ${handle.name}…`);
+  try{
+    const project = await api('/coding/projects/local', {method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({name: handle.name, client: 'browser', snapshot: await snapshotOf(handle)})});
+    await folderStore.put(project.id, handle);
+    showOk(`Connected ${project.name} (${project.detected || 'unknown kind'}). Keep this page open while a task works on it.`);
+    await loadProjects(project.id);
+    serve(project.id, handle);
+  }catch(e){ showError(e.message); showOk(''); }
+}
+
+// --- projects, models, tasks -------------------------------------------------------------------
+
+async function loadProjects(select){
   projects = (await api('/coding/projects')).projects;
-  const select = document.getElementById('taskProject');
-  select.innerHTML = projects.map(p => `<option value="${p.id}">${escapeHtml(p.name)}</option>`).join('')
-                     || '<option value="">Add a project first</option>';
-  const p = projects.find(p => String(p.id) === select.value);
-  document.getElementById('projectNote').innerHTML = p
-    ? `${escapeHtml(p.name)} &middot; into ${escapeHtml(p.base_branch)} &middot; `
-      + (p.verify_command ? `checked with <code>${escapeHtml(p.verify_command)}</code>` : 'no checks set')
-      + (p.can_push ? '' : ' &middot; <b>no write token yet</b>')
-      + ` &middot; <a href="#" data-edit="${p.id}">edit</a>` : '';
+  const box = document.getElementById('taskProject');
+  const keep = select || box.value;
+  box.innerHTML = projects.map(p => `<option value="${p.id}">${escapeHtml(p.name)}${p.kind === 'local' ? ' (on a computer)' : ''}</option>`).join('')
+                  || '<option value="">Add a project first</option>';
+  if(keep && projects.some(p => String(p.id) === String(keep))) box.value = keep;
+  renderProjectNote();
+}
+
+function renderProjectNote(){
+  const p = projects.find(p => String(p.id) === document.getElementById('taskProject').value);
+  const note = document.getElementById('projectNote');
+  if(!p){ note.innerHTML = ''; return; }
+  const checks = p.verify_command ? `checked with <code>${escapeHtml(p.verify_command)}</code>` : 'no checks set';
+  let where;
+  if(p.kind === 'local'){
+    const here = served.has(p.id), live = here || p.connected;
+    where = live ? `<span class="pill on">connected${here ? ' in this tab' : p.connected === 'helper' ? ' (helper)' : ''}</span>`
+                 : '<span class="pill off">not connected</span>';
+    if(!live && waitingForPermission.has(p.id)) where += ` <button class="btn btn-sm" data-reconnect="${p.id}">Reconnect</button>`;
+  } else {
+    where = `into ${escapeHtml(p.base_branch)}${p.can_push ? '' : ' &middot; <b>no write token yet</b>'}`;
+  }
+  note.innerHTML = `${where} &middot; ${checks} &middot; <a href="#" data-edit="${p.id}">settings</a>`;
 }
 
 async function loadModels(){
   const data = (await api('/v1/models')).data.filter(m => (m.capabilities || []).includes('tools'));
-  const select = document.getElementById('taskModel');
   // The ones that have done this work best first; the rest in the order the gateway lists them
   const preferred = ['qwen3-next-80b', 'qwen3-coder:30b'];
   const rank = m => { const i = preferred.indexOf(m.id); return i < 0 ? preferred.length : i; };
   data.sort((a, b) => rank(a) - rank(b));
-  select.innerHTML = data.map(m => `<option>${escapeHtml(m.id)}</option>`).join('');
+  document.getElementById('taskModel').innerHTML = data.map(m => `<option>${escapeHtml(m.id)}</option>`).join('');
 }
 
 async function loadTasks(){
@@ -158,6 +422,9 @@ function renderEvent(e){
   if(e.kind === 'result'){
     return `<div class="ev ${d.failed ? 'error' : ''}"><details><summary><span class="k">${d.failed ? 'failed' : 'result'}</span>${escapeHtml(d.tool || '')}</summary>${escapeHtml(e.text)}</details></div>`;
   }
+  if(e.kind === 'model'){
+    return `<div class="ev"><details><summary><span class="k">model</span>${escapeHtml(e.text.split('\n')[0].slice(0, 140))}</summary>${escapeHtml(e.text)}</details></div>`;
+  }
   if(e.kind === 'verify'){
     return `<div class="ev ${d.passed ? 'done' : 'error'}"><details ${d.passed ? '' : 'open'}><summary><span class="k">checks</span>${d.passed ? 'passed' : 'failed'}</summary>${escapeHtml(e.text)}</details></div>`;
   }
@@ -169,12 +436,18 @@ async function showTask(id){
   clearInterval(polling);
   document.querySelectorAll('.task-row').forEach(r => r.classList.toggle('active', Number(r.dataset.task) === id));
   const t = await api(`/coding/tasks/${id}`);
+  const project = projects.find(p => p.id === t.project_id) || {};
+  const local = project.kind === 'local';
+  const decides = isAdmin || (local && project.mine);
   const box = document.getElementById('detail');
   const actions = [];
-  if(t.status === 'review' && isAdmin) actions.push('<button class="btn" data-act="approve">Approve: merge and deploy</button>');
-  if(['review', 'failed'].includes(t.status)) actions.push('<button class="btn btn-danger" data-act="reject">Reject</button>');
+  if(t.status === 'review' && decides)
+    actions.push(`<button class="btn" data-act="approve">${local ? 'Keep the changes' : 'Approve: merge and deploy'}</button>`);
+  if(['review', 'failed'].includes(t.status) || (local && t.status === 'cancelled' && t.diff))
+    actions.push(`<button class="btn btn-danger" data-act="reject">${local ? 'Undo the changes' : 'Reject'}</button>`);
   if(['queued', 'running'].includes(t.status)) actions.push('<button class="btn btn-danger" data-act="cancel">Cancel</button>');
   if(['failed', 'cancelled', 'rejected'].includes(t.status)) actions.push('<button class="btn btn-secondary" data-act="retry">Retry</button>');
+  if(t.diff) actions.push(`<a class="btn btn-secondary" href="/coding/tasks/${t.id}/patch">Download patch</a>`);
   box.innerHTML = `
     <h2 style="margin-top:0">#${t.id} ${pill(t.status)} ${t.stage ? `<span class="muted">${escapeHtml(t.stage)}</span>` : ''}</h2>
     <p class="prose">${escapeHtml(t.description)}</p>
@@ -207,16 +480,28 @@ async function pollEvents(knownStatus){
   }
 }
 
+// --- clicks ------------------------------------------------------------------------------------
+
 document.addEventListener('click', async e => {
   const row = e.target.closest('[data-task]');
   if(row){ showTask(Number(row.dataset.task)); return; }
   const edit = e.target.closest('[data-edit]');
   if(edit){ e.preventDefault(); openProject(projects.find(p => p.id === Number(edit.dataset.edit))); return; }
+  const again = e.target.closest('[data-reconnect]');
+  if(again){
+    const id = Number(again.dataset.reconnect), handle = waitingForPermission.get(id);
+    if(handle && await handle.requestPermission({mode: 'readwrite'}) === 'granted') serve(id, handle);
+    return;
+  }
+  if(e.target.closest('[data-close]')){ document.getElementById('projectDialog').close(); return; }
   const act = e.target.closest('[data-act]');
   if(!act || acting) return;
   const what = act.dataset.act;
-  if(what === 'approve' && !confirm('Merge this pull request and run the deploy command?')) return;
-  if(what === 'reject' && !confirm('Reject this task? Its branch is left as it is.')) return;
+  const t = tasks.find(t => t.id === shown) || {};
+  const local = (projects.find(p => p.id === t.project_id) || {}).kind === 'local';
+  if(what === 'approve' && !local && !confirm('Merge this pull request and run the deploy command?')) return;
+  if(what === 'reject' && !confirm(local ? 'Put every file this task changed back the way it was?'
+                                         : 'Reject this task? Its branch is left as it is.')) return;
   acting = true; act.disabled = true;
   try{
     await api(`/coding/tasks/${shown}/${what}`, {method: 'POST'});
@@ -225,7 +510,8 @@ document.addEventListener('click', async e => {
   finally{ acting = false; }
 });
 
-document.getElementById('taskProject').addEventListener('change', loadProjects);
+document.getElementById('taskProject').addEventListener('change', renderProjectNote);
+document.getElementById('chooseFolder').addEventListener('click', chooseFolder);
 
 document.getElementById('startTask').addEventListener('click', async e => {
   if(acting) return;
@@ -243,14 +529,32 @@ document.getElementById('startTask').addEventListener('click', async e => {
   finally{ acting = false; e.target.disabled = false; }
 });
 
+// --- the add / settings dialog -----------------------------------------------------------------
+
+function showTab(tab){
+  document.querySelectorAll('#addTabs button').forEach(b => b.classList.toggle('on', b.dataset.tab === tab));
+  document.querySelectorAll('#projectDialog [data-pane]').forEach(p => p.hidden = p.dataset.pane !== tab);
+}
+document.querySelectorAll('#addTabs button').forEach(b => b.addEventListener('click', () => showTab(b.dataset.tab)));
+
 function openProject(project){
   const form = document.getElementById('projectForm');
   form.reset();
-  document.getElementById('projectTitle').textContent = project ? `Change ${project.name}` : 'Add a project';
-  form.clone_url.readOnly = !!project;
+  const editing = !!project, local = editing && project.kind === 'local';
+  document.getElementById('projectTitle').textContent = editing ? `${project.name} settings` : 'Add a project';
+  document.getElementById('addTabs').hidden = editing;
+  document.getElementById('saveProject').textContent = editing ? 'Save' : 'Add';
+  form.querySelectorAll('[data-git-only]').forEach(el => el.hidden = local);
+  form.clone_url.required = !editing;
+  form.clone_url.readOnly = editing;
+  document.getElementById('moreOptions').open = editing;
+  document.getElementById('checkHint').textContent = local
+    ? 'Runs on your computer through the helper, which asks you first. Has to exit 0 for a change to count as working.'
+    : 'Runs in the sandbox. Has to exit 0 for a change to count as working. Empty means nothing is checked.';
   for(const key of ['id', 'clone_url', 'base_branch', 'verify_command', 'sandbox_image', 'deploy_command', 'notes'])
     if(project && project[key] != null) form[key].value = project[key];
   form.sandbox_network.checked = !!(project && project.sandbox_network);
+  showTab('git');
   document.getElementById('projectDialog').showModal();
 }
 document.getElementById('addProject').addEventListener('click', () => openProject(null));
@@ -259,28 +563,43 @@ document.getElementById('projectForm').addEventListener('submit', async e => {
   if(e.submitter && e.submitter.value === 'cancel') return;
   e.preventDefault();
   const form = e.target, save = document.getElementById('saveProject');
-  const body = {base_branch: form.base_branch.value.trim() || null, verify_command: form.verify_command.value,
-                sandbox_image: form.sandbox_image.value.trim(), sandbox_network: form.sandbox_network.checked,
-                notes: form.notes.value || null};
-  if(isAdmin) body.deploy_command = form.deploy_command.value.trim() || null;
-  save.disabled = true; save.textContent = form.id.value ? 'Saving…' : 'Cloning…';
+  if(save.disabled) return;
+  const editing = !!form.id.value;
+  const body = {};
+  const optional = {base_branch: form.base_branch.value.trim(), verify_command: form.verify_command.value.trim(),
+                    sandbox_image: form.sandbox_image.value.trim(), notes: form.notes.value};
+  for(const [key, value] of Object.entries(optional)) if(editing || value) body[key] = value || null;
+  if(editing || form.sandbox_network.checked) body.sandbox_network = form.sandbox_network.checked;
+  if(isAdmin && (editing || form.deploy_command.value.trim())) body.deploy_command = form.deploy_command.value.trim() || null;
+  if(editing && body.verify_command === null) body.verify_command = '';
+  save.disabled = true; save.textContent = editing ? 'Saving…' : 'Cloning…';
   try{
-    if(form.id.value){
-      await api(`/coding/projects/${form.id.value}`, {method: 'PATCH', headers: {'Content-Type': 'application/json'},
-                                                      body: JSON.stringify(body)});
+    let project;
+    if(editing){
+      project = await api(`/coding/projects/${form.id.value}`, {method: 'PATCH', headers: {'Content-Type': 'application/json'},
+                                                                body: JSON.stringify(body)});
+      showOk('Saved.');
     }else{
-      await api('/coding/projects', {method: 'POST', headers: {'Content-Type': 'application/json'},
-                                     body: JSON.stringify({...body, clone_url: form.clone_url.value.trim()})});
+      project = await api('/coding/projects', {method: 'POST', headers: {'Content-Type': 'application/json'},
+                                               body: JSON.stringify({...body, clone_url: form.clone_url.value.trim()})});
+      showOk(`Added ${project.name}: ${project.detected || 'unknown kind'}, `
+             + (project.verify_command ? `checked with ${project.verify_command}` : 'no checks found - set one in its settings'));
     }
     document.getElementById('projectDialog').close();
-    showOk('Saved.'); await loadProjects();
+    await loadProjects(project.id);
   }catch(err){ showError(err.message); document.getElementById('projectDialog').close(); }
-  finally{ save.disabled = false; save.textContent = 'Save'; }
+  finally{ save.disabled = false; save.textContent = editing ? 'Save' : 'Add'; }
 });
+
+document.getElementById('helperCommand').textContent =
+  `python gateway-helper.py --gateway ${location.origin} --folder "C:\\path\\to\\project" --key YOUR_API_KEY`;
 
 (async () => {
   try{ await Promise.all([loadProjects(), loadModels(), loadTasks()]); }
   catch(e){ showError('Could not load: ' + e.message); }
+  restoreFolders();
+  // A helper or another tab may connect while this page is open
+  setInterval(() => loadProjects().catch(() => {}), 15000);
   const wanted = Number(new URLSearchParams(location.search).get('task'));
   if(wanted) showTask(wanted);
 })();
