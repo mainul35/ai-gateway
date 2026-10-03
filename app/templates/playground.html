@@ -101,7 +101,6 @@ textarea:focus{outline:none;border-color:var(--primary)}
 .foot .picker{display:flex;align-items:center;gap:.5rem;flex:none}
 .foot select{background:none;border:none;color:var(--muted);font-size:.78rem;width:auto;padding:0;cursor:pointer}
 .foot select:hover{color:var(--text)}
-.foot .hint{margin:0;min-height:0;flex:1;min-width:0}
 /* A round button for attaching, like the one in the composer of every chat window */
 .icon-btn{width:1.9rem;height:1.9rem;padding:0;border-radius:50%;display:inline-flex;align-items:center;
           justify-content:center;font-size:1.1rem;line-height:1}
@@ -327,18 +326,12 @@ a.cite{font-size:.75em;vertical-align:super;text-decoration:none;padding:0 .1rem
   /* Two tiles across on a phone rather than one enormous one */
   .found .grid{grid-template-columns:repeat(auto-fill,minmax(6.5rem,1fr));gap:.4rem}
   .found figure img{height:6rem}
-  .file{max-width:100%}
   /* 16px, or iOS zooms the whole page the moment the composer is tapped. The rule in base.html
      cannot do this on its own: .composer textarea is the more specific selector. */
   .composer textarea{max-height:30vh;font-size:16px}
   .chip{padding:.28rem .62rem;font-size:.78rem}
   .tools{gap:.35rem}
-  /* The help line and the model picker each get a line of their own, instead of fighting over one
-     and leaving the help line a column of single words. The help line is clipped after two: it is
-     guidance, and on a phone the conversation is worth more than the guidance. */
   .foot{flex-wrap:wrap;align-items:flex-start;gap:.2rem .75rem;min-height:0}
-  .foot .hint{flex:1 0 100%;order:1;white-space:normal;display:-webkit-box;-webkit-line-clamp:2;
-              -webkit-box-orient:vertical;overflow:hidden;line-height:1.35}
   .foot .picker{flex:1 0 100%;order:2;justify-content:flex-start;min-width:0}
   .foot .picker select{max-width:100%;overflow:hidden;text-overflow:ellipsis}
 }
@@ -480,7 +473,6 @@ a.cite{font-size:.75em;vertical-align:super;text-decoration:none;padding:0 .1rem
         </div>
         <div class="note err" id="composerError" hidden></div>
         <div class="foot">
-          <span class="hint" id="modeHint"></span>
           <span class="status" id="deciding" hidden>
             <span class="spinner"></span><span>Working out what you are asking for&hellip;</span>
           </span>
@@ -687,53 +679,22 @@ function syncTools(){
     renderPending();
   }
 
-  const hint = document.getElementById('modeHint');
+  // The line of guidance that used to sit under the composer is gone. What is left of it is the
+  // placeholder, which says the same thing in the place the words are about to be typed, and the
+  // model picker's tooltip, which is where the one warning worth keeping now lives: sending a
+  // picture to a model that cannot see one still fails loudly at send time either way.
   const model = currentModel();
-  hint.className = 'hint';
   if(imageMode()){
-    promptBox.placeholder = pending.length ? 'How should the picture change?' : 'Describe a picture to create…';
-    if(!pending.length){
-      // Drawing and finding are asked for in nearly the same words, so the difference is worth
-      // spelling out where the asking happens
-      const finds = caps.routing && tools.web_search && caps.media_search;
-      hint.textContent = caps.routing
-        ? 'Ask for a picture and one is created with Flux'
-          + (finds ? '; ask to see something real and real photographs of it are found instead' : '')
-          + '; ask a question and you get an answer. Attach an image (or press Edit on one) to change it.'
-        : 'Sending creates an image with Flux instead of chatting. Attach an image (or press Edit on one) to change it.';
-    }else if(qwenEdits()){
-      hint.textContent = 'Say what to do: "remove the noise", "blur the background", '
-        + (caps.photo_backdrop ? '"white background for my passport", ' : '')
-        + 'or a change like "make it night".'
-        + (pending.length > 1 ? ' Refer to the pictures as image 1 (the one edited), image 2 and image 3.'
-                              : ` You can attach up to ${editLimit() - 1} more picture(s) to use, e.g. "put the hat from image 2 on the person in image 1".`);
-    }else{
-      hint.textContent = 'Sending re-renders the attached image with Flux. Lower "Change" keeps more of the original.';
-    }
+    promptBox.placeholder = pending.length ? 'How should the picture change?'
+                                           : 'Describe a picture to create…';
     modelSelect.title = '';
     return;
   }
   promptBox.placeholder = tools.agent ? 'Ask for something that needs looking up or working out…'
                                      : 'Ask anything…';
-  const notes = [];
-  if(tools.agent){
-    notes.push('The model can use the tool servers: it calls one, reads what came back, and goes '
-               + 'again until it can answer. Every step is shown.');
-  }
-  if(tools.web_search) notes.push(caps.routing
-    ? 'Questions that need current information are searched on the web and cited'
-      + (caps.media_search ? '; asking to see something real finds photographs of it.' : '.')
-    : 'Answers will search the web first and cite their sources.');
-  if(tools.vision && caps.vision){
-    if(model && !canSee(model)){
-      hint.className = 'hint warn';
-      notes.push(`${model} cannot see images; pick a model marked "sees images" to send pictures.`);
-    }else{
-      notes.push('Attach, paste or drop images for the model to look at.');
-    }
-  }
-  hint.textContent = notes.join(' ');
-  modelSelect.title = model && canSee(model) ? `${model} can read images` : model;
+  modelSelect.title = (tools.vision && caps.vision && model && !canSee(model))
+    ? `${model} cannot see images; pick one marked "sees images" to send pictures`
+    : (model && canSee(model) ? `${model} can read images` : model);
 }
 
 document.getElementById('strength').addEventListener('input', e =>
@@ -2209,28 +2170,57 @@ function offerFiles(box, text){
     if((suffix === 'html' || !language) && WHOLE_PAGE.test(code.textContent)) preview(block, code);
   }
 
-  // A document, rather than a reply: long, or with headings to navigate by
-  const headings = body.querySelectorAll('h1, h2, h3').length;
-  if(text.length < 1200 && headings < 2) return;
-  const name = fileName(text, 'md');
+  // The answer as a file, but only when the question asked for one. It used to appear under every
+  // long reply, which put a download card under answers nobody wanted to keep; asking for it in
+  // words is the signal, and it is the one people actually use.
+  const question = questionAbove(box);
+  if(!wantsAFile(question)) return;
+  const named = ASKED_FORMAT.exec(question);
+  const kind = named ? named[1].toLowerCase() : 'md';
+  const name = fileName(text, kind === 'markdown' ? 'md' : kind);
   const card = document.createElement('div');
   card.className = 'file';
   card.innerHTML = `
     <span class="icon">&#128196;</span>
     <span class="about">
       <span class="name"></span>
-      <span class="kind">Document &middot; MD &middot; ${(text.length / 1024).toFixed(1)} KB</span>
+      <span class="kind">${(text.length / 1024).toFixed(1)} KB</span>
     </span>
     <button class="btn btn-sm btn-secondary" data-copy-all>Copy</button>
     <button class="btn btn-sm" data-save-all>Download</button>`;
   card.querySelector('.name').textContent = name;
-  card.querySelector('[data-save-all]').addEventListener('click', () => download(text, name, 'text/markdown'));
+  card.querySelector('[data-save-all]').addEventListener('click',
+    () => download(text, name, 'text/markdown'));
   card.querySelector('[data-copy-all]').addEventListener('click', async e => {
     await navigator.clipboard.writeText(text);
     e.target.textContent = 'Copied';
     setTimeout(() => { e.target.textContent = 'Copy'; }, 1500);
   });
   box.appendChild(card);
+}
+
+/* The question this answer is answering: the nearest thing above it that somebody typed. */
+function questionAbove(box){
+  for(let before = box.previousElementSibling; before; before = before.previousElementSibling){
+    if(before.classList && before.classList.contains('user')) return before._text || '';
+  }
+  return '';
+}
+
+// Asking for the answer as something to keep, rather than mentioning a file in passing. "Write it
+// to a file", "as markdown", "can I download this" - but not "read the file I attached".
+const WANTS_A_FILE = new RegExp(
+  String.raw`\b(download|save|export)\b[^.?!]{0,40}\b(it|this|that|answer|reply|them|here)\b` +
+  String.raw`|\b(give|send|make|write|put|get)\s+(me\s+|it\s+|this\s+|that\s+)*` +
+  String.raw`(as|in|into|to)\s+(an?\s+)?(file|markdown|md|text|document|doc)\b` +
+  String.raw`|\bas\s+(an?\s+)?(markdown|md|\.md|text|txt|\.txt|file|document)\b` +
+  String.raw`|\b(downloadable|a file i can|file version|in a file|to a file)\b` +
+  String.raw`|\b(can|could) i (download|save|have)\b`, "i");
+// Which kind, when they said. Everything here is written out as text either way.
+const ASKED_FORMAT = /\b(markdown|md|txt|text|csv|json|yaml|yml|html)\b(?:\s+(?:file|document))?/i;
+
+function wantsAFile(question){
+  return WANTS_A_FILE.test(question || '');
 }
 
 function appendStats(box, stats){
