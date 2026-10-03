@@ -427,7 +427,7 @@ async def delete_model(payload: ModelDelete, principal: Principal = Depends(requ
 
     problem = await backends.delete_ollama_model(payload.name)
     if problem:
-        raise HTTPException(status.HTTP_502_BAD_GATEWAY, problem)
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, problem)
     log.info("model %s deleted by %s", payload.name,
              getattr(principal.user, "name", None) or "master-key")
     # Its own size, not what the disk gets back: Ollama keeps any layer another model still points at,
@@ -478,7 +478,7 @@ def _look_up(model_id):
     """Everything Hugging Face and this machine have to say about a repository. Blocking; threaded."""
     info = hf_client.get_model_info(model_id)
     if "error" in info:
-        return {"error": info["error"], "status_code": info.get("status_code", 502)}
+        return {"error": info["error"], "status_code": info.get("status_code", 503)}
     sizes = hf_client.get_model_sizes(info)
     param_count, param_source = hf_client.get_parameter_count(info, sizes)
     gguf_files = hf_client.get_gguf_files(info, fitting.QUANTIZATION_LEVELS)
@@ -509,7 +509,7 @@ async def check_model(payload: ModelCheck, _: Principal = Depends(require_admin)
                             "That does not look like a Hugging Face repository name (owner/model)")
     found = await asyncio.to_thread(_look_up, model_id)
     if "error" in found:
-        raise HTTPException(found.get("status_code") or status.HTTP_502_BAD_GATEWAY, found["error"])
+        raise HTTPException(found.get("status_code") or status.HTTP_503_SERVICE_UNAVAILABLE, found["error"])
     return found
 
 

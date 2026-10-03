@@ -72,7 +72,13 @@ def authorize_url(redirect_uri, state, challenge):
 
 
 async def exchange_code(code, redirect_uri, verifier):
-    """Swaps the authorization code for an access token."""
+    """Swaps the authorization code for an access token: (tokens, None, 200) or (None, why, status).
+
+    The status is the one to answer the browser with. A 400 from the token endpoint means it looked
+    at this code and refused it - used already, expired, or from another attempt - which starting
+    again fixes. Anything else is the auth server failing or misconfigured, and gets a 503 rather than
+    a 502, which the Cloudflare tunnel would swap for its own page and lose the reason with it.
+    """
     data = {
         "grant_type": "authorization_code",
         "code": code,
@@ -82,24 +88,33 @@ async def exchange_code(code, redirect_uri, verifier):
     }
     secret = settings.sso_client_secret()
     auth = (settings.sso_client_id(), secret) if secret else None
-    async with httpx.AsyncClient(timeout=20) as client:
-        response = await client.post(settings.sso_token_url(), data=data, auth=auth,
-                                     headers={"Accept": "application/json"})
-    if response.status_code >= 400:
-        return None, f"Token endpoint returned {response.status_code}: {response.text[:200]}"
     try:
-        return response.json(), None
+        async with httpx.AsyncClient(timeout=20) as client:
+            response = await client.post(settings.sso_token_url(), data=data, auth=auth,
+                                         headers={"Accept": "application/json"})
+    except httpx.HTTPError as e:
+        return None, f"Could not reach the token endpoint: {e}", 503
+    if response.status_code == 400:
+        return None, (f"The auth server refused this sign-in: {response.text[:200]}. "
+                      "Start the sign-in again."), 400
+    if response.status_code >= 400:
+        return None, f"Token endpoint returned {response.status_code}: {response.text[:200]}", 503
+    try:
+        return response.json(), None, 200
     except ValueError:
-        return None, "Token endpoint did not return JSON"
+        return None, "Token endpoint did not return JSON", 503
 
 
 async def fetch_userinfo(access_token):
     url = settings.sso_userinfo_url()
     if not url:
         return None, "No userinfo endpoint configured"
-    async with httpx.AsyncClient(timeout=20) as client:
-        response = await client.get(url, headers={"Authorization": f"Bearer {access_token}",
-                                                  "Accept": "application/json"})
+    try:
+        async with httpx.AsyncClient(timeout=20) as client:
+            response = await client.get(url, headers={"Authorization": f"Bearer {access_token}",
+                                                      "Accept": "application/json"})
+    except httpx.HTTPError as e:
+        return None, f"Could not reach the userinfo endpoint: {e}"
     if response.status_code >= 400:
         return None, f"Userinfo endpoint returned {response.status_code}"
     try:

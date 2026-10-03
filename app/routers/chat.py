@@ -1103,7 +1103,7 @@ async def edit_photo(payload: PhotoIn, principal: Principal = Depends(authentica
             png = job.result()
         except (images.ImageError, photo.PhotoError, portrait.PortraitError) as e:
             await usage_log.record(principal, settings.image_model_name(), "comfyui",
-                                   f"photo_{payload.action}", True, 502, None,
+                                   f"photo_{payload.action}", True, 503, None,
                                    (time.monotonic() - started) * 1000, str(e))
             yield _error(str(e))
             return
@@ -1216,9 +1216,9 @@ class _NeedsYou(maps.MapError):
 
 
 class _NotOnTheMap(maps.MapError):
-    """A place that does not exist is a bad request, not a broken upstream: 502 is for the
-    services falling over, and a proxy in front of this gateway may well replace one of those
-    with a page of its own before the reason ever reaches the browser."""
+    """A place that does not exist is a bad request, not a broken upstream: 503 is for the
+    services falling over. Never 502 for either: the Cloudflare tunnel in front of this gateway
+    replaces a 502 with a page of its own before the reason ever reaches the browser."""
 
 
 class MapIn(BaseModel):
@@ -1443,7 +1443,7 @@ async def find_on_map(payload: MapIn, principal: Principal = Depends(authenticat
     except _NotOnTheMap as e:
         raise HTTPException(status.HTTP_404_NOT_FOUND, str(e))
     except maps.MapError as e:
-        raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(e))
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, str(e))
 
     # Somewhere to travel from means every answer can say what the journey actually costs, which
     # is the difference between "three kilometres away" and "twenty minutes round a river"
@@ -1457,7 +1457,7 @@ async def find_on_map(payload: MapIn, principal: Principal = Depends(authenticat
         # Past the try above, so this is raised as the answer it is rather than through it
         if result.get("map_search_failed"):
             raise HTTPException(
-                status.HTTP_502_BAD_GATEWAY,
+                status.HTTP_503_SERVICE_UNAVAILABLE,
                 "The map's place search is not answering at the moment, and searching the web for "
                 "it found nothing either. These are busy free services; a minute usually fixes it.")
         widest = maps.SEARCH_RADIUS // 1000
@@ -1659,7 +1659,7 @@ async def generate_image(payload: ImageIn, principal: Principal = Depends(authen
                     getter.cancel()
             png, seed = job.result()
         except images.ImageError as e:
-            await usage_log.record(principal, settings.image_model_name(), "comfyui", endpoint, True, 502,
+            await usage_log.record(principal, settings.image_model_name(), "comfyui", endpoint, True, 503,
                                    None, (time.monotonic() - started) * 1000, str(e))
             yield _error(str(e))
             return
