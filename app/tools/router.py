@@ -33,8 +33,13 @@ CHAT   - can be answered or discussed directly: explanations, opinions, maths, w
          is showing you something so you can read it. Attaching a picture is not asking for it to
          be changed; only words asking for a change make it one.
 IMAGE  - asks for a picture to be created that nobody has ever photographed: "draw", "generate an
-         image of", "make me a picture of". A message that only describes a picture, with no
-         question and no instruction, is also IMAGE.
+         image of", "make me a picture of". A logo, icon, emblem, badge, poster, banner, cover,
+         wallpaper or avatar asked for by someone who wants one is IMAGE too - "design me a logo"
+         is a request for a picture, however much it sounds like a brief, and answering it in
+         words leaves them with no logo. A message that only describes a picture, with no question
+         and no instruction, is also IMAGE. Asking how such a thing is made, or what makes a good
+         one, or which tool to use, is CHAT: that is about the craft rather than a request for
+         the thing.
 PHOTOS - asks to be SHOWN something that really exists: a product, a brand, a building, a place, a
          person, an animal, a machine, a book, a car, or a video of something that happened. The
          test is whether a photograph of it is already out there to be found. If it is, this is
@@ -69,6 +74,11 @@ Examples:
 "What is 17 * 23?" -> CHAT
 "draw a fox in the snow" -> IMAGE
 "an oil painting of a harbour at dawn, stormy sky" -> IMAGE
+"Design me a logo with name Lumina AI" -> IMAGE
+"make me an app icon for a weather app" -> IMAGE
+"a poster for the school summer fair" -> IMAGE
+"how do I design a good logo?" -> CHAT
+"what makes a logo memorable?" -> CHAT
 "show me the photos of the drinks you are suggesting" -> PHOTOS
 "what does a Fairphone 5 look like?" -> PHOTOS
 "find me pictures of the Shibuya crossing" -> PHOTOS
@@ -103,6 +113,8 @@ Examples:
 "notice that the font looks broken" -> CHAT
 "this is the error I am getting" -> CHAT
 "I found these entries in the registry" -> CHAT
+"clicking Try again three times started three answers at once" -> CHAT
+"it should wait until the first one is done before starting another" -> CHAT
 
 Allowed answers this time: {allowed}. Answer with one of those words only."""
 
@@ -146,7 +158,8 @@ LONG_WORDS = re.compile(
 
 IMAGE_WORDS = re.compile(
     r"\b(draw|sketch|paint|render|illustrate|generate|create|make|produce|design)\b[^.?!]{0,40}"
-    r"\b(image|picture|photo|photograph|drawing|painting|illustration|logo|icon|poster|wallpaper|art|artwork)\b"
+    r"\b(image|picture|photo|photograph|drawing|painting|illustration|logo|icon|poster|wallpaper|"
+    r"art|artwork|banner|cover|emblem|badge|avatar|sticker|mockup|thumbnail)\b"
     r"|^\s*(an? |the )?(image|picture|photo|drawing|painting|illustration|logo|poster|wallpaper) of\b", re.I)
 EDIT_WORDS = re.compile(
     r"\b(make it|turn it|change|replace|remove|delete|erase|add|put|swap|recolou?r|repaint|crop|zoom|"
@@ -201,11 +214,11 @@ def candidates(tools, has_images):
 # picture of a registry editor that never existed, which answers nothing and costs the most of any
 # wrong answer this router can give.
 SHOWING_ME = re.compile(
-    r"^\s*(here\s+(is|are|'s)|here's|this\s+is|these\s+are|that\s+is|it\s+is)"
-    r"|(notice|note)\s+(that|this|the|how|it)"
-    r"|(as you can see|look at (this|the|it)|have a look|see (this|the) (one|picture|image|screenshot))"
-    r"|i\s+(found|got|see|attached|uploaded|am seeing|am getting)"
-    r"|this\s+(shows|is what|screenshot|picture|image|photo|error)"
+    r"^\s*(here\s+(is|are|'s)|here's|this\s+is|these\s+are|that\s+is|it\s+is)\b"
+    r"|\b(notice|note)\s+(that|this|the|how|it)\b"
+    r"|\b(as you can see|look at (this|the|it)|have a look|see (this|the) (one|picture|image|screenshot))\b"
+    r"|\bi\s+(found|got|see|attached|uploaded|am seeing|am getting)\b"
+    r"|\bthis\s+(shows|is what|screenshot|picture|image|photo|error)\b"
     r"|\?\s*$", re.I)
 
 
@@ -394,6 +407,15 @@ def category_by_keywords(message, has_images=False):
     return "general"
 
 
+# Asking how a picture is made, rather than asking for one. "Design me a logo" wants a logo;
+# "how do I design a logo" wants an explanation, and drawing one in reply answers nothing. The
+# difference is whether the sentence is a question about the craft or a request for the thing.
+ABOUT_THE_CRAFT = re.compile(
+    r"^\s*(how|what|which|why|where|when|who)\b"
+    r"|\b(can|could|should|do|would|may) i\b"
+    r"|\b(best way|tips|advice|tutorial|step by step|walk me through|explain how)\b", re.I)
+
+
 # Questions that name a place but want a fact about it. A map answers these with a pin and no
 # words, which is a worse answer than a sentence, so the model is overruled on them.
 FACT_ABOUT_PLACE = re.compile(
@@ -401,6 +423,17 @@ FACT_ABOUT_PLACE = re.compile(
     r"far|long|near|nearby|nearest|closest|way to)\b)"
     r".*\b(capital|population|people live|live in|famous|known for|currency|language|founded|"
     r"history|weather|climate|time zone|country|continent|mean|called)\b", re.I)
+
+
+COORDINATES = re.compile(r"-?\d{1,3}\.\d+\s*,\s*-?\d{1,3}\.\d+")
+FROM_TO = re.compile(r"\bfrom\b.{1,80}\bto\b", re.I | re.S)
+
+
+def names_somewhere(message):
+    """Whether anything in the words could be answered by a map: a way to get somewhere, a place
+    asked after, a coordinate, from-here-to-there."""
+    text = message or ""
+    return bool(MAP_WORDS.search(text) or COORDINATES.search(text) or FROM_TO.search(text))
 
 
 def settle_action(answered, message, allowed, has_images):
@@ -413,6 +446,13 @@ def settle_action(answered, message, allowed, has_images):
     question ends up as a picture.
     """
     if answered == MAP and FACT_ABOUT_PLACE.search(message or ""):
+        return CHAT, "keywords"
+    # After a few turns about something else the small model says MAP for messages that name no
+    # place at all - "clicking Try again three times started three answers" went to the map four
+    # times running, which looked it up as a coordinate and failed. A map can only answer words
+    # that point somewhere, so without any, MAP is not believed. A bare place name with no other
+    # words ("Shinjuku station") is lost to CHAT by this, which answers it in words, not wrongly.
+    if answered == MAP and not names_somewhere(message):
         return CHAT, "keywords"
     # The one other place the model is overruled, for the same reason: "show me a photo of it" and
     # "draw me a photo of it" are one word apart, and answering the first by drawing produces a
@@ -435,6 +475,13 @@ def settle_action(answered, message, allowed, has_images):
         return MAP, "keywords"
     if PHOTOS in allowed and _wants_the_real_thing(message):
         return PHOTOS, "keywords"
+    # "Design me a logo with name Lumina AI" came back as CHAT, and the answer was three
+    # paragraphs of art direction and a prompt to paste into somebody else's image generator -
+    # from a gateway with an image generator attached. CHAT is this prompt's catch-all, and a
+    # request for a logo reads enough like a brief to land there.
+    if IMAGE in allowed and not has_images and IMAGE_WORDS.search(message or "") \
+            and not ABOUT_THE_CRAFT.search(message or ""):
+        return IMAGE, "keywords"
     return answered, "model" if answered else None
 
 

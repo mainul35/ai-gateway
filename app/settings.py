@@ -19,6 +19,30 @@ DEFAULTS = {
     "features.vision.enabled": "true",
     "features.image_generation.enabled": "true",
     "features.maps.enabled": "true",
+    "features.mcp.enabled": "true",
+    # Who may reach the tool servers: "open", "claims" (the auth server decides) or "none".
+    # In claims mode, tools.access.claim names the claim to read from what the auth server
+    # sent at sign-in, and tools.access.capability is what a grant for one server looks like
+    # in it - {server} is replaced by the server's name, and a "*" entry means all of them.
+    "tools.access.mode": "open",
+    "tools.access.claim": "scope",
+    "tools.access.capability": "mcp:{server}",
+    # The gateway's own read-only tools (status, models, services) for managers and admins
+    "tools.self.enabled": "true",
+    # The searchable index of code and documents behind gateway__knowledge_search (app/knowledge.py).
+    # Per-owner GitHub tokens go in as knowledge.github.token.<owner>, never in the repository.
+    "knowledge.enabled": "true",
+    "knowledge.file": "config/knowledge.yaml",
+    "knowledge.embedding.model": "qwen3-embedding:0.6b",
+    "knowledge.refresh.hours": "12",
+    # Coding tasks (app/coding): projects are cloned under this folder, one worktree per task.
+    # Write tokens go in as coding.github.token.<owner> (Contents + Pull requests, read and write).
+    "coding.enabled": "true",
+    "coding.projects.dir": "~/projects",
+    "coding.author.email": "",
+    # Tool servers the gateway may call. Secrets are not in it; it names environment
+    # variables or config.properties keys, and those are read at connect time.
+    "mcp.servers.file": "config/mcp.yaml",
     # Empty means OpenStreetMap, which needs nothing. A Google Maps Platform key switches the
     # whole feature over - results and the map together, because their terms forbid mixing.
     "maps.google.key": "",

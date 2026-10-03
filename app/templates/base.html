@@ -102,8 +102,8 @@ label span.hint{display:block;font-size:.8rem;color:var(--muted);margin-top:.2re
   <span class="brand">Model Gateway</span>
   <a href="/dashboard">Dashboard</a>
   <a href="/playground">Playground</a>
-  {% if user.role in ('manager', 'admin') %}<a href="/users">Users</a>{% endif %}
-  {% if user.role == 'admin' %}<a href="/models">Models</a><a href="/settings/sso">SSO</a><a href="/docs">API</a>{% endif %}
+  {% if user.role in ('manager', 'admin') %}<a href="/tasks">Tasks</a><a href="/users">Users</a>{% endif %}
+  {% if user.role == 'admin' %}<a href="/models">Models</a><a href="/mcp">Tools</a><a href="/settings/sso">SSO</a><a href="/docs">API</a>{% endif %}
   <span class="spacer"></span>
   <span class="who">{{ user.name }} &middot; {{ user.role }}</span>
   <a href="/logout">Sign out</a>
@@ -124,7 +124,12 @@ async function api(path, options){
   const response = await fetch(path, options);
   if(response.status === 401){ location.href = '/login'; throw new Error('signed out'); }
   const body = response.headers.get('content-type')?.includes('json') ? await response.json() : null;
-  if(!response.ok) throw new Error((body && (body.detail || body.error)) || `HTTP ${response.status}`);
+  if(!response.ok){
+    // FastAPI's detail is a string, or a list for a request that failed validation; /v1 answers
+    // in OpenAI's shape, {error: {message}}
+    const detail = Array.isArray(body?.detail) ? body.detail.map(d => d.msg).join('; ') : body?.detail;
+    throw new Error(detail || body?.error?.message || body?.error || `HTTP ${response.status}`);
+  }
   return body;
 }
 </script>

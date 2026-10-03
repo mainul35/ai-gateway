@@ -153,7 +153,9 @@ async function loadAdmin(){
 
     document.getElementById('hardware').innerHTML = (system.gpus.length
         ? system.gpus.map(g => `<p style="margin:.2rem 0">${escapeHtml(g.name)}<br>
-            <span class="muted" style="font-size:.85rem">${formatBytes(g.vram_free)} free of ${formatBytes(g.vram_total)}</span></p>`).join('')
+            <span class="muted" style="font-size:.85rem">${g.vram_free == null
+              ? `${formatBytes(g.vram_total)} (configured size, not measured)`
+              : `${formatBytes(g.vram_free)} free of ${formatBytes(g.vram_total)}`}</span></p>`).join('')
         : '<p class="muted" style="margin:.2rem 0">No GPU detected</p>')
       + `<p style="margin:.6rem 0 .2rem">RAM<br><span class="muted" style="font-size:.85rem">
          ${formatBytes(system.available_ram)} free of ${formatBytes(system.total_ram)}</span></p>`;
@@ -163,12 +165,14 @@ async function loadAdmin(){
     document.getElementById('engine').innerHTML = engine.profiles.length
       ? `<table><tr><th>Profile</th><th>State</th><th>Idle</th><th></th></tr>` + engine.profiles.map(name => {
           const r = running.get(name);
+          const pending = engineActions.get(name);
+          const label = pending ? ENGINE_PENDING_LABEL[pending] : r ? 'Unload' : 'Load';
           return `<tr><td>${escapeHtml(name)}</td>
             <td>${r ? `<span class="pill on">loaded</span> <span class="muted">pid ${r.pid}</span>` : '<span class="pill off">not loaded</span>'}</td>
             <td class="muted">${r ? r.idle_seconds + 's of ' + r.ttl_seconds + 's' : '&mdash;'}</td>
             <td style="text-align:right">
               <button class="btn btn-sm ${r ? 'btn-danger' : ''}" data-engine="${escapeHtml(name)}"
-                      data-action="${r ? 'stop' : 'start'}">${r ? 'Unload' : 'Load'}</button></td></tr>`;
+                      data-action="${r ? 'stop' : 'start'}" ${pending ? 'disabled' : ''}>${label}</button></td></tr>`;
         }).join('') + `</table>`
       : '<span class="muted">No profiles defined in config/engines.yaml.</span>';
 
@@ -181,15 +185,21 @@ async function loadAdmin(){
   }catch(e){ showError('Could not load dashboard: ' + e.message); }
 }
 
+// Loads and unloads in progress, by profile. The cards redraw every 15 s and a big model takes
+// longer than that to load, so the redraw has to know, or it puts a fresh Load button back mid-load.
+const engineActions = new Map();
+const ENGINE_PENDING_LABEL = {start: 'Loading, this can take a minute…', stop: 'Unloading…'};
+
 document.addEventListener('click', async e => {
   const button = e.target.closest('[data-engine]');
-  if(!button) return;
+  if(!button || engineActions.has(button.dataset.engine)) return;
   const {engine: name, action} = button.dataset;
+  engineActions.set(name, action);
   button.disabled = true;
-  button.textContent = action === 'start' ? 'Loading, this can take a minute…' : 'Unloading…';
+  button.textContent = ENGINE_PENDING_LABEL[action];
   try{ await api(`/admin/engines/${encodeURIComponent(name)}/${action}`, {method:'POST'}); }
   catch(err){ showError(err.message); }
-  finally{ loadAdmin(); }
+  finally{ engineActions.delete(name); loadAdmin(); }
 });
 
 async function loadMyModels(){

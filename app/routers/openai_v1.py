@@ -86,9 +86,9 @@ async def forward(principal: Principal, endpoint: str, path: str, body: dict, sk
             await client.aclose()
             if running:
                 running.in_flight = max(0, running.in_flight - 1)
-            await usage_log.record(principal, model, backend.name, endpoint, False, 502,
+            await usage_log.record(principal, model, backend.name, endpoint, False, 503,
                                    None, (time.monotonic() - started) * 1000, str(e))
-            raise HTTPException(status.HTTP_502_BAD_GATEWAY, f"Upstream error: {e}")
+            raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, f"Upstream error: {e}")
         await client.aclose()
         if running:
             running.in_flight = max(0, running.in_flight - 1)
@@ -96,9 +96,13 @@ async def forward(principal: Principal, endpoint: str, path: str, body: dict, sk
         await usage_log.record(principal, model, backend.name, endpoint, False, response.status_code,
                                (payload or {}).get("usage"), (time.monotonic() - started) * 1000,
                                None if response.is_success else response.text[:500])
+        # The Cloudflare tunnel swaps a 502 or 504 for a page of its own, so the upstream's reason
+        # would never reach the client; 503 says the same thing and passes through. OpenAI's SDKs
+        # retry any 5xx alike, so nothing a client does changes with it.
+        answer = 503 if response.status_code in (502, 504) else response.status_code
         if payload is None:
-            return JSONResponse({"error": {"message": response.text[:500]}}, status_code=response.status_code)
-        return JSONResponse(payload, status_code=response.status_code)
+            return JSONResponse({"error": {"message": response.text[:500]}}, status_code=answer)
+        return JSONResponse(payload, status_code=answer)
 
     async def stream():
         captured_usage = None
@@ -117,7 +121,7 @@ async def forward(principal: Principal, endpoint: str, path: str, body: dict, sk
                     # aiter_lines strips newlines; SSE needs them back
                     yield (line + "\n").encode()
         except httpx.HTTPError as e:
-            status_code, error = 502, str(e)
+            status_code, error = 503, str(e)
             yield b"data: {\"error\": {\"message\": \"upstream connection failed\"}}\n\n"
         finally:
             await client.aclose()
@@ -165,9 +169,9 @@ async def _run_image_job(principal, prompt, size, source=None, strength=0.75):
         png, _seed = await images.generate(prompt, _OPENAI_SIZES.get(size or "auto", size),
                                            [source] if source else [], strength)
     except images.ImageError as e:
-        await usage_log.record(principal, settings.image_model_name(), "comfyui", endpoint, False, 502,
+        await usage_log.record(principal, settings.image_model_name(), "comfyui", endpoint, False, 503,
                                None, (time.monotonic() - started) * 1000, str(e))
-        raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(e))
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, str(e))
     await usage_log.record(principal, settings.image_model_name(), "comfyui", endpoint, False, 200,
                            None, (time.monotonic() - started) * 1000)
     return {"created": int(time.time()), "data": [{"b64_json": base64.b64encode(png).decode(),

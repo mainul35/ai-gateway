@@ -130,8 +130,9 @@ def _engine_models():
     return {
         name: Backend(name="llamacpp", kind="llamacpp",
                       base_url=f"http://127.0.0.1:{profile.port}/v1", upstream_model=name,
-                      # llama-server only sees images when it is given the model's vision projector
-                      capabilities={"completion", "thinking"} | ({"vision"} if profile.mmproj else set()))
+                      # llama-server only sees images when it is given the model's vision projector.
+                      # Tool calls go through the model's own chat template (--jinja, on by default).
+                      capabilities={"completion", "thinking", "tools"} | ({"vision"} if profile.mmproj else set()))
         for name, profile in load_profiles().items()
     }
 

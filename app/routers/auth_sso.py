@@ -1,4 +1,7 @@
 """Login through the OAuth2 provider, plus self-service API keys for logged-in users."""
+import json
+import logging
+
 from fastapi import APIRouter, Cookie, Depends, HTTPException, Request, status
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from pydantic import BaseModel, Field
@@ -14,6 +17,15 @@ from app.db import get_session
 from app.models import ApiKey, UsageRecord, User, utcnow
 
 router = APIRouter(prefix="/auth", tags=["auth"])
+log = logging.getLogger("sso")
+
+
+def _auth_server_failed(problem, code=status.HTTP_503_SERVICE_UNAVAILABLE):
+    """Never a 502: the Cloudflare tunnel in front of the gateway replaces a 502 (and a 504) with
+    its own error page, and the auth server's reason goes with it. A 503 passes through intact.
+    Logged as well, since a sign-in that fails is often reported long after the page is gone."""
+    log.warning("Sign-in failed at the auth server: %s", problem)
+    return HTTPException(code, problem)
 
 
 def _redirect_uri(request: Request):
@@ -68,17 +80,22 @@ async def callback(request: Request, code: str | None = None, state: str | None 
     if not state_data:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Sign-in expired; start again")
 
-    tokens, problem = await sso.exchange_code(code, state_data["redirect_uri"], state_data["verifier"])
+    tokens, problem, answer = await sso.exchange_code(code, state_data["redirect_uri"],
+                                                      state_data["verifier"])
     if problem:
-        raise HTTPException(status.HTTP_502_BAD_GATEWAY, problem)
+        raise _auth_server_failed(problem, answer)
 
     userinfo, problem = await sso.fetch_userinfo(tokens.get("access_token", ""))
     if problem:
-        raise HTTPException(status.HTTP_502_BAD_GATEWAY, problem)
+        raise _auth_server_failed(problem)
 
     identity = sso.identity_from_userinfo(userinfo)
+    # Kept whole, and refreshed at every sign-in, so a capability granted or taken away on the auth
+    # server is reflected here the next time the person signs in rather than whenever someone
+    # remembers to look
+    claims = sso.capability_claims(userinfo, tokens.get("scope", ""))
     if not identity["name"]:
-        raise HTTPException(status.HTTP_502_BAD_GATEWAY, "Auth server returned no usable identity claims")
+        raise _auth_server_failed("Auth server returned no usable identity claims")
 
     result = await session.execute(select(User).where(User.name == identity["name"]))
     user = result.scalar_one_or_none()
@@ -95,6 +112,8 @@ async def callback(request: Request, code: str | None = None, state: str | None 
         # Listed admin emails are always promoted; otherwise keep the role assigned in the UI
         if sso.role_for(identity["email"]) == "admin":
             user.role = "admin"
+    user.claims = json.dumps(claims) if claims else None
+    user.claims_seen_at = utcnow()
     await session.commit()
     await session.refresh(user)
 

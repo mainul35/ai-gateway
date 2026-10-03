@@ -1,0 +1,47 @@
+# MCP servers this gateway can call.
+#
+# Each entry is a set of tools the playground can use. Two kinds:
+#
+#   transport: stdio   a command the gateway launches and talks to over its standard input and
+#                      output. Almost every published server is one of these. This host has no
+#                      node, so servers published to npm run through Docker; Python ones run
+#                      through uvx, which is already installed.
+#   transport: http    a server already running somewhere, spoken to over Streamable HTTP. This is
+#                      the easy one for a server you wrote yourself and are running already.
+#
+# Secrets never go in this file - it is in the repository. Write ${NAME} and it is read from the
+# environment, or from config/config.properties, which is not.
+#
+#   env:
+#     GITHUB_TOKEN: ${GITHUB_TOKEN}
+#
+# `only:` narrows a server to the tools you name, for when a server offers more than you want the
+# model reaching for. Leave it out and every tool it offers is available.
+#
+# Nothing here is on until enabled: true. Check one on the MCP page before switching it on: it
+# connects, asks what tools the server has, and shows you what came back.
+
+servers:
+  # Fetches a URL and gives back its text. Published by the MCP project itself, written in Python,
+  # so uvx runs it without anything being installed first.
+  - name: fetch
+    description: Fetches a web page and returns it as text
+    transport: stdio
+    command: uvx
+    args: [mcp-server-fetch]
+    enabled: false
+
+  # Reads a git repository: log, diff, show, search. --repository is what it is allowed to look at.
+  - name: git
+    description: Reads a git repository - history, diffs, and what changed when
+    transport: stdio
+    command: uvx
+    args: [mcp-server-git, --repository, /home/mainul35/model-gateway]
+    enabled: false
+
+  # An example of your own, running wherever you run it. Nothing is needed here but the address.
+  - name: my-server
+    description: Something you wrote yourself
+    transport: http
+    url: http://127.0.0.1:9100/mcp
+    enabled: false

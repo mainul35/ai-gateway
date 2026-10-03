@@ -13,16 +13,15 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from app import access, backends, catalogue, fitting, settings, usage as usage_log
-from app.tools import jobs
+from app import access, backends, catalogue, fitting, knowledge, settings, usage as usage_log
+from app.tools import jobs, mcp_client, mcp_config
 from app.auth import Principal, generate_key, hash_key, require_admin, require_manager
 from app import config_writer
 from app.engine.supervisor import supervisor
 from utils import hf_client
 from utils.ollama_client import (StreamCancellation, check_ollama_status, ollama_host,
                                  stream_create_model, stream_pull_model)
-from utils.system_info import get_system_info
-from utils.system_info import get_system_info
+from utils.system_info import get_system_info, measure_hardware
 from app.db import get_session
 from app.models import ApiKey, UsageRecord, User, utcnow
 
@@ -58,6 +57,12 @@ def _user_json(user):
         "model_access": user.model_access or "all",
         "allowed_models": access.parse_patterns(user.allowed_models),
         "sign_in": "local password" if user.password_hash else "single sign-on",
+        # What the auth server said at their last sign-in, kept whole and shown as it arrived.
+        # While permissions are being wired up to it, "what does it actually send us" is the
+        # question, and a gateway that cannot answer it is no help at all.
+        "claims": json.loads(user.claims) if user.claims else None,
+        "claims_seen_at": user.claims_seen_at.isoformat() if user.claims_seen_at else None,
+        "tool_capabilities": access.capabilities_of(user),
         "keys": [
             {"id": k.id, "name": k.name, "prefix": k.key_prefix, "is_active": k.is_active,
              "last_used_at": k.last_used_at.isoformat() if k.last_used_at else None}
@@ -422,7 +427,7 @@ async def delete_model(payload: ModelDelete, principal: Principal = Depends(requ
 
     problem = await backends.delete_ollama_model(payload.name)
     if problem:
-        raise HTTPException(status.HTTP_502_BAD_GATEWAY, problem)
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, problem)
     log.info("model %s deleted by %s", payload.name,
              getattr(principal.user, "name", None) or "master-key")
     # Its own size, not what the disk gets back: Ollama keeps any layer another model still points at,
@@ -473,7 +478,7 @@ def _look_up(model_id):
     """Everything Hugging Face and this machine have to say about a repository. Blocking; threaded."""
     info = hf_client.get_model_info(model_id)
     if "error" in info:
-        return {"error": info["error"], "status_code": info.get("status_code", 502)}
+        return {"error": info["error"], "status_code": info.get("status_code", 503)}
     sizes = hf_client.get_model_sizes(info)
     param_count, param_source = hf_client.get_parameter_count(info, sizes)
     gguf_files = hf_client.get_gguf_files(info, fitting.QUANTIZATION_LEVELS)
@@ -504,7 +509,7 @@ async def check_model(payload: ModelCheck, _: Principal = Depends(require_admin)
                             "That does not look like a Hugging Face repository name (owner/model)")
     found = await asyncio.to_thread(_look_up, model_id)
     if "error" in found:
-        raise HTTPException(found.get("status_code") or status.HTTP_502_BAD_GATEWAY, found["error"])
+        raise HTTPException(found.get("status_code") or status.HTTP_503_SERVICE_UNAVAILABLE, found["error"])
     return found
 
 
@@ -649,7 +654,8 @@ async def write_settings(payload: dict, _: Principal = Depends(require_admin)):
 
 @router.get("/system")
 async def system_overview(_: Principal = Depends(require_admin), session: AsyncSession = Depends(get_session)):
-    info = get_system_info()
+    # Measured, not get_system_info(): its configured sizes would show a loaded card as empty
+    info = await asyncio.to_thread(measure_hardware)   # psutil and nvidia-smi block
     users = (await session.execute(select(func.count(User.id)))).scalar() or 0
     keys = (await session.execute(select(func.count(ApiKey.id)).where(ApiKey.is_active.is_(True)))).scalar() or 0
     requests_today = (await session.execute(
@@ -662,9 +668,114 @@ async def system_overview(_: Principal = Depends(require_admin), session: AsyncS
         "ollama": {**check_ollama_status(), "host": ollama_host()},
         "engine": supervisor.status(),
         "gpus": info["gpu_info"],
+        "gpu_source": info["gpu_source"],
         "total_vram": info["total_vram"],
         "total_ram": info["total_ram"],
         "available_ram": info["available_ram"],
         "counts": {"users": users, "active_keys": keys,
                    "requests_24h": requests_today, "tokens_24h": int(tokens_today)},
     }
+
+
+# --- knowledge base -------------------------------------------------------------------------
+
+
+@router.get("/knowledge")
+async def knowledge_overview(_: Principal = Depends(require_manager)):
+    """What is indexed, and how the current or last indexing run went."""
+    return {"enabled": knowledge.is_enabled(), "embedding_model": knowledge.embedding_model(),
+            "sources": await knowledge.list_sources(), "progress": knowledge.progress}
+
+
+@router.post("/knowledge/reindex")
+async def knowledge_reindex(only: str | None = None, _: Principal = Depends(require_admin)):
+    """Starts an indexing run in the background; `only` limits it to sources matching a pattern."""
+    if not knowledge.is_enabled():
+        raise HTTPException(status.HTTP_409_CONFLICT, "The knowledge base is switched off (knowledge.enabled)")
+    started = knowledge.start_reindex(only)
+    return {"started": started, "progress": knowledge.progress,
+            **({} if started else {"detail": "An indexing run is already going"})}
+
+
+# --- tool servers ---------------------------------------------------------------------------
+
+class McpServerIn(BaseModel):
+    """One tool server as the Tools page sends it.
+
+    Everything except the name is optional on a change, so toggling one switch does not require
+    the browser to send back a server it is not editing.
+    """
+    name: str = Field(min_length=1, max_length=64)
+    description: str | None = Field(default=None, max_length=300)
+    transport: str | None = Field(default=None, pattern="^(stdio|http)$")
+    enabled: bool | None = None
+    command: str | None = Field(default=None, max_length=300)
+    args: list[str] | None = Field(default=None, max_length=40)
+    url: str | None = Field(default=None, max_length=500)
+    env: dict[str, str] | None = None
+    headers: dict[str, str] | None = None
+    only: list[str] | None = Field(default=None, max_length=100)
+
+
+@router.get("/mcp")
+async def list_mcp_servers(_: Principal = Depends(require_admin)):
+    """Every configured tool server, and whether this host could run it at all.
+
+    Deliberately does not connect: launching a dozen child processes to draw a page is not what a
+    page load should do. The tools come from checking one, which is a thing the admin asks for.
+    """
+    return {
+        "enabled": mcp_client.is_enabled(),
+        "file": settings.get("mcp.servers.file", "MCP_SERVERS_FILE") or "config/mcp.yaml",
+        "servers": mcp_config.everything(),
+    }
+
+
+@router.post("/mcp", status_code=status.HTTP_201_CREATED)
+async def add_mcp_server(payload: McpServerIn, _: Principal = Depends(require_admin)):
+    """Adds a server to config/mcp.yaml.
+
+    A stdio server is a command this gateway will run as its own user, so this is an admin-only
+    endpoint in the same sense that installing a model is: it is a way to run something on the
+    machine, and it is only in the hands of people who already have that.
+    """
+    try:
+        return mcp_config.add(payload.model_dump(exclude_none=True))
+    except mcp_config.ConfigError as e:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(e))
+
+
+@router.patch("/mcp/{name}")
+async def update_mcp_server(name: str, payload: McpServerIn,
+                            _: Principal = Depends(require_admin)):
+    """Changes one server. Anything not sent keeps the value it had."""
+    try:
+        return mcp_config.update(name, payload.model_dump(exclude_none=True))
+    except mcp_config.ConfigError as e:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(e))
+
+
+@router.delete("/mcp/{name}")
+async def remove_mcp_server(name: str, _: Principal = Depends(require_admin)):
+    try:
+        return {"removed": mcp_config.remove(name)}
+    except mcp_config.ConfigError as e:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, str(e))
+
+
+class McpCheck(BaseModel):
+    name: str = Field(min_length=1, max_length=128)
+
+
+@router.post("/mcp/check")
+async def check_mcp_server(payload: McpCheck, _: Principal = Depends(require_admin)):
+    """Connects to one server and asks what it offers.
+
+    This is the whole answer to "is my server working": it starts it the way the gateway will,
+    speaks the protocol, and shows what came back - or exactly what went wrong instead.
+    """
+    server = mcp_client.find(payload.name)
+    if server is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND,
+                            f"No server called {payload.name!r} is configured")
+    return await mcp_client.probe(server)

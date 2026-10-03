@@ -11,10 +11,18 @@ jinja2>=3.1.6
 python-multipart>=0.0.20
 websockets>=15.0
 markdown-it-py[linkify]>=3.0.0
-rapidocr-onnxruntime>=1.4.0
+# Reads the words back out of a generated picture, so misspelled lettering can be corrected.
+# Not >=1.4.0: every release from 1.3 onwards declares python_requires <3.13, so on the homelab
+# host (3.14) pip finds nothing to install, fails the whole install step, and - because the step
+# only records success - reinstalls everything again on the next deploy. 1.2.3 is the newest that
+# will install there, and it works: the same API, and the lettering check is live on it today.
+# On Python 3.12 this still resolves to the newest 1.4.x.
+rapidocr-onnxruntime>=1.2.3
 pillow>=11.0
 numpy>=2.0
 pillow-heif>=0.18
 pypdf>=6.0
 python-docx>=1.1
 openpyxl>=3.1
+# Speaks MCP to tool servers, published and hand-written alike
+mcp>=2.2

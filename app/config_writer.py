@@ -26,6 +26,8 @@ EDITABLE_KEYS = [
     "features.vision.enabled",
     "features.image_generation.enabled", "features.maps.enabled",
     "maps.provider", "maps.google.key",
+    "tools.access.mode", "tools.access.claim", "tools.access.capability", "tools.self.enabled",
+    "knowledge.enabled", "knowledge.refresh.hours", "knowledge.github.token",
     "router.enabled",
     "router.model",
     "search.searxng.url",
@@ -56,7 +58,7 @@ EDITABLE_KEYS = [
     "memory.keep.recent",
     "memory.max.user.notes",
 ]
-SECRET_KEYS = {"sso.client.secret"}
+SECRET_KEYS = {"sso.client.secret", "knowledge.github.token"}
 
 
 def read_settings():
@@ -90,3 +92,28 @@ def write_settings(updates):
         written.append(key)
     path.write_text(text, encoding="utf-8")
     return written
+
+
+def _replace(text, key, line):
+    """The file's text with `key`'s line replaced by `line` (None removes it), or appended."""
+    pattern = rf"(?m)^{re.escape(key)}=.*(?:\n|$)"
+    if re.search(pattern, text):
+        return re.sub(pattern, "" if line is None else line + "\n", text)
+    return text if line is None else text.rstrip("\n") + f"\n{line}\n"
+
+
+def write_secret(key, value):
+    """Sets one secret whose key is not in EDITABLE_KEYS - a token per GitHub owner. The caller
+    checks the key and the value; this only refuses anything that would break the file."""
+    value = (value or "").strip()
+    if not value or "\n" in value or "\r" in value or "=" in key or "\n" in key:
+        raise ValueError("A secret must be a single line")
+    path = Path(config.config_file_path())
+    text = path.read_text(encoding="utf-8") if path.exists() else ""
+    path.write_text(_replace(text, key, f"{key}={value}"), encoding="utf-8")
+
+
+def remove_key(key):
+    path = Path(config.config_file_path())
+    if path.exists():
+        path.write_text(_replace(path.read_text(encoding="utf-8"), key, None), encoding="utf-8")

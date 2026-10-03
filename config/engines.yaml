@@ -39,3 +39,16 @@ models:
     chat_template_kwargs: '{"enable_thinking": false}' 
     # Headroom left over: ~4 GB. For 128k context set ctx_size 131072 (22.0 GB, tight).
     # For better KV quality at 64k use cache_type_k/v f16 (21.3 GB).
+
+  # 80B MoE (3B active, 46 GB) that does not fit in 24 GB. n_gpu_layers is left unset so
+  # llama-server's --fit fills the 3090 (~22.7 GB) and keeps the remaining experts in this machine's
+  # RAM; with 3B active per token that costs little.
+  # Measured 2026-10-03, ctx 32768, q8_0 KV:
+  #   3090 + RAM here:                      41.5-49.2 t/s generation, 206 t/s prompt, 48 s load
+  #   3090 + laptop A4000 over llama.cpp RPC: 3.2 t/s generation, 102 t/s prompt, 121 s load
+  # So no --rpc here: the network split is ~13x slower for this model. The laptop's RPC server
+  # (192.168.50.52:50052) is still up if a dense model that needs the extra VRAM comes along.
+  - name: qwen3-next-80b
+    model_path: /home/mainul35/models/Qwen3-Next-80B-A3B-Instruct-UD-Q4_K_XL.gguf
+    ctx_size: 32768
+    cache_reuse: 256

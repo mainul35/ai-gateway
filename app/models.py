@@ -26,6 +26,12 @@ class User(Base):
     model_access: Mapped[str] = mapped_column(String(16), default="all")
     # JSON list of model names or patterns, used when model_access is "selected"
     allowed_models: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Everything the auth server said at the last sign-in, as it said it. Kept whole rather than
+    # picked apart: what a provider puts in a token changes, and a gateway that reads three fields
+    # and throws the rest away cannot answer "what does it actually send us" - which is the first
+    # question anybody asks when wiring permissions up to it.
+    claims: Mapped[str | None] = mapped_column(Text, nullable=True)
+    claims_seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
@@ -137,4 +143,74 @@ class ChatFile(Base):
     # The prompt an image was generated from, shown under it
     prompt: Mapped[str | None] = mapped_column(Text, nullable=True)
     data: Mapped[bytes] = mapped_column(LargeBinary)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class Project(Base):
+    """A repository the gateway may change: cloned on this server, worked on in a worktree per task.
+
+    Added from the Tasks page by a manager or admin. How it is checked (the verify command, in a
+    throwaway container) is part of the project, because "the fix works" means something different
+    for every codebase. How it is deployed is set by an admin only: it runs on this server.
+    """
+    __tablename__ = "projects"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    name: Mapped[str] = mapped_column(String(128), unique=True, index=True)   # owner/repo
+    # "git": cloned on this server, worked on in worktrees. "local": a folder on the computer of the
+    # person who added it, reached through their browser or the helper - edited where it is.
+    kind: Mapped[str] = mapped_column(String(16), default="git")
+    client: Mapped[str | None] = mapped_column(String(16), nullable=True)    # "browser" or "helper"
+    clone_url: Mapped[str] = mapped_column(String(512), default="")
+    base_branch: Mapped[str] = mapped_column(String(128), default="main")
+    # Run in the sandbox after every round of edits; non-zero exit means the fix is not done
+    verify_command: Mapped[str] = mapped_column(Text, default="")
+    sandbox_image: Mapped[str] = mapped_column(String(256), default="python:3.12-slim")
+    # Builds that download dependencies need the network; the default is none
+    sandbox_network: Mapped[bool] = mapped_column(Boolean, default=False)
+    # Run on this server, in the project's own clone, after an approved change is merged
+    deploy_command: Mapped[str | None] = mapped_column(Text, nullable=True)
+    notes: Mapped[str | None] = mapped_column(Text, nullable=True)   # told to the model with every task
+    added_by: Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class CodingTask(Base):
+    """One piece of work on a project: from a description to a pull request, a merge and a deploy."""
+    __tablename__ = "coding_tasks"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    project_id: Mapped[int] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), index=True)
+    user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    conversation_id: Mapped[int | None] = mapped_column(
+        ForeignKey("conversations.id", ondelete="SET NULL"), nullable=True)
+    description: Mapped[str] = mapped_column(Text)
+    model: Mapped[str] = mapped_column(String(256))
+    # queued, running, review, approved, merged, deploying, done, rejected, failed, cancelled
+    status: Mapped[str] = mapped_column(String(32), default="queued", index=True)
+    stage: Mapped[str | None] = mapped_column(String(32), nullable=True)    # what it is doing now
+    branch: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    plan: Mapped[str | None] = mapped_column(Text, nullable=True)
+    summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+    diff: Mapped[str | None] = mapped_column(Text, nullable=True)
+    verify_output: Mapped[str | None] = mapped_column(Text, nullable=True)
+    pr_url: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    # For a local project, JSON {path: text before the task, or null for a file it created}: what
+    # the diff is measured against, and what Undo puts back
+    originals: Mapped[str | None] = mapped_column(Text, nullable=True)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    approved_by: Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+
+
+class CodingTaskEvent(Base):
+    """One step of a task, as it happened: kept so a task can be watched live and read again later."""
+    __tablename__ = "coding_task_events"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    task_id: Mapped[int] = mapped_column(ForeignKey("coding_tasks.id", ondelete="CASCADE"), index=True)
+    kind: Mapped[str] = mapped_column(String(32))     # stage, call, result, verify, note, error, ...
+    text: Mapped[str] = mapped_column(Text, default="")
+    data: Mapped[str | None] = mapped_column(Text, nullable=True)   # JSON
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)

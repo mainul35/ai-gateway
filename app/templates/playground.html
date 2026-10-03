@@ -68,7 +68,12 @@ details.tuning label{margin-bottom:.85rem}
 .msg.assistant .failed{color:var(--danger);font-size:.85rem}
 .msg.user .who{display:none}
 .msg .who{font-size:.72rem;color:var(--muted);margin-bottom:.45rem;font-weight:600;letter-spacing:.02em}
-.msg .body.md{background:none;padding:0;margin:0}
+/* white-space:normal is the important one. The body is pre-wrap so that a streaming answer keeps
+   its line breaks before anything has rendered it; once the Markdown is in, the newlines between
+   </p> and <p> are still being honoured as real line breaks, which lands a blank line on top of
+   every paragraph margin. Two lines of intended gap read as three, and no amount of adjusting the
+   margin fixes it, because the extra line is not a margin. */
+.msg .body.md{background:none;padding:0;margin:0;white-space:normal}
 /* The conversation's name stays in view while its messages scroll under it */
 .topbar{flex:none;border-bottom:1px solid var(--border);padding:.55rem 0;background:var(--bg)}
 .chatTitle{font-size:.9rem;font-weight:600;color:var(--text);display:block;
@@ -96,7 +101,6 @@ textarea:focus{outline:none;border-color:var(--primary)}
 .foot .picker{display:flex;align-items:center;gap:.5rem;flex:none}
 .foot select{background:none;border:none;color:var(--muted);font-size:.78rem;width:auto;padding:0;cursor:pointer}
 .foot select:hover{color:var(--text)}
-.foot .hint{margin:0;min-height:0;flex:1;min-width:0}
 /* A round button for attaching, like the one in the composer of every chat window */
 .icon-btn{width:1.9rem;height:1.9rem;padding:0;border-radius:50%;display:inline-flex;align-items:center;
           justify-content:center;font-size:1.1rem;line-height:1}
@@ -188,6 +192,28 @@ a.cite{font-size:.75em;vertical-align:super;text-decoration:none;padding:0 .1rem
                     display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
 .generated .caption.open{-webkit-line-clamp:unset;overflow:visible}
 .generated .actions{display:flex;gap:.5rem;margin-top:.5rem}
+/* What the agent did, above what it concluded. A step is added the moment a tool is called and
+   completed when it answers, so a slow one reads as something in progress rather than as nothing
+   happening at all. Quiet by design: this is the working, not the answer. */
+.trace{border-left:2px solid var(--border);padding:.1rem 0 .1rem .7rem;margin:.1rem 0 .7rem;
+       white-space:normal;font-size:.8rem}
+.trace .step{display:grid;grid-template-columns:auto 1fr auto;gap:.2rem .5rem;
+             align-items:baseline;padding:.15rem 0}
+.trace .mark{width:.5rem;height:.5rem;border-radius:50%;background:var(--muted);align-self:center}
+.trace .step.done .mark{background:var(--success)}
+.trace .step.failed .mark{background:var(--danger)}
+.trace .step[data-waiting] .mark{background:var(--primary);animation:pulse 1s ease-in-out infinite}
+@keyframes pulse{50%{opacity:.25}}
+.trace .what{font-weight:600;font-family:var(--mono,ui-monospace,monospace)}
+.trace .detail{grid-column:2;color:var(--muted);word-break:break-word;
+               display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.trace .took{color:var(--muted);font-variant-numeric:tabular-nums}
+.trace .said{grid-column:2;color:var(--muted);margin:.15rem 0 .35rem;padding-left:.1rem;
+             border-left:1px solid var(--border);padding-left:.5rem;
+             display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}
+.trace .step.notice .what{font-weight:400;color:var(--warning);font-family:inherit}
+.trace .step.tools .what{font-weight:400;color:var(--muted);font-family:inherit}
+
 /* Pictures found on the web rather than drawn. Every tile carries the site it came from, because
    that is what tells the reader whether it is the right thing: the manufacturer's own photograph
    and a stock library's approximation look identical until you see whose page they are on. */
@@ -300,18 +326,12 @@ a.cite{font-size:.75em;vertical-align:super;text-decoration:none;padding:0 .1rem
   /* Two tiles across on a phone rather than one enormous one */
   .found .grid{grid-template-columns:repeat(auto-fill,minmax(6.5rem,1fr));gap:.4rem}
   .found figure img{height:6rem}
-  .file{max-width:100%}
   /* 16px, or iOS zooms the whole page the moment the composer is tapped. The rule in base.html
      cannot do this on its own: .composer textarea is the more specific selector. */
   .composer textarea{max-height:30vh;font-size:16px}
   .chip{padding:.28rem .62rem;font-size:.78rem}
   .tools{gap:.35rem}
-  /* The help line and the model picker each get a line of their own, instead of fighting over one
-     and leaving the help line a column of single words. The help line is clipped after two: it is
-     guidance, and on a phone the conversation is worth more than the guidance. */
   .foot{flex-wrap:wrap;align-items:flex-start;gap:.2rem .75rem;min-height:0}
-  .foot .hint{flex:1 0 100%;order:1;white-space:normal;display:-webkit-box;-webkit-line-clamp:2;
-              -webkit-box-orient:vertical;overflow:hidden;line-height:1.35}
   .foot .picker{flex:1 0 100%;order:2;justify-content:flex-start;min-width:0}
   .foot .picker select{max-width:100%;overflow:hidden;text-overflow:ellipsis}
 }
@@ -392,6 +412,8 @@ a.cite{font-size:.75em;vertical-align:super;text-decoration:none;padding:0 .1rem
                     title="Find places, routes, and what is along the way, on OpenStreetMap"><span class="dot"></span>Maps</button>
             <button class="chip" id="toolImage" data-tool="image_generation" aria-pressed="false" hidden
                     title="Create a new image, or edit an attached one, instead of chatting"><span class="dot"></span>Image generation</button>
+            <button class="chip" id="toolAgent" data-tool="agent" aria-pressed="false" hidden
+                    title="Let the model use the tool servers: call one, read what came back, call another, then answer"><span class="dot"></span>Agent</button>
             <span class="attach-wrap">
               <button class="icon-btn" id="attach" aria-haspopup="menu" aria-expanded="false"
                       title="Attach something (you can also paste or drop it)">+</button>
@@ -451,7 +473,6 @@ a.cite{font-size:.75em;vertical-align:super;text-decoration:none;padding:0 .1rem
         </div>
         <div class="note err" id="composerError" hidden></div>
         <div class="foot">
-          <span class="hint" id="modeHint"></span>
           <span class="status" id="deciding" hidden>
             <span class="spinner"></span><span>Working out what you are asking for&hellip;</span>
           </span>
@@ -530,7 +551,8 @@ let savedSystem = '';    // system prompt stored with the current conversation
 let controller = null;
 let caps = {web_search: false, vision: false, image_generation: false, maps: false,
             image_sizes: [], max_upload_mb: 10};
-let tools = {web_search: false, vision: false, image_generation: false, maps: false};
+let tools = {web_search: false, vision: false, image_generation: false, maps: false,
+             agent: false};
 let pending = [];        // images attached to the next message: [{id, url, name, kind}]
 
 function showError(message){
@@ -619,6 +641,7 @@ async function loadCapabilities(){
   document.getElementById('toolVision').hidden = !caps.vision;
   document.getElementById('toolImage').hidden = !caps.image_generation;
   document.getElementById('toolMaps').hidden = !caps.maps;
+  document.getElementById('toolAgent').hidden = !caps.agent;
   document.getElementById('imageSize').innerHTML = caps.image_sizes.map(s =>
     `<option value="${s}">${s[0].toUpperCase() + s.slice(1)}</option>`).join('');
   syncTools();
@@ -656,48 +679,22 @@ function syncTools(){
     renderPending();
   }
 
-  const hint = document.getElementById('modeHint');
+  // The line of guidance that used to sit under the composer is gone. What is left of it is the
+  // placeholder, which says the same thing in the place the words are about to be typed, and the
+  // model picker's tooltip, which is where the one warning worth keeping now lives: sending a
+  // picture to a model that cannot see one still fails loudly at send time either way.
   const model = currentModel();
-  hint.className = 'hint';
   if(imageMode()){
-    promptBox.placeholder = pending.length ? 'How should the picture change?' : 'Describe a picture to create…';
-    if(!pending.length){
-      // Drawing and finding are asked for in nearly the same words, so the difference is worth
-      // spelling out where the asking happens
-      const finds = caps.routing && tools.web_search && caps.media_search;
-      hint.textContent = caps.routing
-        ? 'Ask for a picture and one is created with Flux'
-          + (finds ? '; ask to see something real and real photographs of it are found instead' : '')
-          + '; ask a question and you get an answer. Attach an image (or press Edit on one) to change it.'
-        : 'Sending creates an image with Flux instead of chatting. Attach an image (or press Edit on one) to change it.';
-    }else if(qwenEdits()){
-      hint.textContent = 'Say what to do: "remove the noise", "blur the background", '
-        + (caps.photo_backdrop ? '"white background for my passport", ' : '')
-        + 'or a change like "make it night".'
-        + (pending.length > 1 ? ' Refer to the pictures as image 1 (the one edited), image 2 and image 3.'
-                              : ` You can attach up to ${editLimit() - 1} more picture(s) to use, e.g. "put the hat from image 2 on the person in image 1".`);
-    }else{
-      hint.textContent = 'Sending re-renders the attached image with Flux. Lower "Change" keeps more of the original.';
-    }
+    promptBox.placeholder = pending.length ? 'How should the picture change?'
+                                           : 'Describe a picture to create…';
     modelSelect.title = '';
     return;
   }
-  promptBox.placeholder = 'Ask anything…';
-  const notes = [];
-  if(tools.web_search) notes.push(caps.routing
-    ? 'Questions that need current information are searched on the web and cited'
-      + (caps.media_search ? '; asking to see something real finds photographs of it.' : '.')
-    : 'Answers will search the web first and cite their sources.');
-  if(tools.vision && caps.vision){
-    if(model && !canSee(model)){
-      hint.className = 'hint warn';
-      notes.push(`${model} cannot see images; pick a model marked "sees images" to send pictures.`);
-    }else{
-      notes.push('Attach, paste or drop images for the model to look at.');
-    }
-  }
-  hint.textContent = notes.join(' ');
-  modelSelect.title = model && canSee(model) ? `${model} can read images` : model;
+  promptBox.placeholder = tools.agent ? 'Ask for something that needs looking up or working out…'
+                                     : 'Ask anything…';
+  modelSelect.title = (tools.vision && caps.vision && model && !canSee(model))
+    ? `${model} cannot see images; pick one marked "sees images" to send pictures`
+    : (model && canSee(model) ? `${model} can read images` : model);
 }
 
 document.getElementById('strength').addEventListener('input', e =>
@@ -1112,7 +1109,8 @@ function fillTranscript(messages){
       const turn = extra.answers_to || null;
       const box = answerBox(turn, m.model || (extra.map ? 'OpenStreetMap'
                                               : extra.media ? 'Picture search' : ''));
-      if(extra.map) renderMap(box, extra.map);
+      if(extra.agent) renderAgent(box, extra.agent, m.content, m.html, m.stats);
+      else if(extra.map) renderMap(box, extra.map);
       else if(extra.media) renderMedia(box, extra.media);
       else if(extra.generated) renderGenerated(box, extra.generated, m.stats);
       else renderAssistant(box, m.content, m.reasoning, m.stats, extra.sources, m.html);
@@ -1404,7 +1402,13 @@ function showAnswer(box){
 /* Runs the last question again. The question is already in the transcript and already saved, so
    nothing is added to it; what comes back joins the answers that are already there. */
 async function resend(box){
-  if(controller || !box._messageId) return;
+  if(turning || controller || !box._messageId) return;
+  turning = true;
+  try{ await resendTurn(box); }
+  finally{ turning = false; }
+}
+
+async function resendTurn(box){
   // An older question: everything after it was answering what this question led to, and once it
   // is asked again none of that followed from anything. It goes, and it is said plainly first.
   const later = turnsAfter(box);
@@ -1439,7 +1443,7 @@ async function resend(box){
   // description of them
   const images = (box._files || []).map(f => ({id: f.id, url: fileUrl(f.id),
                                                name: f.name || 'attachment', document: !!f.document}));
-  await send({text: box._text || '', images, again: {messageId: box._messageId, replaceAt}});
+  await send({text: box._text || '', images, again: {messageId: box._messageId, replaceAt}}, true);
 }
 
 const ACTION_LABELS = {chat: 'answered directly', search: 'searched the web',
@@ -1913,6 +1917,121 @@ function offerLocation(box, text, decision){
   box.querySelector('.body').appendChild(again);
 }
 
+/* One agent turn. What it does is shown as it does it - which tool, with what arguments, what
+   came back - because an agent that works silently for a minute and then speaks is one you can
+   neither trust nor debug. The same record is saved, so the turn reads the same way tomorrow. */
+async function sendAgent(text, again){
+  showError('');
+  try{
+    await ensureConversation(text, currentModel());
+  }catch(e){
+    showError('Could not save the conversation: ' + errorText(e));
+    return;
+  }
+  const model = currentModel();
+  if(!models[model] || !(models[model].capabilities || []).includes('tools')){
+    showError(`${model} cannot call tools. Pick a model marked "calls tools" to use the agent.`);
+    return;
+  }
+  if(!again){ promptBox.value = ''; fitComposer(); history.push({role: 'user', content: text, images: []}); }
+  const asked = await askedNow(text, [], [], null, again);
+
+  const box = answerBox(again ? again.messageId : asked?._messageId, model);
+  const body = box.querySelector('.body');
+  body.className = 'body agent';
+  const trace = document.createElement('div');
+  trace.className = 'trace';
+  box.insertBefore(trace, body);
+  setStatus(box, 'Starting');
+
+  const steps = [];
+  let answer = null, trouble = '';
+  controller = new AbortController();
+  busy(true);
+  const started = performance.now();
+  try{
+    const response = await postStream('/chat/agent', {
+      model, conversation_id: currentId,
+      messages: history.map(h => ({role: h.role, content: h.content, images: []})),
+      temperature: parseFloat(document.getElementById('temperature').value),
+      max_tokens: parseInt(document.getElementById('maxTokens').value, 10) || 8192,
+      answers_to: box.dataset.turn ? Number(box.dataset.turn) : null});
+    await readEvents(response, chunk => {
+      const event = chunk.gateway;
+      if(!event) return;
+      if(event.type === 'status') setStatus(box, event.text);
+      else if(event.type === 'tools') addTrace(trace, 'tools', `${event.tools.length} tools in reach`,
+                                               event.tools.join(', '));
+      else if(event.type === 'notice') addTrace(trace, 'notice', event.text, '');
+      else if(event.type === 'call') addTrace(trace, 'call', event.tool, event.arguments, event.round);
+      else if(event.type === 'result'){
+        finishTrace(trace, event);
+        steps.push(event);
+      }else if(event.type === 'answer') answer = event;
+      else if(event.type === 'error') trouble = event.message || 'The agent stopped.';
+      followAlong();
+    });
+  }catch(e){
+    if(e.name !== 'AbortError') trouble = errorText(e);
+  }finally{
+    controller = null;
+    busy(false);
+    setStatus(box, null);
+  }
+
+  if(!answer){
+    failedTurn(box, trouble || 'The agent stopped without an answer.');
+    loadConversations();
+    return;
+  }
+  renderAssistant(box, answer.text, null, {total: answer.seconds}, null, answer.html);
+  box.insertBefore(trace, box.querySelector('.body'));   // the trace stays above the answer
+  recordAnswer(box, answer.text, again ? again.replaceAt : null);
+  // The server writes the turn down itself, the way the other long jobs do
+  revealFrom(box);
+  loadConversations();
+}
+
+/* One line of the trace. A call is added when it starts and completed when it comes back, so a
+   slow tool shows as something in progress rather than as nothing at all. */
+function addTrace(where, kind, title, detail, round){
+  const line = document.createElement('div');
+  line.className = `step ${kind}`;
+  if(kind === 'call') line.dataset.waiting = '1';
+  line.innerHTML = `<span class="mark"></span><span class="what"></span>`
+                 + `<span class="detail"></span><span class="took"></span>`;
+  line.querySelector('.what').textContent = round ? `${title}` : title;
+  line.querySelector('.detail').textContent = detail || '';
+  if(kind === 'call') line.querySelector('.took').textContent = '…';
+  where.appendChild(line);
+  return line;
+}
+
+function finishTrace(where, event){
+  const line = [...where.querySelectorAll('.step[data-waiting]')].pop();
+  if(!line) return;
+  delete line.dataset.waiting;
+  line.classList.add(event.failed ? 'failed' : 'done');
+  line.querySelector('.took').textContent = `${event.seconds}s`;
+  const result = document.createElement('div');
+  result.className = 'said';
+  result.textContent = event.text;
+  line.appendChild(result);
+}
+
+/* A finished agent turn, read back from a saved conversation. */
+function renderAgent(box, saved, content, html, stats){
+  const trace = document.createElement('div');
+  trace.className = 'trace';
+  for(const step of saved.steps || []){
+    addTrace(trace, 'call', step.tool, step.arguments);
+    finishTrace(trace, step);
+  }
+  box.insertBefore(trace, box.querySelector('.body'));
+  renderAssistant(box, content, null, stats, null, html);
+  box.insertBefore(trace, box.querySelector('.body'));
+}
+
 async function sendMap(text, decision, fix, again){
   showError('');
   try{
@@ -2051,28 +2170,57 @@ function offerFiles(box, text){
     if((suffix === 'html' || !language) && WHOLE_PAGE.test(code.textContent)) preview(block, code);
   }
 
-  // A document, rather than a reply: long, or with headings to navigate by
-  const headings = body.querySelectorAll('h1, h2, h3').length;
-  if(text.length < 1200 && headings < 2) return;
-  const name = fileName(text, 'md');
+  // The answer as a file, but only when the question asked for one. It used to appear under every
+  // long reply, which put a download card under answers nobody wanted to keep; asking for it in
+  // words is the signal, and it is the one people actually use.
+  const question = questionAbove(box);
+  if(!wantsAFile(question)) return;
+  const named = ASKED_FORMAT.exec(question);
+  const kind = named ? named[1].toLowerCase() : 'md';
+  const name = fileName(text, kind === 'markdown' ? 'md' : kind);
   const card = document.createElement('div');
   card.className = 'file';
   card.innerHTML = `
     <span class="icon">&#128196;</span>
     <span class="about">
       <span class="name"></span>
-      <span class="kind">Document &middot; MD &middot; ${(text.length / 1024).toFixed(1)} KB</span>
+      <span class="kind">${(text.length / 1024).toFixed(1)} KB</span>
     </span>
     <button class="btn btn-sm btn-secondary" data-copy-all>Copy</button>
     <button class="btn btn-sm" data-save-all>Download</button>`;
   card.querySelector('.name').textContent = name;
-  card.querySelector('[data-save-all]').addEventListener('click', () => download(text, name, 'text/markdown'));
+  card.querySelector('[data-save-all]').addEventListener('click',
+    () => download(text, name, 'text/markdown'));
   card.querySelector('[data-copy-all]').addEventListener('click', async e => {
     await navigator.clipboard.writeText(text);
     e.target.textContent = 'Copied';
     setTimeout(() => { e.target.textContent = 'Copy'; }, 1500);
   });
   box.appendChild(card);
+}
+
+/* The question this answer is answering: the nearest thing above it that somebody typed. */
+function questionAbove(box){
+  for(let before = box.previousElementSibling; before; before = before.previousElementSibling){
+    if(before.classList && before.classList.contains('user')) return before._text || '';
+  }
+  return '';
+}
+
+// Asking for the answer as something to keep, rather than mentioning a file in passing. "Write it
+// to a file", "as markdown", "can I download this" - but not "read the file I attached".
+const WANTS_A_FILE = new RegExp(
+  String.raw`\b(download|save|export)\b[^.?!]{0,40}\b(it|this|that|answer|reply|them|here)\b` +
+  String.raw`|\b(give|send|make|write|put|get)\s+(me\s+|it\s+|this\s+|that\s+)*` +
+  String.raw`(as|in|into|to)\s+(an?\s+)?(file|markdown|md|text|document|doc)\b` +
+  String.raw`|\bas\s+(an?\s+)?(markdown|md|\.md|text|txt|\.txt|file|document)\b` +
+  String.raw`|\b(downloadable|a file i can|file version|in a file|to a file)\b` +
+  String.raw`|\b(can|could) i (download|save|have)\b`, "i");
+// Which kind, when they said. Everything here is written out as text either way.
+const ASKED_FORMAT = /\b(markdown|md|txt|text|csv|json|yaml|yml|html)\b(?:\s+(?:file|document))?/i;
+
+function wantsAFile(question){
+  return WANTS_A_FILE.test(question || '');
 }
 
 function appendStats(box, stats){
@@ -2297,10 +2445,25 @@ function setDeciding(on){
   document.getElementById('deciding').hidden = !on;
 }
 
+/* One turn at a time. `controller` only exists once an answer is streaming, and before that a turn
+   spends seconds asking the router what the message is - long enough for three taps on Try again
+   to start three turns, each routed and answered separately. This is set from the first tap to
+   the end of the turn, whatever kind of turn it turns out to be. */
+let turning = false;
+
+async function send(redo = null, claimed = false){
+  if(!claimed){
+    if(turning || controller) return;
+    turning = true;
+  }
+  try{ await sendTurn(redo); }
+  finally{ if(!claimed) turning = false; }
+}
+
 /* One turn. Normally it takes what is in the composer; asking a question again passes the words
    and the attachments back in, along with the question they belong to, and the answer joins the
    ones already filed under it. */
-async function send(redo = null){
+async function sendTurn(redo = null){
   const text = redo ? redo.text : promptBox.value.trim();
   if(controller) return;
   if(redo) pending = redo.images || [];
@@ -2318,6 +2481,8 @@ async function send(redo = null){
               ? myLocation() : Promise.resolve(null);
 
   const decision = await decideAction(text, attachedPictures().length > 0);
+  // The agent is a choice, not a guess: switched on, it takes the turn
+  if(tools.agent && caps.agent) return sendAgent(text, asking);
   if(decision.action === 'map') return sendMap(text, decision, fix, asking);
   if(decision.action === 'photos') return sendMedia(text, decision, asking);
   if(decision.action === 'clean' || decision.action === 'blur' || decision.action === 'backdrop')

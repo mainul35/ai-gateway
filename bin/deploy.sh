@@ -4,7 +4,8 @@
 #   bin/deploy.sh
 #
 # Settings (environment variables):
-#   DEPLOY_HOST        ssh target                  (default: mainul35@homelabai)
+#   DEPLOY_HOST        ssh target, or "local" to deploy on this machine without ssh - how the
+#                      gateway deploys itself from a clone on its own server (default: mainul35@homelabai)
 #   DEPLOY_DIR         project directory on it     (default: model-gateway, relative to the remote home)
 #   DEPLOY_PUBLIC_URL  public URL to check after   (default: https://ai-gateway.mainul35.dev)
 #
@@ -17,10 +18,22 @@ PUBLIC_URL=${DEPLOY_PUBLIC_URL:-https://ai-gateway.mainul35.dev}
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 cd "$ROOT"
 
+PYTHON=${PYTHON:-$(command -v python || command -v python3)}
+
 step() { printf '\n==> %s\n' "$*"; }
 
+# Runs a command on the server, from the home directory, with this script's stdin: over ssh, or here
+# when the server is this machine
+on_server() {
+    if [ "$HOST" = local ]; then
+        (cd "$HOME" && bash -c "$*")
+    else
+        ssh -o BatchMode=yes "$HOST" "$*"
+    fi
+}
+
 step "Checking the code compiles before sending anything"
-python - <<'PY'
+"$PYTHON" - <<'PY'
 import pathlib, sys
 failed = []
 for path in list(pathlib.Path("app").rglob("*.py")) + list(pathlib.Path("utils").rglob("*.py")):
@@ -33,11 +46,15 @@ if failed:
 print("all Python files compile")
 PY
 
+# Compiling is not enough: a backslash eaten by a shell leaves a backspace inside a regular
+# expression that compiles perfectly and matches nothing it was written to match.
+"$PYTHON" scripts/check_control_chars.py app utils scripts
+
 STAMP=$(date +%Y%m%d-%H%M%S)
 
 step "Backing up the current server code ($STAMP)"
-ssh -o BatchMode=yes "$HOST" "cd $REMOTE_DIR && mkdir -p .deploy-backup && \
-  tar czf .deploy-backup/$STAMP.tar.gz app utils bin config/engines.yaml config/models.yaml config/searxng \
+on_server "cd $REMOTE_DIR && mkdir -p .deploy-backup && \
+  tar czf .deploy-backup/$STAMP.tar.gz app utils bin config/engines.yaml config/models.yaml config/mcp.yaml config/knowledge.yaml config/searxng \
       docker-compose.gateway.yml docker-compose.homelab.yml requirements.txt requirements-gateway.txt 2>/dev/null; \
   ls -1t .deploy-backup/*.tar.gz | tail -n +6 | xargs -r rm -f; \
   echo \"kept \$(ls .deploy-backup | wc -l) backup(s)\""
@@ -46,13 +63,13 @@ step "Syncing the project"
 tar czf - \
     --exclude='__pycache__' --exclude='*.pyc' \
     --exclude='config/config.properties' \
-    app utils bin config/engines.yaml config/models.yaml config/searxng scripts \
+    app utils bin config/engines.yaml config/models.yaml config/mcp.yaml config/knowledge.yaml config/searxng scripts \
     docker-compose.gateway.yml docker-compose.homelab.yml .env.example \
     requirements.txt requirements-gateway.txt \
-  | ssh -o BatchMode=yes "$HOST" "tar xzf - -C $REMOTE_DIR && echo synced"
+  | on_server "tar xzf - -C $REMOTE_DIR && echo synced"
 
 step "Installing dependencies if they changed, restarting, checking health"
-ssh -o BatchMode=yes "$HOST" "REMOTE_DIR=$REMOTE_DIR STAMP=$STAMP bash -s" <<'REMOTE'
+on_server "REMOTE_DIR=$REMOTE_DIR STAMP=$STAMP bash -s" <<'REMOTE'
 set -u
 cd "$REMOTE_DIR" || exit 1
 
@@ -104,8 +121,17 @@ fi
 REMOTE
 
 step "Checking the public URL"
-code=$(curl -s -m 20 -o /dev/null -w '%{http_code}' "$PUBLIC_URL/health" || true)
-echo "$PUBLIC_URL/health -> $code"
-[ "$code" = "200" ] || { echo "public check failed (the server itself is healthy)"; exit 1; }
+# Several times, not once. The tunnel keeps a pool of connections to this server, and restarting it
+# leaves every one of them pointing at a process that is gone. One request opens one fresh
+# connection and proves nothing about the rest: the next person through gets a stale one, waits,
+# and is shown a 524 by Cloudflare while the gateway sits here perfectly healthy. Going round the
+# pool here means the deploy finds those, not somebody trying to use the thing.
+failures=0
+for attempt in 1 2 3 4 5 6; do
+    result=$(curl -s -m 25 -o /dev/null -w '%{http_code} in %{time_total}s' "$PUBLIC_URL/health" || echo "no answer")
+    echo "  $attempt: $PUBLIC_URL/health -> $result"
+    case "$result" in 200*) ;; *) failures=$((failures + 1)) ;; esac
+done
+[ "$failures" = "0" ] || { echo "public check failed $failures of 6 times (the server itself is healthy,";     echo "so this is between Cloudflare and here)"; exit 1; }
 
 printf '\nDeployed %s\n' "$STAMP"

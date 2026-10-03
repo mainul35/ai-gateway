@@ -70,7 +70,7 @@ def build_request(model, kind, area, pages):
 
 # A string that opens with a house number and carries street words is an address, not a name
 ADDRESS_SHAPED = re.compile(r"^\s*\d+[-–\d]*\s*(chome|ban|banchi|block|street|st\.?|road|"
-                            r"rd\.?|avenue|ave\.?|lane|dori)?", re.I)
+                            r"rd\.?|avenue|ave\.?|lane|dori)?\b", re.I)
 
 
 def _squashed(text):
