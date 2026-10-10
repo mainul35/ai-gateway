@@ -1521,7 +1521,8 @@ async def route(payload: RouteIn, principal: Principal = Depends(authenticate),
                        and await asyncio.to_thread(photo.is_depth_available)),
     }
     allowed = intent_router.candidates(tools, payload.has_images)
-    history = [{"role": m.role, "content": m.content} for m in payload.history]
+    history = intent_router.plain_history(
+        [{"role": m.role, "content": m.content} for m in payload.history])
     asking_model = intent_router.is_enabled()
 
     async def decide_action():
