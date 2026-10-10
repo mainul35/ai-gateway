@@ -1564,7 +1564,8 @@ async def route(payload: RouteIn, principal: Principal = Depends(authenticate),
 
     (action, decided_by), (category, category_by), wanted = await asyncio.gather(
         decide_action(), decide_category(), look_or_change())
-    action, decided_by = intent_router.settle_picture(action, decided_by, wanted, payload.message)
+    action, decided_by = intent_router.settle_picture(action, decided_by, wanted, payload.message,
+                                                      allowed)
     decision = {"action": action, "decided_by": decided_by}
     if category is None:
         return decision
