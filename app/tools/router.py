@@ -47,14 +47,16 @@ PHOTOS - asks to be SHOWN something that really exists: a product, a brand, a bu
          exist. Asking to see something mentioned earlier in the conversation - "show me the ones
          you suggested", "what does that one look like" - is PHOTOS.
 EDIT   - asks for the attached picture to be changed as a picture: "make it night", "remove the car",
-         "add a hat", "make it look like a painting".
+         "add a hat", "make it look like a painting". Light and colour are EDIT too: brighter,
+         darker, more light on part of it, warmer, more contrast, more vivid.
 CLEAN  - asks for the quality of a photograph to be improved, with nothing in it changed: noise or
          grain removed, haze or mist cleared, softness sharpened, or made good enough to crop into
          or enlarge. "Make it sharper", "it looks hazy", "too grainy" are all CLEAN. If the scene
          itself would look different afterwards - the weather, the season, the time of day, the
          style, anything added or taken away - it is EDIT, not CLEAN.
 BLUR   - asks for the background of a photograph to be blurred, or for the subject to stand out
-         from it: shallower depth of field than the camera gave.
+         from it: shallower depth of field than the camera gave. Only when the words ask for blur,
+         bokeh or depth of field; any other change to a photograph is not BLUR.
 MAP    - asks about somewhere on the earth: finding a place, what is at a coordinate, getting
          from one place to another, how far or how long a journey is, or what of some kind is
          nearby or along the way. Wanting to go somewhere is MAP even when it is phrased as a
@@ -92,6 +94,9 @@ Examples:
 "make it look like winter" -> EDIT
 "add fog to this picture" -> EDIT
 "blur the background so the bird stands out" -> BLUR
+"brighten the light in the road of this photo" -> EDIT
+"make it brighter" -> EDIT
+"darken the sky a little" -> EDIT
 "where is Dhaka University" -> MAP
 "route from Gulshan to the airport" -> MAP
 "find petrol stations along the way to Chittagong" -> MAP
@@ -170,7 +175,9 @@ CLEAN_WORDS = re.compile(
     r"crop into|zoom into|enlarge|upscale|restore)\b", re.I)
 BLUR_WORDS = re.compile(
     r"\b(bokeh|background blur|blur the background|depth of field|dof|stand out from|"
-    r"separate\w* from the background|portrait mode)\b", re.I)
+    r"separate\w* from the background|portrait mode)\b"
+    # "make the background blurry", "blur everything behind her"
+    r"|\bblur\w*\b[^.?!]{0,30}\b(background|behind)\b|\b(background|behind)\b[^.?!]{0,30}\bblur\w*", re.I)
 BACKDROP_WORDS = re.compile(
     r"\bpassport\b|\bvisa photo\w*|\bid photo\b|"
     # a colour named next to the background, either way round: "white background", "background to blue"
@@ -196,7 +203,11 @@ def is_enabled():
 
 
 def candidates(tools, has_images):
-    """The actions the user's toggles allow for this message."""
+    """The actions the user's toggles allow for this message.
+
+    Background blur can be switched off on its own ("photo_blur": False), and then it is not a
+    choice at all - the one way to be sure a photograph never comes back blurred.
+    """
     allowed = [CHAT]
     if tools.get("maps") and not has_images:
         allowed.append(MAP)
@@ -204,8 +215,24 @@ def candidates(tools, has_images):
     if tools.get("web_search") and not has_images:
         allowed += [SEARCH, PHOTOS]     # finding a photograph is a web search with a different eye
     if tools.get("image_generation"):
-        allowed += [EDIT, CLEAN, BLUR, BACKDROP] if has_images else [IMAGE]
+        if has_images:
+            allowed += [EDIT, CLEAN] + ([BLUR] if tools.get("photo_blur", True) else []) + [BACKDROP]
+        else:
+            allowed.append(IMAGE)
     return allowed
+
+
+# The three photograph tools each do one fixed thing, whatever the sentence says: CLEAN takes noise
+# off, BLUR blurs by distance, BACKDROP puts a plain colour behind a person. Asked to "brighten the
+# light in the road", the small model answered BLUR, and the photograph came back with its background
+# blurred and the road no brighter. So one of them is only believed when the words ask for what it
+# does; anything else that changes a photograph goes to the editor, which follows the instruction.
+NAMED_BY = {CLEAN: CLEAN_WORDS, BLUR: BLUR_WORDS, BACKDROP: BACKDROP_WORDS}
+
+
+def _named(action, text):
+    words = NAMED_BY.get(action)
+    return words is None or bool(words.search(text or ""))
 
 
 # Putting a picture in front of somebody is not asking them to redraw it. "Here is what I found
@@ -469,6 +496,13 @@ def settle_action(answered, message, allowed, has_images):
     # only put it forward and ask for no change to it, reading it is the answer
     if answered in (EDIT, CLEAN, BLUR, BACKDROP) and has_images and _only_showing(message):
         return CHAT, "keywords"
+    # A fixed-purpose photograph tool the words never asked for: the words decide instead, and when
+    # they name no tool of their own, the editor takes it, because it does what it is told
+    if answered in NAMED_BY and not _named(answered, message):
+        by_words = by_keywords(message, allowed, has_images)
+        if by_words in (EDIT, CLEAN, BLUR, BACKDROP):
+            return by_words, "keywords"
+        return (EDIT if EDIT in allowed else CHAT), "keywords"
     if answered and answered != CHAT:
         return answered, "model"
     if MAP in allowed and not has_images and MAP_WORDS.search(message or ""):

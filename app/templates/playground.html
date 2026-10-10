@@ -439,9 +439,11 @@ a.cite{font-size:.75em;vertical-align:super;text-decoration:none;padding:0 .1rem
             <span class="inline" id="sizeRow" hidden>Shape
               <select id="imageSize"></select>
             </span>
-            <span class="inline" id="blurRow" hidden title="How much the background is blurred">Blur
+            <span class="inline" id="blurRow" hidden
+                  title="Off: a photograph is never given a blurred background, whatever the words say">
+              <label><input type="checkbox" id="blurAllowed"> Background blur</label>
               <input type="range" id="blurStrength" min="0.2" max="3" step="0.1" value="1"
-                     style="width:5rem">
+                     title="How much the background is blurred" style="width:5rem">
             </span>
             <span class="inline" id="backdropRow" hidden
                   title="The colour to put behind the person, for a passport or visa photo">Backdrop
@@ -2419,7 +2421,7 @@ async function decideAction(text, hasImages){
   try{
     const decision = await api('/chat/route', {method: 'POST', headers: JSON_HEADERS, body: JSON.stringify({
       message: text, has_images: hasImages, web_search: searchOn, image_generation: imageMode(),
-      maps: tools.maps && caps.maps,
+      maps: tools.maps && caps.maps, photo_blur: blurAllowed(),
       choose_model: choosing(), current_model: chosenModel,
       history: history.slice(-4).map(h => ({role: h.role, content: h.content}))})});
     if(decision.model) chosenModel = decision.model;
@@ -2429,6 +2431,17 @@ async function decideAction(text, hasImages){
     return {action: imageMode() && !searchOn ? (hasImages ? 'edit' : 'image') : 'chat', decided_by: 'toggles'};
   }finally{ setDeciding(false); }
 }
+
+// Background blur, allowed or not. Kept in this browser like the tool chips; on unless switched off.
+const blurBox = document.getElementById('blurAllowed');
+function blurAllowed(){ return blurBox.checked; }
+function syncBlur(){ document.getElementById('blurStrength').disabled = !blurBox.checked; }
+try{ blurBox.checked = localStorage.getItem('pg.photoBlur') !== 'off'; }catch(e){ blurBox.checked = true; }
+syncBlur();
+blurBox.addEventListener('change', () => {
+  try{ localStorage.setItem('pg.photoBlur', blurBox.checked ? 'on' : 'off'); }catch(e){}
+  syncBlur();
+});
 
 // An empty answer means the sentence decides the colour, which is usually what was typed anyway
 function chosenBackdrop(){
