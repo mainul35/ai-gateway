@@ -183,6 +183,8 @@ LOOK_CHANGE = re.compile(
     r"|\b(increase|decrease|reduce|boost|raise|lower|adjust|lift)\w*\s+(the\s+|its\s+)?"
     r"(brightness|contrast|saturation|exposure|white balance|warmth|vibrance|shadows|highlights)\b"
     r"|\b(brighten|darken|lighten|desaturate|colou?ri[sz]e)\b", re.I)
+SHARPEN_WORDS = re.compile(r"\b(sharp\w*|crisp\w*|denois\w*|de-noise|noise|noisy|grain\w*|"
+                           r"clean(ing)? up|clear(er)? up|in focus|unblur\w*|deblur\w*)\b", re.I)
 # "Can you make it grayscale?" ends in a question mark and is a request all the same
 POLITE_ASK = re.compile(r"^\s*(please\b|(can|could|would|will) you\b)", re.I)
 EDIT_WORDS = re.compile(
@@ -302,6 +304,13 @@ def by_keywords(message, allowed, has_images):
         return BACKDROP
     if MAP in allowed and not has_images and MAP_WORDS.search(text):
         return MAP
+    # Before CLEAN, whose words include "blurry": "make the background blurry" asks for blur, and
+    # clean-up would sharpen it instead. With blur switched off it is an ordinary edit.
+    if has_images and BLUR_WORDS.search(text) and not SHARPEN_WORDS.search(text):
+        if BLUR in allowed:
+            return BLUR
+        if EDIT in allowed:
+            return EDIT
     if has_images and CLEAN in allowed and CLEAN_WORDS.search(text):
         return CLEAN
     if has_images and BLUR in allowed and BLUR_WORDS.search(text):
@@ -388,16 +397,34 @@ def read_picture_answer(text):
     return None
 
 
-def settle_picture(action, by, wanted, message):
-    """Reading beats changing when the model says the picture was given to be looked at.
+# An instruction about the picture, by its shape: it opens with a verb that changes something, or
+# asks politely. "Fix" is left out on purpose - "fix this error" under a screenshot is about code.
+INSTRUCTION = re.compile(
+    r"^\s*(please\s+)?(make|turn|put|place|change|replace|remove|delete|erase|add|give|let|set|move|"
+    r"convert|transform|swap|edit|brighten|darken|lighten|crop|apply|recolou?r|repaint)\b", re.I)
 
-    Only ever in that direction. The two wrong answers are not equal: reading a picture that was
-    meant to be edited wastes a sentence, and editing a picture that was meant to be read spends a
-    minute of GPU and hands back a fabricated screenshot in place of the evidence.
+
+def settle_picture(action, by, wanted, message, allowed=(CHAT, EDIT, CLEAN, BACKDROP)):
+    """The read-or-change question, asked on its own, settles what the seven-way choice got wrong.
+
+    Reading beats changing when the model says the picture was given to be looked at: editing a
+    picture meant to be read spends a minute of GPU and hands back a fabricated screenshot in place
+    of the evidence. So that direction needs only the model's word.
+
+    The other direction needs more. "Make the kid stand on a beach with the sea behind him" went to
+    chat after a few turns about the same photo, and the chat model, unable to draw, answered with a
+    made-up tool call. Changing is believed over CHAT when the separate question says CHANGE and the
+    words are shaped like an instruction, and nothing in them only shows the picture.
     """
+    text = message or ""
+    if wanted == CHANGE and action == CHAT and EDIT in allowed \
+            and (INSTRUCTION.search(text) or POLITE_ASK.search(text)) and not _only_showing(text):
+        by_words = by_keywords(text, list(allowed), True)
+        return (by_words if by_words in (EDIT, CLEAN, BLUR, BACKDROP) else EDIT), \
+            settings.router_model() or "keywords"
     if wanted is None or action not in (EDIT, CLEAN, BLUR, BACKDROP):
         return action, by
-    if wanted == READ and not _asks_for_a_change(message or ""):
+    if wanted == READ and not _asks_for_a_change(text):
         return CHAT, settings.router_model() or "keywords"
     return action, by
 
