@@ -87,6 +87,8 @@ Examples:
 "show me a video of a Shinkansen leaving Tokyo station" -> PHOTOS
 "can I see the actual product?" -> PHOTOS
 "make it night with northern lights" -> EDIT
+"Make the kid standing in a beach, and sea is behind him" -> EDIT
+"put her in front of the Eiffel tower" -> EDIT
 "remove the noise from this photo" -> CLEAN
 "too grainy, clean it up so I can crop in" -> CLEAN
 "the tower looks hazy, make it sharper" -> CLEAN
@@ -342,8 +344,8 @@ READ   - the picture is there to be looked at. Evidence, a screenshot of a probl
          what is in it, point at part of it, ask a question about it, or simply put it forward
          with no request at all.
 CHANGE - the message asks for the picture itself to come back different: something added, removed
-         or altered in it, the background replaced or recoloured, the quality improved, the
-         background blurred.
+         or altered in it, a person or thing in it put somewhere else or dressed differently, the
+         background replaced or recoloured, the quality improved, the background blurred.
 
 The test is whether words would satisfy them. If what they want back is an answer, it is READ.
 Only if what they want back is a new picture is it CHANGE. A picture with no request attached to
@@ -359,6 +361,10 @@ Examples:
 "is this the right setting?" -> READ
 "make it night with northern lights" -> CHANGE
 "remove the car" -> CHANGE
+"Make the kid standing in a beach, and sea is behind him" -> CHANGE
+"put her in front of the Eiffel tower" -> CHANGE
+"make him wear a red jacket" -> CHANGE
+"what is the kid holding?" -> READ
 "white background for my passport photo" -> CHANGE
 "too grainy, clean it up" -> CHANGE
 "blur the background so the bird stands out" -> CHANGE
@@ -399,9 +405,22 @@ def read_picture_answer(text):
 
 # An instruction about the picture, by its shape: it opens with a verb that changes something, or
 # asks politely. "Fix" is left out on purpose - "fix this error" under a screenshot is about code.
+# Words about what a screenshot of text says, rather than about a picture: the settings, code and
+# documents people photograph or capture to ask about
+# documents people photograph or capture to ask about. Only words that mean nothing in a photograph:
+# "field", "line" or "row" would take "put him in a field" away from the editor.
+ABOUT_TEXT = re.compile(
+    r"\b(config\w*|settings?|port (number|\d+|to \d+)|source code|code|function|method|variable|"
+    r"parameter|query|command|registry|stack ?trace|log file|property|properties|env(ironment)? var\w*|"
+    r"error (line|message)s?|log (line|entry|entries|output)s?)\b"
+    r"|\.(ya?ml|json|xml|properties|ini|conf|toml|py|java|js|ts|sql|sh)\b", re.I)
+
+
+# "Make sure", "let me know", "give me the steps", "set the port", "apply this fix", "edit this file"
+# are said about screenshots of code too, so only verbs that change a picture count.
 INSTRUCTION = re.compile(
-    r"^\s*(please\s+)?(make|turn|put|place|change|replace|remove|delete|erase|add|give|let|set|move|"
-    r"convert|transform|swap|edit|brighten|darken|lighten|crop|apply|recolou?r|repaint)\b", re.I)
+    r"^\s*(please\s+)?(make(?!\s+sure)|turn|put|place|change|replace|remove|delete|erase|add|move|"
+    r"convert|transform|swap|brighten|darken|lighten|crop|recolou?r|repaint)\b", re.I)
 
 
 def settle_picture(action, by, wanted, message, allowed=(CHAT, EDIT, CLEAN, BACKDROP)):
@@ -417,6 +436,11 @@ def settle_picture(action, by, wanted, message, allowed=(CHAT, EDIT, CLEAN, BACK
     words are shaped like an instruction, and nothing in them only shows the picture.
     """
     text = message or ""
+    # "Change the port to 8080 in this config" uses an edit word about a screenshot of text. Both
+    # router answers called it a change; the change wanted is to the configuration, and redrawing
+    # the screenshot answers nothing. Words that only mean something on a screen keep it chat.
+    if action in (EDIT, CLEAN, BLUR, BACKDROP) and ABOUT_TEXT.search(text):
+        return CHAT, "keywords"
     if wanted == CHANGE and action == CHAT and EDIT in allowed \
             and (INSTRUCTION.search(text) or POLITE_ASK.search(text)) and not _only_showing(text):
         by_words = by_keywords(text, list(allowed), True)
@@ -424,7 +448,9 @@ def settle_picture(action, by, wanted, message, allowed=(CHAT, EDIT, CLEAN, BACK
             settings.router_model() or "keywords"
     if wanted is None or action not in (EDIT, CLEAN, BLUR, BACKDROP):
         return action, by
-    if wanted == READ and not _asks_for_a_change(text):
+    # And READ alone does not overrule a sentence shaped like an instruction: after a few turns about
+    # the same photo it said READ for "Make the kid stand on a beach" while the main answer was EDIT
+    if wanted == READ and not _asks_for_a_change(text) and not INSTRUCTION.search(text):
         return CHAT, settings.router_model() or "keywords"
     return action, by
 
@@ -453,6 +479,19 @@ def clean_category(text, has_images=False):
         if word in CATEGORIES:
             return "vision" if has_images and word == "vision" else word
     return None
+
+
+# A chat model asked for a picture it cannot make sometimes answers with a tool call of its own
+# invention: { "action": "img_gen", "action_input": "..." }. Left in the history, the router reads
+# it as how this conversation goes - after one, the same request went to chat again every time.
+INVENTED_CALL = re.compile(r'^\s*(```\w*\s*)?\{\s*"action"\s*:', re.S)
+
+
+def plain_history(history):
+    """The conversation as the router should see it, with invented tool calls said in words."""
+    return [{**m, "content": "(a picture was asked for, and none was made)"}
+            if m.get("role") == "assistant" and INVENTED_CALL.match(m.get("content") or "") else m
+            for m in history]
 
 
 def settle_category(answered, message, has_images=False):
