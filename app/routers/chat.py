@@ -25,7 +25,8 @@ from app.models import ChatFile, Conversation, ConversationMessage, MemoryEntry,
 from app.routers.openai_v1 import PROXY_PATHS, forward
 from app.tools import (agent, chooser, documents, image_prompt, images, jobs, map_plan,
                         map_web, maps, markdown, mcp_client, media, memory as memory_tool,
-                        photo, places, portrait, router as intent_router, self_tools, web_search)
+                        photo, places, portrait, router as intent_router, self_tools, turn_facts,
+                        web_search)
 
 log = logging.getLogger("playground")
 
@@ -579,6 +580,16 @@ async def complete(payload: CompleteIn, principal: Principal = Depends(authentic
         # After the user's own system prompt, so theirs still comes first
         messages.insert(1 if messages and messages[0]["role"] == "system" else 0,
                         {"role": "system", "content": remembered})
+    if payload.conversation_id is not None:
+        # What made the last few answers - a picture's model, a search, a map - read from what was
+        # saved with them, so a question about it is answered from the record rather than guessed
+        recent = (await session.execute(
+            select(ConversationMessage).where(ConversationMessage.conversation_id == payload.conversation_id)
+            .order_by(ConversationMessage.id.desc()).limit(4 * turn_facts.RECENT))).scalars().all()
+        facts = turn_facts.context_block(list(reversed(recent)))
+        if facts:
+            messages.insert(1 if messages and messages[0]["role"] == "system" else 0,
+                            {"role": "system", "content": facts})
 
     body = {"model": payload.model, "messages": messages, "stream": True}
     if payload.temperature is not None:
@@ -1127,7 +1138,9 @@ async def edit_photo(payload: PhotoIn, principal: Principal = Depends(authentica
             seconds = round(time.monotonic() - started, 1)
             stored = await _save_result(db, user_id, payload.conversation_id, png,
                                         f"photo-{payload.action}.png", done,
-                                        {"source_file_id": payload.file_id}, {"total": seconds},
+                                        {"source_file_id": payload.file_id, "asked": payload.request,
+                                         "made_by": turn_facts.photo_maker(payload.action, done)},
+                                        {"total": seconds},
                                         answers_to=payload.answers_to)
             yield _event("image", file=_file_json(stored), action=payload.action,
                          did=done[:1].upper() + done[1:], saved=True, seconds=seconds)
@@ -1675,13 +1688,18 @@ async def generate_image(payload: ImageIn, principal: Principal = Depends(authen
                 job.cancel()  # the browser went away; generate() stops the job on the image server
         await usage_log.record(principal, settings.image_model_name(), "comfyui", endpoint, True, 200,
                                None, (time.monotonic() - started) * 1000)
+        # Recorded with the picture, so that "which model made this?" has a true answer later
+        engine = await images.edit_engine()
+        made_by = turn_facts.image_maker(engine, bool(sources),
+                                         bool(wording) and settings.fix_image_text() and engine == "qwen")
         async with session_factory()() as db:
             seconds = round(time.monotonic() - started, 1)
             stored = await _save_result(db, user_id, payload.conversation_id, png,
                                         f"image-{seed}.png", drawable,
                                         {"seed": seed, "size": payload.size,
                                          "asked": payload.prompt,
-                                         "source_file_id": payload.source_file_id},
+                                         "source_file_id": payload.source_file_id,
+                                         "made_by": made_by},
                                         {"total": seconds}, answers_to=payload.answers_to)
             yield _event("image", file=_file_json(stored), seed=seed, saved=True, seconds=seconds)
 
