@@ -1493,6 +1493,8 @@ class RouteIn(BaseModel):
     web_search: bool = False
     image_generation: bool = False
     maps: bool = False
+    # Off in the playground means a photograph is never given a blurred background, whatever is said
+    photo_blur: bool = True
     history: list[ChatMessageIn] = Field(default_factory=list)
     # The model the conversation is already using: it keeps the job when nothing scores better,
     # because swapping model reloads weights and throws away a warm cache
@@ -1514,6 +1516,9 @@ async def route(payload: RouteIn, principal: Principal = Depends(authenticate),
         "image_generation": (payload.image_generation and images.is_available()
                              and access.can_generate_images(principal)),
         "maps": payload.maps and settings.feature_enabled("maps"),
+        # Without the depth model the blur endpoint refuses, so it is no choice to offer either
+        "photo_blur": (payload.photo_blur and payload.has_images
+                       and await asyncio.to_thread(photo.is_depth_available)),
     }
     allowed = intent_router.candidates(tools, payload.has_images)
     history = [{"role": m.role, "content": m.content} for m in payload.history]
