@@ -97,6 +97,9 @@ Examples:
 "brighten the light in the road of this photo" -> EDIT
 "make it brighter" -> EDIT
 "darken the sky a little" -> EDIT
+"Make the photo grayscale" -> EDIT
+"turn this photo sepia" -> EDIT
+"increase the contrast" -> EDIT
 "where is Dhaka University" -> MAP
 "route from Gulshan to the airport" -> MAP
 "find petrol stations along the way to Chittagong" -> MAP
@@ -166,9 +169,26 @@ IMAGE_WORDS = re.compile(
     r"\b(image|picture|photo|photograph|drawing|painting|illustration|logo|icon|poster|wallpaper|"
     r"art|artwork|banner|cover|emblem|badge|avatar|sticker|mockup|thumbnail)\b"
     r"|^\s*(an? |the )?(image|picture|photo|drawing|painting|illustration|logo|poster|wallpaper) of\b", re.I)
+# Asking for how a picture looks to change: a verb asking for it, then a look. Both halves, because
+# either alone is too common in a message that only shows a picture - "here is a black and white
+# photo of my grandfather" names a look and asks for nothing, and "make it work" asks for something
+# that is not a look. "Make the photo grayscale" went to chat, and the chat model, unable to draw,
+# answered with a made-up tool call in JSON.
+LOOKS = (r"gr[ae]y ?scale|black (and|&) white|b ?& ?w|monochrome|sepia|vintage|retro|"
+         r"brighter|darker|lighter|warmer|cooler|vivid|vibrant|colou?rful|saturated|"
+         r"more contrast|less contrast|high contrast|hdr|"
+         r"(a |an )?(painting|cartoon|anime|sketch|watercolou?r|oil painting|pencil drawing)")
+LOOK_CHANGE = re.compile(
+    rf"\b(make|turn|convert|render|change)\b[^.?!]{{0,40}}\b({LOOKS})\b"
+    r"|\b(increase|decrease|reduce|boost|raise|lower|adjust|lift)\w*\s+(the\s+|its\s+)?"
+    r"(brightness|contrast|saturation|exposure|white balance|warmth|vibrance|shadows|highlights)\b"
+    r"|\b(brighten|darken|lighten|desaturate|colou?ri[sz]e)\b", re.I)
+# "Can you make it grayscale?" ends in a question mark and is a request all the same
+POLITE_ASK = re.compile(r"^\s*(please\b|(can|could|would|will) you\b)", re.I)
 EDIT_WORDS = re.compile(
     r"\b(make it|turn it|change|replace|remove|delete|erase|add|put|swap|recolou?r|repaint|crop|zoom|"
-    r"brighten|darken|blur)\b", re.I)
+    r"brighten|darken|blur)\b"
+    rf"|{LOOK_CHANGE.pattern}", re.I)
 CLEAN_WORDS = re.compile(
     r"\b(noise|noisy|grain|grainy|denoise|de-noise|speckl\w*|iso|clean(ing)? up|clean it up|"
     r"sharp\w*|crisp\w*|clarity|haz\w*|mist\w*|foggy|smog|milky|washed out|soft|blurry|"
@@ -333,6 +353,9 @@ Examples:
 "white background for my passport photo" -> CHANGE
 "too grainy, clean it up" -> CHANGE
 "blur the background so the bird stands out" -> CHANGE
+"Make the photo grayscale" -> CHANGE
+"brighten the street of the image" -> CHANGE
+"increase the contrast" -> CHANGE
 
 Answer with READ or CHANGE."""
 
@@ -496,6 +519,13 @@ def settle_action(answered, message, allowed, has_images):
     # only put it forward and ask for no change to it, reading it is the answer
     if answered in (EDIT, CLEAN, BLUR, BACKDROP) and has_images and _only_showing(message):
         return CHAT, "keywords"
+    # The other way round: with a picture attached, the words plainly ask for it to look different,
+    # and the model said CHAT. Earlier turns about the same photo were enough to tip it there; the
+    # chat model cannot change a picture, so the answer would be words about a picture never made.
+    if answered == CHAT and has_images and EDIT in allowed and LOOK_CHANGE.search(message or "") \
+            and (not (message or "").rstrip().endswith("?") or POLITE_ASK.search(message or "")):
+        by_words = by_keywords(message, allowed, has_images)
+        return (by_words if by_words in (EDIT, CLEAN, BLUR, BACKDROP) else EDIT), "keywords"
     # A fixed-purpose photograph tool the words never asked for: the words decide instead, and when
     # they name no tool of their own, the editor takes it, because it does what it is told
     if answered in NAMED_BY and not _named(answered, message):
