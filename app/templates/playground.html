@@ -333,7 +333,10 @@ a.cite{font-size:.75em;vertical-align:super;text-decoration:none;padding:0 .1rem
   .tools{gap:.35rem}
   .foot{flex-wrap:wrap;align-items:flex-start;gap:.2rem .75rem;min-height:0}
   .foot .picker{flex:1 0 100%;order:2;justify-content:flex-start;min-width:0}
-  .foot .picker select{max-width:100%;overflow:hidden;text-overflow:ellipsis}
+  /* The model name gives way, not the thinking switch beside it: with the name allowed the whole
+     row, the switch's words were cut off and a bare checkbox was left with nothing to say what it is */
+  .foot .picker select{flex:1 1 auto;min-width:0;max-width:100%;overflow:hidden;text-overflow:ellipsis}
+  .foot .picker .think-label{flex:none;overflow:visible}
 }
 @media (prefers-reduced-motion: reduce){
   .side,.scrim{transition:none}
@@ -506,8 +509,9 @@ a.cite{font-size:.75em;vertical-align:super;text-decoration:none;padding:0 .1rem
           </span>
           <span class="picker">
             <select id="model" title="Model"></select>
-            <label id="thinkingRow" class="inline" hidden title="Slower, better reasoning">
-              <input type="checkbox" id="thinking" style="width:auto">think
+            <label id="thinkingRow" class="inline think-label" hidden
+                   title="Thinking mode: the model reasons step by step before answering. Slower, and better on hard questions.">
+              <input type="checkbox" id="thinking" style="width:auto"><span>Thinking mode</span>
             </label>
           </span>
         </div>
