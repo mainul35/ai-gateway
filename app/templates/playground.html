@@ -353,15 +353,16 @@ a.cite{font-size:.75em;vertical-align:super;text-decoration:none;padding:0 .1rem
 /* --- reading mode ---------------------------------------------------------------------------
    On a phone the site menu, the title bar and the message box together took more than half the
    screen, and the answer was read through the slot left between them. Reading mode hides the menu
-   and the message box; the title bar stays, slim, because it holds the way back. Only offered
-   where the screen is short or narrow - on a desktop there is room for everything. */
+   and the message box; the title bar stays, slim, because it holds the way back. Only offered on
+   a phone or a narrow window, and on a phone turned sideways (short, and touch only). Height alone
+   is not enough: a desktop browser window under 900px tall was offered it, and has room for all. */
 /* A thumb-sized target: at 20px it was missed more often than hit */
 .reader-btn{display:none;margin-left:auto;font-size:1.15rem;line-height:1;min-width:2.6rem;min-height:2.4rem;
             align-items:center;justify-content:center;border-radius:8px}
 .reader-btn[aria-pressed="true"]{color:var(--primary)}
 .reader-write{position:fixed;right:1rem;bottom:calc(1rem + env(safe-area-inset-bottom));z-index:15;
               box-shadow:0 .4rem 1.2rem rgba(0,0,0,.45)}
-@media (max-height: 900px), (max-width: 860px){
+@media (max-width: 860px), (max-height: 600px) and (pointer: coarse){
   .reader-btn{display:inline-flex}
   .topbar .column{display:flex;align-items:center;gap:.55rem}
   .chatTitle{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
@@ -1280,7 +1281,7 @@ document.getElementById('newChat').addEventListener('click', () => { if(!control
 // brings everything back without anyone having to find the switch.
 const readerToggle = document.getElementById('readerToggle');
 const readerWrite = document.getElementById('readerWrite');
-const smallScreen = matchMedia('(max-height: 900px), (max-width: 860px)');
+const smallScreen = matchMedia('(max-width: 860px), (max-height: 600px) and (pointer: coarse)');
 let reading = false;
 try{ reading = localStorage.getItem('pg.reading') === 'on'; }catch(e){}
 
