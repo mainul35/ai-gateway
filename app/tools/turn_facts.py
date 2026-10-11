@@ -76,6 +76,13 @@ def _describe(message):
                 f"recorded for this one){took}. Asked for: \"{asked[:200]}\"")
     if filed.get("map"):
         return "a map, from the gateway's maps tool"
+    subs = filed.get("subtitles")
+    if subs:
+        language = "translated to English" if subs.get("translated") else f"in language '{subs.get('language')}'"
+        return (f"subtitles of the YouTube video \"{subs.get('title')}\" ({subs.get('url')}), {language}, "
+                f"transcribed from the video's sound by {subs.get('model', 'Whisper')} on this gateway's own "
+                f"GPU - not taken from YouTube's captions - {subs.get('segments')} lines{took}. The transcript "
+                f"is that answer's text, above")
     sources = filed.get("sources") or []
     words = f"a written answer by the model {message.model}" if message.model else "a written answer"
     if sources:

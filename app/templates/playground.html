@@ -187,6 +187,15 @@ a.cite{font-size:.75em;vertical-align:super;text-decoration:none;padding:0 .1rem
 .pending .sending .track div{height:100%;width:0;background:var(--primary);transition:width .15s}
 /* Leaves room in the transcript for the question above it and the caption below */
 .generated img{max-width:100%;max-height:min(45vh,26rem);border-radius:8px;display:block;cursor:zoom-in}
+/* Subtitles: a long transcript scrolls in its own box, so the conversation around it stays reachable */
+.subs .subs-head{margin-bottom:.5rem;font-size:.9rem}
+.subs .subs-head a{font-weight:600}
+.subs .subs-lines{max-height:min(55vh,32rem);overflow-y:auto;border:1px solid var(--border);border-radius:8px;
+                  padding:.5rem .75rem;background:var(--input);font-size:.92rem;line-height:1.5}
+.subs .subs-lines > div{display:flex;gap:.65rem;padding:.12rem 0}
+.subs .subs-time{flex:none;min-width:3.2rem;color:var(--muted);font-variant-numeric:tabular-nums;text-decoration:none}
+.subs .subs-time:hover{color:var(--primary)}
+.subs .actions{margin-top:.6rem;display:flex;flex-wrap:wrap;gap:.4rem}
 /* The description can run to sixty words; two lines of it is enough to recognise the picture by */
 .generated .caption{font-size:.82rem;color:var(--muted);margin-top:.4rem;cursor:pointer;
                     display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
@@ -1145,6 +1154,7 @@ function fillTranscript(messages){
       else if(extra.map) renderMap(box, extra.map);
       else if(extra.media) renderMedia(box, extra.media);
       else if(extra.generated) renderGenerated(box, extra.generated, m.stats);
+      else if(extra.subtitles) renderSubtitles(box, extra.subtitles, m.content, m.stats);
       else renderAssistant(box, m.content, m.reasoning, m.stats, extra.sources, m.html);
       box._text = m.content;
       const earlier = turn ? answered.find(a => a.turn === turn) : null;
@@ -1512,7 +1522,8 @@ async function resendTurn(box){
 
 const ACTION_LABELS = {chat: 'answered directly', search: 'searched the web',
                        image: 'created an image', edit: 'edited the image',
-                       map: 'looked it up on the map', photos: 'found real pictures of it'};
+                       map: 'looked it up on the map', photos: 'found real pictures of it',
+                       subtitles: 'wrote down what the video says'};
 
 const CATEGORY_LABELS = {code: 'a coding question', vision: 'a question about the picture',
                          reasoning: 'something to work out', long: 'a long read',
@@ -2555,6 +2566,10 @@ async function sendTurn(redo = null){
   const fix = (tools.maps && caps.maps && needsMyLocation(text, previous ? previous.content : ''))
               ? myLocation() : Promise.resolve(null);
 
+  // A YouTube link asking for its words needs no model to decide it: the link and the words say it
+  const subs = !attachedPictures().length ? subtitleRequest(text) : null;
+  if(subs) return sendSubtitles(text, subs, asking);
+
   const decision = await decideAction(text, attachedPictures().length > 0);
   // The agent is a choice, not a guess: switched on, it takes the turn
   if(tools.agent && caps.agent) return sendAgent(text, asking);
@@ -2710,6 +2725,141 @@ function failedTurn(box, trouble){
 }
 
 // A photograph, not a drawing: noise taken off, or the background blurred. Never both at once.
+// --- subtitles of a YouTube video ---------------------------------------------------------------
+// Transcribed from the video's own sound by Whisper on the gateway's GPU, not taken from YouTube.
+const YOUTUBE_LINK = /https?:\/\/(?:www\.|m\.|music\.)?(?:youtube\.com\/(?:watch\?(?:[^\s#]*&)?v=|shorts\/|live\/|embed\/)|youtu\.be\/)([A-Za-z0-9_-]{11})\S*/i;
+const WANTS_WORDS = /\b(subtitles?|sub-?titles?|captions?|cc|transcri\w*|srt|vtt|what (does|did|do) (he|she|they|it) say|written down|in words)\b/i;
+const WANTS_ENGLISH = /\b(english|translat\w*)\b/i;
+
+/* {translate} when the message asks for a video's subtitles, else null. A link on its own counts:
+   pasting a video with nothing else to say is asking what is in it, and the words are that. */
+function subtitleRequest(text){
+  if(!caps.subtitles) return null;
+  const link = YOUTUBE_LINK.exec(text || '');
+  if(!link) return null;
+  const rest = text.replace(link[0], '').trim();
+  if(rest && !WANTS_WORDS.test(rest)) return null;
+  return {action: 'subtitles', translate: WANTS_ENGLISH.test(rest), decided_by: 'keywords'};
+}
+
+async function sendSubtitles(text, decision, again){
+  showError('');
+  try{
+    await ensureConversation(text, currentModel());
+  }catch(e){
+    showError('Could not save the conversation: ' + errorText(e));
+    return;
+  }
+  if(!again){ promptBox.value = ''; fitComposer(); history.push({role: 'user', content: text, images: []}); }
+  const asked = await askedNow(text, [], [], null, again);
+  const box = answerBox(again ? again.messageId : asked?._messageId, 'Subtitles');
+  noteDecision(box, decision);
+  setStatus(box, 'Starting');
+  let result = null, trouble = '';
+  controller = new AbortController();
+  busy(true);
+  try{
+    const response = await postStream('/chat/subtitles', {
+      message: text, translate: !!decision.translate, conversation_id: currentId,
+      answers_to: box.dataset.turn ? Number(box.dataset.turn) : null});
+    await readEvents(response, chunk => {
+      if(chunk.error){ trouble = chunk.error.message; return; }
+      const event = chunk.gateway;
+      if(!event) return;
+      if(event.type === 'progress'){
+        setStatus(box, event.fraction != null ? `${event.stage} · ${Math.round(event.fraction * 100)}%` : event.stage,
+                  event.fraction);
+      }else if(event.type === 'subtitles'){
+        result = event;
+      }
+    });
+  }catch(e){
+    if(e.name !== 'AbortError') trouble = errorText(e);
+  }finally{
+    controller = null;
+    busy(false);
+  }
+  setStatus(box, null);
+  if(!result){
+    if(trouble){ failedTurn(box, trouble); loadConversations(); return; }
+    box.querySelector('.body').textContent =
+      'The connection dropped before the subtitles came back. If they finished, they are saved in '
+      + 'this conversation: open it again from the list to see.';
+    loadConversations();
+    return;
+  }
+  renderSubtitles(box, result, result.text, {total: result.seconds});
+  revealFrom(box);
+  // Saved by the server; this keeps the page's own copy of the conversation in step with it
+  recordAnswer(box, result.text, again ? again.replaceAt : null);
+  if(memory.enabled) setTimeout(loadMemory, 4000);
+  loadConversations();
+}
+
+/* The transcript, with each line's time a link into the video at that moment, and the files.
+   `text` is the saved answer: a heading line, a blank line, then "[m:ss] words" per line. */
+function renderSubtitles(box, facts, text, stats){
+  box.querySelector('.who').textContent = 'Subtitles';
+  const body = box.querySelector('.body');
+  body.className = 'body subs';
+  const language = facts.translated ? `translated to English` : `in ${languageName(facts.language)}`;
+  const minutes = facts.duration ? ` · ${Math.floor(facts.duration / 60)}:${String(facts.duration % 60).padStart(2, '0')}` : '';
+  body.innerHTML = `
+    <div class="subs-head"><a target="_blank" rel="noopener"></a><span class="muted"></span></div>
+    <div class="subs-lines"></div>
+    <div class="actions">
+      <a class="btn btn-sm btn-secondary" style="text-decoration:none" data-file="srt">Download .srt</a>
+      <a class="btn btn-sm btn-secondary" style="text-decoration:none" data-file="vtt">Download .vtt</a>
+      <button class="btn btn-sm btn-secondary" data-copy-subs>Copy text</button>
+      <button class="btn btn-sm btn-secondary" data-english hidden>Translate to English</button>
+    </div>`;
+  const title = body.querySelector('.subs-head a');
+  title.textContent = facts.title || 'YouTube video';
+  title.href = facts.url;
+  body.querySelector('.subs-head .muted').textContent =
+    ` · ${language}${minutes} · ${facts.segments} lines · transcribed by ${facts.model || 'Whisper'}`;
+  const lines = body.querySelector('.subs-lines');
+  const saidLines = [];     // "[m:ss] words", as the copy is given
+  for(const line of (text || '').split('\n')){
+    const found = /^\[(\d+(?::\d\d){1,2})\] (.*)$/.exec(line);
+    if(!found) continue;
+    const row = document.createElement('div');
+    const at = document.createElement('a');
+    at.className = 'subs-time';
+    at.target = '_blank'; at.rel = 'noopener';
+    at.textContent = found[1];
+    at.href = `${facts.url}&t=${found[1].split(':').reduce((total, part) => total * 60 + Number(part), 0)}s`;
+    const words = document.createElement('span');
+    words.textContent = found[2];
+    row.append(at, words);
+    lines.appendChild(row);
+    saidLines.push(line);
+  }
+  for(const kind of ['srt', 'vtt']){
+    const link = body.querySelector(`[data-file="${kind}"]`);
+    const id = facts.files?.[kind];
+    if(!id){ link.remove(); continue; }
+    link.href = fileUrl(id);
+    link.download = `${(facts.title || 'subtitles').replace(/[^\w.-]+/g, '-').slice(0, 80)}${facts.translated ? '-en' : ''}.${kind}`;
+  }
+  body.querySelector('[data-copy-subs]').addEventListener('click', e => {
+    navigator.clipboard?.writeText(saidLines.join('\n'));
+    e.target.textContent = 'Copied';
+    setTimeout(() => { e.target.textContent = 'Copy text'; }, 1500);
+  });
+  const english = body.querySelector('[data-english]');
+  english.hidden = facts.translated || facts.language === 'en';
+  english.addEventListener('click', () => {
+    if(controller) return;
+    sendSubtitles(`Subtitles in English: ${facts.url}`, {action: 'subtitles', translate: true, decided_by: 'you'});
+  });
+  if(stats?.total != null) appendStats(box, `${stats.total}s`);
+}
+
+function languageName(code){
+  try{ return new Intl.DisplayNames(['en'], {type: 'language'}).of(code) || code; }catch(e){ return code || 'its own language'; }
+}
+
 async function sendPhoto(text, decision, again){
   const source = pending[0];
   if(!source){ showError('Attach a photo first.'); return; }
