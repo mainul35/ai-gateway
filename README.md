@@ -345,3 +345,31 @@ Override the target with `DEPLOY_HOST`, `DEPLOY_DIR` and `DEPLOY_PUBLIC_URL`.
 
 On the server the gateway is kept running by cron (`bin/gateway-start.sh` at boot and every
 minute as a watchdog).
+
+## Sleeping when idle
+
+homelabai suspends itself after `IDLE_MINUTES` (30) with nothing to do, and wakes again when a
+request arrives through the [wake front](wake/README.md) on proxy-vm. Asleep it draws a few watts
+instead of 100+.
+
+"Nothing to do" is decided by `ops/idle-shutdown/idle-shutdown.sh`, run every 5 minutes by a systemd
+timer. Any of these keeps the machine up: `/run/stay-awake` exists, someone typed in an SSH session
+recently, the GPU, CPU or network is busy, or the gateway reports work. The gateway's answer comes
+from `GET /internal/activity` (loopback only, not through a proxy or tunnel): requests in flight, a
+request in the last 5 minutes, a coding task running or queued, a deploy being watched, a playground
+job, a llama.cpp request. That catches what GPU numbers miss, such as a coding task between two model
+calls. A task waiting for approval does not keep it awake; approving it later wakes it.
+
+```bash
+cd ops/idle-shutdown
+sudo install -m 755 idle-shutdown.sh /usr/local/sbin/idle-shutdown
+sudo install -m 644 idle-shutdown.conf /etc/default/idle-shutdown    # starts with DRY_RUN=1
+sudo install -m 644 idle-shutdown.service idle-shutdown.timer /etc/systemd/system/
+sudo systemctl daemon-reload && sudo systemctl enable --now idle-shutdown.timer
+journalctl -t idle-shutdown -f
+```
+
+After a night of `DRY_RUN: would suspend` lines at sensible times, set `DRY_RUN=0`. Before relying on
+suspend, check that `cat /sys/power/mem_sleep` lists `[deep]` (real suspend-to-RAM; `s2idle` draws far
+more) and that one manual `sudo systemctl suspend` comes back cleanly, GPU included. Set
+`ACTION=poweroff` to shut down instead.

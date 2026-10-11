@@ -8,3 +8,4 @@ logs/
 .cloudflared.env
 .cf-access.env
 .claude/
+wake/wake.env
