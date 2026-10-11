@@ -26,3 +26,9 @@ python-docx>=1.1
 openpyxl>=3.1
 # Speaks MCP to tool servers, published and hand-written alike
 mcp>=2.2
+# Subtitles for a YouTube video: yt-dlp fetches the sound, Whisper large-v3 writes it down on the GPU.
+# cuBLAS 12 is not installed on the homelab host (cuDNN 9 is), so it comes as a wheel and
+# app/tools/subtitles.py loads it before the first transcription.
+yt-dlp>=2026.8.19
+faster-whisper>=1.2.1
+nvidia-cublas-cu12>=12.4; sys_platform == "linux"

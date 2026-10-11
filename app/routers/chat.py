@@ -25,8 +25,8 @@ from app.models import ChatFile, Conversation, ConversationMessage, MemoryEntry,
 from app.routers.openai_v1 import PROXY_PATHS, forward
 from app.tools import (agent, chooser, documents, image_prompt, images, jobs, map_plan,
                         map_web, maps, markdown, mcp_client, media, memory as memory_tool,
-                        photo, places, portrait, router as intent_router, self_tools, turn_facts,
-                        web_search)
+                        photo, places, portrait, router as intent_router, self_tools, subtitles,
+                        turn_facts, web_search)
 
 log = logging.getLogger("playground")
 
@@ -241,6 +241,8 @@ async def capabilities(principal: Principal = Depends(authenticate)):
         "photo_clean": images.is_available(),
         "photo_blur": images.is_available() and photo.is_depth_available(),
         "photo_backdrop": images.is_available() and portrait.is_available(),
+        # A YouTube link's subtitles, transcribed from its sound on this server
+        "subtitles": subtitles.is_available(),
         "maps": settings.feature_enabled("maps"),
         # Whether there is anything to be agentic with: the feature on, and a tool server
         # that this host could actually run
@@ -1148,6 +1150,96 @@ async def edit_photo(payload: PhotoIn, principal: Principal = Depends(authentica
     if payload.conversation_id is not None:
         asked = (payload.request or payload.action).strip()[:120]
         job = jobs.start(user.id, payload.conversation_id, "photo", asked, stream())
+        return StreamingResponse(jobs.follow(job), media_type="text/event-stream",
+                                 headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+    return StreamingResponse(stream(), media_type="text/event-stream",
+                             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+
+class SubtitlesIn(BaseModel):
+    message: str = Field(min_length=1, max_length=2000)     # holds the YouTube link
+    translate: bool = False                                 # English, whatever the video speaks
+    conversation_id: int | None = None
+    answers_to: int | None = None
+
+
+@router.post("/subtitles")
+async def video_subtitles(payload: SubtitlesIn, principal: Principal = Depends(authenticate),
+                          session: AsyncSession = Depends(get_session)):
+    """Subtitles for a YouTube video, transcribed from its sound. Streams progress, then the result.
+
+    The transcript is saved as the answer's text, so the conversation can go on about the video -
+    summarise it, translate it, ask what was said - and the .srt and .vtt files are saved beside it.
+    """
+    user = _require_user(principal)
+    if not await asyncio.to_thread(subtitles.is_available):
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "Subtitles are not set up on this server")
+    video = subtitles.video_id(payload.message)
+    if not video:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "No YouTube link in the message")
+    if payload.conversation_id is not None:
+        await _owned(session, payload.conversation_id, user)
+    user_id = user.id
+
+    async def stream():
+        events = asyncio.Queue()
+
+        async def progress(stage, fraction):
+            await events.put(_event("progress", stage=stage, fraction=fraction))
+
+        started = time.monotonic()
+        job = asyncio.create_task(subtitles.subtitles(video, payload.translate, progress))
+        try:
+            while not job.done() or not events.empty():
+                getter = asyncio.create_task(events.get())
+                done, _ = await asyncio.wait({getter, job}, return_when=asyncio.FIRST_COMPLETED)
+                if getter in done:
+                    yield getter.result()
+                else:
+                    getter.cancel()
+            result = job.result()
+        except subtitles.SubtitleError as e:
+            await usage_log.record(principal, f"whisper-{subtitles.MODEL}", "whisper", "subtitles", True, 503,
+                                   None, (time.monotonic() - started) * 1000, str(e))
+            yield _error(str(e))
+            return
+        finally:
+            if not job.done():
+                job.cancel()
+        await usage_log.record(principal, f"whisper-{subtitles.MODEL}", "whisper", "subtitles", True, 200,
+                               None, (time.monotonic() - started) * 1000)
+
+        base = re.sub(r"[^\w.-]+", "-", result["title"]).strip("-")[:80] or video
+        suffix = "-en" if payload.translate else ""
+        async with session_factory()() as db:
+            files = []
+            for extension, mime, text in (("srt", "application/x-subrip", subtitles.srt(result["segments"])),
+                                          ("vtt", "text/vtt", subtitles.vtt(result["segments"]))):
+                stored = ChatFile(user_id=user_id, kind="subtitles", mime_type=mime,
+                                  name=f"{base}{suffix}.{extension}", prompt=None, data=text.encode())
+                db.add(stored)
+                files.append(stored)
+            await db.commit()
+            facts = {key: result[key] for key in ("title", "channel", "url", "duration", "language",
+                                                  "language_sure", "translated", "model", "seconds")}
+            facts.update(video=video, segments=len(result["segments"]),
+                         files={"srt": files[0].id, "vtt": files[1].id})
+            if payload.conversation_id is not None:
+                conversation = await db.get(Conversation, payload.conversation_id)
+                if conversation is not None and conversation.user_id == user_id:
+                    filed = {"subtitles": facts}
+                    if payload.answers_to is not None:
+                        filed["answers_to"] = payload.answers_to
+                    db.add(ConversationMessage(conversation_id=conversation.id, role="assistant",
+                                               content=subtitles.transcript(result),
+                                               stats=json.dumps({"total": result["seconds"]}),
+                                               attachments=json.dumps(filed)))
+                    conversation.updated_at = utcnow()
+                    await db.commit()
+        yield _event("subtitles", **facts, text=subtitles.transcript(result), saved=True)
+
+    if payload.conversation_id is not None:
+        job = jobs.start(user.id, payload.conversation_id, "subtitles", payload.message[:120], stream())
         return StreamingResponse(jobs.follow(job), media_type="text/event-stream",
                                  headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
     return StreamingResponse(stream(), media_type="text/event-stream",
