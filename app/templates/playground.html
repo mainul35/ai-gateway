@@ -338,6 +338,27 @@ a.cite{font-size:.75em;vertical-align:super;text-decoration:none;padding:0 .1rem
 @media (prefers-reduced-motion: reduce){
   .side,.scrim{transition:none}
 }
+/* --- reading mode ---------------------------------------------------------------------------
+   On a phone the site menu, the title bar and the message box together took more than half the
+   screen, and the answer was read through the slot left between them. Reading mode hides the menu
+   and the message box; the title bar stays, slim, because it holds the way back. Only offered
+   where the screen is short or narrow - on a desktop there is room for everything. */
+/* A thumb-sized target: at 20px it was missed more often than hit */
+.reader-btn{display:none;margin-left:auto;font-size:1.15rem;line-height:1;min-width:2.6rem;min-height:2.4rem;
+            align-items:center;justify-content:center;border-radius:8px}
+.reader-btn[aria-pressed="true"]{color:var(--primary)}
+.reader-write{position:fixed;right:1rem;bottom:calc(1rem + env(safe-area-inset-bottom));z-index:15;
+              box-shadow:0 .4rem 1.2rem rgba(0,0,0,.45)}
+@media (max-height: 900px), (max-width: 860px){
+  .reader-btn{display:inline-flex}
+  .topbar .column{display:flex;align-items:center;gap:.55rem}
+  .chatTitle{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  body.reading header.nav,
+  body.reading .composer-wrap{display:none}
+  /* Room under the last line, so the end of an answer is not read through the Write button */
+  body.reading .transcript{padding-bottom:4.5rem}
+  .topbar{padding:.2rem 0}
+}
 </style>
 
 <div class="pg" id="pg">
@@ -384,8 +405,13 @@ a.cite{font-size:.75em;vertical-align:super;text-decoration:none;padding:0 .1rem
         <button class="linkish drawer-btn" id="drawerToggle" aria-expanded="false"
                 aria-label="Show conversations">&#9776;</button>
         <span class="chatTitle" id="chatTitle">New conversation</span>
+        <button class="linkish reader-btn" id="readerToggle" aria-pressed="false"
+                title="Reading mode: hide the menu and the message box, so the answer has the whole screen"
+                aria-label="Reading mode">&#8597;</button>
       </div>
     </header>
+    <!-- Reading mode's way back: the message box, one tap away from wherever you have scrolled -->
+    <button class="btn reader-write" id="readerWrite" hidden>&#9998; Write</button>
 
     <div class="transcript" id="transcript">
       <div class="column">
@@ -1233,6 +1259,38 @@ document.getElementById('convs').addEventListener('dblclick', async e => {
 });
 
 document.getElementById('newChat').addEventListener('click', () => { if(!controller) resetChat(); });
+
+// --- reading mode, on a short or narrow screen ------------------------------------------------
+// The menu and the message box hidden, so an answer gets the whole screen. Remembered in this
+// browser, and only in effect while the screen is small: turning the phone or widening the window
+// brings everything back without anyone having to find the switch.
+const readerToggle = document.getElementById('readerToggle');
+const readerWrite = document.getElementById('readerWrite');
+const smallScreen = matchMedia('(max-height: 900px), (max-width: 860px)');
+let reading = false;
+try{ reading = localStorage.getItem('pg.reading') === 'on'; }catch(e){}
+
+function setReading(on){
+  reading = on;
+  const active = on && smallScreen.matches;
+  document.body.classList.toggle('reading', active);
+  readerToggle.setAttribute('aria-pressed', String(active));
+  readerWrite.hidden = !active;
+  try{ localStorage.setItem('pg.reading', on ? 'on' : 'off'); }catch(e){}
+}
+readerToggle.addEventListener('click', () => setReading(!reading));
+readerWrite.addEventListener('click', () => promptBox.focus());
+smallScreen.addEventListener('change', () => setReading(reading));
+// Anything that sends you to the message box - Write, "Edit this image", asking again - has to
+// find it there, so the box comes back first
+{
+  const focusBox = promptBox.focus.bind(promptBox);
+  promptBox.focus = (...options) => {
+    if(document.body.classList.contains('reading')) setReading(false);
+    focusBox(...options);
+  };
+}
+setReading(reading);
 
 // --- the sidebar, on a narrow screen ----------------------------------------------------------
 // It slides over the conversation instead of sitting beside it, so picking something from it is a
