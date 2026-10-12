@@ -582,9 +582,12 @@ async def complete(payload: CompleteIn, principal: Principal = Depends(authentic
         # After the user's own system prompt, so theirs still comes first
         messages.insert(1 if messages and messages[0]["role"] == "system" else 0,
                         {"role": "system", "content": remembered})
-    if payload.conversation_id is not None:
+    latest_words = next((m.content for m in reversed(payload.messages) if m.role == "user"), "")
+    if payload.conversation_id is not None and turn_facts.asks_how_made(latest_words):
         # What made the last few answers - a picture's model, a search, a map - read from what was
-        # saved with them, so a question about it is answered from the record rather than guessed
+        # saved with them, so a question about it is answered from the record rather than guessed.
+        # Only when the question is about that: put in front of every question, Qwen3-Next took it
+        # for the task and answered "Difference between ECC and non-ECC memory" with token counts.
         recent = (await session.execute(
             select(ConversationMessage).where(ConversationMessage.conversation_id == payload.conversation_id)
             .order_by(ConversationMessage.id.desc()).limit(4 * turn_facts.RECENT))).scalars().all()

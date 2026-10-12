@@ -6,6 +6,7 @@ was made: in the history a picture is a line like "(make the kid stand on a beac
 records what made each answer when it is saved, and before the next answer it says so plainly.
 """
 import json
+import re
 from pathlib import PurePath
 
 from app import settings
@@ -92,6 +93,25 @@ def _describe(message):
     return words + took
 
 
+# A question about how this conversation's answers came to be: which model or tool, how long, how
+# many tokens, which seed. Only then is the record put in front of the chat model - anything in a
+# system note is read as something to act on, and a note there for every question got reported back
+# in place of the answer.
+HOW_MADE = re.compile(
+    r"\b(which|what)\s+(model|tool|engine|ai|llm|program|software|service)\b(?!\s+of\b)"
+    r"|\b(model|tool)\s+(did|do|was|were)\s+(you|it|they)\b"
+    r"|\bhow\s+(was|were|did\s+you|is|are)\b.{0,40}\b(made|generated|created|produced|drawn|edited|"
+    r"transcribed|answered|written|done)\b"
+    r"|\b(made|generated|created|produced|drawn|edited|transcribed|answered|written)\s+(by|with|using|on)\b"
+    r"|\bhow\s+long\s+did\b|\bhow\s+many\s+tokens\b|\btokens?\s+per\s+second\b|\bseed\b"
+    r"|\bwho\s+(made|drew|wrote|generated|answered)\b", re.I | re.S)
+
+
+def asks_how_made(text):
+    """Whether a message asks how an earlier answer or picture was produced."""
+    return bool(HOW_MADE.search(text or ""))
+
+
 def context_block(messages):
     """The note for the next answer, from the conversation's saved messages, oldest first."""
     answers = [m for m in messages if m.role == "assistant"][-RECENT:]
@@ -99,9 +119,10 @@ def context_block(messages):
         return None
     ago = lambda n: "the latest answer" if n == 1 else f"{n} answers ago"
     lines = [f"- {ago(len(answers) - i)}: {_describe(m)}" for i, m in enumerate(answers)]
-    return ("What produced the most recent answers in this conversation, as this gateway recorded it:\n"
+    return ("Background for the user's question, which is about how earlier answers in this "
+            "conversation were made. What produced the most recent ones, as this gateway recorded it:\n"
             + "\n".join(lines)
             + "\n\nPictures in this conversation were made by the gateway's own tools listed above, not by "
-              "you: you write text only. When asked how an answer or picture was made, which model or tool "
-              "was used, or how long it took, answer from these facts. If something is not recorded here, "
-              "say it was not recorded rather than guessing.")
+              "you: you write text only. Use these facts to answer what the user asked - only the part "
+              "they asked about, not a report of all of it. If something is not recorded here, say it "
+              "was not recorded rather than guessing.")
