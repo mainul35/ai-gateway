@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # idle-shutdown — suspend (or power off) homelabai once it has been idle for IDLE_MINUTES.
-# Run every 5 min by idle-shutdown.timer. Logs: journalctl -t idle-shutdown -f
+# Run every minute by idle-shutdown.timer. Logs: journalctl -t idle-shutdown -f
 #
 # "Busy" = any of: stay-awake file present, an SSH/tty session with recent
 # keyboard input, the gateway reports work (a request, coding task or job, or a
@@ -12,21 +12,22 @@ set -uo pipefail
 CONF=/etc/default/idle-shutdown
 [[ -r $CONF ]] && . "$CONF"
 
-: "${IDLE_MINUTES:=30}"
+: "${IDLE_MINUTES:=5}"
 : "${DRY_RUN:=1}"
 : "${ACTION:=suspend}"             # suspend (wakes in seconds) or poweroff
 : "${CHECK_GATEWAY:=1}"
 : "${GATEWAY_URL:=http://127.0.0.1:9000}"
-: "${GATEWAY_RECENT_SECONDS:=300}" # a request this recent counts as busy (= the timer's interval)
-: "${CHECK_INTERVAL_SECONDS:=300}" # how often the timer runs; a much longer gap means we slept"
+: "${GATEWAY_RECENT_SECONDS:=90}"  # a request this recent counts as busy (a bit over the interval)
+: "${CHECK_INTERVAL_SECONDS:=60}"  # how often the timer runs; a much longer gap means we slept
 : "${GPU_UTIL_MAX:=10}"            # % — highest GPU over a 5 s sample
 : "${LOAD_MAX:=2.0}"               # 1-min load average
 : "${NET_KBPS_MAX:=500}"           # KB/s rx+tx on the default interface
-: "${SESSION_IDLE_MAX_MIN:=20}"    # a tty with no keystrokes for this long doesn't count
+: "${SESSION_IDLE_MAX_MIN:=5}"     # a tty with no keystrokes for this long doesn't count
 : "${CHECK_OLLAMA:=1}"
 : "${OLLAMA_URL:=http://127.0.0.1:11434}"
 : "${BUSY_PROCESSES:=apt apt-get dpkg unattended-upgr rsync}"
 : "${INHIBIT_FILE:=/run/stay-awake}"
+: "${WARN_SECONDS:=30}"            # notice before suspending; a busy signal in it cancels
 
 STATE_DIR=/run/idle-shutdown        # tmpfs: cleared on reboot = free boot grace period
 LAST_BUSY=$STATE_DIR/last_busy
@@ -136,9 +137,9 @@ if (( idle_for >= IDLE_MINUTES * 60 )); then
     shutdown -h +1 "homelabai idle ${IDLE_MINUTES}+ min. Cancel: sudo shutdown -c && sudo touch $INHIBIT_FILE"
     exit 0
   fi
-  log "idle threshold reached — suspending in 1 min"
-  wall "homelabai idle ${IDLE_MINUTES}+ min: suspending in 1 minute. Cancel: sudo touch $INHIBIT_FILE" 2>/dev/null
-  sleep 60
+  log "idle threshold reached — suspending in ${WARN_SECONDS}s"
+  wall "homelabai idle ${IDLE_MINUTES}+ min: suspending in ${WARN_SECONDS}s. Cancel: sudo touch $INHIBIT_FILE" 2>/dev/null
+  sleep "$WARN_SECONDS"
   busy_reason=""; now=$(date +%s); check
   if [[ -n $busy_reason ]]; then
     echo "$now" > "$LAST_BUSY"

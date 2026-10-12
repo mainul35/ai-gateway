@@ -51,13 +51,15 @@ class ActivityMiddleware:
             _last_request_at = time.time()
 
 
-def snapshot():
+def snapshot(ignore_requests=0):
+    """`ignore_requests`: requests to leave out of the count, e.g. the one asking."""
+    in_flight = max(0, _in_flight - ignore_requests)
     running_jobs = [job for job in list(jobs._jobs.values()) if not job.done]
     engine_requests = sum(model.in_flight for model in list(supervisor._running.values()))
     coding = coding_runner.activity()
     busy_reasons = []
-    if _in_flight:
-        busy_reasons.append(f"{_in_flight} request(s) in flight")
+    if in_flight:
+        busy_reasons.append(f"{in_flight} request(s) in flight")
     if coding["running"] is not None:
         busy_reasons.append(f"coding task {coding['running']} running")
     if coding["queued"]:
@@ -71,7 +73,7 @@ def snapshot():
     return {
         "busy": bool(busy_reasons),
         "reasons": busy_reasons,
-        "in_flight": _in_flight,
+        "in_flight": in_flight,
         "seconds_since_last_request": None if _last_request_at is None else round(time.time() - _last_request_at),
         "coding": coding,
         "jobs_running": len(running_jobs),
