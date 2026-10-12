@@ -348,8 +348,8 @@ minute as a watchdog).
 
 ## Sleeping when idle
 
-Full guide: [docs/sleep-and-wake.md](docs/sleep-and-wake.md) (setup, settings, changing the idle
-timeout, troubleshooting). Deployment pipeline: [docs/deployment.md](docs/deployment.md).
+Setting it up, step by step: [docs/setup-guide.md](docs/setup-guide.md). How it works and every
+setting: [docs/sleep-and-wake.md](docs/sleep-and-wake.md). Deployment: [docs/deployment.md](docs/deployment.md).
 
 homelabai suspends itself after `IDLE_MINUTES` (5) with nothing to do, and wakes again when a
 request arrives through the [wake front](wake/README.md) on proxy-vm. Asleep it draws a few watts

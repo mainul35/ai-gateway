@@ -9,7 +9,7 @@ longer leaves it running until morning.
 - [When it goes to sleep](#when-it-goes-to-sleep)
 - [Changing the idle timeout](#changing-the-idle-timeout)
 - [Doing it by hand](#doing-it-by-hand)
-- [Setting it up](#setting-it-up)
+- [Setting it up](setup-guide.md)
 - [Settings reference](#settings-reference)
 - [Troubleshooting](#troubleshooting)
 - [Power and cost](#power-and-cost)
@@ -38,7 +38,7 @@ database only matters while the gateway is running, so they sleep and wake toget
 
 What does move is **where the tunnel points**. A tunnel connector on homelabai goes to sleep with it,
 and Cloudflare then answers every request with error 1033. The connector for
-`ai-gateway.mainul35.dev` belongs on proxy-vm, pointing at the wake front ([setup step 3](#3-cloudflare-tunnel)).
+`ai-gateway.mainul35.dev` belongs on proxy-vm, pointing at the wake front ([setup guide, Part 3](setup-guide.md#part-3--cloudflare-send-the-public-address-to-the-wake-front)).
 
 ## How a request is handled
 
@@ -173,77 +173,8 @@ PowerShell magic-packet script on Windows, or the power button.
 
 ## Setting it up
 
-From nothing, in this order; each step can be checked before the next. Once the Jenkins jobs
-([deployment.md](deployment.md)) are set up, deploying new code is a `deploy-ai-gateway` run; the one-time parts below stay manual because they need root.
-
-### 1. homelabai
-
-```bash
-# Gateway with the activity endpoint and suspend API (or let the pipeline do it)
-git clone -b develop https://github.com/mainul35/ai-gateway ~/ai-gateway-src
-cd ~/ai-gateway-src && DEPLOY_HOST=local bin/deploy.sh
-curl -s localhost:9000/internal/activity                     # {"busy": false, ...}
-
-# Let proxy-vm reach the gateway
-sudo ufw allow from 192.168.50.81 to any port 9000 proto tcp
-
-# Let the gateway suspend the machine (the suspend API), and nothing else
-echo 'mainul35 ALL=(root) NOPASSWD: /usr/bin/systemctl suspend' | sudo tee /etc/sudoers.d/gateway-suspend
-sudo chmod 440 /etc/sudoers.d/gateway-suspend
-
-# Suspend must really work: [deep] means suspend-to-RAM (s2idle draws 20-40 W)
-cat /sys/power/mem_sleep
-cat /sys/class/net/enp3s0/device/power/wakeup                # enabled
-sudo ethtool enp3s0 | grep Wake-on                           # Wake-on: g
-sudo systemctl suspend                                       # then wake it (step 2 gives you a way)
-
-# The idle timer
-cd ~/model-gateway/ops/idle-shutdown
-sudo install -m 755 idle-shutdown.sh /usr/local/sbin/idle-shutdown
-sudo install -m 644 idle-shutdown.conf /etc/default/idle-shutdown   # first time only: it holds your settings
-sudo install -m 644 idle-shutdown.service idle-shutdown.timer /etc/systemd/system/
-sudo systemctl daemon-reload && sudo systemctl enable --now idle-shutdown.timer
-journalctl -t idle-shutdown -f        # starts with DRY_RUN=1: "would suspend"; then set DRY_RUN=0
-```
-
-When a later deploy brings a newer `idle-shutdown.sh`, the deploy output says so and prints the
-`sudo install` line to run. Install the `.conf` again only on purpose: it would replace your settings.
-
-### 2. proxy-vm
-
-```bash
-git clone -b develop https://github.com/mainul35/ai-gateway ~/ai-gateway-src
-mkdir -p ~/gateway-wake && cp ~/ai-gateway-src/wake/wake.env.example ~/gateway-wake/wake.env
-nano ~/gateway-wake/wake.env
-#   WAKE_UPSTREAM=http://192.168.50.146:9000
-#   WAKE_SESSION_SECRET=<gateway.session.secret from homelabai's config/config.properties>
-~/ai-gateway-src/bin/deploy-wake.sh              # builds, starts, health-checks, rolls back on failure
-curl -s localhost:9100/__wake/status             # {"up": true, ...}
-```
-
-Test the whole loop before touching the tunnel: suspend homelabai, then
-`curl -s -X POST localhost:9100/__wake/now` and watch `__wake/status` turn `"up": true`.
-
-proxy-vm must sit on the LAN bridge (its address is `192.168.50.x`), not behind NAT, or the
-Wake-on-LAN broadcast never leaves Proxmox. The container uses host networking for the same reason.
-
-### 3. Cloudflare tunnel
-
-All connectors of one tunnel serve all of its hostnames, so a connector left on homelabai would
-still get some of the requests while it sleeps (1033). Either:
-
-- **A separate tunnel on proxy-vm (cleaner).** Create it in the Cloudflare dashboard (Zero Trust →
-  Networks → Tunnels), install its connector on proxy-vm with the `cloudflared service install <token>`
-  command shown there, and give it the public hostname `ai-gateway.mainul35.dev` →
-  `http://localhost:9100`. Then delete that hostname from the old tunnel. Anything else homelabai
-  serves keeps its own tunnel.
-- **Move the existing tunnel.** Install its connector on proxy-vm, change the hostname's service to
-  `http://localhost:9100`, and uninstall the connector from homelabai
-  (`sudo cloudflared service uninstall`).
-
-Check: `curl -s https://ai-gateway.mainul35.dev/__wake/status`. Undo: point the hostname back at the
-gateway. The Cloudflare Access applications (`scripts/cloudflare_access.py`) are per hostname and
-path, so they keep working unchanged.
+Follow [setup-guide.md](setup-guide.md). It goes step by step, says which machine each step runs on,
+and ends every step with a check.
 
 ## Settings reference
 
@@ -293,22 +224,7 @@ After editing: `cd ~/gateway-wake && docker compose -p gateway-wake up -d --forc
 
 ## Troubleshooting
 
-Each of these happened during setup.
-
-| Symptom | Cause | Fix |
-|---|---|---|
-| Public URL shows Cloudflare error 1033 while the machine sleeps | the tunnel connector is on homelabai | [setup step 3](#3-cloudflare-tunnel) |
-| `__wake/status` stays `"up": false` though homelabai answers ping | homelabai's firewall blocks port 9000 from proxy-vm | `sudo ufw allow from 192.168.50.81 to any port 9000 proto tcp` on homelabai |
-| It never sleeps; the log says `busy: process unattended-upgr running` | an old config listed `unattended-upgr`, which matches Ubuntu's always-running `unattended-upgrade-shutdown` | remove it from `BUSY_PROCESSES` in `/etc/default/idle-shutdown` |
-| The log says `DRY_RUN: would suspend now` but nothing happens | still in test mode | `DRY_RUN=0` in `/etc/default/idle-shutdown` |
-| The log says `busy: recent input on pts/0` | you are typing in an SSH session (watching the log counts) | close the session, or wait `SESSION_IDLE_MAX_MIN` |
-| It never sleeps; `busy: network ... KB/s` | k3s or another service moves data constantly | raise `NET_KBPS_MAX` |
-| Wake times out; homelabai does not answer ping | the packet does not wake it from suspend | on homelabai: `ethtool enp3s0` shows `Wake-on: g`; `/sys/class/net/enp3s0/device/power/wakeup` is `enabled`; BIOS "Power On By PCI-E" on. Try the Windows script to tell proxy-vm problems from homelabai ones |
-| Wake times out from proxy-vm only | proxy-vm is NAT'd, not bridged | give it a bridged NIC (`vmbr0`) with a `192.168.50.x` address |
-| `curl localhost:9000/admin/...` on proxy-vm says `404 page not found` | port 9000 on proxy-vm is Portainer | use `http://192.168.50.146:9000` |
-| `docker compose up` in the repo root fails on port 5000 | the root `docker-compose.yml` is the old model checker; 5000 is Harbor | the wake front is deployed with `bin/deploy-wake.sh` (or from `wake/`) |
-| `git pull` in `~/model-gateway` fails: not a git repository | by design: it is the deploy target, not a clone | deploy from a clone: `DEPLOY_HOST=local bin/deploy.sh` |
-| `POST /admin/power/suspend` answers 503 about sudo | the sudo rule is missing | the `sudoers.d/gateway-suspend` lines in step 1 |
+See [setup-guide.md → If something goes wrong](setup-guide.md#if-something-goes-wrong).
 
 ## Power and cost
 

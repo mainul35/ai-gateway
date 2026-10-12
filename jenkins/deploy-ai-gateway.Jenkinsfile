@@ -9,7 +9,7 @@
 //   the wake front  gateway-wake-front:<tag>, run with docker compose on proxy-vm.
 //
 // Run it with "Build Now"; it pauses to ask which tag. Nothing triggers it automatically.
-// Setup: jenkins/SETUP.md.
+// Setup: docs/setup-guide.md, Parts 4 to 8.
 pipeline {
     agent any
 
