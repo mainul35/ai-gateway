@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
-# Deploys the wake front (wake/) on this machine - proxy-vm - and rolls back if it does not come up.
+# Deploys the wake front (wake/) on this machine - proxy-vm - by hand, and rolls back if it does not
+# come up. The Jenkins job deploy-ai-gateway does the same from a Harbor image; both use compose
+# project gateway-wake, so they manage the same container.
 #
 #   bin/deploy-wake.sh
 #
@@ -9,7 +11,7 @@
 #
 # Settings (environment variables):
 #   WAKE_DIR        where the wake front runs  (default: ~/gateway-wake)
-#   WAKE_ENV_FILE   settings to use; copied to $WAKE_DIR/wake.env (Jenkins passes its secret file)
+#   WAKE_ENV_FILE   settings to use; copied to $WAKE_DIR/wake.env
 set -euo pipefail
 
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)

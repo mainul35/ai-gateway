@@ -8,6 +8,8 @@
 #                      gateway deploys itself from a clone on its own server (default: mainul35@homelabai)
 #   DEPLOY_DIR         project directory on it     (default: model-gateway, relative to the remote home)
 #   DEPLOY_PUBLIC_URL  public URL to check after   (default: https://ai-gateway.mainul35.dev)
+#   DEPLOY_SKIP_CHECKS 1 skips the local compile checks, when the code was already checked (the
+#                      Jenkins deploy job, which deploys what the build job tested; its agent has no Python)
 #   DEPLOY_SSH_OPTS    extra ssh options, e.g. "-i key -o StrictHostKeyChecking=accept-new" (Jenkins)
 #
 # Never touched on the server: config/config.properties (secrets, SSO settings), .venv, logs, .env.
@@ -34,6 +36,9 @@ on_server() {
     fi
 }
 
+if [ "${DEPLOY_SKIP_CHECKS:-0}" = 1 ]; then
+    step "Skipping the local checks (DEPLOY_SKIP_CHECKS=1)"
+else
 step "Checking the code compiles before sending anything"
 "$PYTHON" - <<'PY'
 import pathlib, sys
@@ -51,6 +56,7 @@ PY
 # Compiling is not enough: a backslash eaten by a shell leaves a backspace inside a regular
 # expression that compiles perfectly and matches nothing it was written to match.
 "$PYTHON" scripts/check_control_chars.py app utils scripts
+fi
 
 STAMP=$(date +%Y%m%d-%H%M%S)
 
