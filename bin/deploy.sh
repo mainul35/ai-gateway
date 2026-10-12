@@ -63,7 +63,7 @@ step "Syncing the project"
 tar czf - \
     --exclude='__pycache__' --exclude='*.pyc' \
     --exclude='config/config.properties' \
-    app utils bin config/engines.yaml config/models.yaml config/mcp.yaml config/knowledge.yaml config/searxng scripts \
+    app utils bin config/engines.yaml config/models.yaml config/mcp.yaml config/knowledge.yaml config/searxng scripts ops \
     docker-compose.gateway.yml docker-compose.homelab.yml .env.example \
     requirements.txt requirements-gateway.txt \
   | on_server "tar xzf - -C $REMOTE_DIR && echo synced"
