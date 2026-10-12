@@ -1,0 +1,15 @@
+# Runs on proxy-vm, the machine that never sleeps.
+#
+#   cp wake.env.example wake.env   # then fill it in
+#   docker compose up -d --build
+#
+# Host networking is required: a Wake-on-LAN packet is a LAN broadcast, and from Docker's bridge
+# network it never reaches the physical network.
+services:
+  wake-front:
+    build: .
+    image: gateway-wake-front
+    container_name: gateway-wake-front
+    network_mode: host
+    env_file: wake.env
+    restart: unless-stopped

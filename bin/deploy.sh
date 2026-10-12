@@ -28,7 +28,7 @@ on_server() {
     if [ "$HOST" = local ]; then
         (cd "$HOME" && bash -c "$*")
     else
-        ssh -o BatchMode=yes "$HOST" "$*"
+        ssh -o BatchMode=yes -o ConnectTimeout=10 "$HOST" "$*"
     fi
 }
 
@@ -52,6 +52,11 @@ PY
 
 STAMP=$(date +%Y%m%d-%H%M%S)
 
+# Keep the server from going to sleep halfway through: ops/idle-shutdown treats a fresh
+# /tmp/gateway-deploying as work. Removed again however this script ends.
+on_server "touch /tmp/gateway-deploying" </dev/null || { echo "server unreachable - is it asleep? (bin/wake-homelabai.sh)"; exit 1; }
+trap 'on_server "rm -f /tmp/gateway-deploying" </dev/null >/dev/null 2>&1 || true' EXIT
+
 step "Backing up the current server code ($STAMP)"
 on_server "cd $REMOTE_DIR && mkdir -p .deploy-backup && \
   tar czf .deploy-backup/$STAMP.tar.gz app utils bin config/engines.yaml config/models.yaml config/mcp.yaml config/knowledge.yaml config/searxng \
@@ -63,7 +68,7 @@ step "Syncing the project"
 tar czf - \
     --exclude='__pycache__' --exclude='*.pyc' \
     --exclude='config/config.properties' \
-    app utils bin config/engines.yaml config/models.yaml config/mcp.yaml config/knowledge.yaml config/searxng scripts \
+    app utils bin config/engines.yaml config/models.yaml config/mcp.yaml config/knowledge.yaml config/searxng scripts ops \
     docker-compose.gateway.yml docker-compose.homelab.yml .env.example \
     requirements.txt requirements-gateway.txt \
   | on_server "tar xzf - -C $REMOTE_DIR && echo synced"
@@ -103,6 +108,12 @@ restart() {
     done
     return 1
 }
+
+# The idle-sleep script is installed by hand (it needs root); say so when this deploy brought a newer one
+if [ -f /usr/local/sbin/idle-shutdown ] && ! cmp -s ops/idle-shutdown/idle-shutdown.sh /usr/local/sbin/idle-shutdown; then
+    echo "note: ops/idle-shutdown/idle-shutdown.sh differs from the installed /usr/local/sbin/idle-shutdown;"
+    echo "      to install it: sudo install -m 755 $PWD/ops/idle-shutdown/idle-shutdown.sh /usr/local/sbin/idle-shutdown"
+fi
 
 if restart; then
     echo "healthy: $(curl -s http://127.0.0.1:9000/health)"

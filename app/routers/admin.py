@@ -13,7 +13,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from app import access, backends, catalogue, fitting, knowledge, settings, usage as usage_log
+from app import access, activity, backends, catalogue, fitting, knowledge, power, settings, usage as usage_log
 from app.tools import jobs, mcp_client, mcp_config
 from app.auth import Principal, generate_key, hash_key, require_admin, require_manager
 from app import config_writer
@@ -779,3 +779,35 @@ async def check_mcp_server(payload: McpCheck, _: Principal = Depends(require_adm
         raise HTTPException(status.HTTP_404_NOT_FOUND,
                             f"No server called {payload.name!r} is configured")
     return await mcp_client.probe(server)
+
+
+# --- power -------------------------------------------------------------------------------------
+
+class SuspendIn(BaseModel):
+    force: bool = False                                  # suspend even if work is running
+    delay_seconds: int = Field(default=5, ge=1, le=600)
+
+
+@router.post("/power/suspend", status_code=status.HTTP_202_ACCEPTED)
+async def suspend_machine(payload: SuspendIn | None = None, principal: Principal = Depends(require_admin)):
+    """Puts homelabai to sleep. The next request through the wake front wakes it again."""
+    payload = payload or SuspendIn()
+    busy = activity.snapshot(ignore_requests=1)          # this request is not work
+    if busy["busy"] and not payload.force:
+        raise HTTPException(status.HTTP_409_CONFLICT,
+                            {"message": "the gateway is busy; send force=true to suspend anyway",
+                             "reasons": busy["reasons"]})
+    ok, problem = await power.allowed()
+    if not ok:
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, problem)
+    if power.pending():
+        return {"suspending_in_seconds": None, "already_pending": True}
+    log.info("suspend requested by %s (force=%s)", principal.label, payload.force)
+    power.schedule(payload.delay_seconds)
+    return {"suspending_in_seconds": payload.delay_seconds, "interrupted": busy["reasons"] if payload.force else []}
+
+
+@router.delete("/power/suspend")
+async def cancel_suspend(principal: Principal = Depends(require_admin)):
+    """Calls off a suspend that has not happened yet."""
+    return {"cancelled": power.cancel()}

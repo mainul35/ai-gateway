@@ -118,6 +118,7 @@ _queue: asyncio.Queue | None = None
 _worker: asyncio.Task | None = None
 _cancelled: set[int] = set()
 _watchers: set[int] = set()
+_current: int | None = None   # the task the worker is on, for the idle check (app/activity.py)
 
 
 class Stop(Exception):
@@ -236,13 +237,22 @@ def _check_cancelled(task_id):
 
 
 async def _work():
+    global _current
     while True:
         task_id = await _queue.get()
+        _current = task_id
         try:
             await run(task_id)
         except Exception:
             log.exception("coding task %s crashed", task_id)
             await set_task(task_id, status="failed", error="The task runner crashed; see the gateway log.")
+        finally:
+            _current = None
+
+
+def activity():
+    """What the runner is doing right now, for the idle check."""
+    return {"running": _current, "queued": _queue.qsize() if _queue else 0, "deploys": len(_watchers)}
 
 
 # --- the model ---------------------------------------------------------------------------------

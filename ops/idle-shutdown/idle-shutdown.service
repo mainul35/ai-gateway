@@ -1,0 +1,6 @@
+[Unit]
+Description=Suspend or power off homelabai when idle
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/idle-shutdown
