@@ -9,3 +9,4 @@ logs/
 .cf-access.env
 .claude/
 wake/wake.env
+.ci-venv/

@@ -173,9 +173,8 @@ PowerShell magic-packet script on Windows, or the power button.
 
 ## Setting it up
 
-From nothing, in this order; each step can be checked before the next. With the deployment pipeline
-([deployment.md](deployment.md)) running, steps 1 and 2's code updates happen on their own after
-this; the one-time parts below stay manual because they need root.
+From nothing, in this order; each step can be checked before the next. Once the Jenkins jobs
+([deployment.md](deployment.md)) are set up, deploying new code is a `deploy-ai-gateway` run; the one-time parts below stay manual because they need root.
 
 ### 1. homelabai
 
@@ -333,4 +332,4 @@ rating is the maximum it can deliver, not what it draws):
 | `bin/deploy.sh` | anywhere | deploys the gateway (holds the deploy lock while it runs) |
 | `bin/deploy-wake.sh` | proxy-vm | deploys the wake front |
 | `bin/wake-homelabai.sh` | proxy-vm | wakes homelabai and waits for the gateway |
-| `ops/deployer/` | proxy-vm | the deployment pipeline ([deployment.md](deployment.md)) |
+| `jenkins/`, `ci/checks.sh` | Jenkins on proxy-vm | the build and deploy jobs ([deployment.md](deployment.md)) |

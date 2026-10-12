@@ -8,7 +8,8 @@
 services:
   wake-front:
     build: .
-    image: gateway-wake-front
+    # Jenkins deploys a tag from Harbor (WAKE_IMAGE); by hand it builds and tags it locally
+    image: ${WAKE_IMAGE:-gateway-wake-front}
     container_name: gateway-wake-front
     network_mode: host
     env_file: wake.env
