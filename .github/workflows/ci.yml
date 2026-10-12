@@ -1,0 +1,41 @@
+# Checks every push and pull request. The deployer on proxy-vm (ops/deployer) deploys a commit on
+# develop only once these have passed. GitHub-hosted runners only: nothing here can reach the LAN.
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Python compiles
+        run: python -m compileall -q app utils scripts wake
+
+      - name: No control characters in code
+        run: python scripts/check_control_chars.py app utils scripts
+
+      - name: No credentials committed
+        run: python scripts/check_secrets.py --all
+
+      - name: Shell scripts parse
+        run: |
+          for f in bin/*.sh ops/*/*.sh scripts/git-hooks/pre-push; do bash -n "$f" && echo "ok $f"; done
+
+      - name: Wake front tests
+        run: |
+          pip install -q -r wake/requirements.txt pytest
+          pytest -q wake/

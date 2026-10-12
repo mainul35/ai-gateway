@@ -12,8 +12,9 @@ Counted as activity:
   - a playground job (chat, picture, photo) that has not finished
   - a request in flight to a llama.cpp engine
 
-Not counted: health checks, this endpoint, and the remote-folder long-poll, which an open Tasks
-tab repeats every 25 seconds whether or not there is any work. A coding task waiting for
+Not counted: health checks, this endpoint, the remote-folder long-poll, and the GETs a web page
+repeats on a timer (dashboard stats every 15 s, the task list): an open tab is not someone working,
+and counting it would keep the machine awake for as long as the tab stays open. A coding task waiting for
 approval is not running either, so it does not keep the machine up; approving it later wakes it.
 """
 import re
@@ -24,6 +25,18 @@ from app.engine.supervisor import supervisor
 from app.tools import jobs
 
 _IGNORED = re.compile(r"^/(health|internal/activity|coding/remote/\d+/next)$")
+# GETs the web pages repeat on a timer (wake/wake_front.py has the same list). From a browser they
+# are a tab refreshing itself, not someone working, so an open dashboard does not keep the machine up.
+POLLED = re.compile(r"^/(admin/system|admin/usage|v1/models|coding/projects|coding/tasks/\d+/events)$")
+
+
+def _is_background_poll(scope):
+    if scope.get("method") not in ("GET", "HEAD") or not POLLED.match(scope.get("path", "")):
+        return False
+    headers = dict(scope.get("headers") or [])
+    mode = headers.get(b"sec-fetch-mode")
+    return mode is not None and mode != b"navigate"
+
 
 _in_flight = 0
 _last_request_at = None   # wall-clock seconds
@@ -36,7 +49,7 @@ class ActivityMiddleware:
         self.app = app
 
     async def __call__(self, scope, receive, send):
-        if scope["type"] != "http" or _IGNORED.match(scope.get("path", "")):
+        if scope["type"] != "http" or _IGNORED.match(scope.get("path", "")) or _is_background_poll(scope):
             return await self.app(scope, receive, send)
 
         global _in_flight, _last_request_at

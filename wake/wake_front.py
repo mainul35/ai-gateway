@@ -3,13 +3,14 @@
 Runs on proxy-vm, which never sleeps. Cloudflare Tunnel points here instead of at homelabai.
 
   homelabai awake   every request is passed straight through, streamed answers included
-  homelabai asleep  a request that someone actually meant to make sends a Wake-on-LAN packet, then:
+  homelabai asleep  any authorised request sends a Wake-on-LAN packet and is answered once it is up:
                       - a streamed completion gets its SSE headers at once and ": waking" comments
                         every 10 s until the gateway answers, so Cloudflare's 100 s limit never bites
                       - any other API call is held up to WAKE_HOLD_SECONDS, then passed through, or
                         answered 503 with Retry-After if the machine is not up yet
                       - a page opened in a browser gets a "waking up" page that reloads itself
-                    background polling (an open tab's fetches) is answered 503 and wakes nothing
+                    a page's timer polling (dashboard stats, task feeds) is answered 503 and wakes
+                    nothing, or an open tab would keep the machine awake forever
 
 Only a caller that looks authorised can wake the machine, otherwise every scanner on the internet
 would keep it awake:
@@ -210,14 +211,21 @@ def is_navigation(request):
     return request.method == "GET" and request.headers.get("sec-fetch-mode") == "navigate"
 
 
-def is_deliberate(request, path):
-    """A request someone meant to make, as opposed to a tab polling in the background."""
-    if request.method not in ("GET", "HEAD", "OPTIONS"):
-        return True
-    if is_navigation(request):
-        return True
-    # API clients (OpenCode, SDKs) send no Sec-Fetch headers; browsers always do
-    return path.startswith("/v1/") and "sec-fetch-mode" not in request.headers
+# GETs the web pages repeat on a timer, whether or not anyone is looking at them: the dashboard's
+# stats, the tasks page's project list and event feed, a folder waiting for remote work. Keep in
+# step with POLLED in app/activity.py, which leaves the same requests out of the idle check.
+POLLED = re.compile(r"^/(admin/system|admin/usage|v1/models|coding/projects|coding/tasks/\d+/events"
+                    r"|coding/remote/\d+/next)$")
+
+
+def is_background_poll(request, path):
+    """A browser tab refreshing itself on a timer. Waking for it would mean a tab left open
+    somewhere wakes the machine every few minutes, forever."""
+    if request.method not in ("GET", "HEAD"):
+        return False
+    if path.startswith("/coding/remote/"):
+        return bool(POLLED.match(path))          # the helper program polls too, without browser headers
+    return "sec-fetch-mode" in request.headers and not is_navigation(request) and bool(POLLED.match(path))
 
 
 def wants_stream(path, body):
@@ -419,7 +427,7 @@ async def gateway(request: Request, rest: str):
             start_waking(f"page {path} ({kind})")
         return waking_page(state.waking is not None and not state.waking.done())
 
-    if not is_deliberate(request, path) or not may_wake(kind, h):
+    if is_background_poll(request, path) or not may_wake(kind, h):
         return asleep("homelabai is asleep; an authenticated request wakes it")
 
     task = start_waking(f"{request.method} {path} ({kind})")

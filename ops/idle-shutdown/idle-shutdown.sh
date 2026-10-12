@@ -27,6 +27,7 @@ CONF=/etc/default/idle-shutdown
 : "${OLLAMA_URL:=http://127.0.0.1:11434}"
 : "${BUSY_PROCESSES:=apt apt-get dpkg rsync}"
 : "${INHIBIT_FILE:=/run/stay-awake}"
+: "${DEPLOY_LOCK:=/tmp/gateway-deploying}" # bin/deploy.sh holds this while it works
 : "${WARN_SECONDS:=30}"            # notice before suspending; a busy signal in it cancels
 
 STATE_DIR=/run/idle-shutdown        # tmpfs: cleared on reboot = free boot grace period
@@ -41,6 +42,10 @@ busy_reason=""
 check() {
   # 1. Manual override: sudo touch /run/stay-awake
   if [[ -e $INHIBIT_FILE ]]; then busy_reason="inhibit file $INHIBIT_FILE"; return; fi
+  # A deploy in progress. Only a fresh one counts, so a deploy that died cannot keep it up forever.
+  if [[ -n $(find "$DEPLOY_LOCK" -maxdepth 0 -mmin -30 2>/dev/null) ]]; then
+    busy_reason="deploy in progress"; return
+  fi
 
   # 2. Interactive sessions — only if someone actually typed recently.
   #    (An SSH window left open while you sleep does NOT keep the box up.)

@@ -10,14 +10,14 @@ Cloudflare Tunnel ──► wake front (proxy-vm :9100) ──► gateway (homel
 ```
 
 While homelabai is awake every request passes straight through, streamed answers included. While it
-is asleep, a request someone meant to make wakes it:
+is asleep, an authorised request wakes it and is answered once the gateway is up:
 
 | Request | While waking |
 |---|---|
 | Streamed completion (`"stream": true`) | SSE headers at once, `: waking` comments every 10 s, then the real stream. No Cloudflare 524 however long it takes |
-| Other API call | held up to `WAKE_HOLD_SECONDS` (90), then answered; `503` + `Retry-After: 30` if still waking |
 | Page opened in a browser | a "waking up" page that reloads itself when the gateway answers |
-| A tab polling in the background | `503`, wakes nothing |
+| Any other request, API call or a click in an open page | held until the gateway answers, then answered (after 90 s: `503` + `Retry-After: 30`) |
+| A page's timer polling (dashboard stats, task feeds, remote-folder long-poll) | `503`, wakes nothing |
 | `/health` | `503`, wakes nothing (so `bin/deploy.sh` and monitors never wake it) |
 
 Coming back from suspend takes a few seconds, so most of the time nobody notices. From power-off it
@@ -41,13 +41,17 @@ The gateway still authenticates every request itself — this only decides who m
 ## Install on proxy-vm
 
 ```bash
-cd wake
-cp wake.env.example wake.env       # set WAKE_UPSTREAM to homelabai's LAN address
-docker compose up -d --build       # host networking: WoL broadcasts must reach the LAN
+mkdir -p ~/gateway-wake && cp wake/wake.env.example ~/gateway-wake/wake.env
+nano ~/gateway-wake/wake.env       # WAKE_UPSTREAM=http://192.168.50.146:9000, WAKE_SESSION_SECRET=...
+bin/deploy-wake.sh                 # builds and starts it from ~/gateway-wake, rolls back on failure
 curl -s localhost:9100/__wake/status
 ```
 
-Or without Docker, see `gateway-wake-front.service`.
+Host networking is required (WoL broadcasts must reach the LAN). Without Docker, see
+`gateway-wake-front.service`. After the first install, the deployment pipeline keeps it up to date
+([docs/deployment.md](../docs/deployment.md)); the full guide is [docs/sleep-and-wake.md](../docs/sleep-and-wake.md).
+
+Tests: `pip install -r wake/requirements.txt pytest && pytest wake/`
 
 Then point the tunnel at it instead of at homelabai. In proxy-vm's `cloudflared` config:
 
