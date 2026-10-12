@@ -25,7 +25,7 @@ CONF=/etc/default/idle-shutdown
 : "${SESSION_IDLE_MAX_MIN:=5}"     # a tty with no keystrokes for this long doesn't count
 : "${CHECK_OLLAMA:=1}"
 : "${OLLAMA_URL:=http://127.0.0.1:11434}"
-: "${BUSY_PROCESSES:=apt apt-get dpkg unattended-upgr rsync}"
+: "${BUSY_PROCESSES:=apt apt-get dpkg rsync}"
 : "${INHIBIT_FILE:=/run/stay-awake}"
 : "${WARN_SECONDS:=30}"            # notice before suspending; a busy signal in it cancels
 
