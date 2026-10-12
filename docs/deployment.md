@@ -1,98 +1,135 @@
 # Deployment pipeline
 
-Merging to `develop` deploys. Nobody has to wake homelabai, SSH anywhere or run a script.
+The gateway is built and deployed by Jenkins (`jenkins.mainul35.dev`, on proxy-vm), from the
+`Jenkinsfile` at the root of this repository. Merging to `develop` deploys; nobody has to wake
+homelabai, SSH anywhere or run a script.
 
 ```
-push / merge to develop
-        │
-        ▼
-GitHub Actions CI  (.github/workflows/ci.yml, GitHub's own runners)
-  compile · control characters · secret scan · shell syntax · wake front tests
-        │  green
-        ▼
-deployer on proxy-vm  (ops/deployer, every 2 min, pulls from GitHub)
-  1. new commit on develop?            no  → nothing to do
-  2. CI passed?                        no  → skip that commit for good; pending → check again next run
-  3. homelabai asleep?                 yes → wake it, wait for the gateway  (bin/wake-homelabai.sh)
-  4. deploy the gateway to homelabai   bin/deploy.sh over ssh: compile check, back up the running
-                                       code, sync, install changed requirements, restart, health
-                                       check, automatic rollback, public URL check
-  5. deploy the wake front here        bin/deploy-wake.sh: rebuild, restart only if it changed,
-                                       health check, automatic rollback
-  6. remember the commit as deployed
+push / merge
+     │  GitHub webhook (or a periodic scan)
+     ▼
+Jenkins on proxy-vm
+  Checks                 every branch and pull request    ci/checks.sh: compile, control characters,
+                                                           secret scan, shell syntax, wake front tests
+  ── develop only, after the checks pass ──
+  Wake homelabai         through the wake front, waits for the gateway   bin/wake-homelabai.sh
+  Deploy gateway         over ssh to homelabai                            bin/deploy.sh
+                         compile check, back up the running code, sync, install changed
+                         requirements, restart, health check, automatic rollback, public URL check
+  Deploy wake front      on proxy-vm                                       bin/deploy-wake.sh
+                         rebuild, restart only if it changed, health check, automatic rollback
 ```
 
-## Why it pulls
+Jenkins runs on proxy-vm, which never sleeps and sits on the same LAN as homelabai, so it can wake it,
+reach its gateway and SSH into it directly. The checks are a script (`ci/checks.sh`), so they run the
+same way on your machine.
 
-The obvious design is a GitHub Actions self-hosted runner on proxy-vm. The repository is public, and
-a self-hosted runner on a public repository runs workflows from other people's pull requests,
-on your LAN. Pulling avoids that entirely: proxy-vm asks GitHub for new commits, nothing from the
-internet can start anything here, and the CI that runs other people's code runs on GitHub's machines,
-which can't reach the LAN. The cost is up to two minutes between a green CI and the deploy starting.
+## One-time setup
 
-## One-time setup (on proxy-vm, as `proxt`)
+### 1. The agent's tools
+
+The pipeline runs on `agent any`: on a single-node Jenkins, the built-in node on proxy-vm. That node
+needs:
+
+| Tool | For | Check |
+|---|---|---|
+| `bash`, `git`, `curl`, `tar` | everything | usually present |
+| `python3` with `venv` | the checks, and the compile check in `deploy.sh` | `python3 -m venv /tmp/x && echo ok` |
+| `ssh` client | deploying to homelabai | `ssh -V` |
+| `docker` CLI with the compose plugin, allowed to use proxy-vm's Docker | deploying the wake front | `docker compose version && docker ps` |
+
+If Jenkins itself runs in a container, mount the host's `/var/run/docker.sock` and install the docker
+CLI and compose plugin in the image (or use an agent that has them). Waking still works from inside a
+container, because the pipeline wakes homelabai by calling the wake front at
+`http://192.168.50.81:9100`, not with its own broadcast. Its requests to homelabai leave proxy-vm
+from `192.168.50.81`, which homelabai's firewall already allows on port 9000.
+
+Run these checks in a throwaway Jenkins job with an `sh` step, so they see what Jenkins sees (its
+user, its PATH, its container if it has one).
+
+### 2. Credentials (Manage Jenkins → Credentials → System → Global)
+
+| ID | Kind | Contents |
+|---|---|---|
+| `homelabai-ssh` | SSH Username with private key | username `mainul35`, and a private key homelabai accepts |
+| `gateway-wake-env` | Secret file | the wake front's settings: `wake/wake.env.example`, filled in (your current `~/ai-gateway-src/wake/wake.env` on proxy-vm) |
+
+For the SSH key, a key just for deploys:
 
 ```bash
-# 1. An ssh key homelabai accepts, so deploys need no password
-ssh-keygen -t ed25519 -N '' -f ~/.ssh/id_ed25519      # skip if ~/.ssh/id_ed25519 exists
-ssh-copy-id mainul35@192.168.50.146                    # asks for mainul35's password once
-ssh -o BatchMode=yes mainul35@192.168.50.146 true && echo ok
-
-# 2. The pipeline's own clone (separate from ~/ai-gateway-src, which stays yours to play in)
-git clone -b develop https://github.com/mainul35/ai-gateway ~/gateway-deployer/src
-
-# 3. Settings, and the timer
-sudo cp ~/gateway-deployer/src/ops/deployer/gateway-deployer.conf /etc/default/gateway-deployer
-sudo cp ~/gateway-deployer/src/ops/deployer/gateway-deployer.{service,timer} /etc/systemd/system/
-sudo systemctl daemon-reload
-sudo systemctl enable --now gateway-deployer.timer
-
-# 4. The first deploy, watched
-sudo systemctl start gateway-deployer
-journalctl -u gateway-deployer -f
+# anywhere
+ssh-keygen -t ed25519 -N '' -C jenkins-deploy -f jenkins-deploy
+ssh-copy-id -i jenkins-deploy.pub mainul35@192.168.50.146
+# paste the contents of jenkins-deploy (the private key) into the credential, then delete both files
 ```
 
-The service runs as `proxt` (`User=` in `gateway-deployer.service`); change it there if the account
-differs. That account needs the ssh key from step 1 and permission to run `docker`.
+The pipeline accepts homelabai's host key on first contact and checks it on every deploy after that.
 
-The wake front's settings stay in `~/gateway-wake/wake.env`, outside every clone. The first pipeline
-deploy copies them there from `~/ai-gateway-src/wake/wake.env` if you set it up by hand earlier, and
-replaces the container you started by hand.
+### 3. The job
+
+New Item → **Multibranch Pipeline**, named e.g. `ai-gateway`:
+
+- Branch Sources → GitHub, repository `https://github.com/mainul35/ai-gateway` (public, so no
+  credentials needed to read it)
+- Behaviours: discover branches; discover pull requests from origin; discover pull requests from
+  forks with **Trust: From users with Admin or Write permission**. The repository is public, and this
+  keeps a stranger's pull request from changing the `Jenkinsfile` that runs on proxy-vm (theirs runs
+  with your `Jenkinsfile`, and only the checks, never the deploy stages)
+- Build Configuration: by Jenkinsfile, path `Jenkinsfile`
+- Scan Repository Triggers: periodically, every 5 minutes, as a fallback for missed webhooks
+
+Then on GitHub, Settings → Webhooks → Add webhook: payload URL
+`https://jenkins.mainul35.dev/github-webhook/`, content type `application/json`, events "push" and
+"pull requests". If `jenkins.mainul35.dev` is behind Cloudflare Access, add a bypass for the
+`/github-webhook/` path, or the webhook never gets through (the periodic scan still works).
+
+A plain Pipeline job pointed at `develop` works too; the deploy stages recognise `develop` either way.
+
+### 4. First run
+
+Run the `develop` branch job (Build Now) and watch the stages. The first wake-front deploy replaces the
+container you started by hand from `~/ai-gateway-src/wake`; from then on it runs from the job's
+workspace with the settings in `gateway-wake-env`. Check afterwards:
+
+```bash
+curl -s localhost:9100/__wake/status          # on proxy-vm: {"up": true, ...}
+docker ps --filter name=gateway-wake-front    # running, from compose project gateway-wake
+```
 
 On GitHub, protect `develop` (Settings → Branches) so only you can push to it: whatever lands there
-runs on both machines. While there, Settings → Actions → General → "Require approval for all
-outside collaborators" keeps strangers' pull requests from using your Actions minutes.
+runs on both machines.
 
 ## Day to day
 
 | To | Do |
 |---|---|
-| Deploy | merge to `develop`. Within ~2 min of CI going green it is live |
-| Watch a deploy | `journalctl -u gateway-deployer -f` on proxy-vm |
-| See what is deployed | `cat ~/gateway-deployer/state/deployed` on proxy-vm |
-| Deploy the branch head again (e.g. after fixing something on a server) | `FORCE=1 ~/gateway-deployer/src/ops/deployer/gateway-deployer.sh` (also skips the CI check) |
-| Deploy without waiting for CI | `REQUIRE_CI=0` in `/etc/default/gateway-deployer` |
-| Pause deploys | `sudo systemctl stop gateway-deployer.timer` (`start` to resume) |
-| Roll back | `git revert` the commit and push; the pipeline deploys the revert. On the server, the last 5 deployed versions are also kept in `~/model-gateway/.deploy-backup/` |
-| Deploy by hand, no pipeline | `DEPLOY_HOST=mainul35@192.168.50.146 bin/deploy.sh` and `bin/deploy-wake.sh` from any clone on proxy-vm, or `DEPLOY_HOST=local bin/deploy.sh` on homelabai |
+| Deploy | merge to `develop` |
+| Watch a deploy | the `develop` build in Jenkins (stage view, console output) |
+| Deploy again without a new commit | Build Now on the `develop` branch job |
+| Pause deploys | disable the job (or the `develop` branch job) |
+| Roll back | `git revert` the commit and push; the revert deploys like anything else. On the server, the last 5 deployed versions are also kept in `~/model-gateway/.deploy-backup/` |
+| Change wake front settings | update the `gateway-wake-env` credential, then Build Now on `develop`. Docker Compose sees the changed settings and recreates the container |
+| Deploy by hand, no Jenkins | `DEPLOY_HOST=local bin/deploy.sh` on homelabai, or `DEPLOY_HOST=mainul35@192.168.50.146 bin/deploy.sh` and `WAKE_ENV_FILE=… bin/deploy-wake.sh` from a clone on proxy-vm |
+| Run the checks locally | `ci/checks.sh` |
 
-A failed deploy has already been rolled back by the script that failed; the log says which step and
-why. A commit whose CI failed is skipped and never retried; the next commit is considered normally.
+A failed deploy step has already rolled itself back; the console output says which step and why. If
+the checks fail, nothing is deployed.
 
 ## What the pipeline does not touch
 
 These need root or hold secrets, so they stay manual (all in [sleep-and-wake.md](sleep-and-wake.md),
 "Setting it up"):
 
-- `config/config.properties` on homelabai (secrets, SSO) and `~/gateway-wake/wake.env` on proxy-vm
-- the idle timer installed in `/usr/local/sbin`, and `/etc/default/idle-shutdown`. When a deploy ships
-  a newer `idle-shutdown.sh`, the deploy log prints the one `sudo install` line to run
+- `config/config.properties` on homelabai (secrets, SSO)
+- the idle timer installed in `/usr/local/sbin`, and `/etc/default/idle-shutdown`. When a deploy ships a
+  newer `idle-shutdown.sh`, the console output prints the one `sudo install` line to run
 - sudo, UFW and Cloudflare tunnel settings
 
 ## Deploys and sleep
 
-A deploy starts by waking homelabai if needed, and while `bin/deploy.sh` runs, `/tmp/gateway-deploying`
-exists on the server, which the idle timer treats as work, so the machine
-never suspends halfway through a deploy. If a deploy dies, the lock stops counting after 30 minutes.
-After the deploy, the machine goes back to sleep on its own once it has been idle for
-`IDLE_MINUTES`.
+The pipeline wakes homelabai before deploying. While `bin/deploy.sh` runs, `/tmp/gateway-deploying`
+exists on the server, which the idle timer treats as work, so the machine never suspends halfway
+through a deploy; if a deploy dies, the lock stops counting after 30 minutes. Afterwards the machine
+goes back to sleep on its own once it has been idle for `IDLE_MINUTES`.
+
+Pull request and feature-branch builds only run the checks, on proxy-vm; they never wake homelabai.

@@ -1,9 +1,0 @@
-[Unit]
-Description=Check for new AI gateway commits every 2 minutes
-
-[Timer]
-OnBootSec=2min
-OnUnitActiveSec=2min
-
-[Install]
-WantedBy=timers.target

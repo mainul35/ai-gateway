@@ -8,6 +8,7 @@
 #                      gateway deploys itself from a clone on its own server (default: mainul35@homelabai)
 #   DEPLOY_DIR         project directory on it     (default: model-gateway, relative to the remote home)
 #   DEPLOY_PUBLIC_URL  public URL to check after   (default: https://ai-gateway.mainul35.dev)
+#   DEPLOY_SSH_OPTS    extra ssh options, e.g. "-i key -o StrictHostKeyChecking=accept-new" (Jenkins)
 #
 # Never touched on the server: config/config.properties (secrets, SSO settings), .venv, logs, .env.
 set -euo pipefail
@@ -28,7 +29,8 @@ on_server() {
     if [ "$HOST" = local ]; then
         (cd "$HOME" && bash -c "$*")
     else
-        ssh -o BatchMode=yes -o ConnectTimeout=10 "$HOST" "$*"
+        # shellcheck disable=SC2086  # DEPLOY_SSH_OPTS is a list of options
+        ssh -o BatchMode=yes -o ConnectTimeout=10 ${DEPLOY_SSH_OPTS:-} "$HOST" "$*"
     fi
 }
 

@@ -1,15 +1,21 @@
 #!/usr/bin/env bash
-# Makes sure homelabai is awake and its gateway answering, waking it with Wake-on-LAN if needed.
-# Runs on proxy-vm (anything on the same LAN works). Exits 0 once the gateway is healthy.
+# Makes sure homelabai is awake and its gateway answering, waking it if needed. Exits 0 once the
+# gateway is healthy. Used by the Jenkins pipeline before it deploys, and by hand.
 #
 #   bin/wake-homelabai.sh
 #
-# Settings (environment variables), read from the wake front's wake.env when not set:
-#   GATEWAY_URL     the gateway on the LAN      (default: WAKE_UPSTREAM from wake.env)
-#   WAKE_MAC        homelabai's NIC             (default: from wake.env)
-#   WAKE_BROADCAST  the LAN broadcast address   (default: from wake.env, else 255.255.255.255)
-#   WAKE_ENV        where wake.env lives        (default: ~/gateway-wake/wake.env)
-#   WAKE_TIMEOUT    seconds to wait             (default: 300)
+# Two ways to wake it, tried in this order:
+#   - through the wake front (WAKE_FRONT_URL): works from anywhere that can reach proxy-vm, including
+#     a Jenkins container whose own broadcasts would never reach the LAN
+#   - a Wake-on-LAN packet sent from here (WAKE_MAC): needs this machine on the LAN itself
+#
+# Settings (environment variables; values missing here are read from wake.env if it exists):
+#   GATEWAY_URL     the gateway on the LAN       (default: WAKE_UPSTREAM from wake.env)
+#   WAKE_FRONT_URL  the wake front               (e.g. http://192.168.50.81:9100)
+#   WAKE_MAC        homelabai's NIC              (default: from wake.env)
+#   WAKE_BROADCAST  the LAN broadcast address    (default: from wake.env, else 255.255.255.255)
+#   WAKE_ENV        where wake.env lives         (default: ~/gateway-wake/wake.env)
+#   WAKE_TIMEOUT    seconds to wait              (default: 300)
 set -uo pipefail
 
 WAKE_ENV=${WAKE_ENV:-$HOME/gateway-wake/wake.env}
@@ -19,10 +25,14 @@ if [ -r "$WAKE_ENV" ]; then
     WAKE_MAC=${WAKE_MAC:-$(from_env WAKE_MAC)}
     WAKE_BROADCAST=${WAKE_BROADCAST:-$(from_env WAKE_BROADCAST)}
 fi
+WAKE_FRONT_URL=${WAKE_FRONT_URL:-}
+WAKE_MAC=${WAKE_MAC:-}
 WAKE_BROADCAST=${WAKE_BROADCAST:-255.255.255.255}
 WAKE_TIMEOUT=${WAKE_TIMEOUT:-300}
-: "${GATEWAY_URL:?set GATEWAY_URL or WAKE_UPSTREAM in $WAKE_ENV}"
-: "${WAKE_MAC:?set WAKE_MAC or WAKE_MAC in $WAKE_ENV}"
+: "${GATEWAY_URL:?set GATEWAY_URL (e.g. http://192.168.50.146:9000)}"
+if [ -z "$WAKE_FRONT_URL" ] && [ -z "$WAKE_MAC" ]; then
+    echo "set WAKE_FRONT_URL or WAKE_MAC, so there is a way to wake it"; exit 2
+fi
 
 healthy() { curl -sf -m 3 "$GATEWAY_URL/health" >/dev/null 2>&1; }
 
@@ -41,6 +51,18 @@ with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
 PY
 }
 
+wake() {
+    if [ -n "$WAKE_FRONT_URL" ]; then
+        # The wake front keeps resending packets on its own for 5 min; a 429 only means someone
+        # pressed it in the last 2 min, so it is waking already
+        curl -s -m 5 -o /dev/null -X POST "$WAKE_FRONT_URL/__wake/now" && return 0
+        echo "wake front unreachable at $WAKE_FRONT_URL"
+    fi
+    if [ -n "$WAKE_MAC" ]; then
+        magic_packet || echo "could not send the magic packet"
+    fi
+}
+
 echo "homelabai is asleep; waking it"
 began=$(date +%s)
 last_sent=0
@@ -49,9 +71,8 @@ while (( $(date +%s) - began < WAKE_TIMEOUT )); do
         echo "homelabai is awake after $(( $(date +%s) - began )) s"
         exit 0
     fi
-    # Resent every 15 s, in case one was lost
-    if (( $(date +%s) - last_sent >= 15 )); then
-        magic_packet || echo "could not send the magic packet"
+    if (( $(date +%s) - last_sent >= 30 )); then
+        wake
         last_sent=$(date +%s)
     fi
     sleep 2
