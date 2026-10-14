@@ -75,6 +75,8 @@ async def forward(principal: Principal, endpoint: str, path: str, body: dict, sk
         backend = backends.Backend(name="llamacpp", kind="llamacpp",
                                    base_url=f"{running.base_url}/v1", upstream_model=model)
         running.in_flight += 1
+    elif backend.kind == "ollama":
+        await supervisor.make_room_for_ollama(backend.upstream_model)
 
     upstream_body = dict(body, model=backend.upstream_model)
     started = time.monotonic()
@@ -140,6 +142,8 @@ def _streamed(principal, endpoint, path, body, model, backend):
                 running.in_flight += 1
                 target = backends.Backend(name="llamacpp", kind="llamacpp",
                                           base_url=f"{running.base_url}/v1", upstream_model=model)
+            elif target.kind == "ollama":
+                await supervisor.make_room_for_ollama(target.upstream_model)
             upstream_body = dict(body, model=target.upstream_model)
             # Token counts in the final chunk, so streamed requests are still accounted for
             upstream_body.setdefault("stream_options", {"include_usage": True})
