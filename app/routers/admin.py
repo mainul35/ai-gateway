@@ -63,8 +63,11 @@ def _user_json(user):
         "claims": json.loads(user.claims) if user.claims else None,
         "claims_seen_at": user.claims_seen_at.isoformat() if user.claims_seen_at else None,
         "tool_capabilities": access.capabilities_of(user),
+        # No part of the key itself: the user list is for managing keys, not reading them, and a
+        # prefix on every row is a piece of somebody's credential on an admin's screen
         "keys": [
-            {"id": k.id, "name": k.name, "prefix": k.key_prefix, "is_active": k.is_active,
+            {"id": k.id, "name": k.name, "is_active": k.is_active,
+             "created_at": k.created_at.isoformat() if k.created_at else None,
              "last_used_at": k.last_used_at.isoformat() if k.last_used_at else None}
             for k in user.api_keys
         ],

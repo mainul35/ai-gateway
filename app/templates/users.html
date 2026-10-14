@@ -1,6 +1,11 @@
 {% extends "base.html" %}
 {% block title %}Users &middot; Model Gateway{% endblock %}
 {% block content %}
+<style>
+details.keys summary{cursor:pointer;color:var(--muted)}
+details.keys summary:hover{color:var(--text)}
+details.keys .key-row{display:flex;align-items:center;gap:.6rem;flex-wrap:wrap;margin-top:.4rem;font-size:.85rem}
+</style>
 <h1>Users</h1>
 <p class="sub">
   {% if user.role == 'admin' %}Manage roles, model access and keys. There is no seat limit.
@@ -119,6 +124,20 @@ function saidByAuthServer(u){
   </details>`;
 }
 
+// How many keys, and on opening, each one by its name and dates - never any of the key itself.
+// The list is for managing keys; a key's characters on an admin's screen help nobody and are a
+// piece of a credential on display.
+function keysCell(keys, manageable){
+  if(!keys.length) return '<span class="muted">none</span>';
+  const when = iso => iso ? new Date(iso).toLocaleDateString() : 'never';
+  const rows = keys.map(k => `<div class="key-row">
+      <span>${escapeHtml(k.name || 'key')}</span>
+      <span class="muted">made ${when(k.created_at)} · used ${when(k.last_used_at)}</span>
+      ${manageable ? `<button class="btn btn-danger btn-sm" data-revoke="${k.id}" title="Revoke this key">Revoke</button>` : ''}
+    </div>`).join('');
+  return `<details class="keys"><summary>${keys.length} ${keys.length === 1 ? 'key' : 'keys'}</summary>${rows}</details>`;
+}
+
 function accessSummary(u){
   if(u.role === 'admin') return '<span class="muted">all (admin)</span>';
   if(u.model_access === 'all') return 'all models';
@@ -150,9 +169,7 @@ async function loadUsers(){
               ${saidByAuthServer(u)}</td>
           <td>${roleCell(u)}</td>
           <td>${accessSummary(u)}</td>
-          <td>${keys.length ? keys.map(k => `<code>${escapeHtml(k.prefix)}&hellip;</code>${manageable
-                ? ` <button class="btn btn-danger btn-sm" data-revoke="${k.id}" title="Revoke">&times;</button>` : ''}`).join('<br>')
-              : '<span class="muted">none</span>'}</td>
+          <td>${keysCell(keys, manageable)}</td>
           <td>${u.is_active ? '<span class="pill on">active</span>' : '<span class="pill off">disabled</span>'}</td>
           <td style="text-align:right;white-space:nowrap">${manageable ? `
             ${u.role !== 'admin' ? `<button class="btn btn-sm btn-secondary" data-access="${escapeHtml(u.name)}">Edit access</button>` : ''}
