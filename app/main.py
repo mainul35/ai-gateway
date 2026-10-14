@@ -4,11 +4,11 @@ import logging
 import os
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
-from app import bootstrap, db, knowledge, settings, sso
+from app import activity, bootstrap, db, knowledge, settings, sso
 from app.engine.supervisor import supervisor
 from app.coding import runner as coding_runner
 from app.routers import admin, auth_sso, chat, coding, openai_v1, ui
@@ -46,6 +46,7 @@ async def lifespan(_: FastAPI):
 
 
 app = FastAPI(title="Model Gateway", version="0.1.0", lifespan=lifespan)
+app.add_middleware(activity.ActivityMiddleware)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],  # homelab: the API key is the access control, not the origin
@@ -65,3 +66,11 @@ app.mount("/static", StaticFiles(directory=os.path.join(os.path.dirname(__file__
 @app.get("/health")
 async def health():
     return {"status": "ok"}
+
+
+@app.get("/internal/activity", include_in_schema=False)
+async def internal_activity(request: Request):
+    """Whether the gateway is busy, for the machine's idle-sleep check (ops/idle-shutdown)."""
+    if not activity.is_local_request(request):
+        raise HTTPException(404)
+    return activity.snapshot()

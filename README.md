@@ -345,3 +345,45 @@ Override the target with `DEPLOY_HOST`, `DEPLOY_DIR` and `DEPLOY_PUBLIC_URL`.
 
 On the server the gateway is kept running by cron (`bin/gateway-start.sh` at boot and every
 minute as a watchdog).
+
+## Sleeping when idle
+
+Full guide: [docs/sleep-and-wake.md](docs/sleep-and-wake.md) (setup, settings, changing the idle
+timeout, troubleshooting). Deployment pipeline: [docs/deployment.md](docs/deployment.md).
+
+homelabai suspends itself after `IDLE_MINUTES` (5) with nothing to do, and wakes again when a
+request arrives through the [wake front](wake/README.md) on proxy-vm. Asleep it draws a few watts
+instead of 100+.
+
+"Nothing to do" is decided by `ops/idle-shutdown/idle-shutdown.sh`, run every minute by a systemd
+timer. Any of these keeps the machine up: `/run/stay-awake` exists, someone typed in an SSH session
+recently, the GPU, CPU or network is busy, or the gateway reports work. The gateway's answer comes
+from `GET /internal/activity` (loopback only, not through a proxy or tunnel): requests in flight, a
+request in the last 90 seconds, a coding task running or queued, a deploy being watched, a playground
+job, a llama.cpp request. That catches what GPU numbers miss, such as a coding task between two model
+calls. A task waiting for approval does not keep it awake; approving it later wakes it.
+
+```bash
+cd ops/idle-shutdown
+sudo install -m 755 idle-shutdown.sh /usr/local/sbin/idle-shutdown
+sudo install -m 644 idle-shutdown.conf /etc/default/idle-shutdown    # starts with DRY_RUN=1
+sudo install -m 644 idle-shutdown.service idle-shutdown.timer /etc/systemd/system/
+sudo systemctl daemon-reload && sudo systemctl enable --now idle-shutdown.timer
+journalctl -t idle-shutdown -f
+```
+
+After a night of `DRY_RUN: would suspend` lines at sensible times, set `DRY_RUN=0`. Before relying on
+suspend, check that `cat /sys/power/mem_sleep` lists `[deep]` (real suspend-to-RAM; `s2idle` draws far
+more) and that one manual `sudo systemctl suspend` comes back cleanly, GPU included. Set
+`ACTION=poweroff` to shut down instead.
+
+To put it to sleep straight away instead of waiting, an admin can call
+`POST /admin/power/suspend` (body optional: `{"force": true, "delay_seconds": 5}`). It answers `409`
+with the reasons if work is running, unless `force` is set, and `DELETE /admin/power/suspend` calls
+off one that has not happened yet. The gateway runs as an ordinary user, so this needs one sudo rule
+on homelabai, limited to that one command:
+
+```bash
+echo 'mainul35 ALL=(root) NOPASSWD: /usr/bin/systemctl suspend' | sudo tee /etc/sudoers.d/gateway-suspend
+sudo chmod 440 /etc/sudoers.d/gateway-suspend
+```
