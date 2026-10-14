@@ -61,6 +61,40 @@ def model_for(name):
     return main
 
 
+def _plain(name):
+    """A model name reduced to what survives being written as part of a claude-* name."""
+    return "".join(c if c.isalnum() else "-" for c in name.lower())
+
+
+async def _model_named(asked):
+    """model_for, plus a gateway model chosen by a claude-* name: claude-gemma4-31b is gemma4:31b.
+
+    The desktop app takes only model names that look like Claude's, so one gateway model per name is
+    the only way to offer several in its picker. A name that matches no gateway model - Claude's own,
+    claude-sonnet-4-5 - keeps meaning the configured default.
+    """
+    name = (asked or "").strip()
+    if name.lower().startswith("anthropic/"):
+        name = name[len("anthropic/"):]
+    if name.lower().startswith("claude-"):
+        wanted = _plain(name[len("claude-"):])
+        for model in await backends.available_models():
+            if _plain(model) == wanted:
+                return model
+    return model_for(name)
+
+
+def _has_images(body):
+    """Whether any message, or any tool result in one, carries an image."""
+    def blocks(content):
+        for block in content if isinstance(content, list) else ():
+            if isinstance(block, dict):
+                yield block
+                yield from blocks(block.get("content"))
+    return any(block.get("type") == "image"
+               for message in body.get("messages") or () for block in blocks(message.get("content")))
+
+
 async def _target(backend, model):
     """Where the request goes, the model loaded first when it is one of ours. (base_url, running)."""
     if backend.kind == "llamacpp":
@@ -69,6 +103,8 @@ async def _target(backend, model):
             raise RuntimeError(problem)
         running.in_flight += 1
         return running.base_url, running
+    if backend.kind == "ollama":
+        await supervisor.make_room_for_ollama(backend.upstream_model)
     # Ollama's OpenAI address is <host>/v1; its Messages API is <host>/v1/messages
     base = backend.base_url[:-3] if backend.base_url.endswith("/v1") else backend.base_url
     return base, None
@@ -115,7 +151,7 @@ async def messages(request: Request, principal: Principal = Depends(authenticate
         return _error(400, "Request body must be JSON", "invalid_request_error")
 
     asked = body.get("model")
-    model = model_for(asked)
+    model = await _model_named(asked)
     if not model:
         return _error(400, "Field 'model' is required", "invalid_request_error")
     if not access.can_use_model(principal, model):
@@ -129,6 +165,15 @@ async def messages(request: Request, principal: Principal = Depends(authenticate
     if body.get("tools") and backend.capabilities and "tools" not in backend.capabilities:
         return _error(400, f"Model '{model}' cannot call tools, and Claude Code needs one that can."
                            " Choose a model listed with 'tools' in the gateway's model list.",
+                      "invalid_request_error")
+    # Same for pictures: llama.cpp without a projector answers a 500, and clients retry a 500 over
+    # and over before giving up with nothing useful said. A 400 they show as it is.
+    if _has_images(body) and backend.capabilities and "vision" not in backend.capabilities:
+        seeing = sorted(name for name, b in (await backends.available_models()).items()
+                        if "vision" in b.capabilities and access.can_use_model(principal, name))
+        return _error(400, f"Model '{model}'" + (f" (asked for as '{asked}')" if asked != model else "")
+                      + " cannot see images. Models that can: " + (", ".join(seeing) or "none")
+                      + ". In the Claude desktop app, name one as claude-<model>, e.g. claude-gemma4-31b.",
                       "invalid_request_error")
 
     if body.get("stream"):

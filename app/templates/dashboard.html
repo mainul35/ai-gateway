@@ -99,15 +99,28 @@
   </p>
 
   <details open>
-    <summary><strong>Claude Code</strong> &mdash; the launcher (Windows, PowerShell)</summary>
+    <summary><strong>Claude Code</strong> &mdash; the launcher (Windows, macOS, Linux)</summary>
+    <p style="margin-bottom:0">You need the Claude Code CLI installed (<code>claude</code>). The launcher
+      asks for your gateway API key the first time it does not find one (in the
+      <code>AI_GATEWAY_API_KEY</code> environment variable, or <code>~/.qwen/.env</code>).</p>
+
+    <p style="margin:.8rem 0 0"><strong>Windows</strong> (PowerShell)</p>
     <ol>
-      <li><a href="/downloads/claude-gateway.ps1" download>Download claude-gateway.ps1</a>. You need the
-        Claude Code CLI installed (<code>claude</code>).</li>
+      <li><a href="/downloads/claude-gateway.ps1" download>Download claude-gateway.ps1</a>.</li>
       <li>Open PowerShell in the project you want to work on and run:
-        <pre><code class="copyable" id="launcherCmd"></code></pre>
-        It asks for your gateway API key the first time it does not find one (in the
-        <code>AI_GATEWAY_API_KEY</code> environment variable, or <code>~/.qwen/.env</code>).</li>
+        <pre><code class="copyable" id="launcherCmd"></code></pre></li>
       <li>Another model: add <code>-Model qwen3-coder:30b -Context 32768</code>. Anything else you add
+        goes to <code>claude</code> as typed, e.g. <code>-p "fix the failing test"</code>.</li>
+    </ol>
+
+    <p style="margin:.8rem 0 0"><strong>macOS and Linux</strong> (bash)</p>
+    <ol>
+      <li>Install it once:
+        <pre><code class="copyable" id="launcherInstallSh"></code></pre></li>
+      <li>In the project you want to work on, run <code>claude-gateway</code> (if
+        <code>~/.local/bin</code> is not on your <code>PATH</code>, run it as
+        <code>~/.local/bin/claude-gateway</code>).</li>
+      <li>Another model: add <code>--model qwen3-coder:30b --context 32768</code>. Anything else you add
         goes to <code>claude</code> as typed, e.g. <code>-p "fix the failing test"</code>.</li>
     </ol>
     <p class="muted" style="font-size:.85rem">Everything it sets is for that one <code>claude</code>
@@ -136,7 +149,14 @@
       <li>Inference provider: <strong>Gateway</strong></li>
       <li>Gateway base URL: <code class="origin"></code></li>
       <li>Gateway API key: one of your keys above, auth scheme <strong>Bearer</strong></li>
-      <li>Models: the gateway model names, e.g. <code>qwen3-next-80b</code></li>
+      <li>Models: the app accepts only names that look like Claude's, so write a gateway model as
+        <code>claude-</code> and its name with <code>:</code> and <code>.</code> as <code>-</code>:
+        <code>claude-gemma4-31b</code> is <code>gemma4:31b</code>, <code>claude-qwen3-next-80b</code> is
+        <code>qwen3-next-80b</code>. Put the real name in <em>Display name</em>. Any other
+        <code>claude-*</code> name, e.g. <code>claude-sonnet-4-5</code>, runs the gateway's default model.</li>
+      <li>Images need a model that sees them (<em>vision</em> in the model list above), e.g.
+        <code>claude-gemma4-31b</code>; <code>qwen3-next-80b</code> reads text only.</li>
+      <li>Leave <em>Offer 1M-context variant</em> off: no model here has a 1M window.</li>
     </ul>
     <p class="muted" style="font-size:.85rem">This moves <em>every</em> desktop session &mdash; Code and
       Cowork &mdash; to this gateway, and Remote Control and cloud sessions are unavailable while it is
@@ -169,6 +189,13 @@ document.querySelectorAll('.agent-guide .origin').forEach(e => e.textContent = l
 document.querySelectorAll('.agent-guide .origin-v1').forEach(e => e.textContent = location.origin + '/v1');
 document.getElementById('launcherCmd').textContent =
   `& "$HOME\\Downloads\\claude-gateway.ps1" -Gateway ${location.origin}`;
+// The gateway's own address goes into the installed copy, so plain `claude-gateway` comes here
+document.getElementById('launcherInstallSh').textContent = [
+  'mkdir -p ~/.local/bin',
+  `curl -fsSL ${location.origin}/downloads/claude-gateway.sh \\`,
+  `  | sed 's#^GATEWAY=.*#GATEWAY=${location.origin}#' > ~/.local/bin/claude-gateway`,
+  'chmod +x ~/.local/bin/claude-gateway',
+].join('\n');
 document.getElementById('settingsJson').textContent = JSON.stringify({env: {
   ANTHROPIC_BASE_URL: location.origin,
   ANTHROPIC_AUTH_TOKEN: '<your gateway API key>',

@@ -2,7 +2,7 @@
 import os
 
 from fastapi import APIRouter, Cookie, Depends, Form, Request
-from fastapi.responses import FileResponse, RedirectResponse
+from fastapi.responses import FileResponse, RedirectResponse, Response
 from fastapi.templating import Jinja2Templates
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -92,14 +92,19 @@ async def logout():
     return response
 
 
-@router.get("/downloads/claude-gateway.ps1")
-async def claude_launcher():
-    """The Claude Code launcher the Dashboard's "Connect an AI agent" card offers. Served from bin/ as
-    deployed, so the copy people download is always the one this gateway was tested with. It holds no
-    secrets - the key is asked for, or read from the user's own machine - so it needs no login."""
-    path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
-                        "bin", "claude-gateway.ps1")
-    return FileResponse(path, media_type="text/plain; charset=utf-8", filename="claude-gateway.ps1")
+LAUNCHERS = ("claude-gateway.ps1", "claude-gateway.sh")  # Windows; macOS and Linux
+
+
+@router.get("/downloads/{name}")
+async def claude_launcher(name: str):
+    """The Claude Code launchers the Dashboard's "Connect an AI agent" card offers. Served from bin/ as
+    deployed, so the copy people download is always the one this gateway was tested with. They hold no
+    secrets - the key is asked for, or read from the user's own machine - so they need no login. Only
+    the names listed: nothing else in bin/ is for handing out."""
+    if name not in LAUNCHERS:
+        return Response(status_code=404)
+    path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "bin", name)
+    return FileResponse(path, media_type="text/plain; charset=utf-8", filename=name)
 
 
 @router.get("/dashboard")

@@ -15,11 +15,13 @@ import httpx
 from app import settings
 from app.engine.profiles import load_profiles
 from utils.ollama_client import ollama_host
+from utils.system_info import detect_gpus
 
 log = logging.getLogger("engine")
 
 STARTUP_TIMEOUT = 600  # big models take a while to load from disk
 REAPER_INTERVAL = 30
+SMALL_OLLAMA_MODEL = 4 * 1024**3  # below this an Ollama model never makes a llama.cpp model give way
 
 
 class RunningModel:
@@ -119,6 +121,56 @@ class Supervisor:
 
             model, problem = await self._start_locked(profile)
             return model, problem
+
+    async def make_room_for_ollama(self, model):
+        """Stops idle llama.cpp models when an Ollama model is about to load and would not fit beside them.
+
+        The other half of engine.unload_ollama_first. A llama.cpp model keeps the GPU for its whole TTL
+        (qwen3-next-80b holds 22.5 GB for an hour), and Ollama loads into whatever VRAM is left: with
+        under a gigabyte free it puts 0 of gemma4:31b's 61 layers on the GPU and runs all of it on the
+        CPU, many times slower. Only when the model does not fit, though - the playground's small
+        router model writes a search query between two turns of the 80B, and stopping the 80B for that
+        would reload it on every turn. A llama.cpp model still answering someone is left alone.
+        """
+        if not settings.get_bool("engine.unload_ollama_first", "ENGINE_UNLOAD_OLLAMA_FIRST"):
+            return
+        if not any(m.profile.exclusive and m.process.returncode is None for m in self._running.values()):
+            return
+        host = ollama_host()
+        try:
+            async with httpx.AsyncClient(timeout=10) as client:
+                loaded = {e.get("name") or e.get("model"): e
+                          for e in (await client.get(f"{host}/api/ps")).json().get("models") or []}
+                here = loaded.get(model)
+                if here and here.get("size_vram", 0) >= 0.9 * here.get("size", 1):
+                    return  # already on the GPU
+                tags = (await client.get(f"{host}/api/tags")).json().get("models") or []
+                size = next((t.get("size") or 0 for t in tags if t.get("name") == model), 0)
+                # The router (qwen3:1.7b) and embedding models are small enough to run on the CPU, and
+                # never fit beside the 80B anyway: stopping it for them would reload it every turn
+                if size < SMALL_OLLAMA_MODEL:
+                    return
+                if here:
+                    # Loaded, but squeezed onto the CPU: drop it so it comes back on the GPU
+                    await client.post(f"{host}/api/generate", json={"model": model, "keep_alive": 0})
+        except (httpx.HTTPError, ValueError) as e:
+            log.warning("Could not ask Ollama about %s: %s", model, e)
+            return
+        free = sum(g["vram_free"] for g in await asyncio.to_thread(detect_gpus))
+        # Weights plus room for the KV cache and compute buffers
+        if free >= size * 1.15 + 1024**3:
+            return
+        async with self._lock:
+            for name, running in list(self._running.items()):
+                if not running.profile.exclusive:
+                    continue
+                if running.in_flight:
+                    log.warning("%s needs the GPU, but %s is answering a request; Ollama will use the CPU",
+                                model, name)
+                    continue
+                log.info("Stopping %s to free VRAM for Ollama's %s (%.1f GB free, %.1f GB needed)",
+                         name, model, free / 1024**3, size / 1024**3)
+                await self._stop_locked(name)
 
     async def _unload_ollama_models(self):
         """Asks Ollama to drop its loaded models; they otherwise keep the GPU full (OLLAMA_KEEP_ALIVE=-1)."""
