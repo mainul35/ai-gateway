@@ -11,7 +11,7 @@ from fastapi.staticfiles import StaticFiles
 from app import activity, bootstrap, db, knowledge, settings, sso
 from app.engine.supervisor import supervisor
 from app.coding import runner as coding_runner
-from app.routers import admin, auth_sso, chat, coding, openai_v1, ui
+from app.routers import admin, anthropic_v1, auth_sso, chat, coding, openai_v1, ui
 from utils.ollama_client import ollama_host
 
 # Without this our own INFO logs never reach the console; uvicorn only configures its own loggers
@@ -55,6 +55,9 @@ app.add_middleware(
     allow_headers=["*"],
 )
 app.include_router(openai_v1.router)
+# Anthropic's Messages API, for Claude Code
+app.include_router(anthropic_v1.router)
+app.include_router(anthropic_v1.hello)
 app.include_router(admin.router)
 app.include_router(auth_sso.router)
 app.include_router(chat.router)
