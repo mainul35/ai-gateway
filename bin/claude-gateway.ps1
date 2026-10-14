@@ -16,24 +16,39 @@
 .EXAMPLE
   .\bin\claude-gateway.ps1
   .\bin\claude-gateway.ps1 -Model qwen3-coder:30b -Context 32768
-  .\bin\claude-gateway.ps1 -- -p "summarise this repo"     # anything after -- goes to claude
+  .\bin\claude-gateway.ps1 -p "summarise this repo" --permission-mode acceptEdits
+
+  -Model, -Context, -Gateway and -MaxOutput are this script's; everything else goes to claude as typed.
 #>
-param(
-    [string]$Model = "qwen3-next-80b",
-    # The model's real context window. Claude Code assumes 200k for a name it does not know, and would
-    # let a conversation grow past what the model can read.
-    [int]$Context = 131072,
-    [string]$Gateway = "https://ai-gateway.mainul35.dev",
-    [int]$MaxOutput = 16384,
-    [Parameter(ValueFromRemainingArguments = $true)][string[]]$ClaudeArgs
-)
+
+# Read by hand rather than with param(): PowerShell would otherwise bind claude's own arguments to
+# these by position, or call `-p` ambiguous, and claude would never see them.
+$Model = "qwen3-next-80b"
+# The model's real context window. Claude Code assumes 200k for a name it does not know, and would let
+# a conversation grow past what the model can read.
+$Context = 131072
+$Gateway = "https://ai-gateway.mainul35.dev"
+$MaxOutput = 16384
+$ClaudeArgs = @()
+for ($i = 0; $i -lt $args.Count; $i++) {
+    switch -Exact ($args[$i]) {
+        "-Model"     { $Model = $args[++$i]; continue }
+        "-Context"   { $Context = [int]$args[++$i]; continue }
+        "-Gateway"   { $Gateway = $args[++$i]; continue }
+        "-MaxOutput" { $MaxOutput = [int]$args[++$i]; continue }
+        "--"         { continue }
+        default      { $ClaudeArgs += $args[$i] }
+    }
+}
 
 function Get-GatewayKey {
     if ($env:AI_GATEWAY_API_KEY) { return $env:AI_GATEWAY_API_KEY }
     $file = Join-Path $HOME ".qwen\.env"
     if (Test-Path $file) {
-        $line = Get-Content $file | Where-Object { $_ -match '^\s*AI_GATEWAY_API_KEY\s*=\s*(.+?)\s*$' } | Select-Object -First 1
-        if ($line -and $Matches[1]) { return $Matches[1].Trim('"', "'") }
+        # Not $Matches: -match inside Where-Object sets it in the filter's own scope, not here
+        $line = Get-Content $file | Where-Object { $_ -match '^\s*AI_GATEWAY_API_KEY\s*=' } | Select-Object -First 1
+        $value = if ($line) { ($line -replace '^\s*AI_GATEWAY_API_KEY\s*=\s*', '').Trim().Trim('"', "'") } else { "" }
+        if ($value) { return $value }
     }
     $secure = Read-Host "AI gateway API key" -AsSecureString
     return [Runtime.InteropServices.Marshal]::PtrToStringAuto([Runtime.InteropServices.Marshal]::SecureStringToBSTR($secure))
@@ -44,6 +59,11 @@ if (-not $key) { Write-Error "No gateway key. Create one under Users in the gate
 
 # Only for the claude started below: the variables go back to what they were when it exits
 $set = @{
+    # A configuration folder of its own. Signed in to claude.ai in the usual one, Claude Code sends that
+    # login's token in place of ANTHROPIC_AUTH_TOKEN - to the gateway, which rightly refuses it. Here
+    # there is no login to prefer, gateway sessions keep their own history and settings, and the
+    # claude.ai sign-in every other session uses is never touched.
+    CLAUDE_CONFIG_DIR                           = (Join-Path $HOME ".claude-gateway")
     ANTHROPIC_BASE_URL                          = $Gateway.TrimEnd('/')
     ANTHROPIC_AUTH_TOKEN                        = $key
     ANTHROPIC_MODEL                             = $Model
