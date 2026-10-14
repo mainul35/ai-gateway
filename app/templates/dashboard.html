@@ -1,6 +1,12 @@
 {% extends "base.html" %}
 {% block title %}Dashboard &middot; Model Gateway{% endblock %}
 {% block content %}
+<style>
+.agent-guide details{border-top:1px solid var(--border);padding:.7rem 0}
+.agent-guide summary{cursor:pointer}
+.agent-guide ol,.agent-guide ul{margin:.6rem 0 .4rem;padding-left:1.3rem;line-height:1.6}
+.agent-guide pre code{background:none;padding:0;word-break:normal;white-space:pre}
+</style>
 <h1>Dashboard</h1>
 <p class="sub">Status of the gateway, its models and its backends.</p>
 
@@ -82,6 +88,74 @@
     <button class="btn" id="createKey">Create key</button>
   </div>
 </div>
+
+<!-- How to point a coding agent at this gateway. Every address in it is filled in from the page's own
+     origin, so what is copied is right for whichever address the gateway was opened at. -->
+<div class="card agent-guide" style="margin-top:1.5rem">
+  <h2>Connect an AI agent</h2>
+  <p class="muted" style="margin-top:0;font-size:.9rem">
+    Coding agents can use this gateway's models with one of your API keys above. Use a model that can
+    call tools (the list above says <em>tools</em>), and tell the agent its real context size.
+  </p>
+
+  <details open>
+    <summary><strong>Claude Code</strong> &mdash; the launcher (Windows, PowerShell)</summary>
+    <ol>
+      <li><a href="/downloads/claude-gateway.ps1" download>Download claude-gateway.ps1</a>. You need the
+        Claude Code CLI installed (<code>claude</code>).</li>
+      <li>Open PowerShell in the project you want to work on and run:
+        <pre><code class="copyable" id="launcherCmd"></code></pre>
+        It asks for your gateway API key the first time it does not find one (in the
+        <code>AI_GATEWAY_API_KEY</code> environment variable, or <code>~/.qwen/.env</code>).</li>
+      <li>Another model: add <code>-Model qwen3-coder:30b -Context 32768</code>. Anything else you add
+        goes to <code>claude</code> as typed, e.g. <code>-p "fix the failing test"</code>.</li>
+    </ol>
+    <p class="muted" style="font-size:.85rem">Everything it sets is for that one <code>claude</code>
+      only, in a settings folder of its own (<code>~/.claude-gateway</code>): your usual Claude Code,
+      signed in to claude.ai, is untouched. That separate folder matters &mdash; signed in to claude.ai,
+      Claude Code sends that login instead of your gateway key, and the gateway refuses it.</p>
+  </details>
+
+  <details>
+    <summary><strong>Claude Code</strong> &mdash; settings for one project, any system</summary>
+    <p>Put this in the project's <code>.claude/settings.local.json</code> (never the committed
+      <code>settings.json</code>: it holds your key), with your key in place of the placeholder:</p>
+    <pre><code class="copyable" id="settingsJson"></code></pre>
+    <p class="muted" style="font-size:.85rem">If you are signed in to claude.ai, run
+      <code>/status</code> in Claude Code: it should name the auth token, not your claude.ai account. If
+      it names the account, use the launcher, or start Claude Code with
+      <code>CLAUDE_CONFIG_DIR</code> pointing at a separate folder.</p>
+  </details>
+
+  <details>
+    <summary><strong>Claude desktop app</strong></summary>
+    <p>The desktop app takes a gateway only for the whole app, not per project:
+      <strong>Help &rarr; Troubleshooting &rarr; Enable Developer Mode</strong>, then
+      <strong>Developer &rarr; Configure Third-Party Inference</strong>:</p>
+    <ul>
+      <li>Inference provider: <strong>Gateway</strong></li>
+      <li>Gateway base URL: <code class="origin"></code></li>
+      <li>Gateway API key: one of your keys above, auth scheme <strong>Bearer</strong></li>
+      <li>Models: the gateway model names, e.g. <code>qwen3-next-80b</code></li>
+    </ul>
+    <p class="muted" style="font-size:.85rem">This moves <em>every</em> desktop session &mdash; Code and
+      Cowork &mdash; to this gateway, and Remote Control and cloud sessions are unavailable while it is
+      on. Switch it back in the same place. To keep the desktop app on Claude, use the CLI with the
+      launcher instead.</p>
+  </details>
+
+  <details>
+    <summary><strong>Other agents</strong> &mdash; Qwen Code, Cline, Continue, Open WebUI, OpenAI SDKs</summary>
+    <ul>
+      <li>OpenAI-compatible base URL: <code class="origin-v1"></code></li>
+      <li>Anthropic-compatible base URL (Messages API): <code class="origin"></code></li>
+      <li>API key: one of your keys above</li>
+    </ul>
+  </details>
+
+  <p class="muted" style="font-size:.82rem;margin-bottom:0">Anthropic does not support Claude Code on
+    models other than Claude; it works here, and open models are weaker at its tool use than Claude.</p>
+</div>
 {% endblock %}
 
 {% block scripts %}
@@ -89,6 +163,21 @@
 const isAdmin = {{ 'true' if user.role == 'admin' else 'false' }};
 document.getElementById('baseUrl').textContent = location.origin + '/v1';
 document.getElementById('baseUrlCard').textContent = location.origin + '/v1';
+
+// The agent guide, with this gateway's own address in every command and setting
+document.querySelectorAll('.agent-guide .origin').forEach(e => e.textContent = location.origin);
+document.querySelectorAll('.agent-guide .origin-v1').forEach(e => e.textContent = location.origin + '/v1');
+document.getElementById('launcherCmd').textContent =
+  `& "$HOME\\Downloads\\claude-gateway.ps1" -Gateway ${location.origin}`;
+document.getElementById('settingsJson').textContent = JSON.stringify({env: {
+  ANTHROPIC_BASE_URL: location.origin,
+  ANTHROPIC_AUTH_TOKEN: '<your gateway API key>',
+  ANTHROPIC_MODEL: 'qwen3-next-80b',
+  ANTHROPIC_DEFAULT_HAIKU_MODEL: 'qwen3-next-80b',
+  CLAUDE_CODE_MAX_CONTEXT_TOKENS: '131072',
+  CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS: '1',
+  CLAUDE_CODE_DISABLE_THINKING: '1',
+}}, null, 2);
 
 function showError(message){
   const box = document.getElementById('error');
