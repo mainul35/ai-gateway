@@ -48,9 +48,14 @@ past it:
 
 ## On the gateway side
 
-- Claude Code's own `claude-*` model names map to `anthropic.model.default` in
+- `claude-` followed by a gateway model's name, with `:` and `.` written as `-`, is that model:
+  `claude-gemma4-31b` is `gemma4:31b`. This is how the desktop app, which takes only Claude-looking
+  names, can offer more than one model.
+- Any other `claude-*` name - Claude Code's own - maps to `anthropic.model.default` in
   `config/config.properties` (else `qwen3-next-80b`), and `claude-haiku-*` - its background jobs -
   to `anthropic.model.small` (else the same model).
+- A request with an image for a model without vision gets a 400 naming the models that have it,
+  instead of llama.cpp's 500 (which clients retry). `qwen3-next-80b` reads text only.
 - Requests for Ollama and llama.cpp models are passed through unchanged; both speak the Messages
   API. Other backends are translated to and from the OpenAI chat API (`app/anthropic_compat.py`).
 - Usage shows on the dashboard under the endpoint `anthropic_messages`.

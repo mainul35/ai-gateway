@@ -136,7 +136,14 @@
       <li>Inference provider: <strong>Gateway</strong></li>
       <li>Gateway base URL: <code class="origin"></code></li>
       <li>Gateway API key: one of your keys above, auth scheme <strong>Bearer</strong></li>
-      <li>Models: the gateway model names, e.g. <code>qwen3-next-80b</code></li>
+      <li>Models: the app accepts only names that look like Claude's, so write a gateway model as
+        <code>claude-</code> and its name with <code>:</code> and <code>.</code> as <code>-</code>:
+        <code>claude-gemma4-31b</code> is <code>gemma4:31b</code>, <code>claude-qwen3-next-80b</code> is
+        <code>qwen3-next-80b</code>. Put the real name in <em>Display name</em>. Any other
+        <code>claude-*</code> name, e.g. <code>claude-sonnet-4-5</code>, runs the gateway's default model.</li>
+      <li>Images need a model that sees them (<em>vision</em> in the model list above), e.g.
+        <code>claude-gemma4-31b</code>; <code>qwen3-next-80b</code> reads text only.</li>
+      <li>Leave <em>Offer 1M-context variant</em> off: no model here has a 1M window.</li>
     </ul>
     <p class="muted" style="font-size:.85rem">This moves <em>every</em> desktop session &mdash; Code and
       Cowork &mdash; to this gateway, and Remote Control and cloud sessions are unavailable while it is
