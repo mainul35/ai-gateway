@@ -128,6 +128,10 @@ SCHEMA = [
 
 async def ensure_schema():
     async with engine().begin() as connection:
+        # CREATE INDEX IF NOT EXISTS still locks the table first; behind a transaction left open by a
+        # gateway that is shutting down, give up (the caller carries on without the knowledge base)
+        # rather than hold the whole start up
+        await connection.execute(text("SET LOCAL lock_timeout = '20s'"))
         for statement in SCHEMA:
             await connection.execute(text(statement))
 

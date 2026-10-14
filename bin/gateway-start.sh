@@ -21,6 +21,14 @@ MAX_LOG_BYTES=52428800  # 50 MB
 cd "$APP_DIR" || exit 1
 mkdir -p "$(dirname "$LOG")"
 
+# A deploy is restarting the gateway (bin/deploy.sh creates this file when it starts, and calls
+# this script itself with GATEWAY_DEPLOY=1). The watchdog stays out of it: finding no answer while
+# the old gateway drains, it would kill the new one mid-start and race the deploy with a second.
+# Only a recent file counts, so one left behind by a deploy that died does not stop the watchdog.
+if [ -z "${GATEWAY_DEPLOY:-}" ] && [ -n "$(find /tmp/gateway-deploying -mmin -20 2>/dev/null)" ]; then
+    exit 0
+fi
+
 # Already answering? Nothing to do. Ten seconds, because a picture job can keep the gateway busy
 # for a moment and killing it then would cut off whoever is waiting for the picture.
 if curl -sf -m 10 "http://127.0.0.1:$PORT/health" >/dev/null 2>&1; then
@@ -29,7 +37,8 @@ fi
 
 # One missed answer is not proof of anything, and neither are two: the gateway can be busy with a
 # picture. Three strikes over the best part of a minute, and only then is it treated as wedged.
-for _ in 1 2; do
+# A deploy has just stopped it on purpose, so it skips the wait.
+for _ in $([ -z "${GATEWAY_DEPLOY:-}" ] && echo 1 2); do
     sleep 15
     if curl -sf -m 10 "http://127.0.0.1:$PORT/health" >/dev/null 2>&1; then
         exit 0
@@ -37,16 +46,17 @@ for _ in 1 2; do
 done
 
 # A process may exist but be wedged; clear it before starting a fresh one. Uvicorn finishes the
-# requests it has in hand first, so wait for the port rather than racing it: a new process that
-# cannot bind exits at once, and the next minute would start the whole dance again.
-pkill -f 'uvicorn app.main:app' >/dev/null 2>&1
+# requests it has in hand first, so wait for it to be gone - not just for the port, which it lets go
+# of as soon as it starts shutting down: one still draining can hold a database transaction open
+# that the new one's start-up waits behind. The [u] keeps the pattern off this script's own line.
+pkill -f '[u]vicorn app.main:app' >/dev/null 2>&1
 for _ in $(seq 1 20); do
-    (echo > "/dev/tcp/127.0.0.1/$PORT") >/dev/null 2>&1 || break
+    pgrep -f '[u]vicorn app.main:app' >/dev/null || break
     sleep 1
 done
-# Still holding the port after twenty seconds: it is wedged, so insist.
-if (echo > "/dev/tcp/127.0.0.1/$PORT") >/dev/null 2>&1; then
-    pkill -9 -f 'uvicorn app.main:app' >/dev/null 2>&1
+# Still there after twenty seconds: it is wedged, so insist.
+if pgrep -f '[u]vicorn app.main:app' >/dev/null; then
+    pkill -9 -f '[u]vicorn app.main:app' >/dev/null 2>&1
     sleep 2
 fi
 
