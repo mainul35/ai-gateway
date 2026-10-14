@@ -21,7 +21,9 @@ PUBLIC_URL=${DEPLOY_PUBLIC_URL:-https://ai-gateway.mainul35.dev}
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 cd "$ROOT"
 
-PYTHON=${PYTHON:-$(command -v python || command -v python3)}
+# "|| true": the Jenkins agent has no Python, and under set -e a lookup that finds nothing ended the
+# script on this line - before a word was printed - although DEPLOY_SKIP_CHECKS means it is never used
+PYTHON=${PYTHON:-$(command -v python || command -v python3 || true)}
 
 step() { printf '\n==> %s\n' "$*"; }
 
