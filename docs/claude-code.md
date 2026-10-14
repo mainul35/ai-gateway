@@ -15,6 +15,11 @@ C:\Users\mainu\Documents\codes\ollama-model-checker\bin\claude-gateway.ps1 -Mode
 C:\Users\mainu\Documents\codes\ollama-model-checker\bin\claude-gateway.ps1 -p "fix the failing test" --permission-mode acceptEdits
 ```
 
+On macOS and Linux, `bin/claude-gateway.sh` does the same, with `--model`, `--context`, `--gateway`
+and `--max-output`. The Dashboard's "Connect an AI agent" card has a one-line install for it
+(`~/.local/bin/claude-gateway`, with the gateway's address filled in); the gateway serves both
+launchers at `/downloads/claude-gateway.ps1` and `/downloads/claude-gateway.sh`.
+
 `-Model`, `-Context`, `-Gateway` and `-MaxOutput` are the launcher's own; everything else goes to
 `claude` as typed. Everything it sets applies to that one `claude` process only - nothing is
 written to your usual Claude settings, so other sessions and the desktop app stay on Anthropic.
