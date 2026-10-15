@@ -5,7 +5,8 @@ Roles, lowest to highest:
   manager  grants model access to users and manages their keys; cannot change roles or settings
   admin    everything, always with access to every model
 
-Model access per user: "all", "none", or "selected" with a list of model names. Entries may be
+Model access per user: "all", "none", "selected" with a list of model names, or "public": the
+models listed in gateway.public.models, which is what an approved SSO sign-up gets. Entries may be
 shell-style patterns, so "qwen*" covers every model whose name starts with qwen.
 """
 import fnmatch
@@ -14,13 +15,20 @@ import json
 from app import settings
 
 ROLES = ("user", "manager", "admin")
-ACCESS_MODES = ("all", "selected", "none")
+ACCESS_MODES = ("all", "selected", "public", "none")
 
 
 def default_access():
     """Access given to accounts created without an explicit choice (including SSO sign-ups)."""
     value = (settings.get("gateway.default.model.access", "GATEWAY_DEFAULT_MODEL_ACCESS") or "all").lower()
     return value if value in ACCESS_MODES else "all"
+
+
+def public_models():
+    """The models every approved account may use: gateway.public.models, names or patterns,
+    separated by commas or spaces. Empty means none."""
+    raw = settings.get("gateway.public.models", "GATEWAY_PUBLIC_MODELS") or ""
+    return [p for p in raw.replace(",", " ").split() if p]
 
 
 def parse_patterns(raw):
@@ -55,14 +63,18 @@ def can_use_model(principal, model):
         return True
     if mode == "none":
         return False
-    return any(fnmatch.fnmatchcase(model, pattern) for pattern in parse_patterns(user.allowed_models))
+    patterns = public_models() if mode == "public" else parse_patterns(user.allowed_models)
+    return any(fnmatch.fnmatchcase(model, pattern) for pattern in patterns)
 
 
 def can_generate_images(principal):
-    """Image generation is not a model in the list; anyone granted any model may use it."""
+    """Image generation is not a model in the list; anyone granted models by hand may use it.
+
+    Not "public" accounts: a picture holds the whole GPU for a minute, and that is a grant for an
+    admin to make, not something anyone the auth server lets in gets by default."""
     if principal.is_admin:
         return True
-    return principal.user is not None and (principal.user.model_access or "all") != "none"
+    return principal.user is not None and (principal.user.model_access or "all") not in ("none", "public")
 
 
 def can_manage(principal, target):

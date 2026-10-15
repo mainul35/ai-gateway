@@ -48,12 +48,21 @@ async def root(user: User | None = Depends(current_user)):
     return RedirectResponse("/dashboard" if user else "/login", status_code=303)
 
 
+# Fixed wording, picked by a code: a message taken from the URL itself would let anybody send a
+# link to this login page saying whatever they liked
+NOTICES = {
+    "requested": "Your request to use this gateway has been sent to an admin. Sign in again once "
+                 "they have approved it.",
+    "pending": "Your request is still waiting for an admin to approve it.",
+}
+
+
 @router.get("/login")
 async def login_page(request: Request, next: str = "/dashboard", error: str | None = None,
-                     user: User | None = Depends(current_user)):
+                     notice: str | None = None, user: User | None = Depends(current_user)):
     if user:
         return RedirectResponse(next, status_code=303)
-    return _page(request, "login.html", None, next=next, error=error,
+    return _page(request, "login.html", None, next=next, error=error, notice=NOTICES.get(notice or ""),
                  sso_configured=sso.is_configured(), sso_name=settings.get("sso.display.name") or "single sign-on")
 
 

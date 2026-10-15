@@ -20,6 +20,9 @@ EDITABLE_KEYS = [
     "sso.claim.email",
     "sso.claim.name",
     "sso.admin.emails",
+    "sso.require.verified.email",
+    "sso.claim.email_verified",
+    "gateway.public.models",
     "engine.unload_ollama_first",
     # Playground tools
     "features.web_search.enabled",

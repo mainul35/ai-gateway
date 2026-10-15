@@ -46,6 +46,23 @@ model server would have fetched them from inside the network with no check at al
   tasks that need a network fail and say why. `status` and `remove` do what they say.
 - All capabilities are dropped, memory, CPU and processes are capped, `no-new-privileges` is set.
 
+## Signing in through SSO: `app/routers/auth_sso.py`
+
+- **Accounts are found by the auth server's own id** (`sso_subject`, "auth server host|sub"), never
+  by a name or email: those are whatever the person typed at the auth server. Matched by name, a
+  display name of `admin` signed in as the built-in admin. A name already taken here - a local
+  account, a manager's pre-made one - gets a suffix on the new account instead.
+- **Accounts from before** were found by name. One is linked to its id once, by the person it was
+  made for: only an account an SSO sign-in created, with no password, on an email the auth server
+  marks verified (`email_verified`).
+- **A first sign-in is a request.** The account is created switched off and listed under
+  *Sign-in requests* on the Users page; only an admin can approve or reject it. Approved, it has
+  **public** access: the models in `gateway.public.models` (ticked on the Users page) and no
+  image generation, until someone grants more.
+- **Admin by email only when verified.** `sso.admin.emails` promotes an account only if the auth
+  server says the email is verified. `sso.require.verified.email=false` trusts every email, for an
+  auth server that never sends the claim; `sso.claim.email_verified` names the claim if it differs.
+
 ## On the server (root, by hand)
 
 Not something the gateway can do for itself:

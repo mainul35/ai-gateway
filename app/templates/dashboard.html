@@ -330,7 +330,8 @@ async function loadMyModels(){
     if(me.role !== 'admin'){
       note.textContent = me.model_access === 'all' ? 'You have access to every model.'
         : me.model_access === 'none' ? 'You have not been granted any models yet. Ask a manager or admin.'
-        : `You have access to ${models.data.length} selected model${models.data.length === 1 ? '' : 's'}.`;
+        : `You have access to ${models.data.filter(m => m.id !== 'auto').length} ${me.model_access === 'public' ? 'public' : 'selected'} model${
+            models.data.filter(m => m.id !== 'auto').length === 1 ? '' : 's'}.`;
       note.hidden = false;
     }
     const byBackend = {};

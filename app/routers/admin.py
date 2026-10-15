@@ -34,13 +34,13 @@ class UserIn(BaseModel):
     name: str = Field(min_length=1, max_length=128)
     email: str | None = None
     role: str = Field(default="user", pattern="^(user|manager|admin)$")
-    model_access: str | None = Field(default=None, pattern="^(all|selected|none)$")
+    model_access: str | None = Field(default=None, pattern="^(all|selected|public|none)$")
     allowed_models: list[str] | None = None
 
 
 class UserPatch(BaseModel):
     role: str | None = Field(default=None, pattern="^(user|manager|admin)$")
-    model_access: str | None = Field(default=None, pattern="^(all|selected|none)$")
+    model_access: str | None = Field(default=None, pattern="^(all|selected|public|none)$")
     allowed_models: list[str] | None = None
     is_active: bool | None = None
 
@@ -57,6 +57,8 @@ def _user_json(user):
         "model_access": user.model_access or "all",
         "allowed_models": access.parse_patterns(user.allowed_models),
         "sign_in": "local password" if user.password_hash else "single sign-on",
+        # "pending": a first SSO sign-in waiting for an admin to approve it
+        "approval": user.approval,
         # What the auth server said at their last sign-in, kept whole and shown as it arrived.
         # While permissions are being wired up to it, "what does it actually send us" is the
         # question, and a gateway that cannot answer it is no help at all.
@@ -89,6 +91,9 @@ async def _other_active_admins(session, user_id):
 def _check_can_manage(principal, target):
     if not access.can_manage(principal, target):
         raise HTTPException(status.HTTP_403_FORBIDDEN, "Managers can only manage accounts with the user role")
+    # A sign-in request is the admins' to decide: until then nobody gives it keys or access
+    if target.approval == "pending" and not principal.is_admin:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Only an admin can act on a sign-in request")
 
 
 def _check_grant_allowed(principal, model_access, allowed_models):
@@ -154,6 +159,9 @@ async def update_user(name: str, payload: UserPatch, principal: Principal = Depe
         user.model_access = model_access
         user.allowed_models = access.serialize_patterns(allowed)
 
+    if payload.is_active and user.approval == "pending":
+        raise HTTPException(status.HTTP_409_CONFLICT, "This is a sign-in request: approve it instead")
+
     if payload.is_active is not None and payload.is_active != user.is_active:
         if not payload.is_active:
             if principal.user is not None and principal.user.id == user.id:
@@ -167,6 +175,32 @@ async def update_user(name: str, payload: UserPatch, principal: Principal = Depe
     await session.commit()
     await session.refresh(user, attribute_names=["api_keys"])
     return _user_json(user)
+
+
+@router.post("/users/{name}/approve")
+async def approve_user(name: str, _: Principal = Depends(require_admin),
+                       session: AsyncSession = Depends(get_session)):
+    """Lets a first SSO sign-in in, with the public models; more can be granted after."""
+    user = await _get_user(session, name)
+    if user is None or user.approval != "pending":
+        raise HTTPException(status.HTTP_404_NOT_FOUND, f"No sign-in request from {name}")
+    user.approval = None
+    user.is_active = True
+    await session.commit()
+    await session.refresh(user, attribute_names=["api_keys"])
+    return _user_json(user)
+
+
+@router.post("/users/{name}/reject")
+async def reject_user(name: str, _: Principal = Depends(require_admin),
+                      session: AsyncSession = Depends(get_session)):
+    """Turns a sign-in request down. The request is removed; signing in again makes a new one."""
+    user = await _get_user(session, name)
+    if user is None or user.approval != "pending":
+        raise HTTPException(status.HTTP_404_NOT_FOUND, f"No sign-in request from {name}")
+    await session.delete(user)
+    await session.commit()
+    return {"rejected": name}
 
 
 @router.delete("/users/{name}")

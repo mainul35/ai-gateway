@@ -28,6 +28,9 @@ _ADDED_COLUMNS = (
     ("projects", "client", "VARCHAR(16)"),
     ("coding_tasks", "originals", "TEXT"),
     ("coding_tasks", "state", "TEXT"),
+    # SSO accounts by the auth server's own id, and sign-ins waiting for an admin
+    ("users", "sso_subject", "VARCHAR(320)"),
+    ("users", "approval", "VARCHAR(16)"),
 )
 
 

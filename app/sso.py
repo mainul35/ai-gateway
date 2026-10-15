@@ -144,16 +144,44 @@ def capability_claims(userinfo, granted_scope=""):
     return kept
 
 
+def _issuer():
+    """Which auth server this is, for telling its subjects apart from another's."""
+    from urllib.parse import urlparse
+    return (urlparse(settings.sso_authorize_url() or "").hostname or "sso").lower()
+
+
+def subject_key(subject):
+    return f"{_issuer()}|{subject}"
+
+
+def _verified(userinfo):
+    """Whether the auth server vouches for the email. An email it has not checked is just text the
+    person typed, so it decides nothing here: not which account, not whether they are an admin.
+    sso.require.verified.email=false trusts every email, for an auth server that never sends the
+    claim and only ever holds checked addresses."""
+    if not settings.get_bool("sso.require.verified.email", "SSO_REQUIRE_VERIFIED_EMAIL", True):
+        return True
+    claim = settings.get("sso.claim.email_verified", "SSO_CLAIM_EMAIL_VERIFIED") or "email_verified"
+    value = (userinfo or {}).get(claim)
+    return value is True or str(value).strip().lower() == "true"
+
+
 def identity_from_userinfo(userinfo):
-    """Maps provider claims onto our user fields, using the configured claim names."""
+    """Maps provider claims onto our user fields, using the configured claim names.
+
+    `subject` is what the account is found by; `name` is only what it is called here, the email
+    when there is one, else the display name, else the subject.
+    """
     subject = str(userinfo.get(settings.sso_claim_id()) or "").strip()
     email = str(userinfo.get(settings.sso_claim_email()) or "").strip()
     name = str(userinfo.get(settings.sso_claim_name()) or "").strip()
-    # Prefer a stable, human-readable account name; fall back to the subject claim
     account = email or name or subject
-    return {"subject": subject, "email": email or None, "name": account or None}
+    return {"subject": subject, "email": email or None, "name": account[:120] or None,
+            "email_verified": bool(email) and _verified(userinfo)}
 
 
-def role_for(email):
+def role_for(email, verified=True):
+    """Admin only for a listed email the auth server has verified: an unverified one is whatever
+    anybody chose to register with, the admin's own address included."""
     admins = [a.strip().lower() for a in (settings.sso_admin_emails() or "").split(",") if a.strip()]
-    return "admin" if email and email.lower() in admins else "user"
+    return "admin" if email and verified and email.lower() in admins else "user"
