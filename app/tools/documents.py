@@ -39,6 +39,32 @@ MIME = {"pdf": "application/pdf",
         "text": "text/plain"}
 
 
+# A .docx or .xlsx is a zip, and is read whole into memory to be parsed. Twenty-five megabytes
+# of zip can unpack to tens of gigabytes; checked against these before anything is unpacked.
+ZIP_MAX_TOTAL = 300 * 1024 * 1024      # everything inside, unpacked
+ZIP_MAX_RATIO = 200                    # how much any one part may grow
+ZIP_MAX_ENTRIES = 5000
+
+
+def _check_zip(data, what):
+    import zipfile
+
+    try:
+        archive = zipfile.ZipFile(io.BytesIO(data))
+    except zipfile.BadZipFile:
+        raise DocumentError(f"This {what} file is damaged and could not be opened.")
+    entries = archive.infolist()
+    if len(entries) > ZIP_MAX_ENTRIES:
+        raise DocumentError(f"This {what} file has too many parts to read.")
+    total = 0
+    for entry in entries:
+        total += entry.file_size
+        if total > ZIP_MAX_TOTAL or (entry.compress_size and entry.file_size > 1_000_000
+                                     and entry.file_size / entry.compress_size > ZIP_MAX_RATIO):
+            raise DocumentError(f"This {what} file unpacks to far more than its size, which is how a "
+                                "file built to exhaust the server's memory looks; it was not opened.")
+
+
 class DocumentError(Exception):
     pass
 
@@ -117,6 +143,7 @@ def _from_pdf(data):
 def _from_docx(data):
     import docx
 
+    _check_zip(data, "Word")
     try:
         document = docx.Document(io.BytesIO(data))
     except Exception as e:
@@ -134,6 +161,7 @@ def _from_docx(data):
 def _from_xlsx(data):
     import openpyxl
 
+    _check_zip(data, "spreadsheet")
     try:
         book = openpyxl.load_workbook(io.BytesIO(data), read_only=True, data_only=True)
     except Exception as e:

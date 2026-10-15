@@ -27,7 +27,13 @@ from app import settings
 log = logging.getLogger("tools.subtitles")
 
 MODEL = "large-v3"
-MAX_SECONDS = 4 * 60 * 60      # a longer video ties the GPU up for longer than anyone waits for
+def max_seconds():
+    """The longest video transcribed: limits.subtitles.max_minutes (default 120). Every minute of
+    sound holds the whole GPU, and one long video after another kept it from everybody else."""
+    try:
+        return int(float(settings.get("limits.subtitles.max_minutes", "LIMITS_SUBTITLES_MAX_MINUTES") or 120) * 60)
+    except ValueError:
+        return 120 * 60
 
 YOUTUBE = re.compile(
     r"https?://(?:www\.|m\.|music\.)?(?:youtube\.com/(?:watch\?(?:[^\s#]*&)?v=|shorts/|live/|embed/)|youtu\.be/)"
@@ -89,7 +95,7 @@ def _download(video, work, report):
 
     options = {"format": "bestaudio/best", "outtmpl": os.path.join(work, "audio.%(ext)s"),
                "quiet": True, "noprogress": True, "noplaylist": True, "progress_hooks": [hook],
-               "match_filter": yt_dlp.utils.match_filter_func(f"duration <= {MAX_SECONDS}")}
+               "match_filter": yt_dlp.utils.match_filter_func(f"duration <= {max_seconds()}")}
     try:
         with yt_dlp.YoutubeDL(options) as ydl:
             info = ydl.extract_info(f"https://www.youtube.com/watch?v={video}", download=True)
@@ -97,8 +103,8 @@ def _download(video, work, report):
         raise SubtitleError(f"YouTube would not give the video: {str(e).replace('ERROR: ', '')[:300]}") from e
     files = glob.glob(os.path.join(work, "audio.*"))
     if not files:
-        if (info or {}).get("duration", 0) > MAX_SECONDS:
-            raise SubtitleError(f"The video is longer than {MAX_SECONDS // 3600} hours, which is the limit here")
+        if (info or {}).get("duration", 0) > max_seconds():
+            raise SubtitleError(f"The video is longer than {max_seconds() // 60} minutes, which is the limit here")
         raise SubtitleError("YouTube gave no sound for this video")
     return files[0], {"title": info.get("title") or video, "channel": info.get("uploader") or "",
                       "duration": info.get("duration") or 0, "url": f"https://www.youtube.com/watch?v={video}"}

@@ -21,6 +21,7 @@ log = logging.getLogger("engine")
 
 STARTUP_TIMEOUT = 600  # big models take a while to load from disk
 REAPER_INTERVAL = 30
+BUSY_WAIT = 90      # seconds a model waits for a busy one; under the 100 s Cloudflare allows a silent request
 SMALL_OLLAMA_MODEL = 4 * 1024**3  # below this an Ollama model never makes a llama.cpp model give way
 
 
@@ -102,25 +103,39 @@ class Supervisor:
         if not self.is_available():
             return None, "llama-server binary not found; set engine.llama_server.path"
 
-        async with self._lock:
-            existing = self._running.get(name)
-            if existing and existing.process.returncode is None:
-                existing.last_used_at = time.monotonic()
-                return existing, None
-            if existing:
-                self._running.pop(name, None)
+        # A model in the middle of someone's answer is never stopped to make room for another: that
+        # cut the answer off, and alternating two requests kept the GPU reloading for everybody.
+        # The new model waits for it, up to BUSY_WAIT seconds, and then says the GPU is busy.
+        waited = 0.0
+        while True:
+            async with self._lock:
+                existing = self._running.get(name)
+                if existing and existing.process.returncode is None:
+                    existing.last_used_at = time.monotonic()
+                    return existing, None
+                if existing:
+                    self._running.pop(name, None)
 
-            if profile.exclusive and settings.get_bool("engine.unload_ollama_first", "ENGINE_UNLOAD_OLLAMA_FIRST"):
-                await self._unload_ollama_models()
-
-            if profile.exclusive:
-                for other_name, other in list(self._running.items()):
-                    if other.profile.exclusive and other_name != name:
-                        log.info("Stopping %s to free VRAM for %s", other_name, name)
-                        await self._stop_locked(other_name)
-
-            model, problem = await self._start_locked(profile)
-            return model, problem
+                busy = [other_name for other_name, other in self._running.items()
+                        if profile.exclusive and other.profile.exclusive and other_name != name
+                        and other.in_flight > 0 and other.process.returncode is None]
+                if not busy:
+                    if profile.exclusive and settings.get_bool("engine.unload_ollama_first",
+                                                               "ENGINE_UNLOAD_OLLAMA_FIRST"):
+                        await self._unload_ollama_models()
+                    if profile.exclusive:
+                        for other_name, other in list(self._running.items()):
+                            if other.profile.exclusive and other_name != name:
+                                log.info("Stopping %s to free VRAM for %s", other_name, name)
+                                await self._stop_locked(other_name)
+                    return await self._start_locked(profile)
+            if waited >= BUSY_WAIT:
+                return None, (f"The GPU is busy answering with {', '.join(busy)}; "
+                              f"try {name} again in a minute")
+            if waited == 0:
+                log.info("%s waits for %s to finish answering", name, ", ".join(busy))
+            await asyncio.sleep(2)
+            waited += 2
 
     async def make_room_for_ollama(self, model):
         """Stops idle llama.cpp models when an Ollama model is about to load and would not fit beside them.

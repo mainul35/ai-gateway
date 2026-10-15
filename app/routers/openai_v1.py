@@ -8,7 +8,7 @@ import httpx
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile, status
 from fastapi.responses import JSONResponse, StreamingResponse
 
-from app import access, api_images, backends, settings, usage as usage_log
+from app import access, api_images, backends, limits, settings, usage as usage_log
 from app.engine.supervisor import supervisor
 from app.auth import Principal, authenticate
 from app.tools import auto_model, images
@@ -77,6 +77,12 @@ async def forward(principal: Principal, endpoint: str, path: str, body: dict, sk
 
     if not skip_access and not access.can_use_model(principal, model):
         raise HTTPException(status.HTTP_403_FORBIDDEN, f"You do not have access to model '{model}'")
+    # The person's rate, day's tokens and longest answer (app/limits.py); the gateway's own helper
+    # calls are not theirs to spend
+    if not skip_access:
+        await limits.check_request(principal)
+        if endpoint in ("chat_completions", "completions"):
+            body = limits.cap_output(principal, body)
 
     backend = await backends.resolve(model)
     if backend is None:

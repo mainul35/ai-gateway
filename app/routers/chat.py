@@ -18,7 +18,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from app import access, backends, settings, usage as usage_log
+from app import access, backends, limits, settings, usage as usage_log
 from app.auth import Principal, authenticate
 from app.db import get_session, session_factory
 from app.models import ChatFile, Conversation, ConversationMessage, MemoryEntry, utcnow
@@ -345,6 +345,7 @@ async def upload_file(file: UploadFile = File(...), principal: Principal = Depen
     if len(data) > limit:
         raise HTTPException(status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
                             f"{name} is larger than {limit // (1024 * 1024)} MB")
+    await limits.check_storage(principal, session, len(data))
     mime = _image_type(data)
     if name.lower().endswith(_RAW_SUFFIXES):
         raise HTTPException(status.HTTP_400_BAD_REQUEST,
@@ -542,6 +543,8 @@ async def complete(payload: CompleteIn, principal: Principal = Depends(authentic
     # Every attachment is loaded, then sorted: pictures go to a model that can see, documents go to
     # any model at all, because by the time they get there they are only text
     attached = [i for m in payload.messages for i in m.images]
+    # Counted on the message being sent: a long conversation gathers more than that over time
+    limits.check_attachments(principal, len(set(payload.messages[-1].images)) if payload.messages else 0)
     everything = await _load_files(session, user, attached)
     papers = [f for f in everything.values() if f.kind == "document"]
     pictures = [f for f in everything.values() if f.kind != "document"]
@@ -1150,12 +1153,15 @@ async def edit_photo(payload: PhotoIn, principal: Principal = Depends(authentica
             yield _event("image", file=_file_json(stored), action=payload.action,
                          did=done[:1].upper() + done[1:], saved=True, seconds=seconds)
 
+    # One picture or transcription at a time per person (app/limits.py); the slot is given back
+    # when the stream ends, however it ends
+    slot = await limits.take_gpu_slot(principal)
     if payload.conversation_id is not None:
         asked = (payload.request or payload.action).strip()[:120]
-        job = jobs.start(user.id, payload.conversation_id, "photo", asked, stream())
+        job = jobs.start(user.id, payload.conversation_id, "photo", asked, limits.holding(slot, stream()))
         return StreamingResponse(jobs.follow(job), media_type="text/event-stream",
                                  headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
-    return StreamingResponse(stream(), media_type="text/event-stream",
+    return StreamingResponse(limits.holding(slot, stream()), media_type="text/event-stream",
                              headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
 
@@ -1241,11 +1247,14 @@ async def video_subtitles(payload: SubtitlesIn, principal: Principal = Depends(a
                     await db.commit()
         yield _event("subtitles", **facts, text=subtitles.transcript(result), saved=True)
 
+    # One picture or transcription at a time per person (app/limits.py); the slot is given back
+    # when the stream ends, however it ends
+    slot = await limits.take_gpu_slot(principal)
     if payload.conversation_id is not None:
-        job = jobs.start(user.id, payload.conversation_id, "subtitles", payload.message[:120], stream())
+        job = jobs.start(user.id, payload.conversation_id, "subtitles", payload.message[:120], limits.holding(slot, stream()))
         return StreamingResponse(jobs.follow(job), media_type="text/event-stream",
                                  headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
-    return StreamingResponse(stream(), media_type="text/event-stream",
+    return StreamingResponse(limits.holding(slot, stream()), media_type="text/event-stream",
                              headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
 
@@ -1798,11 +1807,14 @@ async def generate_image(payload: ImageIn, principal: Principal = Depends(authen
                                         {"total": seconds}, answers_to=payload.answers_to)
             yield _event("image", file=_file_json(stored), seed=seed, saved=True, seconds=seconds)
 
+    # One picture or transcription at a time per person (app/limits.py); the slot is given back
+    # when the stream ends, however it ends
+    slot = await limits.take_gpu_slot(principal)
     if payload.conversation_id is not None:
-        job = jobs.start(user.id, payload.conversation_id, "image", (payload.prompt or "")[:120], stream())
+        job = jobs.start(user.id, payload.conversation_id, "image", (payload.prompt or "")[:120], limits.holding(slot, stream()))
         return StreamingResponse(jobs.follow(job), media_type="text/event-stream",
                                  headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
-    return StreamingResponse(stream(), media_type="text/event-stream",
+    return StreamingResponse(limits.holding(slot, stream()), media_type="text/event-stream",
                              headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
 

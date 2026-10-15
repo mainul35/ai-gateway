@@ -98,6 +98,31 @@ model server would have fetched them from inside the network with no check at al
 - **Settings values are one line**, by every line break `splitlines()` knows - a U+2028 in a value
   could otherwise add a setting of its own to `config.properties`.
 
+## Limits: one person cannot take the machine (`app/limits.py`)
+
+One GPU, one database disk, 30 GB of RAM - shared by everyone the gateway lets in. Admins and the
+master key are never limited, nor the gateway's own helper calls. Every limit is a setting; 0 is off.
+
+| Setting | Default | What |
+|---|---|---|
+| `limits.requests.per_minute` | 60 | model requests per person per minute (429 with Retry-After) |
+| `limits.tokens.per_day.public` | 200000 | tokens per day (UTC) for accounts with public access |
+| `limits.tokens.per_day` | 0 (off) | the same for everyone else |
+| `limits.max_tokens` | 8192 | the longest answer one request may ask for |
+| `limits.gpu_jobs` | 1 | pictures and transcriptions running at once, per person |
+| `limits.files.mb` | 1000 | stored files per person |
+| `limits.attachments` | 10 | files on one message |
+| `limits.subtitles.max_minutes` | 120 | the longest video transcribed |
+
+And without settings:
+
+- **A model answering someone is never stopped** to load another; the new one waits up to 90 s,
+  then says the GPU is busy. Alternating two big models used to cut answers off and keep the GPU
+  reloading.
+- **Word and Excel files are checked before they are opened**: a zip that unpacks past 300 MB, or
+  a part that grows more than 200 times, is refused (a 400 KB file could unpack to 400 MB).
+- **Pictures over 50 megapixels are refused** before they are decoded, everywhere.
+
 ## On the server (root, by hand)
 
 Not something the gateway can do for itself:
