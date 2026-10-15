@@ -184,7 +184,8 @@ async function loadUsers(){
 }
 
 async function loadModels(){
-  try{ models = (await api('/v1/models')).data.map(m => m.id); }
+  // "auto" is the gateway's choice among these, not a model access can be granted to
+  try{ models = (await api('/v1/models')).data.map(m => m.id).filter(id => id !== 'auto'); }
   catch(e){ models = []; }
 }
 

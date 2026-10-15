@@ -24,6 +24,7 @@ from fastapi.responses import JSONResponse, Response, StreamingResponse
 from app import access, anthropic_compat as compat, backends, settings, usage as usage_log
 from app.auth import Principal, authenticate
 from app.engine.supervisor import supervisor
+from app.tools import auto_model
 
 router = APIRouter(prefix="/v1", tags=["anthropic"])
 hello = APIRouter(tags=["anthropic"])
@@ -151,7 +152,15 @@ async def messages(request: Request, principal: Principal = Depends(authenticate
         return _error(400, "Request body must be JSON", "invalid_request_error")
 
     asked = body.get("model")
-    model = await _model_named(asked)
+    # "auto", or "claude-auto" from the desktop app, which takes only Claude-looking names: the
+    # gateway picks the model for this request, as the playground's Auto does
+    if auto_model.is_auto(asked) or (asked or "").strip().lower() == "claude-auto":
+        model, _category, why = await auto_model.choose(
+            principal, body.get("messages") or [], _has_images(body), bool(body.get("tools")))
+        if model is None:
+            return _error(400, f"auto could not pick a model: {why}", "invalid_request_error")
+    else:
+        model = await _model_named(asked)
     if not model:
         return _error(400, "Field 'model' is required", "invalid_request_error")
     if not access.can_use_model(principal, model):

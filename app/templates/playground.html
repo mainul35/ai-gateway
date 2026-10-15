@@ -626,7 +626,8 @@ function relativeTime(iso){
 const canSee = id => (models[id]?.capabilities || []).includes('vision');
 // With Auto chosen there is no model until the router has picked one, so anything that needs a name
 // now asks for one: chosenModel is what the last routing decision settled on, falling back to the
-// first model that can see, since a picture is the only case where the wrong choice simply fails.
+// smallest model that can talk (one that can see when a picture is attached). The smallest is the
+// router itself, already loaded: falling back to a 31B loaded it for nothing, and took the GPU.
 // Everything that asks "is there a picture attached" means a picture, not a PDF
 const attachedPictures = () => pending.filter(p => !p.document);
 const choosing = () => modelSelect.value === 'auto';
@@ -634,15 +635,29 @@ let chosenModel = '';
 function currentModel(){
   if(!choosing()) return modelSelect.value;
   if(chosenModel && models[chosenModel]) return chosenModel;
-  const names = Object.keys(models);
-  return names.find(n => canSee(n)) || names[0] || '';
+  return smallestModel(attachedPictures().length > 0) || Object.keys(models)[0] || '';
+}
+// Billions of parameters from the name (qwen3:1.7b, gemma4:31b, qwen3-next-80b); 30 when it says
+// nothing, so a model of unknown size never passes for the smallest. Same rule as app/tools/chooser.py.
+function modelSize(id){
+  const found = id.toLowerCase().match(/(?<![\d.])(\d+(?:\.\d+)?)([bm])(?![a-z])/);
+  return found ? parseFloat(found[1]) / (found[2] === 'm' ? 1000 : 1) : 30;
+}
+function smallestModel(needsVision){
+  const talks = id => {
+    const caps = models[id]?.capabilities || [];
+    return !/embed|rerank|guard|shield|whisper|tts|image|diffusion|flux/i.test(id)
+      && (!caps.length || caps.includes('completion')) && (!needsVision || caps.includes('vision'));
+  };
+  return Object.keys(models).filter(talks).sort((a, b) => modelSize(a) - modelSize(b))[0] || '';
 }
 
 // --- models -------------------------------------------------------------
 
 async function loadModels(){
   try{
-    const data = (await api('/v1/models')).data;
+    // "auto" from the API is the drop-down's own Auto option, already first in the list
+    const data = (await api('/v1/models')).data.filter(m => m.id !== 'auto');
     models = Object.fromEntries(data.map(m => [m.id, m]));
     if(!data.length){
       modelSelect.innerHTML = '<option value="">no models available</option>';
@@ -653,9 +668,9 @@ async function loadModels(){
     modelSelect.innerHTML = '<option value="auto">Auto · best for the question</option>'
       + data.map(m =>
         `<option value="${escapeHtml(m.id)}">${escapeHtml(m.id)}${canSee(m.id) ? '  · sees images' : ''}</option>`).join('');
-    let remembered = null;
-    try{ remembered = localStorage.getItem('pg.model'); }catch(e){}
-    if(remembered === 'auto' || (remembered && models[remembered])) modelSelect.value = remembered;
+    // Every visit starts in Auto: the router picks for each new task, and a model chosen by hand is
+    // for the conversation it was chosen in, not every one after it
+    modelSelect.value = 'auto';
     syncModel();
   }catch(e){ showError('Could not load models: ' + errorText(e)); }
 }
@@ -666,7 +681,7 @@ function syncModel(){
   syncTools();
 }
 modelSelect.addEventListener('change', () => {
-  try{ localStorage.setItem('pg.model', modelSelect.value); }catch(e){}
+  chosenModel = '';
   syncModel();
 });
 document.getElementById('temperature').addEventListener('input', e =>
@@ -1115,6 +1130,12 @@ async function loadConversations(){
 
 function resetChat(){
   currentId = null;
+  // A new conversation is a new task: back to Auto, with no earlier pick to lean towards
+  if(modelSelect.querySelector('option[value="auto"]')){
+    modelSelect.value = 'auto';
+    chosenModel = '';
+    syncModel();
+  }
   history = [];
   savedSystem = '';
   systemBox.value = '';
@@ -1182,10 +1203,11 @@ async function openConversation(id){
     currentId = conversation.id;
     savedSystem = conversation.system_prompt || '';
     systemBox.value = savedSystem;
-    if(conversation.model && models[conversation.model]){
-      modelSelect.value = conversation.model;
-      syncModel();
-    }
+    // Still Auto: the router keeps picking, and leans towards the model this conversation was
+    // using, so carrying on does not swap models for nothing
+    modelSelect.value = 'auto';
+    chosenModel = conversation.model && models[conversation.model] ? conversation.model : '';
+    syncModel();
     document.getElementById('chatTitle').textContent = conversation.title;
     chat.innerHTML = '';
     history = [];

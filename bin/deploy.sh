@@ -105,13 +105,22 @@ restart() {
     # Uvicorn drains what it is serving before it goes, and a picture job can take a minute. Starting
     # the new one while the old still holds the port makes it exit, and the watchdog then restarts
     # every minute until someone notices.
-    pkill -f 'uvicorn app.main:app' >/dev/null 2>&1
-    for _ in $(seq 1 30); do
-        (echo > /dev/tcp/127.0.0.1/9000) >/dev/null 2>&1 || break
+    #
+    # Waited for until the process is gone, not just the port: uvicorn lets go of the port as soon as
+    # it starts shutting down, then keeps draining - and a long streamed request it is still serving
+    # can hold a database transaction open, which the new one's start-up then queues behind. The
+    # [u] keeps the pattern from matching this shell's own command line.
+    pkill -f '[u]vicorn app.main:app' >/dev/null 2>&1
+    for _ in $(seq 1 45); do
+        pgrep -f '[u]vicorn app.main:app' >/dev/null || break
         sleep 1
     done
-    (echo > /dev/tcp/127.0.0.1/9000) >/dev/null 2>&1 && { pkill -9 -f 'uvicorn app.main:app'; sleep 2; }
-    ./bin/gateway-start.sh
+    if pgrep -f '[u]vicorn app.main:app' >/dev/null; then
+        echo "the old gateway is still draining after 45 s; stopping it"
+        pkill -9 -f '[u]vicorn app.main:app'
+        sleep 2
+    fi
+    GATEWAY_DEPLOY=1 ./bin/gateway-start.sh
     for _ in $(seq 1 30); do
         sleep 1
         curl -sf -m 3 http://127.0.0.1:9000/health >/dev/null 2>&1 && return 0
