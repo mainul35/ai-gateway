@@ -94,34 +94,93 @@ async def callback(request: Request, code: str | None = None, state: str | None 
     # server is reflected here the next time the person signs in rather than whenever someone
     # remembers to look
     claims = sso.capability_claims(userinfo, tokens.get("scope", ""))
-    if not identity["name"]:
-        raise _auth_server_failed("Auth server returned no usable identity claims")
+    if not identity["subject"]:
+        raise _auth_server_failed("Auth server returned no subject claim to know the person by")
 
-    result = await session.execute(select(User).where(User.name == identity["name"]))
-    user = result.scalar_one_or_none()
+    user = await _account_for(session, identity)
     if user is None:
-        # No seat limit: everyone the auth server accepts gets an account
-        user = User(name=identity["name"], email=identity["email"], role=sso.role_for(identity["email"]),
-                    model_access=access.default_access())
-        session.add(user)
+        user = await _new_account(session, identity)
+        user.claims = json.dumps(claims) if claims else None
+        user.claims_seen_at = utcnow()
+        await session.commit()
+        await session.refresh(user)
+        if user.approval == "pending":
+            log.info("SSO sign-in request from %s (%s) waits for an admin", user.name, user.email)
+            return _back_to_login("requested")
     else:
+        if user.approval == "pending":
+            return _back_to_login("pending")
         if not user.is_active:
             # Signing in again must not undo an admin disabling the account
             raise HTTPException(status.HTTP_403_FORBIDDEN, "This account has been disabled")
-        user.email = identity["email"] or user.email
-        # Listed admin emails are always promoted; otherwise keep the role assigned in the UI
-        if sso.role_for(identity["email"]) == "admin":
+        if identity["email_verified"]:
+            user.email = identity["email"]
+        # Listed, verified admin emails are always promoted; otherwise keep the role set in the UI
+        if sso.role_for(identity["email"], identity["email_verified"]) == "admin":
             user.role = "admin"
-    user.claims = json.dumps(claims) if claims else None
-    user.claims_seen_at = utcnow()
-    await session.commit()
-    await session.refresh(user)
+        user.claims = json.dumps(claims) if claims else None
+        user.claims_seen_at = utcnow()
+        await session.commit()
+        await session.refresh(user)
 
     response = RedirectResponse("/dashboard")
     response.set_cookie(sso.SESSION_COOKIE, sso.issue_session(user), max_age=sso.SESSION_MAX_AGE,
                         httponly=True, samesite="lax", path="/")
     response.delete_cookie(sso.STATE_COOKIE, path="/auth")
     return response
+
+
+def _back_to_login(notice):
+    response = RedirectResponse(f"/login?notice={notice}", status_code=303)
+    response.delete_cookie(sso.STATE_COOKIE, path="/auth")
+    return response
+
+
+async def _account_for(session, identity):
+    """The account this auth-server identity already has, or None.
+
+    By the auth server's own id. Before accounts carried it they were found by name - the email, or
+    the display name - so one made that way is taken over once, by the person it was made for:
+    only an account an SSO sign-in created (it has seen claims), with no password, not linked to
+    anybody yet, and only on an email the auth server has verified. A manager's pre-made account,
+    the built-in admin, and anyone merely calling themselves by somebody's name are never matched.
+    """
+    key = sso.subject_key(identity["subject"])
+    found = (await session.execute(select(User).where(User.sso_subject == key))).scalar_one_or_none()
+    if found is not None or not identity["email_verified"]:
+        return found
+    legacy = (await session.execute(select(User).where(
+        User.name == identity["email"], User.sso_subject.is_(None), User.password_hash.is_(None),
+        User.claims_seen_at.is_not(None)))).scalar_one_or_none()
+    if legacy is not None:
+        log.info("SSO account %s now linked to the auth server's id", legacy.name)
+        legacy.sso_subject = key
+    return legacy
+
+
+async def _free_name(session, wanted, subject):
+    """The account name to use: what the auth server calls them, unless that name is taken - by a
+    local account, say, which an SSO sign-in must never become."""
+    taken = select(User.id).where(User.name == wanted)
+    if (await session.execute(taken)).first() is None:
+        return wanted
+    return f"{wanted[:100]} (sso {subject[:12]})"
+
+
+async def _new_account(session, identity):
+    """A first sign-in: a request for an admin, unless it is a listed and verified admin email.
+
+    Nothing is usable until an admin approves it on the Users page; approved, it gets the public
+    models (gateway.public.models) and no more, until somebody grants more.
+    """
+    admin = sso.role_for(identity["email"], identity["email_verified"]) == "admin"
+    user = User(name=await _free_name(session, identity["name"], identity["subject"]),
+                email=identity["email"] if identity["email_verified"] else None,
+                role="admin" if admin else "user", model_access="all" if admin else "public",
+                sso_subject=sso.subject_key(identity["subject"]),
+                approval=None if admin else "pending", is_active=admin)
+    session.add(user)
+    return user
 
 
 @router.get("/me")

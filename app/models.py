@@ -22,7 +22,7 @@ class User(Base):
     role: Mapped[str] = mapped_column(String(32), default="user")  # "user" or "admin"
     # Only the built-in admin has one; SSO accounts authenticate against the auth server
     password_hash: Mapped[str | None] = mapped_column(String(256), nullable=True)
-    # "all", "selected" or "none"; admins always have every model regardless
+    # "all", "selected", "public" (the gateway.public.models list) or "none"; admins have every model
     model_access: Mapped[str] = mapped_column(String(16), default="all")
     # JSON list of model names or patterns, used when model_access is "selected"
     allowed_models: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -34,6 +34,12 @@ class User(Base):
     claims_seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    # Who this is at the auth server: "<auth server host>|<sub>". SSO accounts are found by this and
+    # nothing else - a name or an email is whatever the person typed there, and matching on it let
+    # anyone with the right display name sign in as somebody else, the built-in admin included.
+    sso_subject: Mapped[str | None] = mapped_column(String(320), nullable=True, index=True)
+    # "pending" while a first SSO sign-in waits for an admin; such an account is not active either
+    approval: Mapped[str | None] = mapped_column(String(16), nullable=True)
 
     api_keys: Mapped[list["ApiKey"]] = relationship(back_populates="user", cascade="all, delete-orphan")
 

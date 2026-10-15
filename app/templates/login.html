@@ -6,6 +6,7 @@
   <p class="sub" style="text-align:center">Sign in to manage users, keys and models.</p>
 
   {% if error %}<div class="note err">{{ error }}</div>{% endif %}
+  {% if notice %}<div class="note ok">{{ notice }}</div>{% endif %}
 
   <div class="card">
     <form method="post" action="/login">
