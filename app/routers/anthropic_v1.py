@@ -18,10 +18,10 @@ import json
 import time
 
 import httpx
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 
-from app import access, anthropic_compat as compat, api_images, backends, settings, usage as usage_log
+from app import access, anthropic_compat as compat, api_images, backends, limits, settings, usage as usage_log
 from app.auth import Principal, authenticate
 from app.engine.supervisor import supervisor
 from app.tools import auto_model
@@ -171,6 +171,12 @@ async def messages(request: Request, principal: Principal = Depends(authenticate
         return _error(400, "Field 'model' is required", "invalid_request_error")
     if not access.can_use_model(principal, model):
         return _error(403, f"You do not have access to model '{model}'", "permission_error")
+    try:
+        await limits.check_request(principal)
+    except HTTPException as e:
+        return JSONResponse(compat.error_body(e.detail, "rate_limit_error"), status_code=e.status_code,
+                            headers=e.headers)
+    body = limits.cap_output(principal, body, fields=("max_tokens",))
     backend = await backends.resolve(model)
     if backend is None:
         return _error(404, f"Model '{model}' is not available on this gateway"

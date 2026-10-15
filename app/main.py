@@ -9,6 +9,16 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
 from app import activity, bootstrap, db, knowledge, settings, sso
+
+# Pictures people upload, and pictures fetched from the web, are decoded in this process. A small
+# file can declare an enormous canvas (13000 x 13000 is about half a gigabyte decoded); Pillow only
+# warns below about 179 megapixels. Above 50 it is refused, everywhere at once.
+import warnings  # noqa: E402
+
+from PIL import Image as _Image  # noqa: E402
+
+_Image.MAX_IMAGE_PIXELS = 50_000_000
+warnings.simplefilter("error", _Image.DecompressionBombWarning)
 from app.engine.supervisor import supervisor
 from app.coding import runner as coding_runner
 from app.routers import admin, anthropic_v1, auth_sso, chat, coding, openai_v1, ui
