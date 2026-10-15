@@ -31,6 +31,7 @@ _ADDED_COLUMNS = (
     # SSO accounts by the auth server's own id, and sign-ins waiting for an admin
     ("users", "sso_subject", "VARCHAR(320)"),
     ("users", "approval", "VARCHAR(16)"),
+    ("users", "session_epoch", "INTEGER DEFAULT 0"),
 )
 
 

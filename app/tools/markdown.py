@@ -18,6 +18,7 @@ except ImportError:  # the gateway still runs, answers just stay plain text
     MarkdownIt = None
 
 SAFE_LINK = re.compile(r"^(https?:|mailto:|/chat/files/|#)", re.I)
+CHAT_FILE = re.compile(r"^/chat/files/\d+$")
 _renderer = None
 
 
@@ -40,7 +41,9 @@ def _build():
         token = tokens[index]
         source = token.attrGet("src") or ""
         label = token.content or source
-        if source.startswith("/chat/files/"):  # the user's own generated images are safe to show
+        # The user's own files are safe to show - an exact /chat/files/<id> and nothing more: a path
+        # like /chat/files/../../logout would have the browser fetch any page here, signed in
+        if CHAT_FILE.match(source):
             return f'<img src="{escapeHtml(source)}" alt="{escapeHtml(label)}">'
         if not SAFE_LINK.match(source):
             return escapeHtml(label)

@@ -63,6 +63,25 @@ model server would have fetched them from inside the network with no check at al
   server says the email is verified. `sso.require.verified.email=false` trusts every email, for an
   auth server that never sends the claim; `sso.claim.email_verified` names the claim if it differs.
 
+## In the browser
+
+- **Model-written pages never run as the gateway.** The playground shows them in a sandboxed frame
+  (no access to this origin, its cookies or its API), and *Open in a tab* opens a page holding
+  only that same sandboxed frame. It used to open the page itself from a blob URL, which takes the
+  gateway's origin: a page planted in an answer could make keys, or users if an admin opened it.
+- **Sign-in redirects stay on this site** (`sso.safe_next`): `//evil.example`, `/\evil.example`
+  and full URLs fall back to the dashboard.
+- **Session cookies** are `Secure` over HTTPS, `HttpOnly`, `SameSite=Lax`. Signing out bumps the
+  account's `session_epoch`, which every session cookie carries, so every copy of the cookie stops
+  working - not just the one in that browser.
+- **Headers on every response** (`app/main.py`): `frame-ancestors 'self'` and `X-Frame-Options`
+  (no other site can frame these pages), `object-src 'none'`, `base-uri 'none'`, `nosniff`, a
+  referrer policy, camera/microphone/location for this site only, and HSTS over HTTPS. A CSP that
+  also limits scripts needs the pages' inline scripts moved out first.
+- **API docs** (`/docs`, `/openapi.json`) are for signed-in admins only.
+- **Pictures in answers** load only from an exact `/chat/files/<id>`, so model output cannot make
+  the browser request any other page of the gateway while signed in.
+
 ## On the server (root, by hand)
 
 Not something the gateway can do for itself:

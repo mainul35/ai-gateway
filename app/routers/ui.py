@@ -2,7 +2,8 @@
 import os
 
 from fastapi import APIRouter, Cookie, Depends, Form, Request
-from fastapi.responses import FileResponse, RedirectResponse, Response
+from fastapi.openapi.docs import get_swagger_ui_html
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response
 from fastapi.templating import Jinja2Templates
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -23,7 +24,7 @@ async def signed_in_user(session: AsyncSession, cookie_value):
     if not data:
         return None
     user = await session.get(User, data["user_id"])
-    return user if user and user.is_active else None
+    return user if user and user.is_active and sso.session_current(data, user) else None
 
 
 async def current_user(session: AsyncSession = Depends(get_session),
@@ -60,6 +61,7 @@ NOTICES = {
 @router.get("/login")
 async def login_page(request: Request, next: str = "/dashboard", error: str | None = None,
                      notice: str | None = None, user: User | None = Depends(current_user)):
+    next = sso.safe_next(next)
     if user:
         return RedirectResponse(next, status_code=303)
     return _page(request, "login.html", None, next=next, error=error, notice=NOTICES.get(notice or ""),
@@ -88,14 +90,25 @@ async def login_submit(request: Request, username: str = Form(...), password: st
         throttle.record_failure(throttle_key)
         return login_failed("Wrong username or password")
     throttle.clear(throttle_key)
-    response = RedirectResponse(next if next.startswith("/") else "/dashboard", status_code=303)
+    response = RedirectResponse(sso.safe_next(next), status_code=303)
     response.set_cookie(sso.SESSION_COOKIE, sso.issue_session(user), max_age=sso.SESSION_MAX_AGE,
-                        httponly=True, samesite="lax", path="/")
+                        httponly=True, samesite="lax", secure=sso.cookie_secure(request), path="/")
     return response
 
 
+async def end_sessions(session, cookie_value):
+    """Signing out: every session cookie this user has stops working, not just this browser's."""
+    data = sso.read_session(cookie_value)
+    user = await session.get(User, data["user_id"]) if data else None
+    if user is not None and sso.session_current(data, user):
+        user.session_epoch = (user.session_epoch or 0) + 1
+        await session.commit()
+
+
 @router.get("/logout")
-async def logout():
+async def logout(session: AsyncSession = Depends(get_session),
+                 gateway_session: str | None = Cookie(default=None, alias=sso.SESSION_COOKIE)):
+    await end_sessions(session, gateway_session)
     response = RedirectResponse("/login", status_code=303)
     response.delete_cookie(sso.SESSION_COOKIE, path="/")
     return response
@@ -126,6 +139,19 @@ def _require_role(user, path, roles):
     if not user:
         return _require_login(user, path)
     return None if user.role in roles else RedirectResponse("/dashboard", status_code=303)
+
+
+@router.get("/docs")
+async def api_docs(user: User | None = Depends(current_user)):
+    """The API's documentation, for admins: the Admin menu links here."""
+    return _require_role(user, "/docs", ("admin",)) or         get_swagger_ui_html(openapi_url="/openapi.json", title="Model Gateway API")
+
+
+@router.get("/openapi.json")
+async def api_schema(request: Request, user: User | None = Depends(current_user)):
+    if user is None or user.role != "admin":
+        return Response(status_code=404)
+    return JSONResponse(request.app.openapi())
 
 
 @router.get("/users")

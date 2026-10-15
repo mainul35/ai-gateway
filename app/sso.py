@@ -46,7 +46,30 @@ def read_state(token):
 
 
 def issue_session(user):
-    return _serializer("session").dumps({"user_id": user.id, "name": user.name, "issued_at": int(time.time())})
+    return _serializer("session").dumps({"user_id": user.id, "name": user.name, "issued_at": int(time.time()),
+                                         "epoch": user.session_epoch or 0})
+
+
+def session_current(data, user):
+    """Whether a session read from a cookie is still this user's: not signed out since it was made."""
+    return bool(data) and user is not None and data.get("epoch", 0) == (user.session_epoch or 0)
+
+
+def cookie_secure(request):
+    """Session cookies only over HTTPS when the page came over HTTPS - the public address always
+    does (Cloudflare says so in X-Forwarded-Proto) - so a plain-HTTP test on the LAN still works."""
+    proto = request.headers.get("x-forwarded-proto", request.url.scheme)
+    return proto.split(",")[0].strip().lower() == "https"
+
+
+def safe_next(target, default="/dashboard"):
+    """Where to go after signing in: a path on this site and nothing else. "//evil.example" and
+    "/\\evil.example" are other sites to a browser, though they start with a slash."""
+    target = target or ""
+    if (not target.startswith("/") or target.startswith(("//", "/\\"))
+            or any(ord(ch) < 32 or ch == "\\" for ch in target)):
+        return default
+    return target
 
 
 def read_session(token):

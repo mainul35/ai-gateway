@@ -45,7 +45,7 @@ async def current_user(session: AsyncSession = Depends(get_session),
         select(User).options(selectinload(User.api_keys)).where(User.id == data["user_id"])
     )
     user = result.scalar_one_or_none()
-    if user is None or not user.is_active:
+    if user is None or not user.is_active or not sso.session_current(data, user):
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Account is not active")
     return user
 
@@ -125,7 +125,7 @@ async def callback(request: Request, code: str | None = None, state: str | None 
 
     response = RedirectResponse("/dashboard")
     response.set_cookie(sso.SESSION_COOKIE, sso.issue_session(user), max_age=sso.SESSION_MAX_AGE,
-                        httponly=True, samesite="lax", path="/")
+                        httponly=True, samesite="lax", secure=sso.cookie_secure(request), path="/")
     response.delete_cookie(sso.STATE_COOKIE, path="/auth")
     return response
 
@@ -221,7 +221,10 @@ async def revoke_own_key(key_id: int, user: User = Depends(current_user),
 
 
 @router.post("/logout")
-async def logout():
+async def logout(session: AsyncSession = Depends(get_session),
+                 gateway_session: str | None = Cookie(default=None, alias=sso.SESSION_COOKIE)):
+    from app.routers.ui import end_sessions
+    await end_sessions(session, gateway_session)
     response = JSONResponse({"signed_out": True})
     response.delete_cookie(sso.SESSION_COOKIE, path="/")
     return response
