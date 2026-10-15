@@ -4,9 +4,12 @@
 #
 # "Busy" = any of: stay-awake file present, an SSH/tty session with recent
 # keyboard input, the gateway reports work (a request, coding task or job, or a
-# request in the last GATEWAY_RECENT_SECONDS), Ollama has a model loaded, a named
-# process is running, CPU load, GPU utilisation or network traffic above
+# request in the last GATEWAY_RECENT_SECONDS), a named process is running, CPU load, GPU utilisation or network traffic above
 # threshold. Every busy check resets the idle clock, and so does waking from sleep.
+#
+# A model sitting loaded is not work: Ollama keeps them for ever (OLLAMA_KEEP_ALIVE=-1), so counting
+# one kept the machine up for nothing. Using one shows as a gateway request and as GPU load. Every
+# model is unloaded just before suspending (POST /internal/unload), so none sleeps on the GPU.
 set -uo pipefail
 
 CONF=/etc/default/idle-shutdown
@@ -23,7 +26,7 @@ CONF=/etc/default/idle-shutdown
 : "${LOAD_MAX:=2.0}"               # 1-min load average
 : "${NET_KBPS_MAX:=500}"           # KB/s rx+tx on the default interface
 : "${SESSION_IDLE_MAX_MIN:=5}"     # a tty with no keystrokes for this long doesn't count
-: "${CHECK_OLLAMA:=1}"
+: "${CHECK_OLLAMA:=0}"             # 1: a loaded Ollama model counts as busy (the old rule)
 : "${OLLAMA_URL:=http://127.0.0.1:11434}"
 : "${BUSY_PROCESSES:=apt apt-get dpkg rsync}"
 : "${INHIBIT_FILE:=/run/stay-awake}"
@@ -73,7 +76,7 @@ elif recent is not None and recent < int(sys.argv[1]):
     if [[ -n $verdict ]]; then busy_reason="gateway: $verdict"; return; fi
   fi
 
-  # 4. Ollama has a model in memory (unloads after keep_alive, default 5m)
+  # 4. Ollama has a model in memory - only with CHECK_OLLAMA=1; see the top
   if (( CHECK_OLLAMA )) && curl -fsS --max-time 3 "$OLLAMA_URL/api/ps" 2>/dev/null | grep -q '"name"'; then
     busy_reason="ollama model loaded"; return
   fi
@@ -110,6 +113,24 @@ elif recent is not None and recent < int(sys.argv[1]):
     local kbps=$(( (rx2 - rx1 + tx2 - tx1) / 5 / 1024 ))
     if (( kbps > NET_KBPS_MAX )); then busy_reason="network ${kbps} KB/s on $iface"; return; fi
   fi
+}
+
+# Every model off the GPU before sleeping: the gateway stops its llama.cpp models and has Ollama drop
+# its own; if the gateway does not answer, Ollama is asked directly. Never a reason not to sleep.
+unload_models() {
+  local result
+  if result=$(curl -fsS --max-time 90 -X POST "$GATEWAY_URL/internal/unload" 2>/dev/null); then
+    log "unloaded before suspending: $result"
+    return
+  fi
+  log "gateway did not answer the unload; asking Ollama directly"
+  local name
+  for name in $(curl -fsS --max-time 5 "$OLLAMA_URL/api/ps" 2>/dev/null | python3 -c '
+import json, sys
+for m in json.load(sys.stdin).get("models") or []:
+    print(m.get("name") or m.get("model"))' 2>/dev/null); do
+    curl -fsS --max-time 30 "$OLLAMA_URL/api/generate" -d "{\"model\": \"$name\", \"keep_alive\": 0}" >/dev/null 2>&1       && log "unloaded $name"
+  done
 }
 
 check
@@ -152,5 +173,6 @@ if (( idle_for >= IDLE_MINUTES * 60 )); then
     exit 0
   fi
   echo "$now" > "$LAST_BUSY"     # so the first check after waking starts a fresh idle period
+  unload_models
   systemctl suspend
 fi

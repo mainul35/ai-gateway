@@ -105,12 +105,24 @@ Busy means any one of:
 A coding task **waiting for your approval** is not running, so it lets the machine sleep; approving it
 later wakes it. Time spent asleep is not counted as idle time: after waking, the clock starts again.
 
+A model sitting loaded is not on the list: Ollama keeps models loaded for ever here
+(`OLLAMA_KEEP_ALIVE=-1`), so it would keep the machine up for nothing. Using a model shows as a gateway
+request and as GPU load.
+
+**Models are unloaded before it sleeps.** Right before `systemctl suspend`, the script calls the
+gateway's `POST /internal/unload` (loopback only): every llama.cpp model is stopped and Ollama drops
+its own. If the gateway does not answer, the script asks Ollama directly. The dashboard's suspend
+(`POST /admin/power/suspend`) does the same. So the machine never sleeps with a model on the GPU,
+and the first request after waking loads just the model it needs, which it would have had to reload
+anyway.
+
 Every decision is logged: `journalctl -t idle-shutdown -f`
 
 ```
 busy: gateway: coding task 12 running
 idle for 3 min (threshold 5)
 idle threshold reached — suspending in 30s
+unloaded before suspending: {"stopped":["qwen3-next-80b"],"busy":[]}
 busy: just woke from sleep
 ```
 

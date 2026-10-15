@@ -1,6 +1,6 @@
 """Putting the machine to sleep on request (POST /admin/power/suspend).
 
-The idle timer (ops/idle-shutdown) does this by itself after half an hour; this is for "I'm done,
+The idle timer (ops/idle-shutdown) does this by itself after five idle minutes; this is for "I'm done,
 sleep now". Waking is the wake front's job: the next real request through the tunnel wakes it.
 
 The gateway runs as an ordinary user, so suspending needs one sudo rule on the machine, limited to
@@ -17,6 +17,7 @@ import logging
 import shlex
 
 from app import settings
+from app.engine.supervisor import supervisor
 
 log = logging.getLogger("power")
 
@@ -61,6 +62,11 @@ def schedule(delay_seconds):
 
     async def later():
         await asyncio.sleep(delay_seconds)
+        # Models are unloaded first, as the idle timer does (supervisor.unload_everything says why)
+        try:
+            log.info("unloaded before suspending: %s", await supervisor.unload_everything())
+        except Exception as e:      # a model that will not unload is no reason to stay awake
+            log.warning("could not unload models before suspending: %s", e)
         log.info("suspending the machine: %s", " ".join(command()))
         code, text = await _run(command())
         if code != 0:
