@@ -40,6 +40,9 @@ class User(Base):
     sso_subject: Mapped[str | None] = mapped_column(String(320), nullable=True, index=True)
     # "pending" while a first SSO sign-in waits for an admin; such an account is not active either
     approval: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    # Stamped into every session cookie; signing out bumps it, which ends every copy of the cookie
+    # (one that was copied or stolen included) rather than only the one in that browser
+    session_epoch: Mapped[int | None] = mapped_column(Integer, nullable=True, default=0)
 
     api_keys: Mapped[list["ApiKey"]] = relationship(back_populates="user", cascade="all, delete-orphan")
 

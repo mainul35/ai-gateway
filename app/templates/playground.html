@@ -1749,9 +1749,15 @@ function preview(block, code){
   // Grown to fit what is inside it, within reason: a worksheet is a page, not a thumbnail
   inner.style.height = '60vh';
 
-  // A new tab can print, which a sandboxed frame cannot, and printing is usually the whole point
+  // A tab of its own, for reading at full size and printing. The model's page is still only ever in a
+  // sandboxed frame there: a blob URL takes this site's origin, so the page opened as itself ran as
+  // the gateway, signed in as whoever clicked - able to make keys, or change users if an admin did.
+  // The tab holds nothing else, no script of its own, and the frame has no access to this origin.
   frame.querySelector('[data-open-tab]').addEventListener('click', () => {
-    const blob = new Blob([html], {type: 'text/html'});
+    const wrapper = '<!doctype html><meta charset="utf-8"><title>Preview</title>'
+      + '<style>html,body{margin:0;height:100%;background:#fff}iframe{border:0;display:block;width:100%;height:100%}</style>'
+      + `<iframe sandbox="allow-scripts allow-modals allow-popups" referrerpolicy="no-referrer" srcdoc="${escapeHtml(html)}"></iframe>`;
+    const blob = new Blob([wrapper], {type: 'text/html'});
     const url = URL.createObjectURL(blob);
     window.open(url, '_blank', 'noopener');
     setTimeout(() => URL.revokeObjectURL(url), 60000);

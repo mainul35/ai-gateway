@@ -45,8 +45,54 @@ async def lifespan(_: FastAPI):
     await db.dispose()
 
 
-app = FastAPI(title="Model Gateway", version="0.1.0", lifespan=lifespan)
+# The API's own documentation is for admins (app/routers/ui.py serves it to them): open, it
+# published every route of a public gateway to anyone who asked
+app = FastAPI(title="Model Gateway", version="0.1.0", lifespan=lifespan,
+              docs_url=None, redoc_url=None, openapi_url=None)
+
+
+# Sent with every response. No other site may frame these pages (clickjacking an admin's buttons),
+# nothing is sniffed into a type it was not served as, no plugin content, no <base> rewriting the
+# page's links, and the browser features the playground uses - camera, microphone, location - are
+# this site's only. A CSP that also limits scripts needs the pages' inline scripts moved out first.
+SECURITY_HEADERS = {
+    "Content-Security-Policy": "frame-ancestors 'self'; object-src 'none'; base-uri 'none'",
+    "X-Frame-Options": "SAMEORIGIN",
+    "X-Content-Type-Options": "nosniff",
+    "Referrer-Policy": "strict-origin-when-cross-origin",
+    "Permissions-Policy": "camera=(self), microphone=(self), geolocation=(self), payment=(), usb=()",
+}
+
+
+class SecurityHeaders:
+    """Plain ASGI rather than @app.middleware: that wraps every response, the gateway's long SSE
+    streams included, in a way that has trouble with streaming and client disconnects."""
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            return await self.app(scope, receive, send)
+        headers = dict(scope.get("headers") or [])
+        proto = headers.get(b"x-forwarded-proto", scope.get("scheme", "http").encode()).decode()
+        https = proto.split(",")[0].strip().lower() == "https"
+
+        async def with_headers(message):
+            if message["type"] == "http.response.start":
+                present = {name.lower() for name, _ in message.get("headers", [])}
+                extra = [(name.lower().encode(), value.encode()) for name, value in SECURITY_HEADERS.items()
+                         if name.lower().encode() not in present]
+                if https and b"strict-transport-security" not in present:
+                    extra.append((b"strict-transport-security", b"max-age=31536000"))
+                message = {**message, "headers": list(message.get("headers", [])) + extra}
+            await send(message)
+
+        await self.app(scope, receive, with_headers)
+
+
 app.add_middleware(activity.ActivityMiddleware)
+app.add_middleware(SecurityHeaders)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],  # homelab: the API key is the access control, not the origin
