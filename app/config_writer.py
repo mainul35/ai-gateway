@@ -24,6 +24,7 @@ EDITABLE_KEYS = [
     "sso.claim.email_verified",
     "gateway.public.models",
     "coding.github.owners",
+    "ollama.context.length",
     "limits.requests.per_minute",
     "limits.tokens.per_day",
     "limits.tokens.per_day.public",

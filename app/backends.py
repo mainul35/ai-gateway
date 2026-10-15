@@ -122,7 +122,20 @@ async def _add_ollama_capabilities(host, tags, discovered):
     for tag in tags:
         if tag.get("name") in discovered:
             discovered[tag["name"]].capabilities = set(_capabilities_by_digest.get(tag.get("digest"), ()))
-            discovered[tag["name"]].context_length = _context_by_digest.get(tag.get("digest"))
+            trained = _context_by_digest.get(tag.get("digest"))
+            # What Ollama actually serves, not what the model was trained for: its context is capped
+            # by OLLAMA_CONTEXT_LENGTH on the server, and an agent told the bigger number lets a
+            # conversation grow past what the model is given
+            served = _ollama_context_limit()
+            discovered[tag["name"]].context_length = min(trained, served) if trained and served else trained
+
+
+def _ollama_context_limit():
+    """ollama.context.length: keep it equal to OLLAMA_CONTEXT_LENGTH in Ollama's service (65536 here)."""
+    try:
+        return int(settings.get("ollama.context.length", "OLLAMA_CONTEXT_LENGTH") or 65536)
+    except ValueError:
+        return 65536
 
 
 def _engine_models():
