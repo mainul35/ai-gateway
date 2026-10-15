@@ -42,6 +42,32 @@ Nothing is installed for you: an app that is missing gets its install command pr
 The key: `AI_GATEWAY_API_KEY`, else `~/.ai-gateway/key`, else `~/.qwen/.env`, else a prompt that does
 not echo and offers to keep it in `~/.ai-gateway/key` (readable by you only).
 
+## The Claude desktop app
+
+```bash
+ai-gateway launch claude-desktop             # macOS (ai-gateway.ps1 on Windows)
+ai-gateway launch claude-desktop --restore   # back to the Claude account
+```
+
+As `ollama launch claude-desktop` does: a third-party inference profile named "AI Gateway" is written
+where the app keeps them (`Claude-3p/configLibrary/` in `~/Library/Application Support` or
+`%LOCALAPPDATA%`), made the one in use (`_meta.json`), and the app switched to it
+(`deploymentMode: 3p` in its configs; a Store install's own copy too). No model list is written: the
+app asks the gateway, which answers a GET `/v1/models` carrying `anthropic-version` with Claude's own
+IDs, each standing for a gateway model and shown by that model's name (`app/claude_desktop.py`):
+
+| Claude ID | Default gateway model |
+|---|---|
+| claude-sonnet-5 | `anthropic.model.default` (qwen3-next-80b) |
+| claude-opus-5 | a model that can see (gemma4:31b) |
+| claude-haiku-4-5-20251001 | `anthropic.model.small`, else the default |
+| claude-fable-5 | a coder (qwen3-coder:30b) |
+| claude-sonnet-4-6 | auto - the gateway picks per request |
+
+Set `anthropic.desktop.models` ("claude-opus-5=gemma4:31b, ...") to choose. A person is only offered
+the models they may use. Quit the app (from the tray too) and open it again after either command.
+**Every** desktop session moves to the gateway, Code and Cowork alike, until `--restore`.
+
 ## On the gateway
 
 - `POST /v1/responses` (`app/routers/responses_v1.py`) passes the Responses API through to Ollama and

@@ -23,7 +23,12 @@ PROXY_PATHS = {
 
 
 @router.get("/models")
-async def list_models(principal: Principal = Depends(authenticate)):
+async def list_models(request: Request, principal: Principal = Depends(authenticate)):
+    # Anthropic's clients (the Claude desktop app) ask with an anthropic-version header and take only
+    # Claude's model IDs: they get Claude's IDs, each standing for one of these (app/claude_desktop.py)
+    if request.headers.get("anthropic-version"):
+        from app import claude_desktop
+        return await claude_desktop.catalogue(principal)
     models = await backends.available_models()
     return {
         "object": "list",

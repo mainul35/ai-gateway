@@ -11,6 +11,8 @@
   ai-gateway launch hermes -Model gemma4:31b
   ai-gateway launch openclaw -Model gemma4:31b
   ai-gateway launch claude -Model qwen3-next-80b -- -p "fix the failing test"    # after --: the app's own
+  ai-gateway launch claude-desktop             # the Claude desktop app, all its sessions
+  ai-gateway launch claude-desktop -Restore    # back to your Claude account
   ai-gateway models                                                             # what you may use
 
   -Model, -Context (tokens; default: what the gateway says), -Gateway, -Config (set it up, do not start).
@@ -30,7 +32,7 @@
 # these by position, or call `-p` ambiguous, and the app would never see them.
 $Gateway = if ($env:AI_GATEWAY_URL) { $env:AI_GATEWAY_URL } else { "https://ai-gateway.mainul35.dev" }
 $Command = if ($args.Count) { $args[0] } else { "" }
-$App = ""; $Model = ""; $Context = 0; $ConfigOnly = $false; $Extra = @()
+$App = ""; $Model = ""; $Context = 0; $ConfigOnly = $false; $Restore = $false; $Extra = @()
 $i = 1
 if ($Command -eq "launch" -and $args.Count -gt 1) { $App = $args[1]; $i = 2 }
 for (; $i -lt $args.Count; $i++) {
@@ -39,12 +41,13 @@ for (; $i -lt $args.Count; $i++) {
         "-Context" { $Context = [int]$args[++$i]; continue }
         "-Gateway" { $Gateway = $args[++$i]; continue }
         "-Config"  { $ConfigOnly = $true; continue }
+        "-Restore" { $Restore = $true; continue }
         "--"       { $Extra += $args[($i + 1)..($args.Count - 1)] | Where-Object { $_ -ne $null }; $i = $args.Count; continue }
         default    { $Extra += $args[$i] }
     }
 }
 $Gateway = $Gateway.TrimEnd('/')
-$Apps = @("claude", "opencode", "qwen", "codex", "hermes", "openclaw")
+$Apps = @("claude", "claude-desktop", "opencode", "qwen", "codex", "hermes", "openclaw")
 function Fail($message) { Write-Host "ai-gateway: $message" -ForegroundColor Red; exit 1 }
 if ($Command -notin @("launch", "models")) {
     Get-Help $MyInvocation.MyCommand.Path -Detailed | Out-String | Write-Host; exit 0
@@ -85,6 +88,50 @@ if ($Command -eq "models") {
     exit 0
 }
 if ($App -notin $Apps) { Fail "launch which app? one of: $($Apps -join ', ')" }
+# --- the Claude desktop app ----------------------------------------------------------------------
+# A third-party inference profile of its own, written where the app keeps them - as Ollama's
+# `ollama launch claude-desktop` does - and made the one in use. The app then asks the gateway for its
+# models, and the gateway offers Claude's IDs standing for its own (app/claude_desktop.py). Every
+# desktop session moves to the gateway, Code and Cowork alike, until -Restore.
+if ($App -eq "claude-desktop") {
+    $local = $env:LOCALAPPDATA
+    $id = "00000000-0000-4000-8000-00000000a16e"; $name = "AI Gateway"
+    function Read-Json($path) { if (Test-Path $path) { $t = Get-Content $path -Raw; if ($t.Trim()) { return ($t | ConvertFrom-Json -AsHashtable) } }; return @{} }
+    function Write-Json($path, $value) {
+        New-Item -ItemType Directory -Force (Split-Path $path) | Out-Null
+        if (Test-Path $path) { Copy-Item $path "$path.bak-ai-gateway" -Force }
+        $value | ConvertTo-Json -Depth 20 | Set-Content -Path $path -Encoding utf8
+    }
+    $mode = if ($Restore) { "1p" } else { "3p" }
+    # Where the app reads which profile is in use: its plain folders, and a Store install's own copy
+    $configs = @("$local\Claude-3p\claude_desktop_config.json", "$local\Claude\claude_desktop_config.json") +
+        @(Get-ChildItem "$local\Packages\Claude_*\LocalCache\Roaming\Claude\claude_desktop_config.json" -ErrorAction SilentlyContinue |
+          ForEach-Object FullName) + @(if (Test-Path "$local\Claude Nest") { "$local\Claude Nest\claude_desktop_config.json" })
+    foreach ($path in $configs | Select-Object -Unique) { $c = Read-Json $path; $c.deploymentMode = $mode; Write-Json $path $c }
+    $metaPath = "$local\Claude-3p\configLibrary\_meta.json"; $profilePath = "$local\Claude-3p\configLibrary\$id.json"
+    $meta = Read-Json $metaPath
+    $meta.entries = @(@($meta.entries) | Where-Object { $_ -and $_.id -ne $id })
+    if ($Restore) {
+        if ($meta.appliedId -eq $id) { $meta.Remove("appliedId") }
+        Remove-Item $profilePath -ErrorAction SilentlyContinue
+        Write-Json $metaPath $meta
+        Write-Host "The Claude desktop app is set back to your Claude account. Quit it (also from the tray) and open it again."
+        exit 0
+    }
+    $meta.appliedId = $id; $meta.entries += @{ id = $id; name = $name }
+    $p = Read-Json $profilePath
+    $p.inferenceProvider = "gateway"; $p.inferenceGatewayBaseUrl = $Gateway; $p.inferenceGatewayApiKey = $Key
+    $p.inferenceGatewayAuthScheme = "bearer"; $p.deploymentDisplayName = $name; $p.chatTabEnabled = $true
+    $p.disableDeploymentModeChooser = $false; $p.coworkEgressAllowedHosts = @("*"); $p.disableEssentialTelemetry = $true
+    $p.disableNonessentialTelemetry = $true; $p.autoModeEnabled = $false
+    $p.Remove("inferenceModels")      # the app asks the gateway for its models instead
+    Write-Json $profilePath $p
+    Write-Json $metaPath $meta
+    Write-Host "The Claude desktop app now uses $Gateway (profile `"AI Gateway`"): quit it (also from the tray) and open it again." -ForegroundColor Cyan
+    Write-Host "Its model picker offers Claude's names standing for gateway models; 'ai-gateway launch claude-desktop -Restore' undoes this."
+    exit 0
+}
+
 if (-not $Model) { $Model = "qwen3-next-80b" }
 $Entry = $Models | Where-Object { $_.id -eq $Model } | Select-Object -First 1
 if (-not $Entry) { Fail "$Model is not a model you may use here; 'ai-gateway models' lists them" }
