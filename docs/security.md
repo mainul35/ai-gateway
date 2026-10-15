@@ -82,6 +82,22 @@ model server would have fetched them from inside the network with no check at al
 - **Pictures in answers** load only from an exact `/chat/files/<id>`, so model output cannot make
   the browser request any other page of the gateway while signed in.
 
+## Coding projects: who may do what (`app/routers/coding.py`)
+
+- **A project is its owner's.** Only the person who added it, or an admin, can change it or start
+  tasks on it - from the Tasks page or from the playground's agent. A manager could otherwise set
+  the commands another person's project runs, a local one's on that person's own computer.
+- **GitHub over HTTPS only, from allowed owners.** The SSH form cloned with this server's own SSH
+  key, which reaches whatever that key can. Managers may add repositories of the owners in
+  `coding.github.owners` and of owners the gateway holds a token for; admins, any.
+- **Names stay inside the projects folder.** A name made of dots (`../model-gateway`, the live
+  checkout) is refused, and every clone path is checked to resolve inside `coding.projects.dir`.
+- **Branch names are checked** before git sees them, so one cannot be read as an option
+  (`--upload-pack=...`), and `git clone` gets `--` before the URL.
+- **Only admins choose whether a project gets a network** (the filtered sandbox network above).
+- **Settings values are one line**, by every line break `splitlines()` knows - a U+2028 in a value
+  could otherwise add a setting of its own to `config.properties`.
+
 ## On the server (root, by hand)
 
 Not something the gateway can do for itself:

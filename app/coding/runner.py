@@ -168,6 +168,10 @@ async def create(session, principal, project, description, model, conversation_i
         raise ValueError("Start tasks while signed in, not with the master key")
     if not principal.is_manager:
         raise PermissionError("Only managers and admins can start coding tasks")
+    # On their own projects: a project's commands run in its sandbox, and a local one's on its
+    # owner's computer, so nobody else's task should be choosing what they run
+    if not principal.is_admin and project.added_by != principal.user.id:
+        raise PermissionError("Only the person who added this project, or an admin, can start tasks on it")
     if not access.can_use_model(principal, model):
         raise PermissionError(f"You do not have access to model '{model}'")
     backend = await backends.resolve(model)

@@ -23,6 +23,7 @@ EDITABLE_KEYS = [
     "sso.require.verified.email",
     "sso.claim.email_verified",
     "gateway.public.models",
+    "coding.github.owners",
     "engine.unload_ollama_first",
     # Playground tools
     "features.web_search.enabled",
@@ -87,7 +88,9 @@ def write_settings(updates):
         value = (value or "").strip()
         if key in SECRET_KEYS and not value:
             continue  # blank secret field means "leave unchanged"
-        if "\n" in value or "\r" in value:
+        # Every character splitlines() breaks on - which is how the file is read back - not just \n
+        # and \r: a U+2028 in a value started a new line there, with any key on it
+        if value and (len(value.splitlines()) > 1 or value != value.splitlines()[0]):
             raise ValueError(f"Value for {key} must be a single line")
         pattern = rf"(?m)^{re.escape(key)}=.*$"
         replacement = f"{key}={value}"
