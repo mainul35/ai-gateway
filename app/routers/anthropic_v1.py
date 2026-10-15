@@ -24,6 +24,7 @@ from fastapi.responses import JSONResponse, Response, StreamingResponse
 from app import access, anthropic_compat as compat, api_images, backends, limits, settings, usage as usage_log
 from app.auth import Principal, authenticate
 from app.engine.supervisor import supervisor
+from app import claude_desktop
 from app.tools import auto_model
 
 router = APIRouter(prefix="/v1", tags=["anthropic"])
@@ -157,7 +158,8 @@ async def messages(request: Request, principal: Principal = Depends(authenticate
     except api_images.ImageRefused as e:
         return _error(400, str(e), "invalid_request_error")
 
-    asked = body.get("model")
+    # One of Claude's own IDs, as the desktop app sends them, means the gateway model it stands for
+    asked = await claude_desktop.route(body.get("model"))
     # "auto", or "claude-auto" from the desktop app, which takes only Claude-looking names: the
     # gateway picks the model for this request, as the playground's Auto does
     if auto_model.is_auto(asked) or (asked or "").strip().lower() == "claude-auto":

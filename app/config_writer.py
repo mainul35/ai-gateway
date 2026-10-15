@@ -25,6 +25,7 @@ EDITABLE_KEYS = [
     "gateway.public.models",
     "coding.github.owners",
     "ollama.context.length",
+    "anthropic.desktop.models",
     "limits.requests.per_minute",
     "limits.tokens.per_day",
     "limits.tokens.per_day.public",

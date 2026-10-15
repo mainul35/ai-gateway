@@ -9,6 +9,8 @@
 #   ai-gateway launch hermes --model gemma4:31b
 #   ai-gateway launch openclaw --model gemma4:31b
 #   ai-gateway launch claude --model qwen3-next-80b -- -p "fix the failing test"   # after --: the app's own
+#   ai-gateway launch claude-desktop            # the Claude desktop app (macOS), all its sessions
+#   ai-gateway launch claude-desktop --restore  # back to your Claude account
 #   ai-gateway models                                                             # what you may use
 #
 # Options: --model (default: the app's usual one here), --context (tokens; default: what the gateway
@@ -28,14 +30,14 @@
 set -euo pipefail
 
 GATEWAY=${AI_GATEWAY_URL:-https://ai-gateway.mainul35.dev}
-APPS="claude opencode qwen codex hermes openclaw"
+APPS="claude claude-desktop opencode qwen codex hermes openclaw"
 
 usage() { sed -n '2,25p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
 die() { echo "ai-gateway: $*" >&2; exit 1; }
 
 # --- arguments ---------------------------------------------------------------------------------
 command=${1:-}; [ $# -gt 0 ] && shift
-APP="" MODEL="" CONTEXT="" CONFIG_ONLY=0
+APP="" MODEL="" CONTEXT="" CONFIG_ONLY=0 RESTORE=0
 extra=()
 if [ "$command" = launch ]; then
     APP=${1:-}; [ $# -gt 0 ] && shift
@@ -46,6 +48,7 @@ while [ $# -gt 0 ]; do
         --context) CONTEXT=${2:?--context needs a number}; shift 2 ;;
         --gateway) GATEWAY=${2:?--gateway needs a URL}; shift 2 ;;
         --config)  CONFIG_ONLY=1; shift ;;
+        --restore) RESTORE=1; shift ;;
         --)        shift; extra+=("$@"); break ;;
         -h|--help) usage ;;
         *)         extra+=("$1"); shift ;;
@@ -100,6 +103,60 @@ if [ "$command" = models ]; then
         vision=$(printf '%s' "$entry" | grep -q '"vision"' && echo " vision" || true)
         printf '%-44s %8s%s%s\n' "$id" "${ctx:-?}" "$tools" "$vision"
     done
+    exit 0
+fi
+
+# --- the Claude desktop app ----------------------------------------------------------------------
+# A third-party inference profile of its own, written where the app keeps them - as Ollama's
+# `ollama launch claude-desktop` does - and made the one in use. The app then asks the gateway for its
+# models, and the gateway offers Claude's IDs standing for its own (app/claude_desktop.py). Every
+# desktop session moves to the gateway, Code and Cowork alike, until --restore.
+if [ "$APP" = claude-desktop ]; then
+    [ "$(uname -s)" = Darwin ] || die "the Claude desktop app is set up from here on macOS; on Windows use ai-gateway.ps1, and Linux has no Claude desktop app"
+    support="$HOME/Library/Application Support"
+    [ -d "$support/Claude" ] || [ -d "$support/Claude-3p" ] || die "the Claude desktop app has not been opened on this Mac yet; open it once, then run this again"
+    AIGW_MODE=$([ "$RESTORE" = 1 ] && echo restore || echo apply) AIGW_URL="$GATEWAY" AIGW_KEY="$KEY" \
+    AIGW_SUPPORT="$support" osascript -l JavaScript -e '
+        ObjC.import("Foundation");
+        const env = $.NSProcessInfo.processInfo.environment;
+        const get = k => ObjC.unwrap(env.objectForKey(k));
+        const ID = "00000000-0000-4000-8000-00000000a16e", NAME = "AI Gateway";
+        const fm = $.NSFileManager.defaultManager;
+        const read = p => { const s = $.NSString.stringWithContentsOfFileEncodingError(p, 4, null);
+                            return s.isNil() ? {} : JSON.parse(ObjC.unwrap(s) || "{}"); };
+        const write = (p, o) => { fm.createDirectoryAtPathWithIntermediateDirectoriesAttributesError(
+                                      $(p).stringByDeletingLastPathComponent, true, $(), null);
+                                  $(JSON.stringify(o, null, 2)).writeToFileAtomicallyEncodingError(p, true, 4, null); };
+        const base = get("AIGW_SUPPORT"), restore = get("AIGW_MODE") === "restore";
+        const mode = (p, m) => { const c = read(p); c.deploymentMode = m; write(p, c); };
+        mode(base + "/Claude/claude_desktop_config.json", restore ? "1p" : "3p");
+        const third = base + "/Claude-3p";
+        mode(third + "/claude_desktop_config.json", restore ? "1p" : "3p");
+        const metaPath = third + "/configLibrary/_meta.json", profilePath = third + "/configLibrary/" + ID + ".json";
+        const meta = read(metaPath);
+        meta.entries = (meta.entries || []).filter(e => !e || e.id !== ID);
+        if (restore) {
+            if (meta.appliedId === ID) delete meta.appliedId;
+            fm.removeItemAtPathError(profilePath, null);
+        } else {
+            meta.appliedId = ID; meta.entries.push({id: ID, name: NAME});
+            const p = read(profilePath);
+            Object.assign(p, {inferenceProvider: "gateway", inferenceGatewayBaseUrl: get("AIGW_URL"),
+                inferenceGatewayApiKey: get("AIGW_KEY"), inferenceGatewayAuthScheme: "bearer",
+                deploymentDisplayName: NAME, chatTabEnabled: true, disableDeploymentModeChooser: false,
+                coworkEgressAllowedHosts: ["*"], disableEssentialTelemetry: true,
+                disableNonessentialTelemetry: true, autoModeEnabled: false});
+            delete p.inferenceModels;      // the app asks the gateway for its models instead
+            write(profilePath, p);
+        }
+        write(metaPath, meta);
+        "ok";' >/dev/null || die "could not write the Claude desktop app's settings"
+    if [ "$RESTORE" = 1 ]; then
+        echo "The Claude desktop app is set back to your Claude account. Quit it and open it again."
+    else
+        echo "The Claude desktop app now uses $GATEWAY (profile \"AI Gateway\"): quit it and open it again."
+        echo "Its model picker offers Claude's names standing for gateway models; ai-gateway launch claude-desktop --restore undoes this."
+    fi
     exit 0
 fi
 

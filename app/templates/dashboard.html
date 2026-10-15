@@ -191,6 +191,7 @@ document.querySelectorAll('.agent-guide .origin-v1').forEach(e => e.textContent 
 // Applications: one command per app for the chosen model, in the shell of the chosen computer
 const APPS = [
   {id: 'claude', name: 'Claude Code', about: "Anthropic's coding agent, on the Messages API"},
+  {id: 'claude-desktop', name: 'Claude desktop app', about: 'every desktop session, macOS and Windows; restart the app after, --restore to undo', noModel: true},
   {id: 'opencode', name: 'OpenCode', about: 'Open-source coding agent'},
   {id: 'codex', name: 'Codex CLI', about: "OpenAI's coding agent, on the Responses API"},
   {id: 'qwen', name: 'Qwen Code', about: "Qwen's coding agent"},
@@ -205,7 +206,7 @@ function renderApps(){
   const flag = windows ? '-Model' : '--model';
   document.getElementById('appList').innerHTML = APPS.map(a => `
     <div class="app-row"><div><strong>${a.name}</strong> <span class="muted">&middot; ${a.about}</span>
-      <pre><code class="copyable">ai-gateway launch ${a.id} ${flag} ${escapeHtml(model)}</code></pre></div></div>`).join('');
+      <pre><code class="copyable">ai-gateway launch ${a.id}${a.noModel ? '' : ` ${flag} ${escapeHtml(model)}`}</code></pre></div></div>`).join('');
   document.getElementById('appInstall').textContent = windows
     ? [`New-Item -ItemType Directory -Force "$HOME\\.ai-gateway\\bin" | Out-Null`,
        `Invoke-RestMethod ${location.origin}/downloads/ai-gateway.ps1 -OutFile "$HOME\\.ai-gateway\\bin\\ai-gateway.ps1"`,
