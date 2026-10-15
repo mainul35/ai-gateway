@@ -2890,7 +2890,8 @@ function languageName(code){
 }
 
 async function sendPhoto(text, decision, again){
-  const source = pending[0];
+  // The first picture: a document attached alongside it is not a photograph to work on
+  const source = attachedPictures()[0];
   if(!source){ showError('Attach a photo first.'); return; }
   showError('');
   const cleaning = decision.action === 'clean';
@@ -2961,8 +2962,13 @@ async function sendPhoto(text, decision, again){
 async function sendImage(text, decision, again){
   if(!text){ showError('Describe the image you want.'); return; }
   showError('');
-  const source = pending[0] || null;
-  const references = pending.slice(1, editLimit());
+  // Pictures and documents are told apart: the first picture is the one to edit, and documents are
+  // read for what to draw. Taking the first attachment, whatever it was, sent a PDF to the image
+  // editor as the picture to change, where it failed as "cannot identify image file".
+  const pictures = attachedPictures();
+  const source = pictures[0] || null;
+  const references = pictures.slice(1, editLimit());
+  const documentsToRead = pending.filter(p => p.document);
   const size = document.getElementById('imageSize').value;
   const strength = parseFloat(document.getElementById('strength').value);
   try{
@@ -2992,7 +2998,8 @@ async function sendImage(text, decision, again){
                                                        conversation_id: currentId,
                                                        answers_to: box.dataset.turn ? Number(box.dataset.turn) : null,
                                                        source_file_id: source ? source.id : null,
-                                                       reference_file_ids: references.map(f => f.id)});
+                                                       reference_file_ids: references.map(f => f.id),
+                                                       document_file_ids: documentsToRead.slice(0, 4).map(f => f.id)});
     await readEvents(response, chunk => {
       const event = chunk.gateway;
       if(!event) return;

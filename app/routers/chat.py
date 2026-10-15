@@ -1699,8 +1699,12 @@ async def route(payload: RouteIn, principal: Principal = Depends(authenticate),
     return decision
 
 
-async def _drawable_prompt(principal, session, user, request, conversation_id):
-    """What to draw, the wording it must spell, and the rewrite to show, if there was one."""
+async def _drawable_prompt(principal, session, user, request, conversation_id, documents=()):
+    """What to draw, the wording it must spell, and the rewrite to show, if there was one.
+
+    `documents` are (name, text) of files attached to the request - "read this and design a logo
+    for it" - and are what the prompt is written from, so they come after the conversation.
+    """
     if not image_prompt.is_enabled():
         return request, None, None
     history, made = [], []
@@ -1714,6 +1718,8 @@ async def _drawable_prompt(principal, session, user, request, conversation_id):
             generated = (json.loads(message.attachments) if message.attachments else {}).get("generated")
             if generated and generated.get("prompt"):
                 made.append(generated["prompt"])
+    for name, text in documents:
+        history.append({"role": "user", "content": f"Attached document {name}:\n{text[:DOCUMENT_CHARS_FOR_IMAGES]}"})
     # Both questions at once: what to draw, and which words have to be spelled right in it
     described, worded = await asyncio.gather(
         _ask_helper(principal, image_prompt.build_request(request, history, made)),
@@ -1724,12 +1730,16 @@ async def _drawable_prompt(principal, session, user, request, conversation_id):
     return drawn, wording, (drawn if drawn != request else None)
 
 
+DOCUMENT_CHARS_FOR_IMAGES = 6000     # of each attached document, for writing an image prompt
+
+
 class ImageIn(BaseModel):
     prompt: str = Field(min_length=1, max_length=4000)
     conversation_id: int | None = None
     size: str = "square"
     source_file_id: int | None = None      # the picture to edit
     reference_file_ids: list[int] = Field(default_factory=list, max_length=2)  # extra pictures it may use
+    document_file_ids: list[int] = Field(default_factory=list, max_length=4)   # documents to draw from
     strength: float = Field(default=0.75, ge=0.05, le=1.0)
     answers_to: int | None = None          # the question this answers, for asking it again
 
@@ -1754,11 +1764,16 @@ async def generate_image(payload: ImageIn, principal: Principal = Depends(authen
         sources = [(found[i].data, found[i].mime_type) for i in wanted]
     elif payload.reference_file_ids:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Reference images need an image to edit")
+    documents = []
+    if payload.document_file_ids:
+        found = await _load_files(session, user, payload.document_file_ids)
+        documents = [(found[i].name, found[i].prompt or "") for i in payload.document_file_ids
+                     if i in found and found[i].kind == "document"]
     user_id = user.id
     # An edit is already an instruction about a picture that exists, so it is passed through as written
     drawable, wording, rewritten = ((payload.prompt, None, None) if sources else
                                     await _drawable_prompt(principal, session, user, payload.prompt,
-                                                           payload.conversation_id))
+                                                           payload.conversation_id, documents))
 
     async def stream():
         events = asyncio.Queue()
