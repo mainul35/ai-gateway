@@ -21,7 +21,11 @@ from app import github_access, knowledge, settings
 
 log = logging.getLogger("coding.workspace")
 
-GITHUB = re.compile(r"^(?:https://github\.com/|git@github\.com:)(?P<owner>[\w.-]+)/(?P<repo>[\w.-]+?)(?:\.git)?/?$")
+# HTTPS only. The SSH form cloned with this server's own SSH key, which reaches whatever that key
+# can: a manager could read any private repository it opens, and push to it.
+GITHUB = re.compile(r"^https://github\.com/(?P<owner>[\w.-]+)/(?P<repo>[\w.-]+?)(?:\.git)?/?$")
+# A branch name git cannot mistake for an option or a path trick
+BRANCH = re.compile(r"^(?!-)(?!.*\.\.)(?!.*//)(?!.*@\{)(?!.*\.lock$)(?!.*/$)[A-Za-z0-9._/-]{1,128}$")
 AUTHOR_NAME = "AI Gateway"
 
 
@@ -34,9 +38,16 @@ def projects_dir():
 
 
 def github_of(clone_url):
-    """(owner, repo) for a GitHub URL, else None."""
+    """(owner, repo) for a GitHub URL, else None. Never "." or "..": as a path, owner ".." and repo
+    "model-gateway" was the gateway's own live checkout."""
     match = GITHUB.match((clone_url or "").strip())
-    return (match["owner"], match["repo"]) if match else None
+    if not match or any(part.strip(".") == "" for part in (match["owner"], match["repo"])):
+        return None
+    return match["owner"], match["repo"]
+
+
+def valid_branch(name):
+    return bool(name) and BRANCH.match(name) is not None
 
 
 def token_for(clone_url):
@@ -48,7 +59,12 @@ def token_for(clone_url):
 
 
 def clone_path(name):
-    return os.path.join(projects_dir(), *name.split("/"))
+    """Where a project lives: always inside the projects folder, whatever its name says."""
+    root = os.path.realpath(projects_dir())
+    path = os.path.realpath(os.path.join(root, *name.split("/")))
+    if not path.startswith(root + os.sep) or any(part.strip(".") == "" for part in name.split("/")):
+        raise GitError(f"{name!r} is not a project name that stays inside {root}")
+    return path
 
 
 def worktree_path(task_id):
@@ -117,7 +133,7 @@ async def clone(name, clone_url):
     token = token_for(clone_url)
     if not os.path.isdir(os.path.join(path, ".git")):
         os.makedirs(os.path.dirname(path), exist_ok=True)
-        await git(["clone", "--quiet", "--filter=blob:none", clone_url, path], token=token)
+        await git(["clone", "--quiet", "--filter=blob:none", "--", clone_url, path], token=token)
     else:
         await git(["fetch", "--quiet", "--prune", "origin"], cwd=path, token=token)
     head = (await git(["symbolic-ref", "--short", "refs/remotes/origin/HEAD"], cwd=path)).strip()
