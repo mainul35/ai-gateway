@@ -156,8 +156,18 @@ jq -r '[ .[] | (.tags // []) as $tags | ($tags | any(.name == "latest")) as $has
         stage('Wake homelabai') {
             steps {
                 timeout(time: 10, unit: 'MINUTES') {
-                    // Through the wake front: this container's own broadcasts never reach the LAN
-                    sh 'WAKE_ENV=/nonexistent release/bin/wake-homelabai.sh'
+                    // Through the wake front, from a container on proxy-vm's own network. This
+                    // Jenkins container's broadcasts never reach the LAN, and its requests to
+                    // 192.168.50.81:9100 - this very machine, from inside Docker - are dropped by the
+                    // host's firewall, so the wake never went out: a deploy started while homelabai
+                    // slept stalled here. On the host network the wake front is plain 127.0.0.1, as
+                    // Harbor is for the stages above. The script goes in as a variable, not a mount:
+                    // Docker here is the host's, which would look for this workspace on its own disk.
+                    sh '''
+                        WAKE_SCRIPT="$(cat release/bin/wake-homelabai.sh)" docker run --rm --network host \\
+                            -e WAKE_SCRIPT -e GATEWAY_URL -e WAKE_FRONT_URL=http://127.0.0.1:9100 -e WAKE_ENV=/nonexistent \\
+                            alpine:3.20 sh -c 'apk add --no-cache bash curl >/dev/null && printf "%s\\n" "$WAKE_SCRIPT" | bash'
+                    '''
                 }
             }
         }
