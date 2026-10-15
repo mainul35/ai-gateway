@@ -77,3 +77,11 @@ async def internal_activity(request: Request):
     if not activity.is_local_request(request):
         raise HTTPException(404)
     return activity.snapshot()
+
+
+@app.post("/internal/unload", include_in_schema=False)
+async def internal_unload(request: Request):
+    """Unloads every model, for ops/idle-shutdown just before it suspends the machine."""
+    if not activity.is_local_request(request):
+        raise HTTPException(404)
+    return await supervisor.unload_everything()

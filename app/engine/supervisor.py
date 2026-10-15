@@ -172,6 +172,27 @@ class Supervisor:
                          name, model, free / 1024**3, size / 1024**3)
                 await self._stop_locked(name)
 
+    async def unload_everything(self):
+        """Stops every llama.cpp model and has Ollama drop its own, for a machine about to sleep.
+
+        A suspended GPU keeps nothing worth waking up to: the first request after a wake reloads its
+        model either way, and a CUDA process carried through suspend and resume can come back unable to
+        use the card. Unloading first also means a model nobody is using never keeps the machine awake.
+        A llama.cpp model still answering someone is left alone - the caller should not be suspending
+        then, and says so. Returns what was done, for the log.
+        """
+        stopped, busy = [], []
+        async with self._lock:
+            for name, running in list(self._running.items()):
+                if running.in_flight:
+                    busy.append(name)
+                    continue
+                log.info("Unloading %s before the machine sleeps", name)
+                await self._stop_locked(name)
+                stopped.append(name)
+            await self._unload_ollama_models()
+        return {"stopped": stopped, "busy": busy}
+
     async def _unload_ollama_models(self):
         """Asks Ollama to drop its loaded models; they otherwise keep the GPU full (OLLAMA_KEEP_ALIVE=-1)."""
         host = ollama_host()
