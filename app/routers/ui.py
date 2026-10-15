@@ -3,7 +3,7 @@ import os
 
 from fastapi import APIRouter, Cookie, Depends, Form, Request
 from fastapi.openapi.docs import get_swagger_ui_html
-from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response
+from fastapi.responses import JSONResponse, PlainTextResponse, RedirectResponse, Response
 from fastapi.templating import Jinja2Templates
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -114,19 +114,26 @@ async def logout(session: AsyncSession = Depends(get_session),
     return response
 
 
-LAUNCHERS = ("claude-gateway.ps1", "claude-gateway.sh")  # Windows; macOS and Linux
+# Windows, then macOS and Linux: ai-gateway is the launcher for every app, claude-gateway the older one
+LAUNCHERS = ("ai-gateway.ps1", "ai-gateway.sh", "claude-gateway.ps1", "claude-gateway.sh")
+DEFAULT_GATEWAY = "https://ai-gateway.mainul35.dev"
 
 
 @router.get("/downloads/{name}")
-async def claude_launcher(name: str):
-    """The Claude Code launchers the Dashboard's "Connect an AI agent" card offers. Served from bin/ as
-    deployed, so the copy people download is always the one this gateway was tested with. They hold no
-    secrets - the key is asked for, or read from the user's own machine - so they need no login. Only
-    the names listed: nothing else in bin/ is for handing out."""
+async def launcher(name: str, request: Request):
+    """The launchers the Dashboard offers, served from bin/ as deployed, with this gateway's own
+    address in place of the default one, so a download works as it is. They hold no secrets - the
+    key is asked for, or read from the user's own machine - so they need no login. Only the names
+    listed: nothing else in bin/ is for handing out."""
     if name not in LAUNCHERS:
         return Response(status_code=404)
     path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "bin", name)
-    return FileResponse(path, media_type="text/plain; charset=utf-8", filename=name)
+    with open(path, encoding="utf-8") as handle:
+        text = handle.read()
+    here = (settings.public_base_url() or str(request.base_url)).rstrip("/")
+    if here.startswith(("http://", "https://")) and '"' not in here and "'" not in here:
+        text = text.replace(DEFAULT_GATEWAY, here)
+    return PlainTextResponse(text, headers={"Content-Disposition": f'attachment; filename="{name}"'})
 
 
 @router.get("/dashboard")

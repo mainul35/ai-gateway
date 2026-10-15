@@ -31,7 +31,9 @@ async def list_models(principal: Principal = Depends(authenticate)):
         "data": [{"id": "auto", "object": "model", "created": 0, "owned_by": "gateway",
                   "capabilities": ["auto"]}] + [
             {"id": name, "object": "model", "created": 0, "owned_by": backend.name,
-             "capabilities": sorted(backend.capabilities)}
+             "capabilities": sorted(backend.capabilities),
+             # How much it reads at once, for clients that need telling (ai-gateway launch does)
+             **({"context_length": backend.context_length} if backend.context_length else {})}
             for name, backend in sorted(models.items())
             if access.can_use_model(principal, name)
         ],
