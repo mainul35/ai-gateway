@@ -56,6 +56,11 @@ past it:
 - `claude-` followed by a gateway model's name, with `:` and `.` written as `-`, is that model:
   `claude-gemma4-31b` is `gemma4:31b`. This is how the desktop app, which takes only Claude-looking
   names, can offer more than one model.
+- `auto` (or `claude-auto`, for the desktop app) lets the gateway pick the model per request, as
+  the playground's Auto does (`app/tools/auto_model.py`): the router model names the kind of work,
+  and the chooser picks the smallest model for everyday questions and a suited one otherwise. A tool
+  loop is judged by the last message with words in it, so one task stays on one model. Claude Code
+  itself is better on one fixed model.
 - Any other `claude-*` name - Claude Code's own - maps to `anthropic.model.default` in
   `config/config.properties` (else `qwen3-next-80b`), and `claude-haiku-*` - its background jobs -
   to `anthropic.model.small` (else the same model).

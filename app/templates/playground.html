@@ -656,7 +656,8 @@ function smallestModel(needsVision){
 
 async function loadModels(){
   try{
-    const data = (await api('/v1/models')).data;
+    // "auto" from the API is the drop-down's own Auto option, already first in the list
+    const data = (await api('/v1/models')).data.filter(m => m.id !== 'auto');
     models = Object.fromEntries(data.map(m => [m.id, m]));
     if(!data.length){
       modelSelect.innerHTML = '<option value="">no models available</option>';

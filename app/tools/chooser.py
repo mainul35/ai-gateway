@@ -111,7 +111,7 @@ def score(model, category, needs_vision):
 
 def why(model, category):
     """A short sentence for the reason it was picked, in the words of what was actually known."""
-    reasons = []
+    reasons = ["smallest that will do"] if category == "general" else []
     capabilities = set(model.get("capabilities") or ())
     name = model.get("name") or ""
     if category == "vision" or "vision" in capabilities:

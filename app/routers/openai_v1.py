@@ -11,7 +11,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from app import access, backends, settings, usage as usage_log
 from app.engine.supervisor import supervisor
 from app.auth import Principal, authenticate
-from app.tools import images
+from app.tools import auto_model, images
 
 router = APIRouter(prefix="/v1", tags=["openai"])
 
@@ -27,7 +27,9 @@ async def list_models(principal: Principal = Depends(authenticate)):
     models = await backends.available_models()
     return {
         "object": "list",
-        "data": [
+        # "auto" first: not a model but a choice - the gateway picks one per request (app/tools/auto_model.py)
+        "data": [{"id": "auto", "object": "model", "created": 0, "owned_by": "gateway",
+                  "capabilities": ["auto"]}] + [
             {"id": name, "object": "model", "created": 0, "owned_by": backend.name,
              "capabilities": sorted(backend.capabilities)}
             for name, backend in sorted(models.items())
@@ -54,6 +56,16 @@ async def forward(principal: Principal, endpoint: str, path: str, body: dict, sk
     model = body.get("model")
     if not model:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Field 'model' is required")
+
+    if auto_model.is_auto(model) and endpoint == "chat_completions":
+        messages = body.get("messages") or []
+        has_images = any(isinstance(m.get("content"), list) and
+                         any(isinstance(p, dict) and p.get("type") == "image_url" for p in m["content"])
+                         for m in messages)
+        model, category, why = await auto_model.choose(principal, messages, has_images, bool(body.get("tools")))
+        if model is None:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, f"auto could not pick a model: {why}")
+        body = dict(body, model=model)
 
     if not skip_access and not access.can_use_model(principal, model):
         raise HTTPException(status.HTTP_403_FORBIDDEN, f"You do not have access to model '{model}'")
