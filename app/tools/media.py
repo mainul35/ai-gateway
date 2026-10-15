@@ -34,7 +34,7 @@ from urllib.parse import urljoin, urlparse
 
 import httpx
 
-from app import settings
+from app import net, settings
 from app.tools import web_search
 
 log = logging.getLogger("tools.media")
@@ -47,6 +47,7 @@ MAX_SUBJECTS = 3        # separate things one message may ask to see
 FETCH_TIMEOUT = 8       # one picture
 BUDGET = 30             # all of them together, so a slow CDN cannot hold up the answer
 MAX_BYTES = 8_000_000
+PAGE_BYTES = 1_000_000   # of a result page read for its pictures
 SMALLEST = 200          # a side shorter than this is an icon, a logo or a tracking pixel
 # A video still is small by nature: the engines hand back 320x180 and 354x199, and holding
 # those to the picture floor threw away five videos out of six.
@@ -373,20 +374,18 @@ async def scrape_pages(subject, limit=CANDIDATES):
         log.info("no pages to scrape for %r (%s)", subject, e)
         return []
     found = []
-    async with httpx.AsyncClient(timeout=FETCH_TIMEOUT, follow_redirects=True,
-                                 headers={"User-Agent": web_search.USER_AGENT}) as client:
+    # Through app.net: a result page, and every redirect it gives, is checked before the server goes
+    # there, so a page cannot send it into this network. Only so much of a page is read.
+    async with net.client(timeout=FETCH_TIMEOUT, headers={"User-Agent": web_search.USER_AGENT}) as client:
         async def one(result):
             url = result.get("url") or ""
-            host = urlparse(url).hostname
-            if not host or not await asyncio.to_thread(web_search.is_public_host, host):
-                return []
             try:
-                response = await client.get(url)
-                if response.status_code != 200 or "html" not in response.headers.get("content-type", ""):
+                page = await net.get(client, url, max_bytes=PAGE_BYTES, truncate=True)
+                if page.status_code != 200 or "html" not in page.content_type:
                     return []
                 parser = _Pictures()
-                parser.feed(response.text[:400_000])
-            except (httpx.HTTPError, ValueError, AssertionError):
+                parser.feed(page.text)
+            except (net.Refused, httpx.HTTPError, ValueError, AssertionError):
                 return []
             except Exception as e:                       # a broken page must not end the search
                 log.info("could not read %s (%s)", url, e.__class__.__name__)
@@ -434,27 +433,22 @@ def _shrink(data, smallest=SMALLEST):
 
 
 async def fetch(client, url, smallest=SMALLEST):
-    """One picture, if that is what is really there. Never follows a link into this machine."""
-    host = urlparse(url).hostname
-    if not host or not await asyncio.to_thread(web_search.is_public_host, host):
-        return None
+    """One picture, if that is what is really there.
+
+    Through app.net, with every redirect checked: a picture URL out of a search result that
+    redirected to ComfyUI's output folder used to come back as the asker's own picture. And only a
+    response that says it is an image - one that says nothing could be anything on the LAN.
+    """
     try:
-        async with client.stream("GET", url) as response:
-            if response.status_code != 200:
-                return None
-            kind = response.headers.get("content-type", "").split(";")[0].strip().lower()
-            if kind and not kind.startswith("image/"):
-                return None
-            data = b""
-            async for chunk in response.aiter_bytes():
-                data += chunk
-                if len(data) > MAX_BYTES:
-                    return None
-    except httpx.HTTPError:
+        picture = await net.get(client, url, max_bytes=MAX_BYTES)
+    except (net.Refused, httpx.HTTPError):
         return None
     except Exception as e:
         log.info("could not fetch %s (%s)", url[:120], e.__class__.__name__)
         return None
+    if picture.status_code != 200 or not picture.content_type.startswith("image/"):
+        return None
+    data = picture.content
     return await asyncio.to_thread(_shrink, data, smallest) if data else None
 
 
@@ -467,9 +461,8 @@ async def collect(candidates, keep=KEEP, budget=BUDGET, smallest=SMALLEST):
     they came from: the same press photograph comes back from five sites at five URLs.
     """
     kept, seen = [], set()
-    async with httpx.AsyncClient(timeout=FETCH_TIMEOUT, follow_redirects=True,
-                                 headers={"User-Agent": web_search.USER_AGENT,
-                                          "Accept": "image/*,*/*"}) as client:
+    async with net.client(timeout=FETCH_TIMEOUT, headers={"User-Agent": web_search.USER_AGENT,
+                                                          "Accept": "image/*,*/*"}) as client:
         remaining = budget
 
         async def group(batch):

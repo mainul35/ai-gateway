@@ -8,7 +8,7 @@ import httpx
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile, status
 from fastapi.responses import JSONResponse, StreamingResponse
 
-from app import access, backends, settings, usage as usage_log
+from app import access, api_images, backends, settings, usage as usage_log
 from app.engine.supervisor import supervisor
 from app.auth import Principal, authenticate
 from app.tools import auto_model, images
@@ -56,6 +56,14 @@ async def forward(principal: Principal, endpoint: str, path: str, body: dict, sk
     model = body.get("model")
     if not model:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Field 'model' is required")
+
+    # Image URLs are fetched here, not by the model server inside this network (app/api_images.py)
+    if endpoint == "chat_completions" and body.get("messages"):
+        body = dict(body)
+        try:
+            await api_images.inline(body["messages"])
+        except api_images.ImageRefused as e:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, str(e))
 
     if auto_model.is_auto(model) and endpoint == "chat_completions":
         messages = body.get("messages") or []
