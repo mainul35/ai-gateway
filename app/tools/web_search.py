@@ -4,16 +4,14 @@ The results are handed to the model as numbered sources, so it can answer from t
 """
 import asyncio
 import datetime
-import ipaddress
 import logging
 import re
-import socket
 from html.parser import HTMLParser
 from urllib.parse import urlparse
 
 import httpx
 
-from app import settings
+from app import net, settings
 
 log = logging.getLogger("tools.search")
 
@@ -170,20 +168,8 @@ async def search(queries, limit=None, wants_recent=False):
 # --- page text ------------------------------------------------------------------
 
 def is_public_host(host):
-    """Pages and pictures are fetched by the server, so never let a result point it at the LAN.
-
-    Shared with the media search, which follows image URLs out of search results and is the more
-    exposed of the two: a result can name any host at all, including this one.
-    """
-    try:
-        addresses = {info[4][0] for info in socket.getaddrinfo(host, None)}
-    except (socket.gaierror, UnicodeError):
-        return False
-    for address in addresses:
-        ip = ipaddress.ip_address(address.split("%")[0])
-        if not ip.is_global:
-            return False
-    return bool(addresses)
+    """Whether every address of this host is public (blocking). The fetching itself is app.net's."""
+    return net.is_public_host(host)
 
 
 class _TextExtractor(HTMLParser):
@@ -220,45 +206,20 @@ class _TextExtractor(HTMLParser):
 
 
 async def _page_text(client, url):
-    host = urlparse(url).hostname
-    if not host or not await asyncio.to_thread(is_public_host, host):
-        return None
+    """The readable text of one result page. Through app.net, so neither the result's URL nor any
+    redirect it gives can point the server at this network, and only so much of it is read."""
     try:
-        async with client.stream("GET", url) as response:
-            if response.status_code != 200 or "html" not in response.headers.get("content-type", ""):
-                return None
-            # A redirect here means _follow's HEAD saw none; skip rather than follow it unchecked
-            body = b""
-            async for chunk in response.aiter_bytes():
-                body += chunk
-                if len(body) > PAGE_BYTES:
-                    break
-            encoding = response.encoding or "utf-8"
-    except httpx.HTTPError:
+        page = await net.get(client, url, max_bytes=PAGE_BYTES, truncate=True)
+    except (net.Refused, httpx.HTTPError):
+        return None
+    if page.status_code != 200 or "html" not in page.content_type:
         return None
     parser = _TextExtractor()
     try:
-        parser.feed(body.decode(encoding, errors="replace"))
+        parser.feed(page.text)
     except Exception:
         return None
     return parser.text()[:PAGE_CHARS] or None
-
-
-async def _follow(client, url, hops=3):
-    """Resolves redirects one at a time, refusing any that lead to a private address."""
-    for _ in range(hops):
-        host = urlparse(url).hostname
-        if not host or not await asyncio.to_thread(is_public_host, host):
-            return None
-        try:
-            response = await client.head(url)
-        except httpx.HTTPError:
-            return url  # some servers reject HEAD; the GET is checked again anyway
-        if response.is_redirect and response.headers.get("location"):
-            url = str(response.url.join(response.headers["location"]))
-            continue
-        return url
-    return None
 
 
 async def fetch_pages(results, least=200, wanted=None):
@@ -276,11 +237,9 @@ async def fetch_pages(results, least=200, wanted=None):
     wanted = wanted or settings.search_fetch_pages()
     if not wanted or not results:
         return results
-    async with httpx.AsyncClient(timeout=PAGE_TIMEOUT, follow_redirects=False,
-                                 headers={"User-Agent": USER_AGENT, "Accept": "text/html"}) as client:
+    async with net.client(timeout=PAGE_TIMEOUT, headers={"User-Agent": USER_AGENT, "Accept": "text/html"}) as client:
         async def one(result):
-            final = await _follow(client, result["url"])
-            return await _page_text(client, final) if final else None
+            return await _page_text(client, result["url"])
 
         texts = await asyncio.gather(*(one(r) for r in results), return_exceptions=True)
 

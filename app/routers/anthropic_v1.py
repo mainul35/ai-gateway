@@ -21,7 +21,7 @@ import httpx
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 
-from app import access, anthropic_compat as compat, backends, settings, usage as usage_log
+from app import access, anthropic_compat as compat, api_images, backends, settings, usage as usage_log
 from app.auth import Principal, authenticate
 from app.engine.supervisor import supervisor
 from app.tools import auto_model
@@ -150,6 +150,12 @@ async def messages(request: Request, principal: Principal = Depends(authenticate
         body = await request.json()
     except ValueError:
         return _error(400, "Request body must be JSON", "invalid_request_error")
+
+    # Image URLs are fetched here, not by the model server inside this network (app/api_images.py)
+    try:
+        await api_images.inline(body.get("messages"))
+    except api_images.ImageRefused as e:
+        return _error(400, str(e), "invalid_request_error")
 
     asked = body.get("model")
     # "auto", or "claude-auto" from the desktop app, which takes only Claude-looking names: the

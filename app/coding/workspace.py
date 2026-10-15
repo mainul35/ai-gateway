@@ -55,22 +55,56 @@ def worktree_path(task_id):
     return os.path.join(projects_dir(), ".tasks", f"task-{task_id}")
 
 
+def _check_worktree(cwd):
+    """Refuses to run git in a task worktree whose .git no longer points at the project's clone.
+
+    A task's commands run in a container that can write the worktree. If its .git - a file naming
+    the real git directory - were replaced with a directory or a pointer of the container's making,
+    git on this host would read that git directory's config, and a config can name programs git
+    runs (core.fsmonitor, hooks, diff and filter drivers): the container's code, run here, as the
+    gateway's user. sandbox.run mounts the pointer read-only; this checks it before every command.
+    """
+    tasks = os.path.realpath(os.path.join(projects_dir(), ".tasks"))
+    here = os.path.realpath(cwd)
+    if not here.startswith(tasks + os.sep):
+        return
+    pointer = os.path.join(here, ".git")
+    if os.path.islink(pointer) or not os.path.isfile(pointer):
+        raise GitError("the task's .git is not the file git worktree made; refusing to run git in it")
+    with open(pointer, encoding="utf-8", errors="replace") as handle:
+        line = handle.read(4096).strip()
+    if not line.startswith("gitdir:") or "\n" in line:
+        raise GitError("the task's .git does not name a git directory; refusing to run git in it")
+    target = os.path.realpath(os.path.join(here, line[len("gitdir:"):].strip()))
+    clones = os.path.realpath(projects_dir())
+    if (not target.startswith(clones + os.sep) or target.startswith(tasks + os.sep)
+            or f"{os.sep}.git{os.sep}worktrees{os.sep}" not in target + os.sep):
+        raise GitError("the task's .git points outside its project's clone; refusing to run git in it")
+
+
+# Whatever a repository's own config says: no fsmonitor program and no hooks
+HARDENING = ["-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null"]
+
+
 async def git(args, cwd=None, token="", timeout=600):
     """Runs git and returns its output; GitError with the end of stderr when it fails."""
-    env = {**os.environ, "GIT_TERMINAL_PROMPT": "0", "GIT_ASKPASS": "true"}
+    if cwd:
+        _check_worktree(cwd)
+    shown = list(args)
+    env = {**os.environ, "GIT_TERMINAL_PROMPT": "0", "GIT_ASKPASS": "true", "GIT_CONFIG_NOSYSTEM": "1"}
     if token:
         basic = base64.b64encode(f"x-access-token:{token}".encode()).decode()
         env.update({"GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "http.extraHeader",
                     "GIT_CONFIG_VALUE_0": f"Authorization: Basic {basic}"})
     process = await asyncio.create_subprocess_exec(
-        "git", *args, cwd=cwd, env=env, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+        "git", *HARDENING, *shown, cwd=cwd, env=env, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
     try:
         out, err = await asyncio.wait_for(process.communicate(), timeout=timeout)
     except asyncio.TimeoutError:
         process.kill()
-        raise GitError(f"git {args[0]} took longer than {timeout}s")
+        raise GitError(f"git {shown[0]} took longer than {timeout}s")
     if process.returncode != 0:
-        raise GitError(f"git {' '.join(args[:2])} failed: {err.decode(errors='replace').strip()[-600:]}")
+        raise GitError(f"git {' '.join(shown[:2])} failed: {err.decode(errors='replace').strip()[-600:]}")
     return out.decode(errors="replace")
 
 
