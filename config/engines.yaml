@@ -56,7 +56,50 @@ models:
   # 128k, for long chats in desktop clients (Qwen Code through ACP UI). Reading a long conversation
   # cold takes longer than Cloudflare allows a silent request; streamed requests are kept alive with
   # SSE comments while that happens (app/routers/openai_v1.py, _streamed).
+  # 256k since the RAM went to 45 GB (2026-10-16): the experts that do not fit on the 3090 now stay
+  # in RAM instead of being read back from disk. Measured with --fit, q8_0 KV, no prompt cache:
+  #    47k tokens: 618 t/s prompt (77 s),  40.4 t/s generation
+  #    95k tokens: 590 t/s prompt (161 s), 35.9 t/s generation
+  #   178k tokens: 546 t/s prompt (325 s), 29.5 t/s generation          22.9 GB VRAM throughout
   - name: qwen3-next-80b
     model_path: /home/mainul35/models/Qwen3-Next-80B-A3B-Instruct-UD-Q4_K_XL.gguf
-    ctx_size: 131072
+    ctx_size: 262144
     cache_reuse: 256
+
+  # qwen3.6 (35B MoE, 3B active, hybrid attention, vision) with a long window: the fastest model here
+  # for long work. The llama-b11025 build cannot load its architecture, so these run Ollama's own,
+  # newer llama-server on Ollama's file; vision comes from the same file (--mmproj on it works: the
+  # server translates Ollama's format). Ollama's build needs to be told where its CUDA backend is.
+  # Measured 2026-10-16 with --fit (experts it cannot place stay in RAM), q8_0 KV, no prompt cache:
+  #   256k window:  47k tokens 2658 t/s prompt (18 s),  86.6 t/s generation
+  #                 95k tokens 2239 t/s prompt (42 s),  66.7 t/s
+  #                178k tokens 1753 t/s prompt (101 s), 49.9 t/s           23.0 GB VRAM
+  #   1M window (YaRN x4 past the trained 256k):
+  #                178k tokens 1217 t/s prompt (146 s), 33.9 t/s
+  #                356k tokens  911 t/s prompt (6.5 min), 24.7 t/s
+  #                519k tokens  734 t/s prompt (12 min), 19.9 t/s
+  #                741k tokens  579 t/s prompt (21 min), 15.5 t/s           23.1 GB VRAM, 23+ GB RAM free
+  # The 1M profile is slower at every length (its bigger cache leaves less of the model on the GPU)
+  # and YaRN stretching costs a little quality on short work: use it only for what needs > 256k.
+  - name: qwen3.6-256k
+    model_path: /usr/share/ollama/.ollama/models/blobs/sha256-f5ee307a2982106a6eb82b62b2c00b575c9072145a759ae4660378acda8dcf2d
+    mmproj: /usr/share/ollama/.ollama/models/blobs/sha256-f5ee307a2982106a6eb82b62b2c00b575c9072145a759ae4660378acda8dcf2d
+    binary: /usr/local/lib/ollama/llama-server
+    env: {LD_LIBRARY_PATH: "/usr/local/lib/ollama:/usr/local/lib/ollama/cuda_v13",
+          GGML_BACKEND_PATH: /usr/local/lib/ollama/cuda_v13/libggml-cuda.so}
+    ctx_size: 262144
+    cache_reuse: 256
+    extra_args: ["--fit", "on"]
+
+  - name: qwen3.6-1m
+    model_path: /usr/share/ollama/.ollama/models/blobs/sha256-f5ee307a2982106a6eb82b62b2c00b575c9072145a759ae4660378acda8dcf2d
+    mmproj: /usr/share/ollama/.ollama/models/blobs/sha256-f5ee307a2982106a6eb82b62b2c00b575c9072145a759ae4660378acda8dcf2d
+    binary: /usr/local/lib/ollama/llama-server
+    env: {LD_LIBRARY_PATH: "/usr/local/lib/ollama:/usr/local/lib/ollama/cuda_v13",
+          GGML_BACKEND_PATH: /usr/local/lib/ollama/cuda_v13/libggml-cuda.so}
+    ctx_size: 1048576
+    cache_reuse: 256
+    # The server caps a window at the length the file says the model was trained for (256k) unless
+    # told otherwise: hence the override, besides YaRN itself
+    extra_args: ["--fit", "on", "--rope-scaling", "yarn", "--rope-scale", "4", "--yarn-orig-ctx", "262144",
+                 "--override-kv", "qwen35moe.context_length=int:1048576"]

@@ -205,17 +205,22 @@ class Supervisor:
                 log.info("Unloading %s before the machine sleeps", name)
                 await self._stop_locked(name)
                 stopped.append(name)
-            await self._unload_ollama_models()
+            await self._unload_ollama_models(gpu_only=False)
         return {"stopped": stopped, "busy": busy}
 
-    async def _unload_ollama_models(self):
-        """Asks Ollama to drop its loaded models; they otherwise keep the GPU full (OLLAMA_KEEP_ALIVE=-1)."""
+    async def _unload_ollama_models(self, gpu_only=True):
+        """Asks Ollama to drop its loaded models; they otherwise keep the GPU full (OLLAMA_KEEP_ALIVE=-1).
+
+        Only the ones on the GPU, unless gpu_only is off: the router and embedding models run on the
+        CPU (num_gpu 0), hold no VRAM, and would only be reloaded a moment later for nothing.
+        """
         host = ollama_host()
         try:
             async with httpx.AsyncClient(timeout=30) as client:
                 response = await client.get(f"{host}/api/ps")
                 response.raise_for_status()
-                loaded = [e.get("model") or e.get("name") for e in response.json().get("models") or []]
+                loaded = [e.get("model") or e.get("name") for e in response.json().get("models") or []
+                          if not gpu_only or e.get("size_vram", 1)]
                 for name in filter(None, loaded):
                     log.info("Asking Ollama to unload %s", name)
                     # keep_alive 0 unloads immediately. Ollama reports failures in the body with HTTP 200.
@@ -228,7 +233,8 @@ class Supervisor:
 
                 for _ in range(15):
                     await asyncio.sleep(1)
-                    still_loaded = (await client.get(f"{host}/api/ps")).json().get("models") or []
+                    still_loaded = [e for e in (await client.get(f"{host}/api/ps")).json().get("models") or []
+                                    if not gpu_only or e.get("size_vram", 1)]
                     if not still_loaded:
                         log.info("Ollama released its models")
                         return
@@ -240,11 +246,15 @@ class Supervisor:
         if not os.path.isfile(profile.model_path):
             return None, f"Model file not found: {profile.model_path}"
 
-        command = profile.command(self.binary())
+        binary = profile.binary or self.binary()
+        if profile.binary and not (os.path.isfile(binary) and os.access(binary, os.X_OK)):
+            return None, f"llama-server not found at {binary} (profile {profile.name})"
+        command = profile.command(binary)
         env = dict(os.environ)
         library_path = settings.get("engine.library.path", "ENGINE_LIBRARY_PATH")
-        if library_path:
+        if library_path and not profile.binary:
             env["LD_LIBRARY_PATH"] = library_path + os.pathsep + env.get("LD_LIBRARY_PATH", "")
+        env.update({str(k): str(v) for k, v in (profile.env or {}).items()})
 
         log.info("Starting %s: %s", profile.name, " ".join(command))
         process = await asyncio.create_subprocess_exec(
