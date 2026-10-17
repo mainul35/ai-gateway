@@ -2,6 +2,13 @@
 {% block title %}Dashboard &middot; Model Gateway{% endblock %}
 {% block content %}
 <style>
+.usage-table .usage-user{cursor:pointer}
+.usage-table .usage-user:hover td,.usage-table .usage-user:focus td{background:rgba(99,102,241,.08)}
+.share{display:inline-block;width:4.5rem;height:.45rem;border-radius:4px;background:var(--border);vertical-align:middle;overflow:hidden}
+.share span{display:block;height:100%;background:var(--primary)}
+.usage-dialog{width:min(56rem,calc(100vw - 2rem));max-height:80vh;border:1px solid var(--border);border-radius:12px;
+  background:var(--card,#1e293b);color:inherit;padding:1.2rem 1.3rem}
+.usage-dialog::backdrop{background:rgba(0,0,0,.55)}
 .agent-guide details{border-top:1px solid var(--border);padding:.7rem 0}
 .agent-guide summary{cursor:pointer}
 .agent-guide ol,.agent-guide ul{margin:.6rem 0 .4rem;padding-left:1.3rem;line-height:1.6}
@@ -41,8 +48,19 @@
 
 <div class="card" style="margin-bottom:1.5rem">
   <h2>Usage, last 7 days</h2>
+  <p class="muted" style="margin:-.3rem 0 .6rem;font-size:.85rem">Heaviest first, by tokens. Click a user for their breakdown.</p>
   <div id="usage" class="muted">Loading&hellip;</div>
 </div>
+
+<!-- One person's usage, model by model: opened from a row of the table above -->
+<dialog id="usageDialog" class="usage-dialog">
+  <div class="row" style="justify-content:space-between;align-items:center;margin-bottom:.6rem">
+    <h2 id="usageDialogTitle" style="margin:0"></h2>
+    <button class="btn btn-sm btn-secondary" id="usageDialogClose" type="button">Close</button>
+  </div>
+  <div id="usageDialogSummary" class="muted" style="font-size:.88rem;margin-bottom:.8rem"></div>
+  <div id="usageDialogBody" style="overflow-x:auto"></div>
+</dialog>
 {% endif %}
 
 <div class="grid">
@@ -280,6 +298,78 @@ document.addEventListener('click', async e => {
   catch(err){ showError(err.message); }
 });
 
+// Usage: one row per person, heaviest first by tokens (prompt + completion); their per-model rows
+// open in a dialog. The rows come per person and model from /admin/usage and are grouped here.
+let usageRows = [];
+let usageOpenFor = null;
+const fmt = n => Number(n || 0).toLocaleString();
+
+function usageByUser(rows){
+  const users = new Map();
+  for(const r of rows){
+    const u = users.get(r.user) || {user: r.user, requests: 0, prompt: 0, completion: 0, failed: 0, models: [], last: null};
+    u.requests += r.requests; u.prompt += r.prompt_tokens; u.completion += r.completion_tokens;
+    u.failed += r.failed || 0; u.models.push(r);
+    if(r.last_used && (!u.last || r.last_used > u.last)) u.last = r.last_used;
+    users.set(r.user, u);
+  }
+  return [...users.values()].map(u => ({...u, total: u.prompt + u.completion}))
+    .sort((a, b) => b.total - a.total || b.requests - a.requests);
+}
+
+function renderUsage(rows){
+  usageRows = rows;
+  const target = document.getElementById('usage');
+  if(!rows.length){ target.innerHTML = '<span class="muted">No requests recorded yet.</span>'; return; }
+  const users = usageByUser(rows);
+  const all = users.reduce((s, u) => s + u.total, 0) || 1;
+  target.innerHTML = `<div style="overflow-x:auto"><table class="usage-table">
+    <tr><th>User</th><th>Total tokens</th><th>Share</th><th>Requests</th><th>Prompt</th><th>Completion</th><th>Models</th><th>Failed</th></tr>` +
+    users.map(u => `<tr class="usage-user" data-usage-user="${escapeHtml(u.user)}" tabindex="0" title="Show ${escapeHtml(u.user)}'s usage by model">
+      <td><strong>${escapeHtml(u.user)}</strong></td><td>${fmt(u.total)}</td>
+      <td><span class="share"><span style="width:${Math.max(2, Math.round(100 * u.total / all))}%"></span></span> ${Math.round(100 * u.total / all)}%</td>
+      <td>${fmt(u.requests)}</td><td>${fmt(u.prompt)}</td><td>${fmt(u.completion)}</td><td>${u.models.length}</td>
+      <td>${u.failed ? `<span class="pill err">${fmt(u.failed)}</span>` : '<span class="muted">0</span>'}</td></tr>`).join('') +
+    `</table></div>`;
+  if(usageOpenFor) showUsageFor(usageOpenFor, false);   // the 15 s refresh keeps an open breakdown current
+}
+
+function showUsageFor(user, open = true){
+  const u = usageByUser(usageRows).find(x => x.user === user);
+  if(!u) return;
+  usageOpenFor = user;
+  document.getElementById('usageDialogTitle').textContent = u.user;
+  document.getElementById('usageDialogSummary').textContent =
+    `${fmt(u.total)} tokens (${fmt(u.prompt)} prompt, ${fmt(u.completion)} completion) in ${fmt(u.requests)} requests` +
+    ` over the last 7 days` + (u.failed ? `, ${fmt(u.failed)} failed` : '') +
+    (u.last ? ` · last used ${new Date(u.last).toLocaleString()}` : '');
+  const models = [...u.models].sort((a, b) => (b.prompt_tokens + b.completion_tokens) - (a.prompt_tokens + a.completion_tokens));
+  document.getElementById('usageDialogBody').innerHTML = `<table>
+    <tr><th>Model</th><th>Total tokens</th><th>Requests</th><th>Prompt</th><th>Completion</th><th>Avg / request</th><th>Failed</th><th>Last used</th></tr>` +
+    models.map(m => `<tr><td><code>${escapeHtml(m.model)}</code></td><td>${fmt(m.prompt_tokens + m.completion_tokens)}</td>
+      <td>${fmt(m.requests)}</td><td>${fmt(m.prompt_tokens)}</td><td>${fmt(m.completion_tokens)}</td>
+      <td>${fmt(Math.round((m.prompt_tokens + m.completion_tokens) / Math.max(1, m.requests)))}</td>
+      <td>${m.failed ? `<span class="pill err">${fmt(m.failed)}</span>` : '<span class="muted">0</span>'}</td>
+      <td class="muted">${m.last_used ? escapeHtml(new Date(m.last_used).toLocaleString()) : ''}</td></tr>`).join('') + `</table>`;
+  const dialog = document.getElementById('usageDialog');
+  if(open && !dialog.open) dialog.showModal();
+}
+
+document.addEventListener('click', e => {
+  const row = e.target.closest('[data-usage-user]');
+  if(row) showUsageFor(row.dataset.usageUser);
+});
+document.addEventListener('keydown', e => {
+  const row = e.target.closest?.('[data-usage-user]');
+  if(row && (e.key === 'Enter' || e.key === ' ')){ e.preventDefault(); showUsageFor(row.dataset.usageUser); }
+});
+document.getElementById('usageDialog')?.addEventListener('close', () => { usageOpenFor = null; });
+document.getElementById('usageDialogClose')?.addEventListener('click', () => document.getElementById('usageDialog').close());
+// A click on the backdrop (outside the dialog's box) closes it too
+document.getElementById('usageDialog')?.addEventListener('click', e => {
+  if(e.target.id === 'usageDialog') e.target.close();
+});
+
 async function loadAdmin(){
   try{
     const [system, models, usage] = await Promise.all([
@@ -327,12 +417,7 @@ async function loadAdmin(){
         }).join('') + `</table>`
       : '<span class="muted">No profiles defined in config/engines.yaml.</span>';
 
-    document.getElementById('usage').innerHTML = usage.rows.length
-      ? `<table><tr><th>User</th><th>Model</th><th>Requests</th><th>Prompt</th><th>Completion</th></tr>` +
-        usage.rows.map(r => `<tr><td>${escapeHtml(r.user)}</td><td>${escapeHtml(r.model)}</td>
-          <td>${r.requests}</td><td>${r.prompt_tokens.toLocaleString()}</td>
-          <td>${r.completion_tokens.toLocaleString()}</td></tr>`).join('') + `</table>`
-      : '<span class="muted">No requests recorded yet.</span>';
+    renderUsage(usage.rows);
   }catch(e){ showError('Could not load dashboard: ' + e.message); }
 }
 

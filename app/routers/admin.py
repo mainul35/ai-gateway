@@ -240,21 +240,26 @@ async def revoke_key(key_id: int, principal: Principal = Depends(require_manager
 @router.get("/usage")
 async def usage_summary(days: int = 7, _: Principal = Depends(require_manager),
                         session: AsyncSession = Depends(get_session)):
+    """Usage per user and model; the dashboard groups it by user, largest first, with the per-model
+    rows as each user's breakdown."""
     since = utcnow() - timedelta(days=days)
     result = await session.execute(
         select(User.name, UsageRecord.model, func.count(UsageRecord.id),
-               func.sum(UsageRecord.prompt_tokens), func.sum(UsageRecord.completion_tokens))
+               func.sum(UsageRecord.prompt_tokens), func.sum(UsageRecord.completion_tokens),
+               func.count(UsageRecord.id).filter(UsageRecord.status_code >= 400),
+               func.max(UsageRecord.created_at))
         .join(User, User.id == UsageRecord.user_id, isouter=True)
         .where(UsageRecord.created_at >= since)
         .group_by(User.name, UsageRecord.model)
-        .order_by(func.count(UsageRecord.id).desc())
+        .order_by((func.sum(UsageRecord.prompt_tokens) + func.sum(UsageRecord.completion_tokens)).desc())
     )
     return {
         "since": since.isoformat(),
         "rows": [
             {"user": name or "master-key", "model": model, "requests": requests,
-             "prompt_tokens": int(prompt or 0), "completion_tokens": int(completion or 0)}
-            for name, model, requests, prompt, completion in result.all()
+             "prompt_tokens": int(prompt or 0), "completion_tokens": int(completion or 0),
+             "failed": int(failed or 0), "last_used": last.isoformat() if last else None}
+            for name, model, requests, prompt, completion, failed, last in result.all()
         ],
     }
 
