@@ -17,7 +17,6 @@ and gateway__read_file over the index in app/knowledge.py.
 import asyncio
 import json
 import logging
-import socket
 import time
 from datetime import timedelta
 
@@ -107,13 +106,12 @@ async def status():
 
     engine = supervisor.status()
     return {
-        "host": socket.gethostname(),
         "gateway_uptime_minutes": int((time.time() - STARTED_AT) / 60),
         **measured,
         "ollama_loaded": loaded if not ollama_problem else f"could not ask Ollama: {ollama_problem}",
         "llamacpp_engines": {
             "profiles": engine["profiles"],
-            "running": [{k: r[k] for k in ("name", "port", "uptime_seconds", "idle_seconds", "in_flight", "ttl_seconds")}
+            "running": [{k: r[k] for k in ("name", "uptime_seconds", "idle_seconds", "in_flight", "ttl_seconds")}
                         for r in engine["running"]],
         },
         "last_24h": {"requests": requests, "tokens": int(tokens)},
@@ -184,7 +182,9 @@ async def services():
         try:
             async with httpx.AsyncClient(timeout=PROBE_SECONDS, follow_redirects=True) as client:
                 response = await client.get(url)
-            row = {"service": name, "url": url, "ok": response.status_code < 400,
+            # Names only, never the address: what this returns goes to a model and can be quoted
+            # into a chat, and the addresses are a map of the machine behind the gateway
+            row = {"service": name, "ok": response.status_code < 400,
                    "status": response.status_code, "ms": int((time.monotonic() - began) * 1000)}
             if detail and response.status_code < 400:
                 try:
@@ -193,7 +193,7 @@ async def services():
                     pass
             return row
         except httpx.HTTPError as e:
-            return {"service": name, "url": url, "ok": False, "error": f"{e.__class__.__name__}: {e}"}
+            return {"service": name, "ok": False, "error": e.__class__.__name__}
 
     async def database():
         began = time.monotonic()
@@ -203,13 +203,13 @@ async def services():
             return {"service": "database", "ok": True, "ms": int((time.monotonic() - began) * 1000),
                     "version": version.split(",")[0]}
         except Exception as e:
-            return {"service": "database", "ok": False, "error": f"{e.__class__.__name__}: {e}"}
+            return {"service": "database", "ok": False, "error": e.__class__.__name__}
 
     async def rpc(address, used_by):
         ok, problem = await _tcp_open(address)
-        row = {"service": "llama.cpp RPC server", "address": address, "used_by": used_by, "ok": ok}
+        row = {"service": "llama.cpp RPC server", "used_by": used_by, "ok": ok}
         if problem:
-            row["error"] = problem
+            row["error"] = problem.split(":")[0]
         return row
 
     probes = [http("ollama", f"{ollama_host()}/api/version", lambda d: {"version": d.get("version")}),
