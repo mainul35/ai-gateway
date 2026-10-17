@@ -909,7 +909,12 @@ async function uploadImages(files){
 const canOpenCamera = () => !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia
                                && window.isSecureContext);
 
-function showCamera(stream){
+// Front or back: the back one first (this is for photographing a thing), and Flip between them when
+// the device has both. The front camera's preview is mirrored, as people expect to see themselves;
+// the photo is taken from the stream itself, so it comes out the right way round.
+const cameraConstraints = facing => ({video: {facingMode: {ideal: facing}, width: {ideal: 1920}}, audio: false});
+
+function showCamera(stream, facing = 'environment'){
   const panel = document.createElement('div');
   panel.className = 'camera';
   panel.innerHTML = `
@@ -917,11 +922,32 @@ function showCamera(stream){
     <div class="row">
       <button class="btn btn-secondary" data-cancel>Cancel</button>
       <button class="shutter" data-shoot title="Take the photo"></button>
-      <button class="btn btn-secondary" data-flip hidden>Flip</button>
+      <button class="btn btn-secondary" data-flip hidden title="Switch between the front and back camera">&#x21C4; Flip</button>
     </div>`;
   document.body.appendChild(panel);
   const video = panel.querySelector('video');
-  video.srcObject = stream;
+  const flip = panel.querySelector('[data-flip]');
+  const show = (next, side) => {
+    stream = next; facing = side;
+    video.srcObject = stream;
+    video.style.transform = facing === 'user' ? 'scaleX(-1)' : '';
+  };
+  show(stream, facing);
+  // Device labels and counts are only known once the camera is allowed, which it now is
+  navigator.mediaDevices.enumerateDevices?.()
+    .then(devices => { flip.hidden = devices.filter(d => d.kind === 'videoinput').length < 2; })
+    .catch(() => {});
+  flip.addEventListener('click', async () => {
+    const side = facing === 'user' ? 'environment' : 'user';
+    flip.disabled = true;
+    stream.getTracks().forEach(track => track.stop());     // phones allow one camera open at a time
+    try{
+      show(await navigator.mediaDevices.getUserMedia(cameraConstraints(side)), side);
+    }catch(e){
+      showError('Could not switch camera: ' + (e.message || e.name));
+      try{ show(await navigator.mediaDevices.getUserMedia(cameraConstraints(facing)), facing); }catch(_){ close(); }
+    }finally{ flip.disabled = false; }
+  });
 
   const close = () => {
     stream.getTracks().forEach(track => track.stop());
@@ -958,9 +984,7 @@ async function openCamera(){
   }
   try{
     // The back camera by preference: this is for photographing a thing, not oneself
-    const stream = await navigator.mediaDevices.getUserMedia({
-      video: {facingMode: {ideal: 'environment'}, width: {ideal: 1920}}, audio: false});
-    showCamera(stream);
+    showCamera(await navigator.mediaDevices.getUserMedia(cameraConstraints('environment')), 'environment');
   }catch(e){
     // Refused, or there is no camera. Either way the file input still gets a photo on a phone.
     const refused = e && (e.name === 'NotAllowedError' || e.name === 'SecurityError');
