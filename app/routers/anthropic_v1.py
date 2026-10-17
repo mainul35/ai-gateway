@@ -152,6 +152,8 @@ async def messages(request: Request, principal: Principal = Depends(authenticate
     except ValueError:
         return _error(400, "Request body must be JSON", "invalid_request_error")
 
+    body["messages"] = compat.fold_system_messages(body.get("messages"))
+
     # Image URLs are fetched here, not by the model server inside this network (app/api_images.py)
     try:
         await api_images.inline(body.get("messages"))

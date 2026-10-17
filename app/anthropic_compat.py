@@ -228,6 +228,48 @@ def error_body(message, kind="api_error"):
     return {"type": "error", "error": {"type": kind, "message": message}}
 
 
+def _blocks(content):
+    if isinstance(content, str):
+        return [{"type": "text", "text": content}] if content else []
+    return [b for b in content or () if isinstance(b, dict)]
+
+
+def fold_system_messages(messages):
+    """Messages with role "system" inside the conversation, folded into the user turn beside them.
+
+    Claude Code (2.1.2xx) sends some of its context - the list of skills - as a "system" message
+    after the first user message. Models whose chat template allows a system message only at the
+    very start refuse the whole request for it: qwen3.6 answered every Claude Code request with a
+    500, "System message must be at the beginning". The note is kept where it was in the
+    conversation, as a <system-reminder> block on the nearest user message - the way Claude Code
+    sends its other reminders - so the model reads the same thing and every template accepts it.
+    """
+    if not isinstance(messages, list) or not any(isinstance(m, dict) and m.get("role") == "system"
+                                                  for m in messages):
+        return messages
+    folded, pending = [], []
+    for message in messages:
+        if not isinstance(message, dict):
+            folded.append(message)
+            continue
+        if message.get("role") == "system":
+            text = "\n".join(b.get("text", "") for b in _blocks(message.get("content")) if b.get("type") == "text")
+            if text.strip():
+                note = {"type": "text", "text": f"<system-reminder>\n{text}\n</system-reminder>"}
+                if folded and isinstance(folded[-1], dict) and folded[-1].get("role") == "user":
+                    folded[-1] = {**folded[-1], "content": _blocks(folded[-1].get("content")) + [note]}
+                else:
+                    pending.append(note)
+            continue
+        if pending and message.get("role") == "user":
+            message = {**message, "content": pending + _blocks(message.get("content"))}
+            pending = []
+        folded.append(message)
+    if pending:      # nothing after it to carry it: a user turn of its own, still in its place
+        folded.append({"role": "user", "content": pending})
+    return folded
+
+
 def estimate_tokens(body):
     """A rough count for /v1/messages/count_tokens: about four characters a token, as Claude Code
     itself assumes when a gateway has no counter at all."""
