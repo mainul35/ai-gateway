@@ -19,5 +19,5 @@ make() {   # base model, CPU copy
 make qwen3:1.7b qwen3-1.7b-cpu
 make qwen3-embedding:0.6b qwen3-embedding-0.6b-cpu
 echo "Then in config/config.properties:"
-echo "  router.model=qwen3-1.7b-cpu"
+echo "  router.model=qwen3-1.7b-cpu:latest      # with the tag: the gateway knows Ollama models by their full name"
 echo "  knowledge.embedding.model=qwen3-embedding-0.6b-cpu"
