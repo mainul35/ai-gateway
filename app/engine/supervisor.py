@@ -175,17 +175,44 @@ class Supervisor:
         # Weights plus room for the KV cache and compute buffers
         if free >= size * 1.15 + 1024**3:
             return
+        busy = []
         async with self._lock:
             for name, running in list(self._running.items()):
                 if not running.profile.exclusive:
                     continue
                 if running.in_flight:
-                    log.warning("%s needs the GPU, but %s is answering a request; Ollama will use the CPU",
-                                model, name)
+                    busy.append(name)
                     continue
                 log.info("Stopping %s to free VRAM for Ollama's %s (%.1f GB free, %.1f GB needed)",
                          name, model, free / 1024**3, size / 1024**3)
                 await self._stop_locked(name)
+        if busy:
+            # Ollama was once left to fall back to the CPU here. With a vision projector it cannot:
+            # qwen3.6 died loading with "cudaMalloc failed: out of memory" while qwen3.6-1m answered
+            # a Claude Code session, and the playground showed the raw CUDA error. Said plainly instead.
+            log.warning("%s needs the GPU, but %s is answering a request", model, ", ".join(busy))
+            return (f"The GPU is busy: {', '.join(busy)} is answering another request and holds all of "
+                    f"its memory, so {model} cannot be loaded now. Try again when that finishes, or "
+                    f"pick {busy[0]} or a small model.")
+        return None
+
+    def blocked_by_busy_gpu(self, name, backend):
+        """Whether this model cannot be loaded now, because a model answering someone holds the GPU.
+
+        For Auto, which should not pick it: an exclusive llama.cpp model would have to stop the busy
+        one, and a large Ollama model would not fit beside it (make_room_for_ollama). The busy model
+        itself is fine - its request waits its turn - and so are small Ollama models, run on the CPU.
+        """
+        busy = [n for n, m in self._running.items()
+                if m.profile.exclusive and m.in_flight and m.process.returncode is None]
+        if not busy or name in busy:
+            return False
+        if backend.kind == "llamacpp":
+            profile = load_profiles().get(name)
+            return bool(profile and profile.exclusive)
+        if backend.kind == "ollama":
+            return (backend.size_bytes or 0) >= SMALL_OLLAMA_MODEL
+        return False
 
     async def unload_everything(self):
         """Stops every llama.cpp model and has Ollama drop its own, for a machine about to sleep.

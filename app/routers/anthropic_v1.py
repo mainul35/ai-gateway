@@ -106,7 +106,9 @@ async def _target(backend, model):
         running.in_flight += 1
         return running.base_url, running
     if backend.kind == "ollama":
-        await supervisor.make_room_for_ollama(backend.upstream_model)
+        problem = await supervisor.make_room_for_ollama(backend.upstream_model)
+        if problem:
+            raise RuntimeError(problem)
     # Ollama's OpenAI address is <host>/v1; its Messages API is <host>/v1/messages
     base = backend.base_url[:-3] if backend.base_url.endswith("/v1") else backend.base_url
     return base, None

@@ -147,7 +147,8 @@ def _engine_models():
                       # Tool calls go through the model's own chat template (--jinja, on by default).
                       capabilities={"completion", "thinking", "tools"} | ({"vision"} if profile.mmproj else set()),
                       # What the server is started with, which is what a request can actually use
-                      context_length=profile.ctx_size)
+                      context_length=profile.ctx_size,
+                      details={"parameter_size": profile.parameter_size} if profile.parameter_size else None)
         for name, profile in load_profiles().items()
     }
 

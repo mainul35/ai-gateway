@@ -43,10 +43,11 @@ def _parameters(model):
     text = (model.get("parameter_size") or "").strip().upper()
     found = re.match(r"([\d.]+)\s*([BMT])?", text)
     if not found:
-        named = re.search(r"(?<![\d.])(\d+(?:\.\d+)?)([bm])(?![a-z])", (model.get("name") or "").lower())
+        # Millions only with three digits or more ("596m"): "qwen3.6-1m" is a 1M window, not a size
+        named = re.search(r"(?<![\d.])(?:(\d+(?:\.\d+)?)b|(\d{3,})m)(?![a-z])", (model.get("name") or "").lower())
         if not named:
             return UNKNOWN_SIZE
-        return float(named.group(1)) / (1000 if named.group(2) == "m" else 1)
+        return float(named.group(1)) if named.group(1) else float(named.group(2)) / 1000
     try:
         size = float(found.group(1))
     except ValueError:
@@ -90,6 +91,8 @@ def score(model, category, needs_vision):
     capabilities = set(model.get("capabilities") or ())
     if is_helper(name):
         return None
+    if model.get("blocked"):
+        return None            # it cannot load now: a model answering someone else holds the GPU
     if needs_vision and "vision" not in capabilities:
         return None            # it cannot see the picture it is being asked about
     if SPECIALIST.search(name) or (capabilities and "completion" not in capabilities):
