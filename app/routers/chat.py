@@ -224,6 +224,40 @@ async def drop_what_followed(conversation_id: int, message_id: int,
     return {"removed": len(doomed)}
 
 
+class EditedQuestionIn(BaseModel):
+    content: str = Field(min_length=1, max_length=200_000)
+
+
+@router.patch("/conversations/{conversation_id}/messages/{message_id}")
+async def edit_question(conversation_id: int, message_id: int, payload: EditedQuestionIn,
+                        principal: Principal = Depends(authenticate),
+                        session: AsyncSession = Depends(get_session)):
+    """Rewords a question, so that it can be asked again as it should have been asked.
+
+    Everything after it goes, its own answers too: they answer words that are no longer there.
+    The playground then asks the reworded question, and the new answer is filed under it. The
+    running summary goes for the same reason as in drop_what_followed.
+    """
+    user = _require_user(principal)
+    conversation = await _owned(session, conversation_id, user, with_messages=True)
+    messages = sorted(conversation.messages, key=lambda m: m.id)
+    at = next((i for i, m in enumerate(messages) if m.id == message_id), None)
+    if at is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "That message is not in this conversation")
+    if messages[at].role != "user":
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Only your own messages can be edited")
+    messages[at].content = payload.content
+    doomed = messages[at + 1:]
+    for message in doomed:
+        await session.delete(message)
+    summary = await _conversation_memory(session, user.id, conversation_id)
+    if summary is not None:
+        await session.delete(summary)
+    conversation.updated_at = utcnow()
+    await session.commit()
+    return {"removed": len(doomed)}
+
+
 @router.get("/capabilities")
 async def capabilities(principal: Principal = Depends(authenticate)):
     """Which tools this server offers; the playground only shows toggles for these."""
@@ -254,6 +288,8 @@ async def capabilities(principal: Principal = Depends(authenticate)):
                             if settings.feature_enabled("maps") and places.name() == "google"
                             else ""),
         "routing": intent_router.is_enabled(),
+        # Never picked by Auto to answer: they read messages and index documents (chooser.is_helper)
+        "helper_models": chooser.helper_names(),
         "markdown": markdown.is_available(),
         "max_upload_mb": settings.max_upload_bytes() // (1024 * 1024),
     }

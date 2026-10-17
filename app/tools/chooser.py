@@ -76,9 +76,12 @@ def is_helper(name):
     They are there to read every message and index documents, not to answer: Auto gave the CPU
     copy of the 1.7B router a question about mixing a 3090 and a 2080 Ti in one machine.
     """
-    wanted = {(settings.router_model() or ""), (settings.get("knowledge.embedding.model") or "")}
-    bare = {w.removesuffix(":latest") for w in wanted if w}
-    return (name or "").removesuffix(":latest") in bare
+    return (name or "").removesuffix(":latest") in {h.removesuffix(":latest") for h in helper_names()}
+
+
+def helper_names():
+    """The helper models' names as configured, for the playground's own Auto fallback to skip."""
+    return sorted(n for n in (settings.router_model(), settings.get("knowledge.embedding.model")) if n)
 
 
 def score(model, category, needs_vision):
