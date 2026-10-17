@@ -14,6 +14,7 @@ from datetime import timedelta
 
 from app import access, backends, settings, usage as usage_log
 from app.db import session_factory
+from app.engine.supervisor import supervisor
 from app.models import utcnow
 from app.tools import chooser, router as intent_router
 
@@ -76,7 +77,8 @@ async def choose(principal, messages, has_images=False, needs_tools=False):
         details = backend.details or {}
         candidates.append({"name": name, "capabilities": sorted(backend.capabilities),
                            "parameter_size": details.get("parameter_size", ""),
-                           "context_length": backend.context_length, "health": health.get(name, {})})
+                           "context_length": backend.context_length, "health": health.get(name, {}),
+                           "blocked": supervisor.blocked_by_busy_gpu(name, backend)})
     picked = chooser.pick(candidates, category, needs_vision=has_images)
     if picked:
         log.info("auto: %s work (by %s) -> %s (%s)", category, decided_by, picked["model"], picked["why"])

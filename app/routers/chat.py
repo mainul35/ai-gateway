@@ -22,6 +22,7 @@ from app import access, backends, limits, settings, usage as usage_log
 from app.auth import Principal, authenticate
 from app.db import get_session, session_factory
 from app.models import ChatFile, Conversation, ConversationMessage, MemoryEntry, utcnow
+from app.engine.supervisor import supervisor
 from app.routers.openai_v1 import PROXY_PATHS, forward
 from app.tools import (agent, chooser, documents, image_prompt, images, jobs, map_plan,
                         map_web, maps, markdown, mcp_client, media, memory as memory_tool,
@@ -1316,6 +1317,7 @@ async def _choose_model(principal, session, category, has_images, prefer=None):
             "parameter_size": details.get("parameter_size", ""),
             "context_length": backend.context_length,
             "health": health.get(name, {}),
+            "blocked": supervisor.blocked_by_busy_gpu(name, backend),
         })
     return chooser.pick(candidates, category, needs_vision=has_images, prefer=prefer)
 

@@ -179,10 +179,11 @@ a.cite{font-size:.75em;vertical-align:super;text-decoration:none;padding:0 .1rem
 .paper{display:flex;align-items:center;gap:.5rem;height:5.5rem;width:11rem;padding:.5rem .6rem;
        border:1px solid var(--border);border-radius:8px;background:var(--input);position:relative}
 .paper .what{min-width:0}
-.paper .who{font-size:.8rem;font-weight:600;word-break:break-word;
+.paper .who,.paper .doc-name{font-size:.8rem;font-weight:600;word-break:break-word;
             display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}
 .paper .size{font-size:.7rem;color:var(--muted)}
 .paper .glyph{font-size:1.4rem;flex:none}
+a.paper{color:var(--text);text-decoration:none}
 /* The camera, when one is asked for: a live picture with a shutter under it */
 .camera{position:fixed;inset:0;z-index:60;background:rgba(0,0,0,.85);display:flex;
         flex-direction:column;align-items:center;justify-content:center;gap:1rem;padding:1rem}
@@ -658,8 +659,9 @@ function currentModel(){
 // Billions of parameters from the name (qwen3:1.7b, gemma4:31b, qwen3-next-80b); 30 when it says
 // nothing, so a model of unknown size never passes for the smallest. Same rule as app/tools/chooser.py.
 function modelSize(id){
-  const found = id.toLowerCase().match(/(?<![\d.])(\d+(?:\.\d+)?)([bm])(?![a-z])/);
-  return found ? parseFloat(found[1]) / (found[2] === 'm' ? 1000 : 1) : 30;
+  // Millions only with three digits or more ("596m"): "qwen3.6-1m" names a 1M window, not a size
+  const found = id.toLowerCase().match(/(?<![\d.])(?:(\d+(?:\.\d+)?)b|(\d{3,})m)(?![a-z])/);
+  return found ? (found[1] ? parseFloat(found[1]) : parseFloat(found[2]) / 1000) : 30;
 }
 function smallestModel(needsVision){
   const helpers = new Set((caps.helper_models || []).map(h => h.replace(/:latest$/, '')));
@@ -1201,7 +1203,7 @@ function fillTranscript(messages){
   const answered = [];
   for(const m of messages){
     const extra = m.attachments || {};
-    const attached = (extra.images || []).map(i => ({id: i.file_id, document: !!i.document}));
+    const attached = (extra.images || []).map(i => ({id: i.file_id, document: !!i.document, name: i.name || ''}));
     const imageIds = attached.map(f => f.id);
     if(m.role === 'user'){
       // A picture that went to the image tools is kept so the question can be asked again, but is
@@ -1420,7 +1422,15 @@ function addUserMessage(text, imageUrls, files, asContext = true){
   if(imageUrls.length){
     const strip = document.createElement('div');
     strip.className = 'thumbs';
-    strip.innerHTML = imageUrls.map(u => `<img src="${u}" alt="attached image" data-zoom="${u}">`).join('');
+    // A document has no picture to show: drawn as an image it came out as a broken one
+    strip.innerHTML = imageUrls.map((u, i) => {
+      const file = box._files[i] || {};
+      return file.document
+        ? `<a class="paper" href="${u}" target="_blank" rel="noopener" title="Open the document">
+             <span class="glyph">${paperGlyph(file)}</span>
+             <span class="what"><span class="doc-name">${escapeHtml(file.name || 'document')}</span></span></a>`
+        : `<img src="${u}" alt="attached image" data-zoom="${u}">`;
+    }).join('');
     box.insertBefore(strip, box.querySelector('.body'));
   }
   addTurnTools(box);
@@ -2858,7 +2868,7 @@ async function sendChat(text, decision, again){
   pending = []; renderPending();
   if(!again){ promptBox.value = ''; fitComposer(); history.push({role: 'user', content: text, images}); }
   const asked = await askedNow(text, images.map(fileUrl), files,
-                               files.length ? {images: files.map(f => ({file_id: f.id, document: f.document}))} : null,
+                               files.length ? {images: files.map(f => ({file_id: f.id, document: f.document, name: f.name}))} : null,
                                again);
 
   const box = answerBox(again ? again.messageId : asked?._messageId, model);

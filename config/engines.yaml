@@ -28,6 +28,7 @@ models:
   #   generation 42.5 t/s, prefill ~1340 t/s at pp512/pp2048. Ollama matches the speed but cannot
   #   set context or KV type per model, which is what this profile buys.
   - name: qwen3.8-27b-tuned
+    parameter_size: 27.3B
     model_path: /usr/share/ollama/.ollama/models/blobs/sha256-3e020514545c310dfc511dc8d3ddc23482b645189cb9287816d84bed6eddd4ac
     n_gpu_layers: 999
     ctx_size: 65536
@@ -62,6 +63,7 @@ models:
   #    95k tokens: 590 t/s prompt (161 s), 35.9 t/s generation
   #   178k tokens: 546 t/s prompt (325 s), 29.5 t/s generation          22.9 GB VRAM throughout
   - name: qwen3-next-80b
+    parameter_size: 80B
     model_path: /home/mainul35/models/Qwen3-Next-80B-A3B-Instruct-UD-Q4_K_XL.gguf
     ctx_size: 262144
     cache_reuse: 256
@@ -82,6 +84,7 @@ models:
   # The 1M profile is slower at every length (its bigger cache leaves less of the model on the GPU)
   # and YaRN stretching costs a little quality on short work: use it only for what needs > 256k.
   - name: qwen3.6-256k
+    parameter_size: 36B
     model_path: /usr/share/ollama/.ollama/models/blobs/sha256-f5ee307a2982106a6eb82b62b2c00b575c9072145a759ae4660378acda8dcf2d
     mmproj: /usr/share/ollama/.ollama/models/blobs/sha256-f5ee307a2982106a6eb82b62b2c00b575c9072145a759ae4660378acda8dcf2d
     binary: /usr/local/lib/ollama/llama-server
@@ -92,6 +95,7 @@ models:
     extra_args: ["--fit", "on"]
 
   - name: qwen3.6-1m
+    parameter_size: 36B
     model_path: /usr/share/ollama/.ollama/models/blobs/sha256-f5ee307a2982106a6eb82b62b2c00b575c9072145a759ae4660378acda8dcf2d
     mmproj: /usr/share/ollama/.ollama/models/blobs/sha256-f5ee307a2982106a6eb82b62b2c00b575c9072145a759ae4660378acda8dcf2d
     binary: /usr/local/lib/ollama/llama-server

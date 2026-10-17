@@ -44,6 +44,9 @@ class EngineProfile:
     env: dict = field(default_factory=dict)
     ttl_seconds: int = 900           # unload after this long idle; 0 = keep loaded
     exclusive: bool = True           # stop other exclusive models first (one big model fits in 24 GB)
+    # "35B": what Auto knows the model's size by (app/tools/chooser.py). Without it the size is read
+    # from the name, and "qwen3.6-1m" names its window, not a model of a million parameters
+    parameter_size: str | None = None
 
     def command(self, binary):
         """The llama-server command line this profile describes."""
