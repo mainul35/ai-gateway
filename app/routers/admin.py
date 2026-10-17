@@ -19,7 +19,7 @@ from app.auth import Principal, generate_key, hash_key, require_admin, require_m
 from app import config_writer
 from app.engine.supervisor import supervisor
 from utils import hf_client
-from utils.ollama_client import (StreamCancellation, check_ollama_status, ollama_host,
+from utils.ollama_client import (StreamCancellation, check_ollama_status,
                                  stream_create_model, stream_pull_model)
 from utils.system_info import get_system_info, measure_hardware
 from app.db import get_session
@@ -706,9 +706,16 @@ async def system_overview(_: Principal = Depends(require_admin), session: AsyncS
     tokens_today = (await session.execute(
         select(func.coalesce(func.sum(UsageRecord.total_tokens), 0)).where(UsageRecord.created_at >= utcnow() - timedelta(days=1))
     )).scalar() or 0
+    # What is up and what is loaded - never where: no addresses, ports, process ids or file paths.
+    # The page is public-facing (an admin's browser, a screenshot, a shared screen), and those are a
+    # map of the machine behind it.
+    ollama = check_ollama_status()
+    engine = supervisor.status()
     return {
-        "ollama": {**check_ollama_status(), "host": ollama_host()},
-        "engine": supervisor.status(),
+        "ollama": {"status": ollama.get("status"), "version": ollama.get("version")},
+        "engine": {"available": engine["available"], "profiles": engine["profiles"],
+                   "running": [{k: r[k] for k in ("name", "running", "uptime_seconds", "idle_seconds",
+                                                  "in_flight", "ttl_seconds")} for r in engine["running"]]},
         "gpus": info["gpu_info"],
         "gpu_source": info["gpu_source"],
         "total_vram": info["total_vram"],

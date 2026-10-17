@@ -397,11 +397,9 @@ async function loadAdmin(){
     const ollama = system.ollama;
     document.getElementById('backends').innerHTML = `
       <p style="margin:.2rem 0">Ollama <span class="pill ${ollama.status === 'running' ? 'on' : 'err'}">${escapeHtml(ollama.status)}</span>
-        ${ollama.version ? 'v' + escapeHtml(ollama.version) : ''}<br>
-        <span class="muted" style="font-size:.85rem">${escapeHtml(ollama.host)}</span></p>
+        ${ollama.version ? 'v' + escapeHtml(ollama.version) : ''}</p>
       <p style="margin:.6rem 0 .2rem">llama.cpp <span class="pill ${system.engine.available ? 'on' : 'off'}">
-        ${system.engine.available ? 'available' : 'not installed'}</span><br>
-        <span class="muted" style="font-size:.85rem">${escapeHtml(system.engine.binary || 'no binary configured')}</span></p>`;
+        ${system.engine.available ? 'available' : 'not installed'}</span></p>`;
 
     document.getElementById('hardware').innerHTML = (system.gpus.length
         ? system.gpus.map(g => `<p style="margin:.2rem 0">${escapeHtml(g.name)}<br>
@@ -420,7 +418,7 @@ async function loadAdmin(){
           const pending = engineActions.get(name);
           const label = pending ? ENGINE_PENDING_LABEL[pending] : r ? 'Unload' : 'Load';
           return `<tr><td>${escapeHtml(name)}</td>
-            <td>${r ? `<span class="pill on">loaded</span> <span class="muted">pid ${r.pid}</span>` : '<span class="pill off">not loaded</span>'}</td>
+            <td>${r ? '<span class="pill on">loaded</span>' : '<span class="pill off">not loaded</span>'}</td>
             <td class="muted">${r ? r.idle_seconds + 's of ' + r.ttl_seconds + 's' : '&mdash;'}</td>
             <td style="text-align:right">
               <button class="btn btn-sm ${r ? 'btn-danger' : ''}" data-engine="${escapeHtml(name)}"
