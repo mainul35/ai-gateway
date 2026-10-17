@@ -192,6 +192,12 @@ POLITE_ASK = re.compile(r"^\s*(please\b|(can|could|would|will) you\b)", re.I)
 EDIT_WORDS = re.compile(
     r"\b(make it|turn it|change|replace|remove|delete|erase|add|put|swap|recolou?r|repaint|crop|zoom|"
     r"brighten|darken|blur)\b"
+    # A new picture made from the attached one: "use my photo to generate an image of me with a
+    # puppy", "make a picture of me as an astronaut". With a photo attached that is an edit of it -
+    # the person in it kept - not a drawing from nothing, and not a question about it.
+    r"|\b(use|using|based on)\s+(my|this|the|that|these|those)\s+(photo|picture|image|pic|selfie)s?\b"
+    r"|\b(generate|create|make|draw|design|render|produce)\s+(me\s+)?((an?|another|new)\s+)*"
+    r"(image|picture|photo|portrait|drawing|illustration|avatar|version)\b"
     rf"|{LOOK_CHANGE.pattern}", re.I)
 CLEAN_WORDS = re.compile(
     r"\b(noise|noisy|grain|grainy|denoise|de-noise|speckl\w*|iso|clean(ing)? up|clean it up|"
@@ -345,7 +351,9 @@ READ   - the picture is there to be looked at. Evidence, a screenshot of a probl
          with no request at all.
 CHANGE - the message asks for the picture itself to come back different: something added, removed
          or altered in it, a person or thing in it put somewhere else or dressed differently, the
-         background replaced or recoloured, the quality improved, the background blurred.
+         background replaced or recoloured, the quality improved, the background blurred. A new
+         picture made from this one - the person in it shown doing something else, in another
+         scene, in another style - is CHANGE too: they want a picture back, with them in it.
 
 The test is whether words would satisfy them. If what they want back is an answer, it is READ.
 Only if what they want back is a new picture is it CHANGE. A picture with no request attached to
@@ -362,6 +370,9 @@ Examples:
 "make it night with northern lights" -> CHANGE
 "remove the car" -> CHANGE
 "Make the kid standing in a beach, and sea is behind him" -> CHANGE
+"This is me. Use my photo to generate an image of me taking care of a puppy" -> CHANGE
+"make a picture of me as an astronaut" -> CHANGE
+"turn this photo of me into a cartoon avatar" -> CHANGE
 "put her in front of the Eiffel tower" -> CHANGE
 "make him wear a red jacket" -> CHANGE
 "what is the kid holding?" -> READ
@@ -616,11 +627,19 @@ def settle_action(answered, message, allowed, has_images):
 
 
 def clean_answer(text, allowed):
-    """Pulls the action word out of the model's reply; None when it did not name an allowed one."""
+    """Pulls the action word out of the model's reply; None when it did not name an allowed one.
+
+    With a picture attached IMAGE is not on offer - a new picture there is an edit of the one
+    attached - but the small model still says IMAGE for "use my photo to generate an image of me
+    with a puppy". That is what it means, so it is read as EDIT rather than thrown away, which left
+    the keyword fallback to answer it as a chat.
+    """
     words = re.findall(r"[a-z]+", re.sub(r"<think>.*?</think>", "", (text or ""), flags=re.S).lower())
     for word in words:
         if word in allowed:
             return word
+        if word == IMAGE and IMAGE not in allowed and EDIT in allowed:
+            return EDIT
     return None
 
 
