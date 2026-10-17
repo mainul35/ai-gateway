@@ -232,13 +232,15 @@ function renderApps(){
     <div class="app-row"><div><strong>${a.name}</strong> <span class="muted">&middot; ${a.about}</span>
       <pre><code class="copyable">ai-gateway launch ${a.id}${a.noModel ? '' : ` ${flag} ${escapeHtml(model)}`}</code></pre></div></div>`).join('');
   document.getElementById('appInstallNote').textContent = windows
-    ? 'Then open a new PowerShell window: one that was already open does not see the new PATH yet.'
+    ? 'ai-gateway then works in this window straight away, and in every PowerShell window opened after.'
     : 'If ai-gateway is then not found, ~/.local/bin is not on your PATH: add export PATH="$HOME/.local/bin:$PATH" to ~/.bashrc (or ~/.zshrc) and open a new terminal.';
   document.getElementById('appInstall').textContent = windows
     ? [`New-Item -ItemType Directory -Force "$HOME\\.ai-gateway\\bin" | Out-Null`,
        `Invoke-RestMethod ${location.origin}/downloads/ai-gateway.ps1 -OutFile "$HOME\\.ai-gateway\\bin\\ai-gateway.ps1"`,
-       `# once, so "ai-gateway" works in new windows:`,
-       `[Environment]::SetEnvironmentVariable("Path", [Environment]::GetEnvironmentVariable("Path", "User") + ";$HOME\\.ai-gateway\\bin", "User")`].join('\n')
+       `# on your PATH for good (only if it is not there yet), and in this window right away:`,
+       `$dir = "$HOME\\.ai-gateway\\bin"; $p = [Environment]::GetEnvironmentVariable("Path", "User")`,
+       `if (($p -split ';') -notcontains $dir) { [Environment]::SetEnvironmentVariable("Path", "$p;$dir", "User") }`,
+       `if (($env:Path -split ';') -notcontains $dir) { $env:Path += ";$dir" }`].join('\n')
     : [`mkdir -p ~/.local/bin`,
        `curl -fsSL ${location.origin}/downloads/ai-gateway.sh -o ~/.local/bin/ai-gateway`,
        `chmod +x ~/.local/bin/ai-gateway`].join('\n');
