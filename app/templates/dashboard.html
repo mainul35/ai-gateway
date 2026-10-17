@@ -16,6 +16,8 @@
 .agent-guide .apps .app-row{border-top:1px solid var(--border);padding:.55rem 0}
 .agent-guide .apps .app-row:first-child{border-top:none}
 .agent-guide .apps pre{margin:.35rem 0 0}
+.agent-guide .step{margin:1rem 0 .35rem}
+.agent-guide .step-n{display:inline-flex;align-items:center;justify-content:center;width:1.45rem;height:1.45rem;border-radius:50%;background:var(--primary);color:#fff;font-size:.8rem;font-weight:700;margin-right:.45rem;vertical-align:.1em}
 </style>
 <h1>Dashboard</h1>
 <p class="sub">Status of the gateway, its models and its backends.</p>
@@ -123,18 +125,22 @@
        (bin/ai-gateway.sh / .ps1) points the app at the gateway in a place of its own and starts it. -->
   <details open>
     <summary><strong>Applications</strong> &mdash; start an agent on one of these models</summary>
-    <div class="row" style="gap:1rem;align-items:flex-end;margin:.7rem 0 .4rem">
-      <label style="margin:0;flex:1;min-width:14rem"><span class="lbl">Model</span>
-        <select id="appModel"></select></label>
-      <label style="margin:0;width:auto"><span class="lbl">Your computer</span>
-        <select id="appOs" style="width:auto">
-          <option value="unix">macOS / Linux</option><option value="windows">Windows</option></select></label>
-    </div>
+    <!-- In the order they are done: the launcher first (once per computer), then a command per app -->
+    <label style="margin:.7rem 0 .2rem;width:auto;display:inline-block"><span class="lbl">Your computer</span>
+      <select id="appOs" style="width:auto">
+        <option value="unix">macOS / Linux</option><option value="windows">Windows</option></select></label>
+
+    <p class="step"><span class="step-n">1</span><strong>Install the launcher</strong> &mdash; once per computer. It
+      asks for your API key the first time (or reads <code>AI_GATEWAY_API_KEY</code>) and can keep it for next time.</p>
+    <pre><code class="copyable" id="appInstall"></code></pre>
+    <p class="muted" id="appInstallNote" style="font-size:.85rem;margin-top:.3rem"></p>
+
+    <p class="step"><span class="step-n">2</span><strong>Start an app</strong> on a model, in the folder you want
+      to work in.</p>
+    <label style="margin:0 0 .4rem;display:block"><span class="lbl">Model</span>
+      <select id="appModel"></select></label>
     <div id="appList" class="apps"></div>
 
-    <p style="margin:1rem 0 .3rem"><strong>Install the launcher once</strong> &mdash; it asks for your API key
-      the first time (or reads <code>AI_GATEWAY_API_KEY</code>) and can keep it for next time:</p>
-    <pre><code class="copyable" id="appInstall"></code></pre>
     <p class="muted" style="font-size:.85rem">Each app is pointed at this gateway in a place of its own, so
       the way you use it otherwise is untouched: Claude Code in <code>~/.claude-gateway</code>, Hermes in
       <code>~/.hermes-gateway</code>; OpenCode, Qwen Code and Codex for that one run only. OpenClaw keeps one
@@ -225,6 +231,9 @@ function renderApps(){
   document.getElementById('appList').innerHTML = APPS.map(a => `
     <div class="app-row"><div><strong>${a.name}</strong> <span class="muted">&middot; ${a.about}</span>
       <pre><code class="copyable">ai-gateway launch ${a.id}${a.noModel ? '' : ` ${flag} ${escapeHtml(model)}`}</code></pre></div></div>`).join('');
+  document.getElementById('appInstallNote').textContent = windows
+    ? 'Then open a new PowerShell window: one that was already open does not see the new PATH yet.'
+    : 'If ai-gateway is then not found, ~/.local/bin is not on your PATH: add export PATH="$HOME/.local/bin:$PATH" to ~/.bashrc (or ~/.zshrc) and open a new terminal.';
   document.getElementById('appInstall').textContent = windows
     ? [`New-Item -ItemType Directory -Force "$HOME\\.ai-gateway\\bin" | Out-Null`,
        `Invoke-RestMethod ${location.origin}/downloads/ai-gateway.ps1 -OutFile "$HOME\\.ai-gateway\\bin\\ai-gateway.ps1"`,
@@ -241,7 +250,7 @@ async function loadAppModels(){
     const models = (await api('/v1/models')).data.filter(m => m.id !== 'auto' && (m.capabilities || []).includes('tools'));
     const select = document.getElementById('appModel');
     select.innerHTML = models.map(m => `<option value="${escapeHtml(m.id)}">${escapeHtml(m.id)}${
-      m.context_length ? ` &middot; ${Math.round(m.context_length / 1024)}K context` : ''}</option>`).join('')
+      m.context_length ? ` &middot; ${m.context_length >= 1048576 ? Math.round(m.context_length / 1048576) + 'M' : Math.round(m.context_length / 1024) + 'K'} context` : ''}</option>`).join('')
       || '<option value="">no model that can call tools is available to you</option>';
     const preferred = models.find(m => m.id === 'qwen3-next-80b') || models[0];
     if(preferred) select.value = preferred.id;
