@@ -51,13 +51,31 @@ details.tuning label{margin-bottom:.85rem}
 .msg.user{background:var(--input);border-radius:12px;padding:.6rem .9rem;align-self:flex-end;max-width:85%}
 /* What you can do with something you said: copy it, or ask it again. Quiet until the message is
    pointed at, because they are for the times something went wrong rather than every turn. */
-.turn-tools{display:flex;gap:.6rem;justify-content:flex-end;margin-top:.4rem;
+.turn-tools{display:flex;flex-wrap:wrap;gap:.6rem;justify-content:flex-end;margin-top:.4rem;
             opacity:0;transition:opacity .15s}
 .msg.user:hover .turn-tools,.msg.user:focus-within .turn-tools,.turn-tools.stay{opacity:1}
 .turn-tools button{background:none;border:none;padding:0;cursor:pointer;font:inherit;
                    font-size:.74rem;color:var(--muted)}
 .turn-tools button:hover{color:var(--text);text-decoration:underline}
 .turn-tools button:disabled{opacity:.5;cursor:default;text-decoration:none}
+/* Changing what you said, in place */
+.msg.user.editing{width:min(40rem,85%)}
+.edit-box textarea,.aside textarea{width:100%;min-height:4.5rem;background:var(--bg);color:var(--text);
+     border:1px solid var(--border);border-radius:8px;padding:.5rem .6rem;font:inherit;resize:vertical}
+.edit-box .row,.aside .row{display:flex;gap:.5rem;justify-content:flex-end;margin-top:.45rem}
+/* A side question: asked about one message and answered beside the conversation, never in it */
+dialog.aside{width:min(44rem,94vw);max-height:88vh;background:var(--card);color:var(--text);
+     border:1px solid var(--border);border-radius:12px;padding:1rem 1.1rem}
+dialog.aside::backdrop{background:rgba(0,0,0,.55)}
+.aside .head{display:flex;align-items:center;gap:.5rem;margin-bottom:.4rem}
+.aside .head strong{flex:1}
+.aside .head button{background:none;border:none;color:var(--muted);font-size:1.1rem;cursor:pointer}
+.aside .about{color:var(--muted);font-size:.85rem;border-left:3px solid var(--border);padding-left:.6rem;
+     margin:0 0 .5rem;max-height:4.8em;overflow:hidden;white-space:pre-wrap}
+.aside .note{color:var(--muted);font-size:.78rem;margin:0 0 .5rem}
+.aside .answer{margin-top:.8rem;max-height:52vh;overflow:auto;white-space:pre-wrap}
+.aside .answer.md{white-space:normal}
+.aside .answer:empty{display:none}
 /* Answers to the same question, when it was asked more than once */
 .variants{display:inline-flex;align-items:center;gap:.3rem;margin-left:.5rem;font-weight:400}
 .variants button{background:none;border:none;padding:0 .15rem;cursor:pointer;color:var(--muted);
@@ -644,7 +662,9 @@ function modelSize(id){
   return found ? parseFloat(found[1]) / (found[2] === 'm' ? 1000 : 1) : 30;
 }
 function smallestModel(needsVision){
+  const helpers = new Set((caps.helper_models || []).map(h => h.replace(/:latest$/, '')));
   const talks = id => {
+    if(helpers.has(id.replace(/:latest$/, ''))) return false;    // the gateway's own CPU helpers
     const caps = models[id]?.capabilities || [];
     return !/embed|rerank|guard|shield|whisper|tts|image|diffusion|flux/i.test(id)
       && (!caps.length || caps.includes('completion')) && (!needsVision || caps.includes('vision'));
@@ -1412,13 +1432,17 @@ function addUserMessage(text, imageUrls, files, asContext = true){
 function addTurnTools(box){
   const row = document.createElement('div');
   row.className = 'turn-tools';
-  row.innerHTML = '<button data-copy-turn>Copy</button><button data-resend>Ask again</button>';
+  row.innerHTML = '<button data-copy-turn>Copy</button><button data-edit>Edit</button>'
+                + '<button data-resend>Ask again</button>'
+                + '<button data-aside title="Ask something about this without adding to the conversation">Side question</button>';
   row.querySelector('[data-copy-turn]').addEventListener('click', async e => {
     await navigator.clipboard.writeText(box._text || '');
     e.target.textContent = 'Copied';
     setTimeout(() => { e.target.textContent = 'Copy'; }, 1500);
   });
+  row.querySelector('[data-edit]').addEventListener('click', () => startEdit(box));
   row.querySelector('[data-resend]').addEventListener('click', () => resend(box));
+  row.querySelector('[data-aside]').addEventListener('click', () => askAside(box));
   box.appendChild(row);
   refreshTurnTools();
 }
@@ -1429,6 +1453,8 @@ function addTurnTools(box){
 function refreshTurnTools(){
   const asked = [...chat.querySelectorAll('.msg.user')];
   asked.forEach((box, i) => {
+    const edit = box.querySelector('[data-edit]');
+    if(edit) edit.hidden = !box._messageId;
     const again = box.querySelector('[data-resend]');
     if(!again) return;
     again.hidden = !box._messageId;
@@ -1565,6 +1591,172 @@ async function resendTurn(box){
   const images = (box._files || []).map(f => ({id: f.id, url: fileUrl(f.id),
                                                name: f.name || 'attachment', document: !!f.document}));
   await send({text: box._text || '', images, again: {messageId: box._messageId, replaceAt}}, true);
+}
+
+/* Rewording something already asked. The answers to the old words go, and so does everything after
+   it, the way a question asked again from further back drops what followed; the reworded question
+   is then asked, and its answer filed under it. */
+function startEdit(box){
+  if(turning || controller || !box._messageId || box.classList.contains('editing')) return;
+  const body = box.querySelector('.body');
+  const toolRow = box.querySelector('.turn-tools');
+  const form = document.createElement('div');
+  form.className = 'edit-box';
+  form.innerHTML = '<textarea aria-label="Your message"></textarea><div class="row">'
+                 + '<button class="btn btn-secondary btn-sm" data-cancel>Cancel</button>'
+                 + '<button class="btn btn-sm" data-save>Save and ask</button></div>';
+  const area = form.querySelector('textarea');
+  area.value = box._text || '';
+  box.classList.add('editing');
+  body.hidden = true;
+  toolRow.hidden = true;
+  body.after(form);
+  area.focus();
+  area.setSelectionRange(area.value.length, area.value.length);
+  const close = () => {
+    form.remove();
+    body.hidden = false;
+    toolRow.hidden = false;
+    box.classList.remove('editing');
+  };
+  form.querySelector('[data-cancel]').addEventListener('click', close);
+  area.addEventListener('keydown', e => {
+    if(e.key === 'Escape'){ e.preventDefault(); close(); }
+    else if(e.key === 'Enter' && !e.shiftKey && !e.isComposing){ e.preventDefault(); save(); }
+  });
+  form.querySelector('[data-save]').addEventListener('click', () => save());
+
+  async function save(){
+    const text = area.value.trim();
+    if(!text){ area.focus(); return; }
+    if(text === (box._text || '').trim()){ close(); return; }
+    if(turning || controller) return;
+    const later = turnsAfter(box).filter(m => m.classList.contains('user')).length;
+    if(later && !confirm(`Editing this drops the ${later} question${later === 1 ? '' : 's'} after it, `
+                         + 'and their answers. This cannot be undone.')) return;
+    turning = true;
+    try{
+      try{
+        await api(`/chat/conversations/${currentId}/messages/${box._messageId}`,
+                  {method: 'PATCH', headers: JSON_HEADERS, body: JSON.stringify({content: text})});
+      }catch(e){
+        showError('Could not save the edit: ' + errorText(e));
+        return;
+      }
+      for(let after = box.nextElementSibling; after; ){
+        const next = after.nextElementSibling;
+        if(after.classList.contains('msg')) after.remove();
+        after = next;
+      }
+      box._text = text;
+      body.textContent = text;
+      close();
+      rebuildHistory();
+      refreshTurnTools();
+      loadConversations();
+      const images = (box._files || []).map(f => ({id: f.id, url: fileUrl(f.id),
+                                                   name: f.name || 'attachment', document: !!f.document}));
+      await send({text, images, again: {messageId: box._messageId, replaceAt: null}}, true);
+    }finally{ turning = false; }
+  }
+}
+
+/* A side question about one message: answered from the conversation up to that point, in a panel
+   of its own, and never saved - the conversation carries on as if it had not been asked. */
+let asideController = null;
+
+function askAside(box){
+  let dialog = document.getElementById('asideDialog');
+  if(!dialog){
+    dialog = document.createElement('dialog');
+    dialog.id = 'asideDialog';
+    dialog.className = 'aside';
+    dialog.innerHTML = '<div class="head"><strong>Side question</strong>'
+      + '<button type="button" data-close title="Close" aria-label="Close">&times;</button></div>'
+      + '<div class="about"></div>'
+      + '<p class="note">Answered from the conversation up to this message. Nothing here is added to it.</p>'
+      + '<textarea placeholder="Ask about this message..." aria-label="Side question"></textarea>'
+      + '<div class="row"><button class="btn btn-danger btn-sm" data-stop hidden>Stop</button>'
+      + '<button class="btn btn-sm" data-ask>Ask</button></div><div class="answer"></div>';
+    document.body.appendChild(dialog);
+    const area = dialog.querySelector('textarea');
+    dialog.querySelector('[data-close]').addEventListener('click', () => dialog.close());
+    dialog.querySelector('[data-ask]').addEventListener('click', () => answerAside(dialog));
+    dialog.querySelector('[data-stop]').addEventListener('click', () => asideController?.abort());
+    area.addEventListener('keydown', e => {
+      if(e.key === 'Enter' && !e.shiftKey && !e.isComposing){ e.preventDefault(); answerAside(dialog); }
+    });
+    dialog.addEventListener('close', () => asideController?.abort());
+  }
+  asideController?.abort();
+  dialog._box = box;
+  dialog.querySelector('.about').textContent = box._text || '';
+  dialog.querySelector('textarea').value = '';
+  const answer = dialog.querySelector('.answer');
+  answer.textContent = '';
+  answer.classList.remove('md');
+  dialog.showModal();
+  dialog.querySelector('textarea').focus();
+}
+
+async function answerAside(dialog){
+  const area = dialog.querySelector('textarea');
+  const question = area.value.trim();
+  if(!question || asideController) return;
+  // The conversation as far as this question and the answer on screen to it
+  const upTo = [];
+  let reached = false;
+  for(const message of chat.querySelectorAll('.msg')){
+    if(message.dataset.failed) continue;
+    if(message.classList.contains('user')){
+      if(reached) break;
+      upTo.push({role: 'user', content: message._text || '', images: message._images || []});
+      reached = message === dialog._box;
+    }else if(!message.hidden && message._text){
+      upTo.push({role: 'assistant', content: message._text});
+    }
+  }
+  const messages = savedSystem ? [{role: 'system', content: savedSystem}] : [];
+  messages.push(...upTo, {role: 'user', content: question, images: []});
+  const answer = dialog.querySelector('.answer');
+  const ask = dialog.querySelector('[data-ask]');
+  const stop = dialog.querySelector('[data-stop]');
+  answer.classList.remove('md');
+  answer.textContent = 'Thinking...';
+  ask.disabled = true;
+  stop.hidden = false;
+  asideController = new AbortController();
+  let text = '';
+  try{
+    const response = await fetch('/chat/complete', {
+      method: 'POST', signal: asideController.signal, headers: JSON_HEADERS,
+      body: JSON.stringify({model: currentModel(), messages, conversation_id: null, web_search: false,
+                            max_tokens: parseInt(document.getElementById('maxTokens').value, 10) || 8192,
+                            vision: tools.vision && caps.vision})});
+    if(!response.ok){
+      const err = await response.json().catch(() => ({}));
+      throw new Error((typeof err.detail === 'string' && err.detail) || err.error?.message || `HTTP ${response.status}`);
+    }
+    await readEvents(response, chunk => {
+      if(chunk.gateway) return;
+      const words = chunk.choices?.[0]?.delta?.content;
+      if(!words) return;
+      text += words;
+      answer.textContent = text;
+    });
+    const html = await renderedHtml(text);
+    if(html){
+      answer.classList.add('md');
+      answer.innerHTML = html;
+    }else answer.textContent = text || '(no answer)';
+  }catch(e){
+    answer.textContent = e.name === 'AbortError' ? (text ? text + '\n\n(stopped)' : '(stopped)')
+                                                 : 'That did not go through: ' + errorText(e);
+  }finally{
+    asideController = null;
+    ask.disabled = false;
+    stop.hidden = true;
+  }
 }
 
 const ACTION_LABELS = {chat: 'answered directly', search: 'searched the web',
@@ -2545,8 +2737,9 @@ async function decideAction(text, hasImages){
   if(!imageMode() && !searchOn && !choosing()) return {action: 'chat'};
   if(!caps.routing && !choosing()) return {action: imageMode() ? (hasImages ? 'edit' : 'image') : 'search'};
   setDeciding(true);
+  deciding = new AbortController();
   try{
-    const decision = await api('/chat/route', {method: 'POST', headers: JSON_HEADERS, body: JSON.stringify({
+    const decision = await api('/chat/route', {method: 'POST', signal: deciding.signal, headers: JSON_HEADERS, body: JSON.stringify({
       message: text, has_images: hasImages, web_search: searchOn, image_generation: imageMode(),
       attachments: pending.filter(p => !p.uploading).map(p => ({kind: p.document ? 'document' : 'picture',
                                                                name: (p.name || '').slice(0, 200)})),
@@ -2556,9 +2749,11 @@ async function decideAction(text, hasImages){
     if(decision.model) chosenModel = decision.model;
     return decision;
   }catch(e){
+    // Stopped before anything was asked: the words stay in the box, to be changed or sent again
+    if(e.name === 'AbortError') return {action: 'stopped'};
     // Falling back to what the toggles alone would have done
     return {action: imageMode() && !searchOn ? (hasImages ? 'edit' : 'image') : 'chat', decided_by: 'toggles'};
-  }finally{ setDeciding(false); }
+  }finally{ deciding = null; setDeciding(false); }
 }
 
 // Background blur, allowed or not. Kept in this browser like the tool chips; on unless switched off.
@@ -2582,9 +2777,13 @@ document.getElementById('backdropColour').addEventListener('change', e => {
   document.getElementById('backdropCustom').hidden = e.target.value !== 'custom';
 });
 
+/* Working out what the message asks for takes a few seconds before anything streams, and Stop is
+   there for those too: it cancels the turn before the message is sent anywhere. */
+let deciding = null;
 function setDeciding(on){
   document.getElementById('send').disabled = on;
   document.getElementById('deciding').hidden = !on;
+  busy(on);
 }
 
 /* One turn at a time. `controller` only exists once an answer is streaming, and before that a turn
@@ -2627,6 +2826,7 @@ async function sendTurn(redo = null){
   if(subs) return sendSubtitles(text, subs, asking);
 
   const decision = await decideAction(text, attachedPictures().length > 0);
+  if(decision.action === 'stopped') return;
   // The agent is a choice, not a guess: switched on, it takes the turn
   if(tools.agent && caps.agent) return sendAgent(text, asking);
   if(decision.action === 'map') return sendMap(text, decision, fix, asking);
@@ -3071,7 +3271,7 @@ async function sendImage(text, decision, again){
 // Wrapped, not passed straight in: a click handler is called with the event, and send now
 // takes an argument - the button would have handed it a MouseEvent to re-ask
 document.getElementById('send').addEventListener('click', () => send());
-document.getElementById('stop').addEventListener('click', () => controller?.abort());
+document.getElementById('stop').addEventListener('click', () => { deciding?.abort(); controller?.abort(); });
 function fitComposer(){
   promptBox.style.height = 'auto';
   promptBox.style.height = promptBox.scrollHeight + 'px';
