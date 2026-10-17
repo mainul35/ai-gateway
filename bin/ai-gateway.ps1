@@ -49,6 +49,22 @@ for (; $i -lt $args.Count; $i++) {
 $Gateway = $Gateway.TrimEnd('/')
 $Apps = @("claude", "claude-desktop", "opencode", "qwen", "codex", "hermes", "openclaw")
 function Fail($message) { Write-Host "ai-gateway: $message" -ForegroundColor Red; exit 1 }
+
+# Windows PowerShell 5.1, the one every Windows has, lacks ConvertFrom-Json -AsHashtable and writes
+# "utf8" with a byte-order mark, which Node apps (OpenClaw) refuse to parse. These work in 5.1 and 7.
+function ConvertTo-Hashtable($value) {
+    if ($value -is [System.Management.Automation.PSCustomObject]) {
+        $table = [ordered]@{}
+        foreach ($p in $value.PSObject.Properties) { $table[$p.Name] = ConvertTo-Hashtable $p.Value }
+        return $table
+    }
+    if ($value -is [System.Collections.IList]) { return ,@($value | ForEach-Object { ConvertTo-Hashtable $_ }) }
+    return $value
+}
+function ConvertFrom-JsonTable($text) { return ConvertTo-Hashtable ($text | ConvertFrom-Json) }
+function Write-Utf8($path, $text) {
+    [System.IO.File]::WriteAllText($path, ($text -join "`n") + "`n", (New-Object System.Text.UTF8Encoding $false))
+}
 if ($Command -notin @("launch", "models")) {
     Get-Help $MyInvocation.MyCommand.Path -Detailed | Out-String | Write-Host; exit 0
 }
@@ -96,11 +112,11 @@ if ($App -notin $Apps) { Fail "launch which app? one of: $($Apps -join ', ')" }
 if ($App -eq "claude-desktop") {
     $local = $env:LOCALAPPDATA
     $id = "00000000-0000-4000-8000-00000000a16e"; $name = "AI Gateway"
-    function Read-Json($path) { if (Test-Path $path) { $t = Get-Content $path -Raw; if ($t.Trim()) { return ($t | ConvertFrom-Json -AsHashtable) } }; return @{} }
+    function Read-Json($path) { if (Test-Path $path) { $t = Get-Content $path -Raw; if ($t.Trim()) { return (ConvertFrom-JsonTable $t) } }; return @{} }
     function Write-Json($path, $value) {
         New-Item -ItemType Directory -Force (Split-Path $path) | Out-Null
         if (Test-Path $path) { Copy-Item $path "$path.bak-ai-gateway" -Force }
-        $value | ConvertTo-Json -Depth 20 | Set-Content -Path $path -Encoding utf8
+        Write-Utf8 $path ($value | ConvertTo-Json -Depth 20)
     }
     $mode = if ($Restore) { "1p" } else { "3p" }
     # Where the app reads which profile is in use: its plain folders, and a Store install's own copy
@@ -213,14 +229,14 @@ switch ($App) {
         $home2 = Join-Path $HOME ".hermes-gateway"
         New-Item -ItemType Directory -Force $home2 | Out-Null
         $q = { param($v) '"' + ($v -replace '\\', '\\' -replace '"', '\"') + '"' }
-        @(
+        Write-Utf8 (Join-Path $home2 "config.yaml") @(
             "# Written by ai-gateway launch hermes; rewritten on every launch.",
             "model:", "  provider: ai-gateway", "  default: $(& $q $Model)", "  base_url: $(& $q "$Gateway/v1")",
             "  api_key: $(& $q $Key)", "  context_length: $Context",
             "providers:", "  ai-gateway:", "    name: AI Gateway", "    api: $(& $q "$Gateway/v1")",
             "    api_key: $(& $q $Key)", "    default_model: $(& $q $Model)", "    models: [$(& $q $Model)]",
             "toolsets: [hermes-cli, web]"
-        ) | Set-Content -Path (Join-Path $home2 "config.yaml") -Encoding utf8
+        )
         Set-ForRun @{ HERMES_HOME = $home2 }
         Start-App "hermes" $Extra; exit $script:ExitCode
     }
@@ -229,7 +245,7 @@ switch ($App) {
         $file = Join-Path $HOME ".openclaw\openclaw.json"
         if (-not (Test-Path $file)) { Fail "OpenClaw has not been set up yet: run 'openclaw onboard' once, then this again" }
         Copy-Item $file "$file.bak-ai-gateway" -Force
-        $c = Get-Content $file -Raw | ConvertFrom-Json -AsHashtable
+        $c = ConvertFrom-JsonTable (Get-Content $file -Raw)
         if (-not $c.models) { $c.models = @{} }; if (-not $c.models.providers) { $c.models.providers = @{} }
         if (-not $c.models.mode) { $c.models.mode = "merge" }
         # Typed, so a one-item list stays a list in the JSON: $(...) would unwrap it to "text"
@@ -242,7 +258,7 @@ switch ($App) {
         $c.agents.defaults.model.primary = "ai-gateway/$Model"
         # An allowlist, where there is one, has to name the model or OpenClaw refuses it
         if ($c.agents.defaults.models -and -not $c.agents.defaults.models["ai-gateway/$Model"]) { $c.agents.defaults.models["ai-gateway/$Model"] = @{} }
-        $c | ConvertTo-Json -Depth 30 | Set-Content -Path $file -Encoding utf8
+        Write-Utf8 $file ($c | ConvertTo-Json -Depth 30)
         if (-not $ConfigOnly) {
             openclaw daemon restart *> $null; if ($LASTEXITCODE) { openclaw daemon start *> $null }
             if ($LASTEXITCODE) { Write-Warning "could not restart the OpenClaw gateway; run 'openclaw gateway run' in another terminal" }

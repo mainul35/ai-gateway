@@ -26,7 +26,7 @@ from app.routers.openai_v1 import PROXY_PATHS, forward
 from app.tools import (agent, chooser, documents, image_prompt, images, jobs, map_plan,
                         map_web, maps, markdown, mcp_client, media, memory as memory_tool,
                         photo, places, portrait, router as intent_router, self_tools, subtitles,
-                        turn_facts, web_search)
+                        turn_facts, understand, web_search)
 
 log = logging.getLogger("playground")
 
@@ -547,8 +547,11 @@ async def complete(payload: CompleteIn, principal: Principal = Depends(authentic
     limits.check_attachments(principal, len(set(payload.messages[-1].images)) if payload.messages else 0)
     everything = await _load_files(session, user, attached)
     papers = [f for f in everything.values() if f.kind == "document"]
-    pictures = [f for f in everything.values() if f.kind != "document"]
-    if pictures and payload.vision and "vision" not in backend.capabilities:
+    # Only a picture in the message being sent stops a text-only model. One from an earlier turn
+    # failed every later question in the conversation once Auto picked a model that cannot see.
+    asked_about = set(latest_user.images) if latest_user else set()
+    if any(i in asked_about and f.kind != "document" for i, f in everything.items()) \
+            and payload.vision and "vision" not in backend.capabilities:
         raise HTTPException(status.HTTP_400_BAD_REQUEST,
                             f"{payload.model} cannot see images. Pick a model marked as "
                             "vision-capable, or attach a document instead.")
@@ -1604,9 +1607,17 @@ async def find_on_map(payload: MapIn, principal: Principal = Depends(authenticat
     return result
 
 
+class AttachmentIn(BaseModel):
+    kind: str = Field(default="picture", pattern="^(picture|document)$")
+    name: str = Field(default="", max_length=200)
+
+
 class RouteIn(BaseModel):
     message: str = ""
     has_images: bool = False
+    # Everything attached, pictures and documents, by kind and file name: "design a logo from this"
+    # means one thing with a brief attached and another with a photograph
+    attachments: list[AttachmentIn] = Field(default_factory=list, max_length=20)
     web_search: bool = False
     image_generation: bool = False
     maps: bool = False
@@ -1624,7 +1635,11 @@ async def route(payload: RouteIn, principal: Principal = Depends(authenticate),
                 session: AsyncSession = Depends(get_session)):
     """What this message asks for: which tool, what kind of work, and which model should do it.
 
-    The two questions go to the small model at the same time. They are independent, so asking them
+    Normally one question: the small model describes the request from everything that came with it
+    (app/tools/understand.py), and the tool and the kind of work follow from that description. With
+    router.understand off, or when that answer cannot be read, the older questions below decide.
+
+    The two older questions go to the small model at the same time. They are independent, so asking them
     together costs one round trip rather than two, and keeping them in separate prompts keeps the
     action answer as good as it was - putting both in one prompt made it worse.
     """
@@ -1641,6 +1656,35 @@ async def route(payload: RouteIn, principal: Principal = Depends(authenticate),
     history = intent_router.plain_history(
         [{"role": m.role, "content": m.content} for m in payload.history])
     asking_model = intent_router.is_enabled()
+
+    if asking_model and settings.get_bool("router.understand", "ROUTER_UNDERSTAND", True):
+        attachments = [a.model_dump() for a in payload.attachments] or (
+            [{"kind": "picture", "name": ""}] if payload.has_images else [])
+
+        async def second_opinion():
+            """The one-word tool question, asked at the same time, so it costs no extra wait."""
+            if len(allowed) == 1:
+                return None
+            found = intent_router.clean_answer(await _ask_helper(
+                principal, intent_router.build_request(payload.message, allowed, history)), allowed)
+            return intent_router.settle_action(found, payload.message, allowed, payload.has_images)[0]
+
+        answer, other = await asyncio.gather(
+            _ask_helper(principal, understand.build_request(payload.message, attachments, history)),
+            second_opinion())
+        reading = understand.read_answer(answer)
+        if reading is not None:
+            only = len(allowed) == 1
+            action = allowed[0] if only else understand.decide(reading, allowed, payload.has_images,
+                                                               payload.message, other)
+            decision = {"action": action,
+                        "decided_by": "the only tool switched on" if only else settings.router_model(),
+                        "understood": reading["request"]}
+            if payload.choose_model:
+                return await _with_model(principal, session, decision,
+                                         understand.category(reading, payload.has_images),
+                                         settings.router_model(), payload)
+            return decision
 
     async def decide_action():
         if len(allowed) == 1:
@@ -1687,6 +1731,12 @@ async def route(payload: RouteIn, principal: Principal = Depends(authenticate),
     decision = {"action": action, "decided_by": decided_by}
     if category is None:
         return decision
+    return await _with_model(principal, session, decision, category, category_by, payload)
+
+
+async def _with_model(principal, session, decision, category, category_by, payload):
+    """The decision, with the model to answer it when Auto is choosing."""
+    action = decision["action"]
     decision.update(category=category, category_by=category_by)
     # Only a text answer is the model's to choose: a picture is drawn by the image model, and a
     # photograph is worked on by tools that have nothing to do with the drop-down

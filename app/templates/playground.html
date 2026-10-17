@@ -1574,7 +1574,7 @@ const ACTION_LABELS = {chat: 'answered directly', search: 'searched the web',
 
 const CATEGORY_LABELS = {code: 'a coding question', vision: 'a question about the picture',
                          reasoning: 'something to work out', long: 'a long read',
-                         general: 'a general question'};
+                         general: 'a question that needs knowledge', light: 'small talk'};
 
 function noteDecision(box, decision){
   if(!decision) return;
@@ -1584,7 +1584,8 @@ function noteDecision(box, decision){
     note.className = 'muted';
     note.style.fontWeight = '400';
     note.textContent = ` · ${ACTION_LABELS[decision.action] || decision.action}`;
-    note.title = `Chosen by ${decision.decided_by || 'the gateway'} from the tools you switched on.` +
+    note.title = (decision.understood ? `Understood as: ${decision.understood}. ` : '') +
+                 `Chosen by ${decision.decided_by || 'the gateway'} from the tools you switched on.` +
                  ' Leave only one tool on to force it.';
     who.appendChild(note);
   }
@@ -2547,6 +2548,8 @@ async function decideAction(text, hasImages){
   try{
     const decision = await api('/chat/route', {method: 'POST', headers: JSON_HEADERS, body: JSON.stringify({
       message: text, has_images: hasImages, web_search: searchOn, image_generation: imageMode(),
+      attachments: pending.filter(p => !p.uploading).map(p => ({kind: p.document ? 'document' : 'picture',
+                                                               name: (p.name || '').slice(0, 200)})),
       maps: tools.maps && caps.maps, photo_blur: blurAllowed(),
       choose_model: choosing(), current_model: chosenModel,
       history: history.slice(-4).map(h => ({role: h.role, content: h.content}))})});
