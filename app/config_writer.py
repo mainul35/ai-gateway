@@ -44,6 +44,7 @@ EDITABLE_KEYS = [
     "knowledge.enabled", "knowledge.refresh.hours", "knowledge.github.token",
     "router.enabled",
     "router.model",
+    "router.understand",
     "search.searxng.url",
     "search.results",
     "search.fetch_pages",

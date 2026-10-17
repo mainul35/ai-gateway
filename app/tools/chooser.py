@@ -13,10 +13,14 @@ be known rather than guessed. A model that has been failing is not the best mode
 import logging
 import re
 
+from app import settings
+
 log = logging.getLogger("tools.chooser")
 
 # What a message is asking for. The router names one of these; the scoring below turns it into a model.
-CATEGORIES = ("code", "vision", "reasoning", "long", "general")
+# "light" is small talk - thanks, a joke, a quick rewrite - and is the one kind given to the smallest
+# model; "general" is a real question that needs knowledge, which a 1.7B answers badly.
+CATEGORIES = ("code", "vision", "reasoning", "long", "general", "light")
 
 CODE_NAME = re.compile(r"coder|code|starcoder|deepseek-?c", re.I)
 # A model whose name says it is for one narrow thing is a poor default for everything else
@@ -66,10 +70,23 @@ def _reliability(health):
     return score
 
 
+def is_helper(name):
+    """One of the gateway's own helper models: the router and the embedder, run on the CPU.
+
+    They are there to read every message and index documents, not to answer: Auto gave the CPU
+    copy of the 1.7B router a question about mixing a 3090 and a 2080 Ti in one machine.
+    """
+    wanted = {(settings.router_model() or ""), (settings.get("knowledge.embedding.model") or "")}
+    bare = {w.removesuffix(":latest") for w in wanted if w}
+    return (name or "").removesuffix(":latest") in bare
+
+
 def score(model, category, needs_vision):
     """How well this model suits the work, or None when it cannot or should not do it."""
     name = model.get("name") or ""
     capabilities = set(model.get("capabilities") or ())
+    if is_helper(name):
+        return None
     if needs_vision and "vision" not in capabilities:
         return None            # it cannot see the picture it is being asked about
     if SPECIALIST.search(name) or (capabilities and "completion" not in capabilities):
@@ -81,10 +98,9 @@ def score(model, category, needs_vision):
     size = _parameters(model)
     context = model.get("context_length") or 0
     points = reliability
-    if category == "general":
-        # Everyday questions go to the smallest model: it is the router itself and already loaded,
-        # answers in a second, and leaves the GPU to whatever needs it. A bigger model is loaded
-        # only when the work calls for one - code, reasoning, a long read, a picture.
+    if category == "light":
+        # Small talk goes to the smallest model: it answers in a second and leaves the GPU to
+        # whatever needs it. Everything that needs knowledge gets a bigger one.
         points -= min(size / 12.0, 2.0)
     else:
         # Size stands in for quality, but gently: a 30B is better than a 3B, not ten times better
@@ -111,7 +127,7 @@ def score(model, category, needs_vision):
 
 def why(model, category):
     """A short sentence for the reason it was picked, in the words of what was actually known."""
-    reasons = ["smallest that will do"] if category == "general" else []
+    reasons = ["smallest that will do"] if category == "light" else []
     capabilities = set(model.get("capabilities") or ())
     name = model.get("name") or ""
     if category == "vision" or "vision" in capabilities:
@@ -132,7 +148,7 @@ def why(model, category):
 
 def smallest(models, needs_vision=False):
     """Auto's model before the router has said anything: the smallest one that can hold a conversation."""
-    able = [m for m in models if score(m, "general", needs_vision) is not None]
+    able = [m for m in models if score(m, "light", needs_vision) is not None]
     return min(able, key=_parameters)["name"] if able else None
 
 
@@ -152,8 +168,7 @@ def pick(models, category, needs_vision=False, prefer=None):
         return None
     best_points = max(points for points, _ in scored)
     shortlist = [model for points, model in scored if points >= best_points - 0.25]
-    if category == "general":
-        shortlist.sort(key=_parameters)    # a near-tie on everyday work goes to the smaller model
+    shortlist.sort(key=_parameters)        # a near-tie goes to the smaller model, which is quicker
     chosen = next((m for m in shortlist if m.get("name") == prefer), shortlist[0])
     log.debug("category %s -> %s from %d candidates", category, chosen.get("name"), len(scored))
     return {"model": chosen["name"], "why": why(chosen, category),
