@@ -1,7 +1,7 @@
 """Database tables: users, API keys and per-request usage."""
 from datetime import datetime, timezone
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, LargeBinary, String, Text, func
+from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, LargeBinary, String, Text, UniqueConstraint, func
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 
@@ -214,6 +214,27 @@ class CodingTask(Base):
     approved_by: Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+
+
+class AnswerFeedback(Base):
+    """Whether an answer was helpful and accurate, as the person who asked judged it.
+
+    Kept per answer and person, with the model that wrote it and the kind of question it was, so that
+    person's Auto can learn which model does well for them at what (app/feedback.py) - never anyone
+    else's: one person's mistaken verdicts must not steer everybody's answers.
+    """
+    __tablename__ = "answer_feedback"
+    __table_args__ = (UniqueConstraint("message_id", "user_id"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    message_id: Mapped[int] = mapped_column(ForeignKey("conversation_messages.id", ondelete="CASCADE"), index=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    model: Mapped[str | None] = mapped_column(String(256), nullable=True, index=True)
+    category: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    helpful: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    accurate: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
 class CodingTaskEvent(Base):

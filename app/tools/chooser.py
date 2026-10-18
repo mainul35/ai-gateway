@@ -85,6 +85,23 @@ def helper_names():
     return sorted(n for n in (settings.router_model(), settings.get("knowledge.embedding.model")) if n)
 
 
+ENOUGH_VOTES = 3       # accuracy verdicts before they count; fewer is one person's bad day
+
+
+def judged(feedback, category):
+    """What people said about this model's accuracy, as points: from -1.4 to +0.6.
+
+    For this kind of question when there are enough verdicts on it, otherwise over all questions.
+    Centred on 70% accurate, so a model has to be marked right most of the time to gain, and one
+    marked wrong half the time loses more than any small-model bonus is worth.
+    """
+    for counts in ((feedback or {}).get(category), (feedback or {}).get("all")):
+        votes = (counts or {}).get("accurate", 0) + (counts or {}).get("inaccurate", 0)
+        if votes >= ENOUGH_VOTES:
+            return (counts["accurate"] / votes - 0.7) * 2
+    return 0.0
+
+
 def score(model, category, needs_vision):
     """How well this model suits the work, or None when it cannot or should not do it."""
     name = model.get("name") or ""
@@ -103,7 +120,7 @@ def score(model, category, needs_vision):
 
     size = _parameters(model)
     context = model.get("context_length") or 0
-    points = reliability
+    points = reliability + judged(model.get("feedback"), category)
     if category == "light":
         # Small talk goes to the smallest model: it answers in a second and leaves the GPU to
         # whatever needs it. Everything that needs knowledge gets a bigger one.

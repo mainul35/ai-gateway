@@ -129,6 +129,16 @@ details.sources li{margin:.15rem 0}
 details.sources a{word-break:break-all}
 a.cite{font-size:.75em;vertical-align:super;text-decoration:none;padding:0 .1rem}
 .stats{font-size:.78rem;color:var(--muted);margin-top:.4rem}
+/* Was it any good: asked under each answer, kept, and read by Auto when it picks a model */
+.verdict{display:flex;flex-wrap:wrap;align-items:center;gap:.35rem .9rem;margin-top:.35rem;
+         font-size:.76rem;color:var(--muted)}
+.verdict .ask{display:inline-flex;align-items:center;gap:.3rem}
+.verdict button{background:none;border:1px solid var(--border);border-radius:999px;color:var(--muted);
+                font:inherit;padding:.05rem .55rem;cursor:pointer}
+.verdict button:hover{color:var(--text)}
+.verdict button[aria-pressed="true"]{color:#fff;background:var(--primary);border-color:var(--primary)}
+.verdict button[aria-pressed="true"][data-value="false"]{background:var(--danger);border-color:var(--danger)}
+.verdict .thanks{font-style:italic}
 .status{font-size:.85rem;color:var(--muted);display:flex;align-items:center;gap:.5rem}
 .spinner{width:.8rem;height:.8rem;border:2px solid var(--border);border-top-color:var(--primary);border-radius:50%;
          animation:spin .8s linear infinite;flex:none}
@@ -1218,12 +1228,16 @@ function fillTranscript(messages){
       const turn = extra.answers_to || null;
       const box = answerBox(turn, m.model || (extra.map ? 'OpenStreetMap'
                                               : extra.media ? 'Picture search' : ''));
-      if(extra.agent) renderAgent(box, extra.agent, m.content, m.html, m.stats);
+      const withModel = m.stats || m.model ? {...(m.stats || {}), model: m.model} : null;
+      if(extra.agent) renderAgent(box, extra.agent, m.content, m.html, withModel);
       else if(extra.map) renderMap(box, extra.map);
       else if(extra.media) renderMedia(box, extra.media);
       else if(extra.generated) renderGenerated(box, extra.generated, m.stats);
       else if(extra.subtitles) renderSubtitles(box, extra.subtitles, m.content, m.stats);
-      else renderAssistant(box, m.content, m.reasoning, m.stats, extra.sources, m.html);
+      else renderAssistant(box, m.content, m.reasoning, withModel, extra.sources, m.html);
+      // Words a model wrote can be judged; a map, a picture search or a drawing are judged by looking
+      if(!extra.map && !extra.media && !extra.generated && !extra.subtitles && m.content)
+        addVerdict(box, {messageId: m.id}, m.feedback);
       box._text = m.content;
       const earlier = turn ? answered.find(a => a.turn === turn) : null;
       if(earlier){
@@ -1807,7 +1821,9 @@ function noteDecision(box, decision){
 
 function statsText(stats){
   if(!stats) return '';
-  return [stats.ttft != null ? `${stats.ttft}s to first token` : '',
+  // Which model wrote it, first: the name at the top of a long answer has scrolled away by here
+  return [stats.model || '',
+          stats.ttft != null ? `${stats.ttft}s to first token` : '',
           stats.tokens ? `${stats.tokens} tokens` : '',
           stats.tps ? `${stats.tps} tok/s` : '',
           stats.total != null ? `${stats.total}s total` : ''].filter(Boolean).join(' · ');
@@ -2315,8 +2331,9 @@ async function sendAgent(text, again){
     loadConversations();
     return;
   }
-  renderAssistant(box, answer.text, null, {total: answer.seconds}, null, answer.html);
+  renderAssistant(box, answer.text, null, {model, total: answer.seconds}, null, answer.html);
   box.insertBefore(trace, box.querySelector('.body'));   // the trace stays above the answer
+  if(currentId) addVerdict(box, {conversationId: currentId, startsWith: (answer.text || '').trim().slice(0, 200)});
   recordAnswer(box, answer.text, again ? again.replaceAt : null);
   // The server writes the turn down itself, the way the other long jobs do
   revealFrom(box);
@@ -2552,6 +2569,53 @@ const ASKED_FORMAT = /\b(markdown|md|txt|text|csv|json|yaml|yml|html)\b(?:\s+(?:
 
 function wantsAFile(question){
   return WANTS_A_FILE.test(question || '');
+}
+
+/* Helpful? Accurate? under an answer. The verdict is saved against the answer (by id, or - for one
+   that has only just streamed, which the server saved without telling the page its id - by where it
+   is and how it begins) and Auto reads it when it next picks a model for this kind of question.
+   Pressing a chosen answer again takes it back. */
+function addVerdict(box, where, saved){
+  box.querySelector('.verdict')?.remove();
+  const row = document.createElement('div');
+  row.className = 'verdict';
+  row.title = 'Your answers teach your own Auto which model to pick for questions like this - nobody else’s';
+  const state = {helpful: saved?.helpful ?? null, accurate: saved?.accurate ?? null};
+  const ask = (field, label) => `<span class="ask">${label}
+      <button type="button" data-field="${field}" data-value="true">Yes</button>
+      <button type="button" data-field="${field}" data-value="false">No</button></span>`;
+  row.innerHTML = ask('helpful', 'Helpful?') + ask('accurate', 'Accurate?') + '<span class="thanks"></span>';
+  const show = () => row.querySelectorAll('button').forEach(b =>
+    b.setAttribute('aria-pressed', String(state[b.dataset.field] === (b.dataset.value === 'true'))));
+  show();
+  row.addEventListener('click', async e => {
+    const button = e.target.closest('button');
+    if(!button) return;
+    const value = button.dataset.value === 'true';
+    const before = {...state};
+    state[button.dataset.field] = state[button.dataset.field] === value ? null : value;
+    show();
+    const body = {helpful: state.helpful, accurate: state.accurate, category: where.category || null,
+                  ...(where.messageId ? {message_id: where.messageId}
+                                      : {conversation_id: where.conversationId, starts_with: where.startsWith})};
+    // A just-finished answer is written down by the server a moment after the last word arrives
+    for(let attempt = 0; ; attempt++){
+      try{
+        const result = await api('/chat/feedback', {method: 'POST', headers: JSON_HEADERS, body: JSON.stringify(body)});
+        where.messageId = result.message_id;
+        row.querySelector('.thanks').textContent = state.accurate === false ? 'Noted - your Auto will lean away from this model for questions like this'
+                                                 : (state.helpful !== null || state.accurate !== null) ? 'Thanks' : '';
+        return;
+      }catch(err){
+        if(attempt < 3 && /not saved/i.test(errorText(err))){ await new Promise(r => setTimeout(r, 1500)); continue; }
+        Object.assign(state, before);
+        show();
+        showError('Could not save that: ' + errorText(err));
+        return;
+      }
+    }
+  });
+  box.appendChild(row);
 }
 
 function appendStats(box, stats){
@@ -2877,7 +2941,7 @@ async function sendChat(text, decision, again){
   // Three dots sit there looking the same whether the model is working or has died. The spinner is
   // the same one every other job on this page uses, and it stops the moment the first word arrives.
   setStatus(box, 'Waiting for the first words');
-  let thinkBlock = null, thinking = '', answer = '', firstTokenAt = null, usage = null, sources = null;
+  let thinkBlock = null, thinking = '', answer = '', firstTokenAt = null, usage = null, sources = null, measured = null;
   const started = performance.now();
 
   const messages = [];
@@ -2905,6 +2969,7 @@ async function sendChat(text, decision, again){
         if(event.type === 'status') setStatus(box, event.text);
         else if(event.type === 'notice') showError(event.text);
         else if(event.type === 'sources'){ sources = event.sources; renderSources(box, sources); }
+        else if(event.type === 'stats') measured = event.stats;   // timed where the words arrive, not here
         return;
       }
       if(chunk.usage) usage = chunk.usage;
@@ -2946,10 +3011,12 @@ async function sendChat(text, decision, again){
   const genSeconds = firstTokenAt ? (performance.now() - firstTokenAt) / 1000 : total;
   const tokens = usage?.completion_tokens;
   const stats = {
+    model,
     ttft: firstTokenAt ? +((firstTokenAt - started) / 1000).toFixed(1) : null,
     tokens: tokens || null,
     tps: tokens && genSeconds > 0 ? +(tokens / genSeconds).toFixed(1) : null,
     total: +total.toFixed(1),
+    ...(measured ? {ttft: measured.ttft, tokens: measured.tokens, tps: measured.tps} : {}),
   };
   if(!answer && !thinking){
     // Nothing came back, so nothing was saved either. Say why here, where the question is, and
@@ -2960,6 +3027,7 @@ async function sendChat(text, decision, again){
     return;
   }
   renderAssistant(box, answer, thinking, stats, sources, await renderedHtml(answer));
+  if(currentId) addVerdict(box, {conversationId: currentId, startsWith: answer.slice(0, 200), category: decision.category});
 
   recordAnswer(box, answer, again ? again.replaceAt : null);
   // The server writes the answer down itself as the job finishes, so that walking away mid-answer
