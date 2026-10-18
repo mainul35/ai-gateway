@@ -6,8 +6,9 @@ long chat keeps its thread instead of losing the beginning.
 Per user: short notes that outlive a single conversation, so the next chat already knows what was
 decided. They are kept up to date after every turn by explicit edits - add, update or delete a note
 by its id - so that something that stops being true is taken out the moment the user says so
-(CHECK_PROMPT). Both are written by the conversation's own model, which is already loaded and has
-just read the material, and both are shown in the playground, where they can be edited or deleted.
+(CHECK_PROMPT). An agent turn also has them as tools (memory_tools), so a note is fixed in the
+middle of a task, as soon as a tool or the user shows it is wrong, the way Claude Code keeps its
+memory. Both are shown in the playground, where they can be edited or deleted.
 """
 import json
 import logging
@@ -165,6 +166,82 @@ def parse_changes(text, notes_now, user_text, protected=()):
             seen.add(note.lower())
             add.append(note)
     return {"update": update, "delete": delete, "add": add}
+
+
+# --- memory as tools, for the agent: notes changed the moment something is learned ---------------
+
+TOOL_SERVER = "memory"
+TOOL_GUIDE = """You keep a short list of durable notes about this user, shown below with ids. They
+carry what you knew from earlier conversations, and they can be out of date.
+
+Treat them as you would your own notes: when the user says, or one of your tools shows, that a note
+is no longer true - a plan now done, a setting changed, a number different - fix it at once with
+{server}{sep}update or {server}{sep}forget, in the middle of the task, before carrying on. When you
+learn a lasting fact about the user or their setup that is not there, add it with
+{server}{sep}remember. Never note one-off questions or today's topic, and never something you only
+assumed. Every change quotes its evidence: the user's own words, or what a tool returned this turn.
+
+Notes:
+{notes}"""
+
+
+def memory_tools(sep):
+    """The three memory tools, in the shape a chat model is given."""
+    evidence = {"type": "string", "description": "The exact words from the user, or from a tool result "
+                                                 "this turn, that show this. Copied, not paraphrased."}
+    note_id = {"type": "string", "description": "The note's id, such as n3."}
+    text = {"type": "string", "description": "The note as it is true now: one specific fact, under 120 characters."}
+    spec = [("remember", "Add a lasting fact about the user that is not in the notes yet.",
+             {"text": text, "evidence": evidence}, ["text", "evidence"]),
+            ("update", "Rewrite a note that is out of date or wrong, as it is true now.",
+             {"id": note_id, "text": text, "evidence": evidence}, ["id", "text", "evidence"]),
+            ("forget", "Remove a note that no longer holds or that the user contradicted.",
+             {"id": note_id, "evidence": evidence}, ["id", "evidence"])]
+    return [{"type": "function", "function": {
+        "name": f"{TOOL_SERVER}{sep}{name}", "description": description,
+        "parameters": {"type": "object", "properties": properties, "required": required}}}
+        for name, description, properties, required in spec]
+
+
+def tool_guide(notes, sep):
+    """notes: (key, text, written_by_user)."""
+    listed = "\n".join(f"{key}: {text}" + (" (user's own - do not change)" if manual else "")
+                       for key, text, manual in notes) or "(none yet)"
+    return TOOL_GUIDE.format(server=TOOL_SERVER, sep=sep, notes=listed)
+
+
+def check_tool_edit(tool, args, notes_now, seen_text, protected=()):
+    """One memory tool call, checked the same way as the after-turn edits.
+
+    seen_text is what this turn has shown: the user's words and every tool result so far - the
+    agent may learn something from a tool (the dashboard says 92 GB) that the user never typed.
+    Returns ((action, key, text), None) to apply, or (None, why not) for the model to read.
+    """
+    quote = str(args.get("evidence") or "")
+    if not said_by_user(quote, seen_text):
+        return None, ("Not changed: the evidence must be words the user wrote or a tool returned this "
+                      "turn, copied exactly. Notes are never changed on an assumption.")
+    key = args.get("id")
+    new = str(args.get("text") or "").strip()[:NOTE_LENGTH]
+    if tool == "remember":
+        if not new:
+            return None, "Not added: the note is empty."
+        if new.lower() in {t.lower() for t in notes_now.values()}:
+            return None, "Not added: that note is already there."
+        return ("add", None, new), None
+    if key not in notes_now:
+        return None, f"Not changed: there is no note {key}. The notes are {', '.join(notes_now) or 'none'}."
+    if key in protected:
+        return None, f"Not changed: {key} was written by the user, and only they change it."
+    if not about(quote, notes_now[key]):
+        return None, f"Not changed: the evidence is not about what {key} says."
+    if tool == "update":
+        if not new or new == notes_now[key]:
+            return None, "Not changed: the text is the same."
+        return ("update", key, new), None
+    if tool == "forget":
+        return ("delete", key, None), None
+    return None, f"There is no memory tool called {tool}."
 
 
 def exchange_text(messages, chars=3000):

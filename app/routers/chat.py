@@ -891,6 +891,56 @@ async def _refresh_summary(principal, session, user_id, conversation, model):
     await session.commit()
 
 
+MEMORY_TOOLS = object()     # where[] marker for the agent's memory tools, as self_tools.BUILTIN is for its own
+
+
+async def _agent_memory(user_id):
+    """The user's notes for one agent turn, keyed n1, n2 ... as the model sees them."""
+    async with session_factory()() as db:
+        notes = list((await db.execute(select(MemoryEntry).where(
+            MemoryEntry.user_id == user_id, MemoryEntry.scope == "user").order_by(MemoryEntry.id))).scalars())
+    state = {"ids": {f"n{i + 1}": n.id for i, n in enumerate(notes)},
+             "text": {f"n{i + 1}": n.content for i, n in enumerate(notes)},
+             "manual": {f"n{i + 1}" for i, n in enumerate(notes) if n.source == "manual"}}
+    state["listed"] = lambda: [(k, t, k in state["manual"]) for k, t in state["text"].items()]
+    return state
+
+
+async def _memory_edit(user_id, memory, tool, args, seen_text):
+    """One memory tool call from the agent, checked and applied at once. Returns (text, failed)."""
+    if not memory:
+        return "Memory is switched off.", True
+    edit, refused = memory_tool.check_tool_edit(tool, args, memory["text"], seen_text, memory["manual"])
+    if refused:
+        return refused, True
+    action, key, text = edit
+    async with session_factory()() as db:
+        if action == "add":
+            if len(memory["text"]) >= settings.max_user_notes():
+                return (f"Not added: there are {settings.max_user_notes()} notes, the most kept. "
+                        "Update or forget one first."), True
+            entry = MemoryEntry(user_id=user_id, scope="user", content=text, source="auto")
+            db.add(entry)
+            await db.commit()
+            key = f"n{max([int(k[1:]) for k in memory['text']] + [0]) + 1}"
+            memory["ids"][key], memory["text"][key] = entry.id, text
+            log.info("Agent noted for user %s: %s", user_id, text)
+            return f"Noted as {key}.", False
+        entry = await db.get(MemoryEntry, memory["ids"][key])
+        if entry is None or entry.user_id != user_id:
+            return f"Not changed: {key} is gone.", True
+        if action == "update":
+            log.info("Agent updated a note for user %s: %r -> %r", user_id, entry.content, text)
+            entry.content, entry.updated_at = text, utcnow()
+            memory["text"][key] = text
+        else:
+            log.info("Agent forgot a note for user %s: %r", user_id, entry.content)
+            await db.delete(entry)
+            del memory["text"][key], memory["ids"][key]
+        await db.commit()
+    return f"{key} {'updated' if action == 'update' else 'forgotten'}.", False
+
+
 NOTES_MIN_BILLIONS = 14     # smaller models were measured to record plans as facts and to duplicate notes
 
 
@@ -2046,10 +2096,20 @@ async def run_agent(payload: AgentIn, principal: Principal = Depends(authenticat
             yield _error("None of the switched-on tool servers answered, so there are no tools "
                          "to use. Check them on the Tools page.")
             return
+        # The user's notes, as tools: a note found to be wrong is fixed then and there (_memory_edit)
+        memory = await _agent_memory(user_id) if memory_tool.is_enabled() else None
+        if memory:
+            for spec in memory_tool.memory_tools(agent.SEPARATOR):
+                where[spec["function"]["name"]] = (MEMORY_TOOLS, spec["function"]["name"].split(agent.SEPARATOR)[-1])
+                tools.append(spec)
         yield _event("tools", tools=[t["function"]["name"] for t in tools])
 
+        latest_said = next((m.content for m in reversed(payload.messages) if m.role == "user"), "")
+        seen = [latest_said or ""]      # what this turn has shown: evidence a note may be changed on
+        extra = [agent.about_self() if own else "",
+                 memory_tool.tool_guide(memory["listed"](), agent.SEPARATOR) if memory else ""]
         messages = agent.with_system([{"role": m.role, "content": m.content} for m in payload.messages],
-                                     agent.about_self() if own else "")
+                                     "\n\n".join(e for e in extra if e))
         budget = agent.Budget()
         answer, finished = "", None
 
@@ -2093,7 +2153,11 @@ async def run_agent(payload: AgentIn, principal: Principal = Depends(authenticat
                 else:
                     server, tool = known
                     try:
-                        if server is self_tools.BUILTIN:
+                        if server is MEMORY_TOOLS:
+                            text, bad = await _memory_edit(user_id, memory, tool,
+                                                           agent.arguments(call.get("arguments")),
+                                                           "\n".join(seen))
+                        elif server is self_tools.BUILTIN:
                             text, bad = await self_tools.call(
                                 tool, agent.arguments(call.get("arguments")),
                                 {"principal": principal, "model": payload.model,
@@ -2110,6 +2174,8 @@ async def run_agent(payload: AgentIn, principal: Principal = Depends(authenticat
                         text, bad = f"{e.__class__.__name__}: {e}", True
                 seconds = round(time.monotonic() - began, 1)
                 budget.take(text)
+                if known and known[0] is not MEMORY_TOOLS:
+                    seen.append(text)
                 # The same field names the live event uses, so one renderer draws both: a turn
                 # being watched and the same turn read back tomorrow
                 steps.append({"tool": call["name"], "failed": bad, "seconds": seconds,
@@ -2143,6 +2209,9 @@ async def run_agent(payload: AgentIn, principal: Principal = Depends(authenticat
                         attachments=json.dumps(filed)))
                     conversation.updated_at = utcnow()
                     await db.commit()
+            if memory_tool.is_enabled():
+                # The same check as after a chat turn, for whatever the agent did not note itself
+                asyncio.create_task(_refresh_memory(principal, user_id, payload.conversation_id))
 
     return StreamingResponse(stream(), media_type="text/event-stream",
                              headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
