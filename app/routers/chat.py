@@ -836,9 +836,9 @@ _refreshing = set()
 
 
 async def _refresh_memory(principal, user_id, conversation_id):
-    """Rewrites the conversation summary, then folds what it learned into the user's notes.
+    """After a turn: the conversation's running summary when it is due, and the user's notes always.
 
-    Runs after a turn, in its own session, and never disturbs the chat: failures are only logged.
+    Runs in its own session and never disturbs the chat: failures are only logged.
     """
     if conversation_id in _refreshing:
         return  # a refresh is already running; the next turn picks up whatever it misses
@@ -850,54 +850,105 @@ async def _refresh_memory(principal, user_id, conversation_id):
                 .where(Conversation.id == conversation_id, Conversation.user_id == user_id))).scalar_one_or_none()
             if conversation is None:
                 return
-            keep = settings.keep_recent_messages()
-            older = conversation.messages[:-keep] if keep else list(conversation.messages)
-            if not older:
-                return
             model = memory_tool.model_for(conversation.model)
             if not model:
                 return
-            entry = await _conversation_memory(session, user_id, conversation_id)
-            if entry is not None and entry.source == "manual":
-                return  # the user wrote these notes themselves
-            if entry is not None and len(older) - entry.covered_count < settings.summarize_every():
-                return
-
-            previous = entry.content if entry else None
-            # The whole conversation is summarised, but only the older turns count as covered: the
-            # recent ones are still sent in full, and the notes are the better for including them
-            summary = memory_tool.clean_text(await _ask_helper(
-                principal, memory_tool.summary_request(previous, memory_tool.transcript(conversation.messages),
-                                                       model)))
-            if not summary:
-                return
-            if entry is None:
-                entry = MemoryEntry(user_id=user_id, scope="conversation", conversation_id=conversation_id)
-                session.add(entry)
-            entry.content = summary
-            entry.covered_count = len(older)
-            entry.source = "auto"
-            entry.updated_at = utcnow()
-            await session.commit()
-
-            notes = [n for n in (await session.execute(select(MemoryEntry).where(
-                MemoryEntry.user_id == user_id, MemoryEntry.scope == "user"))).scalars()]
-            kept = [n for n in notes if n.source == "manual"]  # the user's own notes stay untouched
-            automatic = [n for n in notes if n.source == "auto"]
-            updated = memory_tool.parse_notes(await _ask_helper(
-                principal, memory_tool.notes_request([n.content for n in notes], summary, model)))
-            updated = [u for u in updated if u not in [k.content for k in kept]]
-            for note, content in zip(automatic, updated):
-                note.content, note.updated_at = content, utcnow()
-            for content in updated[len(automatic):]:
-                session.add(MemoryEntry(user_id=user_id, scope="user", content=content, source="auto"))
-            for note in automatic[len(updated):]:
-                await session.delete(note)   # dropped by the model, usually because it was superseded
-            await session.commit()
+            await _refresh_summary(principal, session, user_id, conversation, model)
+            notes_model = await _notes_model(conversation.model)
+            if notes_model:
+                await _check_notes(principal, session, user_id, conversation, notes_model)
     except Exception as e:  # memory is a convenience; never let it break a conversation
         log.warning("Could not refresh memory for conversation %s: %s", conversation_id, e)
     finally:
         _refreshing.discard(conversation_id)
+
+
+async def _refresh_summary(principal, session, user_id, conversation, model):
+    """Rewrites the summary of the turns that are no longer sent in full, every few turns."""
+    keep = settings.keep_recent_messages()
+    older = conversation.messages[:-keep] if keep else list(conversation.messages)
+    if not older:
+        return
+    entry = await _conversation_memory(session, user_id, conversation.id)
+    if entry is not None and entry.source == "manual":
+        return  # the user wrote these notes themselves
+    if entry is not None and len(older) - entry.covered_count < settings.summarize_every():
+        return
+    previous = entry.content if entry else None
+    # The whole conversation is summarised, but only the older turns count as covered: the recent
+    # ones are still sent in full, and the notes are the better for including them
+    summary = memory_tool.clean_text(await _ask_helper(
+        principal, memory_tool.summary_request(previous, memory_tool.transcript(conversation.messages), model)))
+    if not summary:
+        return
+    if entry is None:
+        entry = MemoryEntry(user_id=user_id, scope="conversation", conversation_id=conversation.id)
+        session.add(entry)
+    entry.content = summary
+    entry.covered_count = len(older)
+    entry.source = "auto"
+    entry.updated_at = utcnow()
+    await session.commit()
+
+
+NOTES_MIN_BILLIONS = 14     # smaller models were measured to record plans as facts and to duplicate notes
+
+
+async def _notes_model(conversation_model):
+    """Which model keeps the user's notes: one able to, and never one loaded just for this.
+
+    memory.model when it is set. Otherwise the conversation's own model when it is big enough, then a
+    big enough model already on the GPU. llama3.2:3b, asked to keep notes, missed a RAM upgrade, wrote
+    a planned GPU down as installed and added a note that was already there - so with only a small
+    model about, this turn's check is skipped, and the next turn with a capable one does it.
+    """
+    if settings.memory_model():
+        return settings.memory_model()
+    available = await backends.available_models()
+
+    def able(name):
+        backend = available.get(name)
+        if backend is None or chooser.is_helper(name):
+            return False
+        return chooser._parameters({"name": name, "parameter_size": (backend.details or {}).get(
+            "parameter_size", "")}) >= NOTES_MIN_BILLIONS
+    if conversation_model and able(conversation_model):
+        return conversation_model
+    for name in supervisor.loaded_names() + await supervisor.ollama_loaded():
+        if able(name):
+            return name
+    return None
+
+
+async def _check_notes(principal, session, user_id, conversation, model):
+    """Checks the latest exchange against the user's notes and applies the edits it calls for.
+
+    Every turn, so a fact that stops being true mid-task is taken out then and there, not left to
+    contradict the next conversation. The user's own notes are shown, so nothing repeats them, and
+    are never changed.
+    """
+    exchange, user_text = memory_tool.exchange_text(conversation.messages)
+    if not exchange:
+        return
+    notes = list((await session.execute(select(MemoryEntry).where(
+        MemoryEntry.user_id == user_id, MemoryEntry.scope == "user").order_by(MemoryEntry.id))).scalars())
+    by_key = {f"n{i + 1}": note for i, note in enumerate(notes)}
+    protected = {key for key, note in by_key.items() if note.source == "manual"}
+    changes = memory_tool.parse_changes(await _ask_helper(principal, memory_tool.check_request(
+        [(key, note.content, key in protected) for key, note in by_key.items()], exchange, model)),
+        {key: note.content for key, note in by_key.items()}, user_text, protected)
+    if not changes or not any(changes.values()):
+        return
+    for key, text in changes["update"].items():
+        by_key[key].content, by_key[key].updated_at = text, utcnow()
+    for key in changes["delete"]:
+        await session.delete(by_key[key])
+    room = settings.max_user_notes() - (len(notes) - len(changes["delete"]))
+    for text in changes["add"][:max(room, 0)]:
+        session.add(MemoryEntry(user_id=user_id, scope="user", content=text, source="auto"))
+    await session.commit()
+    log.info("Notes for user %s: %d updated, %d deleted, %d added", user_id,
+             len(changes["update"]), len(changes["delete"]), min(len(changes["add"]), max(room, 0)))
 
 
 class RenderIn(BaseModel):
