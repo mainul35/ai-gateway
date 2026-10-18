@@ -205,6 +205,16 @@ a.paper{color:var(--text);text-decoration:none}
 .thumbs{display:flex;gap:.5rem;flex-wrap:wrap;margin-bottom:.4rem}
 .thumbs img{height:5.5rem;max-width:9rem;object-fit:cover;border-radius:8px;border:1px solid var(--border);cursor:zoom-in}
 .pending{position:relative}
+/* Messages waiting for the current answer to finish, above the composer */
+.queue{display:flex;flex-direction:column;gap:.3rem;margin-bottom:.5rem}
+.queued-item{display:flex;align-items:center;gap:.5rem;font-size:.82rem;background:var(--bg);
+             border:1px dashed var(--border);border-radius:8px;padding:.3rem .5rem}
+.queued-item .tag{font-size:.7rem;color:var(--muted);text-transform:uppercase;letter-spacing:.04em}
+.queued-item .text{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.queued-item button{background:none;border:none;color:var(--muted);cursor:pointer;font-size:1rem;line-height:1}
+/* A message just sent, before it is saved; and what is happening to it, in the conversation */
+.msg.user.sending{opacity:.85}
+.deciding-line{display:flex;align-items:center;gap:.5rem;font-size:.85rem;color:var(--muted);margin:.2rem 0 .6rem}
 .pending button{position:absolute;top:-.4rem;right:-.4rem;width:1.3rem;height:1.3rem;border-radius:50%;border:none;
                 background:var(--danger);color:#fff;cursor:pointer;font-size:.8rem;line-height:1;padding:0}
 .pending .tag{position:absolute;left:.3rem;bottom:.3rem;font-size:.65rem;background:rgba(0,0,0,.7);padding:0 .3rem;border-radius:4px}
@@ -467,6 +477,7 @@ a.paper{color:var(--text);text-decoration:none}
     <div class="composer-wrap">
       <div class="column">
         <div class="composer" id="composer">
+          <div class="queue" id="queue" hidden></div>
           <div class="thumbs" id="pending"></div>
           <textarea id="prompt" rows="1"
                     title="Enter to send, Shift+Enter for a new line"
@@ -659,12 +670,16 @@ const canSee = id => (models[id]?.capabilities || []).includes('vision');
 // router itself, already loaded: falling back to a 31B loaded it for nothing, and took the GPU.
 // Everything that asks "is there a picture attached" means a picture, not a PDF
 const attachedPictures = () => pending.filter(p => !p.document);
+// The attachments of the message being answered. The composer's are `pending`: they are moved here
+// when a message is sent, so that a picture attached for the next message never joins this one.
+let turnFiles = [];
+const turnPictures = () => turnFiles.filter(p => !p.document);
 const choosing = () => modelSelect.value === 'auto';
 let chosenModel = '';
-function currentModel(){
+function currentModel(needsVision = attachedPictures().length > 0 || turnPictures().length > 0){
   if(!choosing()) return modelSelect.value;
   if(chosenModel && models[chosenModel]) return chosenModel;
-  return smallestModel(attachedPictures().length > 0) || Object.keys(models)[0] || '';
+  return smallestModel(needsVision) || Object.keys(models)[0] || '';
 }
 // Billions of parameters from the name (qwen3:1.7b, gemma4:31b, qwen3-next-80b); 30 when it says
 // nothing, so a model of unknown size never passes for the smallest. Same rule as app/tools/chooser.py.
@@ -1575,8 +1590,9 @@ function showAnswer(box){
 async function resend(box){
   if(turning || controller || !box._messageId) return;
   turning = true;
+  refreshSendButton();
   try{ await resendTurn(box); }
-  finally{ turning = false; }
+  finally{ turning = false; refreshSendButton(); nextInQueue(); }
 }
 
 async function resendTurn(box){
@@ -1681,7 +1697,7 @@ function startEdit(box){
       const images = (box._files || []).map(f => ({id: f.id, url: fileUrl(f.id),
                                                    name: f.name || 'attachment', document: !!f.document}));
       await send({text, images, again: {messageId: box._messageId, replaceAt: null}}, true);
-    }finally{ turning = false; }
+    }finally{ turning = false; refreshSendButton(); nextInQueue(); }
   }
 }
 
@@ -2280,7 +2296,7 @@ async function sendAgent(text, again){
     showError(`${model} cannot call tools. Pick a model marked "calls tools" to use the agent.`);
     return;
   }
-  if(!again){ promptBox.value = ''; fitComposer(); history.push({role: 'user', content: text, images: []}); }
+  if(!again){ history.push({role: 'user', content: text, images: []}); }
   const asked = await askedNow(text, [], [], null, again);
 
   const box = answerBox(again ? again.messageId : asked?._messageId, model);
@@ -2388,7 +2404,7 @@ async function sendMap(text, decision, fix, again){
     showError('Could not save the conversation: ' + errorText(e));
     return;
   }
-  if(!again){ promptBox.value = ''; fitComposer(); history.push({role: 'user', content: text, images: []}); }
+  if(!again){ history.push({role: 'user', content: text, images: []}); }
   const asked = await askedNow(text, [], [], null, again);
 
   const box = answerBox(again ? again.messageId : asked?._messageId, 'OpenStreetMap');
@@ -2449,7 +2465,7 @@ async function sendMedia(text, decision, again){
     showError('Could not save the conversation: ' + errorText(e));
     return;
   }
-  if(!again){ promptBox.value = ''; fitComposer(); history.push({role: 'user', content: text, images: []}); }
+  if(!again){ history.push({role: 'user', content: text, images: []}); }
   const asked = await askedNow(text, [], [], null, again);
 
   const box = answerBox(again ? again.messageId : asked?._messageId, 'Picture search');
@@ -2745,7 +2761,14 @@ async function saveMessage(message){
    When the question is being asked again it is already both of those, so nothing happens. */
 async function askedNow(text, imageUrls, files, attachments, again, asContext = true){
   if(again) return chat.querySelector(`.msg.user[data-message="${again.messageId}"]`);
-  const box = addUserMessage(text, imageUrls, files, asContext);
+  let box;
+  if(provisional){
+    // Shown the moment it was sent; now it is asked, and saved
+    box = provisional;
+    provisional = null;
+    box.classList.remove('sending');
+    box._images = asContext ? (box._files || []).map(f => f.id) : [];
+  }else box = addUserMessage(text, imageUrls, files, asContext);
   const saved = await saveMessage({role: 'user', content: text, attachments: attachments || null});
   if(saved){
     box._messageId = saved.id;
@@ -2798,8 +2821,19 @@ async function postStream(path, payload){
 }
 
 function busy(on){
-  document.getElementById('send').hidden = on;
   document.getElementById('stop').hidden = !on;
+  refreshSendButton();
+}
+
+/* While a message is being answered, Send queues the next one instead of waiting for the box to
+   be free: what is typed then goes out by itself when the answer is finished. */
+function refreshSendButton(){
+  const button = document.getElementById('send');
+  const working = turning || !!controller;
+  button.hidden = false;
+  if(Object.keys(models).length) button.disabled = false;
+  button.textContent = working ? 'Queue' : 'Send';
+  button.title = working ? 'Sends this when the current answer is finished' : '';
 }
 
 // --- sending ----------------------------------------------------------------
@@ -2815,7 +2849,7 @@ async function decideAction(text, hasImages){
   try{
     const decision = await api('/chat/route', {method: 'POST', signal: deciding.signal, headers: JSON_HEADERS, body: JSON.stringify({
       message: text, has_images: hasImages, web_search: searchOn, image_generation: imageMode(),
-      attachments: pending.filter(p => !p.uploading).map(p => ({kind: p.document ? 'document' : 'picture',
+      attachments: turnFiles.filter(p => !p.uploading).map(p => ({kind: p.document ? 'document' : 'picture',
                                                                name: (p.name || '').slice(0, 200)})),
       maps: tools.maps && caps.maps, photo_blur: blurAllowed(),
       choose_model: choosing(), current_model: chosenModel,
@@ -2855,8 +2889,17 @@ document.getElementById('backdropColour').addEventListener('change', e => {
    there for those too: it cancels the turn before the message is sent anywhere. */
 let deciding = null;
 function setDeciding(on){
-  document.getElementById('send').disabled = on;
-  document.getElementById('deciding').hidden = !on;
+  // In the conversation, under the message it is about, rather than in the composer, which is
+  // already free for the next one
+  let line = chat.querySelector('.deciding-line');
+  if(on && !line){
+    line = document.createElement('div');
+    line.className = 'deciding-line';
+    line.innerHTML = '<span class="spinner"></span><span>Working out what you are asking for&hellip;</span>';
+    chat.appendChild(line);
+    followAlong();
+  }
+  if(!on) line?.remove();
   busy(on);
 }
 
@@ -2868,26 +2911,111 @@ let turning = false;
 
 async function send(redo = null, claimed = false){
   if(!claimed){
-    if(turning || controller) return;
+    if(turning || controller){
+      if(!redo) enqueue();
+      return;
+    }
     turning = true;
   }
+  refreshSendButton();
   try{ await sendTurn(redo); }
-  finally{ if(!claimed) turning = false; }
+  finally{
+    if(!claimed){
+      turning = false;
+      refreshSendButton();
+      nextInQueue();
+    }
+  }
 }
 
-/* One turn. Normally it takes what is in the composer; asking a question again passes the words
-   and the attachments back in, along with the question they belong to, and the answer joins the
-   ones already filed under it. */
-async function sendTurn(redo = null){
-  const text = redo ? redo.text : promptBox.value.trim();
-  if(controller) return;
-  if(redo) pending = redo.images || [];
+/* Messages written while another was being answered, oldest first. Each goes out on its own when
+   the one before it is finished; until then it waits above the composer, where it can be taken
+   back. */
+const queued = [];
+let provisional = null;     // the message just sent: on screen at once, saved once it is asked
+
+function enqueue(){
+  const text = promptBox.value.trim();
   if(!text && !pending.length) return;
   if(pending.some(p => p.uploading)){
     showError('One moment: the picture is still uploading.');
     return;
   }
-  const asking = redo ? redo.again : null;
+  queued.push({text, images: pending, fresh: true});
+  pending = []; renderPending();
+  promptBox.value = ''; fitComposer();
+  renderQueue();
+}
+
+function nextInQueue(){
+  if(turning || controller || !queued.length) return;
+  const next = queued.shift();
+  renderQueue();
+  setTimeout(() => send(next), 0);
+}
+
+function renderQueue(){
+  const strip = document.getElementById('queue');
+  strip.hidden = !queued.length;
+  strip.innerHTML = queued.map((q, i) => `<div class="queued-item"><span class="tag">Queued</span>
+      <span class="text">${escapeHtml(q.text || 'attachment only')}</span>
+      ${q.images.length ? `<span class="muted">+ ${q.images.length} file${q.images.length === 1 ? '' : 's'}</span>` : ''}
+      <button type="button" data-unqueue="${i}" title="Take it back into the box">&times;</button></div>`).join('');
+}
+
+document.getElementById('queue').addEventListener('click', e => {
+  const button = e.target.closest('[data-unqueue]');
+  if(!button) return;
+  const [item] = queued.splice(Number(button.dataset.unqueue), 1);
+  renderQueue();
+  // Back into the box to be changed, unless something else is being written there
+  if(item && !promptBox.value.trim() && !pending.length){
+    promptBox.value = item.text; fitComposer();
+    pending = item.images; renderPending();
+  }
+});
+
+/* One turn. Normally it takes what is in the composer; asking a question again passes the words
+   and the attachments back in, along with the question they belong to, and the answer joins the
+   ones already filed under it. */
+async function sendTurn(redo = null){
+  const fresh = !redo || !!redo.fresh;      // a new message, from the composer or the queue
+  const text = redo ? redo.text : promptBox.value.trim();
+  if(controller) return;
+  const files = redo ? (redo.images || []) : pending;
+  if(!text && !files.length) return;
+  if(files.some(p => p.uploading)){
+    showError('One moment: the picture is still uploading.');
+    return;
+  }
+  turnFiles = files;
+  if(!redo){
+    pending = []; renderPending();
+    promptBox.value = ''; fitComposer();
+  }
+  if(fresh){
+    provisional = addUserMessage(text, files.map(f => f.url || fileUrl(f.id)),
+                                 files.map(f => ({id: f.id, name: f.name, document: !!f.document})));
+    provisional.classList.add('sending');
+    followAlong();
+  }
+  try{ await routeTurn(text, fresh ? null : redo.again); }
+  finally{
+    if(provisional){
+      // It never went out - stopped while being worked out, or refused before it was asked. It
+      // goes back into the box rather than vanishing, unless the next message is being written.
+      provisional.remove();
+      provisional = null;
+      if(!promptBox.value.trim() && !pending.length){
+        promptBox.value = text; fitComposer();
+        pending = files; renderPending();
+      }
+    }
+    turnFiles = [];
+  }
+}
+
+async function routeTurn(text, asking){
   // Asked here, in the same turn as the tap that called this. On iOS the permission prompt is
   // tied to a gesture, and waiting for the router to answer first spends it: by then the ask is
   // silently refused and the map is told nobody knows where you are.
@@ -2896,10 +3024,10 @@ async function sendTurn(redo = null){
               ? myLocation() : Promise.resolve(null);
 
   // A YouTube link asking for its words needs no model to decide it: the link and the words say it
-  const subs = !attachedPictures().length ? subtitleRequest(text) : null;
+  const subs = !turnPictures().length ? subtitleRequest(text) : null;
   if(subs) return sendSubtitles(text, subs, asking);
 
-  const decision = await decideAction(text, attachedPictures().length > 0);
+  const decision = await decideAction(text, turnPictures().length > 0);
   if(decision.action === 'stopped') return;
   // The agent is a choice, not a guess: switched on, it takes the turn
   if(tools.agent && caps.agent) return sendAgent(text, asking);
@@ -2912,8 +3040,8 @@ async function sendTurn(redo = null){
 }
 
 async function sendChat(text, decision, again){
-  const model = decision.model || currentModel();
-  if(attachedPictures().length && !canSee(model)){
+  const model = decision.model || currentModel(turnPictures().length > 0);
+  if(turnPictures().length && !canSee(model)){
     showError(choosing()
       ? `None of your models can see images, so ${model} cannot read this attachment.`
       : `${model} cannot see images. Pick a model marked "sees images", or remove the attachment.`);
@@ -2927,10 +3055,10 @@ async function sendChat(text, decision, again){
     showError('Could not save the conversation: ' + errorText(e));
     return;
   }
-  const files = pending.map(f => ({id: f.id, name: f.name, document: !!f.document}));
+  const files = turnFiles.map(f => ({id: f.id, name: f.name, document: !!f.document}));
   const images = files.map(f => f.id);
-  pending = []; renderPending();
-  if(!again){ promptBox.value = ''; fitComposer(); history.push({role: 'user', content: text, images}); }
+  turnFiles = [];
+  if(!again){ history.push({role: 'user', content: text, images}); }
   const asked = await askedNow(text, images.map(fileUrl), files,
                                files.length ? {images: files.map(f => ({file_id: f.id, document: f.document, name: f.name}))} : null,
                                again);
@@ -3084,7 +3212,7 @@ async function sendSubtitles(text, decision, again){
     showError('Could not save the conversation: ' + errorText(e));
     return;
   }
-  if(!again){ promptBox.value = ''; fitComposer(); history.push({role: 'user', content: text, images: []}); }
+  if(!again){ history.push({role: 'user', content: text, images: []}); }
   const asked = await askedNow(text, [], [], null, again);
   const box = answerBox(again ? again.messageId : asked?._messageId, 'Subtitles');
   noteDecision(box, decision);
@@ -3196,7 +3324,7 @@ function languageName(code){
 
 async function sendPhoto(text, decision, again){
   // The first picture: a document attached alongside it is not a photograph to work on
-  const source = attachedPictures()[0];
+  const source = turnPictures()[0];
   if(!source){ showError('Attach a photo first.'); return; }
   showError('');
   const cleaning = decision.action === 'clean';
@@ -3207,9 +3335,9 @@ async function sendPhoto(text, decision, again){
     showError('Could not save the conversation: ' + errorText(e));
     return;
   }
-  const references = pending.slice(1);
-  pending = []; renderPending();
-  if(!again){ promptBox.value = ''; fitComposer(); history.push({role: 'user', content: text, images: []}); }
+  const references = turnFiles.filter(f => f !== source);
+  turnFiles = [];
+  if(!again){ history.push({role: 'user', content: text, images: []}); }
   const asked = await askedNow(text, [source, ...references].map(f => f.url),
                                [{id: source.id, name: source.name}],
                                {mode: 'photo', images: [{file_id: source.id}]}, again, false);
@@ -3270,10 +3398,10 @@ async function sendImage(text, decision, again){
   // Pictures and documents are told apart: the first picture is the one to edit, and documents are
   // read for what to draw. Taking the first attachment, whatever it was, sent a PDF to the image
   // editor as the picture to change, where it failed as "cannot identify image file".
-  const pictures = attachedPictures();
+  const pictures = turnPictures();
   const source = pictures[0] || null;
   const references = pictures.slice(1, editLimit());
-  const documentsToRead = pending.filter(p => p.document);
+  const documentsToRead = turnFiles.filter(p => p.document);
   const size = document.getElementById('imageSize').value;
   const strength = parseFloat(document.getElementById('strength').value);
   try{
@@ -3282,9 +3410,9 @@ async function sendImage(text, decision, again){
     showError('Could not save the conversation: ' + errorText(e));
     return;
   }
-  pending = []; renderPending();
+  turnFiles = [];
   // Image turns are kept in the transcript as text only, so a chat model later knows what was made
-  if(!again){ promptBox.value = ''; fitComposer(); history.push({role: 'user', content: text, images: []}); }
+  if(!again){ history.push({role: 'user', content: text, images: []}); }
   const asked = await askedNow(text, source ? [source, ...references].map(f => f.url) : [],
                                source ? [source, ...references].map(f => ({id: f.id, name: f.name})) : [],
                                {mode: 'image', images: source ? [source, ...references].map(f => ({file_id: f.id})) : []},
