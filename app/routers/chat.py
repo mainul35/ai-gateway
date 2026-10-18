@@ -18,10 +18,10 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from app import access, backends, limits, settings, usage as usage_log
+from app import access, backends, feedback, limits, settings, usage as usage_log
 from app.auth import Principal, authenticate
 from app.db import get_session, session_factory
-from app.models import ChatFile, Conversation, ConversationMessage, MemoryEntry, utcnow
+from app.models import AnswerFeedback, ChatFile, Conversation, ConversationMessage, MemoryEntry, utcnow
 from app.engine.supervisor import supervisor
 from app.routers.openai_v1 import PROXY_PATHS, forward
 from app.tools import (agent, chooser, documents, image_prompt, images, jobs, map_plan,
@@ -129,9 +129,57 @@ async def create_conversation(payload: ConversationIn, principal: Principal = De
 @router.get("/conversations/{conversation_id}")
 async def get_conversation(conversation_id: int, principal: Principal = Depends(authenticate),
                            session: AsyncSession = Depends(get_session)):
-    conversation = await _owned(session, conversation_id, _require_user(principal), with_messages=True)
+    user = _require_user(principal)
+    conversation = await _owned(session, conversation_id, user, with_messages=True)
+    ids = [m.id for m in conversation.messages if m.role == "assistant"]
+    judged = {f.message_id: {"helpful": f.helpful, "accurate": f.accurate} for f in (await session.execute(
+        select(AnswerFeedback).where(AnswerFeedback.user_id == user.id,
+                                     AnswerFeedback.message_id.in_(ids)))).scalars()} if ids else {}
     return {**_conversation_json(conversation, len(conversation.messages)),
-            "messages": [_message_json(m) for m in conversation.messages]}
+            "messages": [{**_message_json(m), "feedback": judged.get(m.id)} for m in conversation.messages]}
+
+
+class FeedbackIn(BaseModel):
+    # The answer: by id when the page has it, otherwise by where it is and how it begins - an answer
+    # that has just streamed is saved by the server as it finishes, and the page never learns its id
+    message_id: int | None = None
+    conversation_id: int | None = None
+    starts_with: str = Field(default="", max_length=400)
+    helpful: bool | None = None
+    accurate: bool | None = None
+    category: str | None = Field(default=None, max_length=32)
+
+
+@router.post("/feedback")
+async def give_feedback(payload: FeedbackIn, principal: Principal = Depends(authenticate),
+                        session: AsyncSession = Depends(get_session)):
+    """Helpful? Accurate? for one answer, from the person who asked. Asking again replaces the verdict."""
+    user = _require_user(principal)
+    if payload.message_id is not None:
+        message = await session.get(ConversationMessage, payload.message_id)
+        if message is not None:
+            await _owned(session, message.conversation_id, user)
+    elif payload.conversation_id is not None and payload.starts_with:
+        await _owned(session, payload.conversation_id, user)
+        message = (await session.execute(
+            select(ConversationMessage).where(ConversationMessage.conversation_id == payload.conversation_id,
+                                              ConversationMessage.role == "assistant",
+                                              ConversationMessage.content.startswith(payload.starts_with, autoescape=True))
+            .order_by(ConversationMessage.id.desc()).limit(1))).scalar_one_or_none()
+    else:
+        message = None
+    if message is None or message.role != "assistant":
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "That answer is not saved, so it cannot be rated")
+    entry = (await session.execute(select(AnswerFeedback).where(
+        AnswerFeedback.message_id == message.id, AnswerFeedback.user_id == user.id))).scalar_one_or_none()
+    if entry is None:
+        entry = AnswerFeedback(message_id=message.id, user_id=user.id, model=message.model)
+        session.add(entry)
+    entry.helpful, entry.accurate, entry.updated_at = payload.helpful, payload.accurate, utcnow()
+    if payload.category:
+        entry.category = payload.category
+    await session.commit()
+    return {"message_id": message.id, "helpful": entry.helpful, "accurate": entry.accurate}
 
 
 @router.patch("/conversations/{conversation_id}")
@@ -683,6 +731,9 @@ async def complete(payload: CompleteIn, principal: Principal = Depends(authentic
         async for chunk in response.body_iterator:
             answer.feed(chunk)
             yield chunk
+        # Measured here, where the model's words arrive one by one. The browser's own clock can see
+        # them in a burst - after a web search, through a proxy - and once showed 1760 tok/s.
+        yield _event("stats", stats=answer.stats(), model=payload.model)
 
     async def save(_job):
         """Writes the turn down once the answer is finished, whoever is still watching."""
@@ -1407,6 +1458,8 @@ async def _choose_model(principal, session, category, has_images, prefer=None):
     """The best model this user may use for this kind of work, with the reason it was picked."""
     available = await backends.available_models()
     health = await usage_log.by_model(session, utcnow() - timedelta(days=CHOOSER_DAYS))
+    judged = await feedback.by_model(session, utcnow() - timedelta(days=CHOOSER_DAYS),
+                                     principal.user.id if principal.user else None)
     candidates = []
     for name, backend in available.items():
         if not access.can_use_model(principal, name):
@@ -1419,6 +1472,7 @@ async def _choose_model(principal, session, category, has_images, prefer=None):
             "context_length": backend.context_length,
             "health": health.get(name, {}),
             "blocked": supervisor.blocked_by_busy_gpu(name, backend),
+            "feedback": judged.get(name),
         })
     return chooser.pick(candidates, category, needs_vision=has_images, prefer=prefer)
 
