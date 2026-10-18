@@ -215,7 +215,8 @@ document.querySelectorAll('.agent-guide .origin-v1').forEach(e => e.textContent 
 // Applications: one command per app for the chosen model, in the shell of the chosen computer
 const APPS = [
   {id: 'claude', name: 'Claude Code', about: "Anthropic's coding agent, on the Messages API"},
-  {id: 'claude-desktop', name: 'Claude desktop app', about: 'every desktop session, macOS and Windows; restart the app after, --restore to undo', noModel: true},
+  {id: 'claude-desktop', name: 'Claude desktop app', about: 'every desktop session, macOS and Windows; quit the app (also from the tray) and open it again after either command', noModel: true,
+   undo: {label: 'Back to your Claude account', windows: '-Restore', unix: '--restore'}},
   {id: 'opencode', name: 'OpenCode', about: 'Open-source coding agent'},
   {id: 'codex', name: 'Codex CLI', about: "OpenAI's coding agent, on the Responses API"},
   {id: 'qwen', name: 'Qwen Code', about: "Qwen's coding agent"},
@@ -230,7 +231,9 @@ function renderApps(){
   const flag = windows ? '-Model' : '--model';
   document.getElementById('appList').innerHTML = APPS.map(a => `
     <div class="app-row"><div><strong>${a.name}</strong> <span class="muted">&middot; ${a.about}</span>
-      <pre><code class="copyable">ai-gateway launch ${a.id}${a.noModel ? '' : ` ${flag} ${escapeHtml(model)}`}</code></pre></div></div>`).join('');
+      <pre><code class="copyable">ai-gateway launch ${a.id}${a.noModel ? '' : ` ${flag} ${escapeHtml(model)}`}</code></pre>
+      ${a.undo ? `<div class="muted" style="margin-top:.4rem">${a.undo.label}</div>
+      <pre><code class="copyable">ai-gateway launch ${a.id} ${windows ? a.undo.windows : a.undo.unix}</code></pre>` : ''}</div></div>`).join('');
   document.getElementById('appInstallNote').textContent = windows
     ? 'ai-gateway then works in this window straight away, and in every PowerShell window opened after.'
     : 'If ai-gateway is then not found, ~/.local/bin is not on your PATH: add export PATH="$HOME/.local/bin:$PATH" to ~/.bashrc (or ~/.zshrc) and open a new terminal.';
