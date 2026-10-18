@@ -187,9 +187,11 @@ The person asking helps run this gateway. Its knowledge base holds the gateway's
 owner's other projects and the handbook of the homelab it runs in. For how something works, where it
 is defined, how it is deployed, or anything about those projects and machines, search it ({server}{sep}knowledge_search)
 and answer from what it returns, naming the files. If the search does not cover it, say so rather
-than filling the gap from general knowledge.
+than filling the gap from general knowledge."""
 
-You can also hand work on a project to the gateway's coding tasks. When the person asks for a change
+# Only while coding tasks are switched on (coding.enabled): their tools are left out otherwise, and a
+# model told about tools it does not have offers to use them
+ABOUT_CODING = """You can also hand work on a project to the gateway's coding tasks. When the person asks for a change
 to one of their projects - fix this, add that, redeploy it - or for a question about one to be
 worked through in its code, use {server}{sep}coding_projects to find the project and
 {server}{sep}start_coding_task to start it, then give them the link. A task runs in the background
@@ -199,7 +201,9 @@ going."""
 
 
 def about_self():
-    return ABOUT_SELF.format(server=self_tools.SERVER, sep=SEPARATOR)
+    from app.coding import runner as coding_runner     # here, as in self_tools: imported late
+    text = ABOUT_SELF + ("\n\n" + ABOUT_CODING if coding_runner.is_enabled() else "")
+    return text.format(server=self_tools.SERVER, sep=SEPARATOR)
 
 
 def with_system(messages, extra=""):
