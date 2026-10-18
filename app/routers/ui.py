@@ -9,6 +9,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app import settings, sso, throttle
+from app.coding import runner as coding_runner
 from app.db import get_session
 from app.models import User
 from app.security import verify_password
@@ -35,7 +36,7 @@ async def current_user(session: AsyncSession = Depends(get_session),
 def _page(request, name, user, **context):
     # Never cached: the page carries the whole interface, so a browser holding yesterday's copy runs
     # yesterday's playground against today's gateway, and the mismatch looks like a broken feature.
-    return templates.TemplateResponse(request, name, {"user": user, **context},
+    return templates.TemplateResponse(request, name, {"user": user, "coding_on": coding_runner.is_enabled(), **context},
                                       headers={"Cache-Control": "no-store"})
 
 
@@ -178,6 +179,8 @@ async def playground_page(request: Request, user: User | None = Depends(current_
 
 @router.get("/tasks")
 async def tasks_page(request: Request, user: User | None = Depends(current_user)):
+    if not coding_runner.is_enabled():
+        return RedirectResponse("/dashboard", status_code=303)
     return _require_role(user, "/tasks", ("manager", "admin")) or _page(request, "tasks.html", user)
 
 

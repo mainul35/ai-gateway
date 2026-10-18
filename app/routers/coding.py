@@ -10,7 +10,7 @@ import re
 
 import httpx
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import select
@@ -22,7 +22,15 @@ from app.coding import detect, remote, runner, workspace
 from app.db import get_session
 from app.models import CodingTask, CodingTaskEvent, Project
 
-router = APIRouter(prefix="/coding", tags=["coding"])
+def _switched_on(request: Request):
+    """Every coding endpoint, not only the ones that start work, is closed while coding.enabled is off:
+    listing, approving and retrying tasks, and the channel a local helper polls for commands. Only the
+    GitHub tokens stay reachable - the knowledge base reads repositories with them too."""
+    if not runner.is_enabled() and not request.url.path.startswith("/coding/github"):
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "Coding tasks are switched off (coding.enabled)")
+
+
+router = APIRouter(prefix="/coding", tags=["coding"], dependencies=[Depends(_switched_on)])
 
 IMAGE = re.compile(r"^[a-z0-9][a-z0-9._/:@-]{0,200}$")
 
