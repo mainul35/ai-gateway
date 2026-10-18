@@ -216,6 +216,44 @@ class CodingTask(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
 
 
+class GitHubConnection(Base):
+    """A GitHub user or organisation whose repositories one person has asked the gateway to index.
+
+    The token, when there is one, is read-only by intent, and stored sealed (app/secretbox.py). Without
+    one only public repositories are indexed. Each person's repositories are indexed for them alone.
+    """
+    __tablename__ = "github_connections"
+    __table_args__ = (UniqueConstraint("user_id", "owner"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    owner: Mapped[str] = mapped_column(String(100))
+    token_sealed: Mapped[str | None] = mapped_column(Text, nullable=True)
+    login: Mapped[str | None] = mapped_column(String(100), nullable=True)   # whose token it is
+    repositories: Mapped[int] = mapped_column(Integer, default=0)
+    private: Mapped[int] = mapped_column(Integer, default=0)
+    can_push: Mapped[bool] = mapped_column(Boolean, default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class ProjectNote(Base):
+    """What a person's coding agents learned about one of their projects, and how it connects to others.
+
+    Shared by every session of that person, whatever workspace it runs in: an agent working on one
+    project finds what an agent working on another wrote down - "alishan_pos calls ai-gateway's
+    /v1/messages with model auto". Kept true by the agents themselves, which update or remove a note
+    the moment the code shows it is wrong (app/routers/mcp_server.py).
+    """
+    __tablename__ = "project_notes"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    project: Mapped[str] = mapped_column(String(200), index=True)
+    content: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
 class AnswerFeedback(Base):
     """Whether an answer was helpful and accurate, as the person who asked judged it.
 

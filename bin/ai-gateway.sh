@@ -175,6 +175,19 @@ MAX_OUTPUT=16384; [ "$MAX_OUTPUT" -lt "$CONTEXT" ] || MAX_OUTPUT=$((CONTEXT / 4)
 
 json_str() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'; }
 
+# The project this session works in, for the gateway's project tools (its MCP server): owner/repo from
+# the git remote, else the folder's name. Agents get the person's other projects to search and read,
+# and the notes earlier sessions left about how they connect.
+workspace() {
+    url=$(git remote get-url origin 2>/dev/null || true)
+    case "$url" in
+        *github.com[:/]*) printf '%s' "$url" | sed -E 's#^.*github\.com[:/]+##; s#\.git$##' ;;
+        *) basename "$(git rev-parse --show-toplevel 2>/dev/null || pwd)" ;;
+    esac | tr -c 'A-Za-z0-9._/-' '_'
+}
+WORKSPACE=$(workspace)
+MCP_URL="$GATEWAY/v1/mcp"
+
 need() {   # the app's command, or its install command and out
     command -v "$1" >/dev/null 2>&1 && return 0
     echo "$2 is not installed. Install it with:" >&2
@@ -207,14 +220,23 @@ claude)
         CLAUDE_CODE_AUTO_MODE_SERVER=0 DISABLE_ERROR_REPORTING=1 DISABLE_FEEDBACK_COMMAND=1 \
         CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY=1 ENABLE_CLAUDEAI_MCP_SERVERS=false
     unset ANTHROPIC_API_KEY
-    run claude ${extra[@]+"${extra[@]}"}
+    # The project tools, for this run: one file per workspace (it holds the key, so only you may read
+    # it), and the tools allowed without asking - they read your own projects and notes. Given after
+    # the app's own arguments, since --mcp-config takes every word that follows it.
+    slug=$(printf '%s' "$WORKSPACE" | tr '/' '_')
+    mcp="$CLAUDE_CONFIG_DIR/ai-gateway-mcp-$slug.json"; allow="$CLAUDE_CONFIG_DIR/ai-gateway-allow.json"
+    (umask 077; mkdir -p "$CLAUDE_CONFIG_DIR"
+     printf '{"mcpServers":{"ai-gateway":{"type":"http","url":"%s","headers":{"Authorization":"Bearer %s","X-Workspace":"%s"}}}}\n' \
+         "$(json_str "$MCP_URL")" "$(json_str "$KEY")" "$(json_str "$WORKSPACE")" > "$mcp"
+     printf '{"permissions":{"allow":["mcp__ai-gateway"]}}\n' > "$allow")
+    run claude ${extra[@]+"${extra[@]}"} --settings "$allow" --mcp-config "$mcp"
     ;;
 opencode)
     need opencode "OpenCode" "curl -fsSL https://opencode.ai/install | bash"
     modalities=""; [ "$VISION" = 1 ] && modalities=',"modalities":{"input":["text","image"],"output":["text"]}'
     m=$(json_str "$MODEL")
     # Inline: nothing in opencode.json changes, and this run alone sees the gateway
-    export OPENCODE_CONFIG_CONTENT="{\"\$schema\":\"https://opencode.ai/config.json\",\"provider\":{\"ai-gateway\":{\"npm\":\"@ai-sdk/openai-compatible\",\"name\":\"AI Gateway\",\"options\":{\"baseURL\":\"$(json_str "$GATEWAY")/v1\",\"apiKey\":\"$(json_str "$KEY")\"},\"models\":{\"$m\":{\"name\":\"$m\",\"tool_call\":true,\"limit\":{\"context\":$CONTEXT,\"output\":$MAX_OUTPUT}$modalities}}}},\"model\":\"ai-gateway/$m\"}"
+    export OPENCODE_CONFIG_CONTENT="{\"\$schema\":\"https://opencode.ai/config.json\",\"provider\":{\"ai-gateway\":{\"npm\":\"@ai-sdk/openai-compatible\",\"name\":\"AI Gateway\",\"options\":{\"baseURL\":\"$(json_str "$GATEWAY")/v1\",\"apiKey\":\"$(json_str "$KEY")\"},\"models\":{\"$m\":{\"name\":\"$m\",\"tool_call\":true,\"limit\":{\"context\":$CONTEXT,\"output\":$MAX_OUTPUT}$modalities}}}},\"model\":\"ai-gateway/$m\",\"mcp\":{\"ai-gateway\":{\"type\":\"remote\",\"enabled\":true,\"url\":\"$(json_str "$MCP_URL")\",\"headers\":{\"Authorization\":\"Bearer $(json_str "$KEY")\",\"X-Workspace\":\"$(json_str "$WORKSPACE")\"}}}}"
     run opencode ${extra[@]+"${extra[@]}"}
     ;;
 qwen)
@@ -230,6 +252,8 @@ codex)
     run codex -c model_provider='"ai-gateway"' -c model_providers.ai-gateway.name='"AI Gateway"' \
         -c model_providers.ai-gateway.base_url="\"$GATEWAY/v1/\"" -c model_providers.ai-gateway.wire_api='"responses"' \
         -c model_providers.ai-gateway.env_key='"AI_GATEWAY_API_KEY"' -c model_context_window="$CONTEXT" \
+        -c mcp_servers.ai-gateway.url="\"$MCP_URL\"" -c mcp_servers.ai-gateway.bearer_token_env_var='"AI_GATEWAY_API_KEY"' \
+        -c "mcp_servers.ai-gateway.http_headers={\"X-Workspace\"=\"$WORKSPACE\"}" \
         -m "$MODEL" ${extra[@]+"${extra[@]}"}
     ;;
 hermes)

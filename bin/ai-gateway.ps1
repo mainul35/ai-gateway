@@ -180,6 +180,23 @@ function Start-App($exe, $appArgs) {
     finally { foreach ($name in $script:saved.Keys) { [Environment]::SetEnvironmentVariable($name, $script:saved[$name], "Process") } }
 }
 
+# The project this session works in, for the gateway's project tools (its MCP server): owner/repo from
+# the git remote, else the folder's name. Agents get the person's other projects to search and read,
+# and the notes earlier sessions left about how they connect.
+function Get-Workspace {
+    $url = ""
+    try { $url = (git remote get-url origin 2>$null) } catch {}
+    if ($url -match 'github\.com[:/]+(.+?)(\.git)?$') { $name = $Matches[1] }
+    else {
+        $top = ""
+        try { $top = (git rev-parse --show-toplevel 2>$null) } catch {}
+        $name = Split-Path -Leaf $(if ($top) { $top } else { (Get-Location).Path })
+    }
+    return ($name -replace '[^A-Za-z0-9._/-]', '_')
+}
+$Workspace = Get-Workspace
+$McpUrl = "$Gateway/v1/mcp"
+
 switch ($App) {
     "claude" {
         Need "claude" "Claude Code" "irm https://claude.ai/install.ps1 | iex"
@@ -196,7 +213,17 @@ switch ($App) {
             CLAUDE_CODE_ATTRIBUTION_HEADER = "0"; CLAUDE_CODE_AUTO_MODE_SERVER = "0"; DISABLE_ERROR_REPORTING = "1"
             DISABLE_FEEDBACK_COMMAND = "1"; CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY = "1"; ENABLE_CLAUDEAI_MCP_SERVERS = "false"
         }
-        Start-App "claude" $Extra; exit $script:ExitCode
+        # The project tools, for this run: one file per workspace (it holds the key), and the tools allowed
+        # without asking - they read your own projects and notes. Given after the app's own arguments,
+        # since --mcp-config takes every word that follows it.
+        $dir = Join-Path $HOME ".claude-gateway"
+        New-Item -ItemType Directory -Force $dir | Out-Null
+        $mcp = Join-Path $dir ("ai-gateway-mcp-" + ($Workspace -replace '/', '_') + ".json")
+        $allow = Join-Path $dir "ai-gateway-allow.json"
+        Write-Utf8 $mcp (@{ mcpServers = @{ "ai-gateway" = @{ type = "http"; url = $McpUrl
+            headers = @{ Authorization = "Bearer $Key"; "X-Workspace" = $Workspace } } } } | ConvertTo-Json -Depth 6 -Compress)
+        Write-Utf8 $allow '{"permissions":{"allow":["mcp__ai-gateway"]}}'
+        Start-App "claude" ($Extra + @("--settings", $allow, "--mcp-config", $mcp)); exit $script:ExitCode
     }
     "opencode" {
         Need "opencode" "OpenCode" "npm install -g opencode-ai@latest"
@@ -205,7 +232,9 @@ switch ($App) {
         # Inline: nothing in opencode.json changes, and this run alone sees the gateway
         $config = @{ '$schema' = "https://opencode.ai/config.json"; model = "ai-gateway/$Model"
             provider = @{ "ai-gateway" = @{ npm = "@ai-sdk/openai-compatible"; name = "AI Gateway"
-                options = @{ baseURL = "$Gateway/v1"; apiKey = $Key }; models = @{ $Model = $entry } } } }
+                options = @{ baseURL = "$Gateway/v1"; apiKey = $Key }; models = @{ $Model = $entry } } }
+            mcp = @{ "ai-gateway" = @{ type = "remote"; enabled = $true; url = $McpUrl
+                headers = @{ Authorization = "Bearer $Key"; "X-Workspace" = $Workspace } } } }
         Set-ForRun @{ OPENCODE_CONFIG_CONTENT = ($config | ConvertTo-Json -Depth 10 -Compress) }
         Start-App "opencode" $Extra; exit $script:ExitCode
     }
@@ -220,7 +249,9 @@ switch ($App) {
         Set-ForRun @{ AI_GATEWAY_API_KEY = $Key }
         $codexArgs = @("-c", 'model_provider="ai-gateway"', "-c", 'model_providers.ai-gateway.name="AI Gateway"',
             "-c", "model_providers.ai-gateway.base_url=`"$Gateway/v1/`"", "-c", 'model_providers.ai-gateway.wire_api="responses"',
-            "-c", 'model_providers.ai-gateway.env_key="AI_GATEWAY_API_KEY"', "-c", "model_context_window=$Context", "-m", $Model)
+            "-c", 'model_providers.ai-gateway.env_key="AI_GATEWAY_API_KEY"', "-c", "model_context_window=$Context",
+            "-c", "mcp_servers.ai-gateway.url=`"$McpUrl`"", "-c", 'mcp_servers.ai-gateway.bearer_token_env_var="AI_GATEWAY_API_KEY"',
+            "-c", "mcp_servers.ai-gateway.http_headers={`"X-Workspace`"=`"$Workspace`"}", "-m", $Model)
         Start-App "codex" ($codexArgs + $Extra); exit $script:ExitCode
     }
     "hermes" {

@@ -112,6 +112,34 @@
   </div>
 </div>
 
+<!-- Your projects: GitHub repositories indexed for you, so coding agents started with the launcher can
+     read across all of them and share notes between workspaces (app/routers/projects.py). -->
+<div class="card" style="margin-top:1.5rem" id="projectsCard">
+  <h2>Your projects</h2>
+  <p class="muted" style="margin-top:0;font-size:.9rem">
+    Connect the GitHub accounts and organisations your projects live in. They are indexed for you alone,
+    and a coding agent started with <code>ai-gateway launch</code> can then search and read every one of
+    them - an API this project calls, a library it uses - and keep notes about how they connect that its
+    sessions in other workspaces read too. Without a token only public repositories are indexed; for private
+    ones, <a href="https://github.com/settings/personal-access-tokens/new" target="_blank" rel="noopener">create a
+    fine-grained token</a> with access to the repositories and <strong>Contents: Read-only</strong> (Metadata
+    read-only comes with it). It is stored encrypted and only ever used to read.</p>
+  <div id="projConnections" class="muted">Loading&hellip;</div>
+  <div class="row" style="margin-top:.8rem">
+    <label style="flex:1;min-width:10rem;margin:0"><span class="lbl">GitHub user or organisation</span>
+      <input id="projOwner" placeholder="mainul35" autocomplete="off"></label>
+    <label style="flex:2;min-width:14rem;margin:0"><span class="lbl">Read-only token (for private repositories)</span>
+      <input id="projToken" type="password" placeholder="github_pat_... (leave empty for public only)" autocomplete="off"></label>
+    <button class="btn" id="projConnect">Connect</button>
+  </div>
+  <div id="projMessage" class="note" hidden style="margin-top:.8rem"></div>
+  <div id="projList" style="margin-top:1rem"></div>
+  <details style="margin-top:1rem" id="projNotesBox">
+    <summary>Notes your agents keep about your projects</summary>
+    <div id="projNotes" class="muted" style="margin-top:.5rem">Loading&hellip;</div>
+  </details>
+</div>
+
 <!-- How to point a coding agent at this gateway. Every address in it is filled in from the page's own
      origin, so what is copied is right for whichever address the gateway was opened at. -->
 <div class="card agent-guide" style="margin-top:1.5rem">
@@ -147,7 +175,9 @@
       config, so an <code>ai-gateway</code> provider is added to it (backed up first). An app that is not
       installed is not installed for you: the launcher prints its install command. Add
       <code>--config</code> to set an app up without starting it, and anything after <code>--</code> goes
-      to the app as typed. <code>ai-gateway models</code> lists what you may use.</p>
+      to the app as typed. <code>ai-gateway models</code> lists what you may use.
+      Claude Code, OpenCode and Codex also get <em>Your projects</em> (above) as tools: they can search and read
+      your other repositories and share notes across workspaces. Qwen Code does not yet.</p>
   </details>
 
   <details>
@@ -283,6 +313,98 @@ function showError(message){
   box.textContent = message;
   box.hidden = false;
 }
+
+// --- your projects -------------------------------------------------------------------------------
+
+function projSay(text, ok){
+  const box = document.getElementById('projMessage');
+  box.hidden = !text;
+  box.className = 'note ' + (ok ? 'ok' : 'err');
+  box.textContent = text || '';
+}
+
+function ago(iso){
+  if(!iso) return 'not yet';
+  const minutes = Math.round((Date.now() - new Date(iso)) / 60000);
+  return minutes < 60 ? `${minutes} min ago` : minutes < 2880 ? `${Math.round(minutes / 60)} h ago` : `${Math.round(minutes / 1440)} days ago`;
+}
+
+let projTimer = null;
+async function loadProjects(){
+  let data;
+  try{ data = await api('/projects'); }
+  catch(e){ document.getElementById('projConnections').textContent = 'Could not load your projects: ' + e.message; return; }
+  if(!data.enabled){
+    document.getElementById('projectsCard').innerHTML = '<h2>Your projects</h2><p class="muted">The knowledge base is switched off on this gateway.</p>';
+    return;
+  }
+  document.getElementById('projConnections').innerHTML = data.connections.length
+    ? data.connections.map(c => `<div class="row" style="justify-content:space-between;align-items:center;margin:.3rem 0">
+        <span><strong>${escapeHtml(c.owner)}</strong>
+          <span class="muted"> &middot; ${c.repositories} repositories${c.has_token ? `, ${c.private} private &middot; token of ${escapeHtml(c.login || '?')}` : ' &middot; public only (no token)'}</span>
+          ${c.can_push ? '<span class="muted" title="It can also push. The gateway only reads; a read-only token would be safer."> &middot; &#9888; token can write</span>' : ''}</span>
+        <button class="btn btn-secondary btn-sm" data-disconnect="${c.id}" data-owner="${escapeHtml(c.owner)}">Remove</button></div>`).join('')
+    : `<p class="muted" style="margin:.2rem 0">Nothing connected yet. Up to ${data.limits.connections} accounts or organisations, ${data.limits.repositories} repositories each.</p>`;
+  const list = document.getElementById('projList');
+  list.innerHTML = data.projects.length ? `
+    <div class="row" style="justify-content:space-between;align-items:center"><strong>Indexed</strong>
+      <span>${data.indexing ? '<span class="muted">indexing now&hellip;</span> ' : ''}<button class="btn btn-secondary btn-sm" id="projReindex">Index again</button></span></div>
+    <table style="margin-top:.4rem"><thead><tr><th>Project</th><th>Files</th><th>Indexed</th></tr></thead><tbody>${
+      data.projects.map(p => `<tr><td><code>${escapeHtml(p.name)}</code>${p.description ? `<div class="muted" style="font-size:.8rem">${escapeHtml(p.description)}</div>` : ''}
+        ${p.error ? `<div class="note err" style="font-size:.8rem;margin-top:.2rem">${escapeHtml(p.error)}</div>` : ''}</td>
+        <td>${p.files}</td><td>${ago(p.indexed_at)}</td></tr>`).join('')}</tbody></table>`
+    : (data.connections.length ? `<p class="muted">${data.indexing ? 'Indexing your repositories now&hellip;' : 'Indexing starts shortly; a first run takes a few minutes per repository.'}</p>` : '');
+  clearTimeout(projTimer);
+  // While the first run is going there is something to watch; once it is done, nothing to poll
+  if(data.indexing || (data.connections.length && !data.projects.length)) projTimer = setTimeout(loadProjects, 15000);
+  loadProjectNotes();
+}
+
+async function loadProjectNotes(){
+  const box = document.getElementById('projNotes');
+  try{
+    const notes = await api('/projects/notes');
+    box.innerHTML = notes.length ? notes.map(n => `<div class="row" style="justify-content:space-between;align-items:flex-start;margin:.3rem 0;gap:.6rem">
+        <span><code>${escapeHtml(n.project)}</code> ${escapeHtml(n.content)}</span>
+        <button class="btn btn-secondary btn-sm" data-note="${n.id}" title="Delete this note">&times;</button></div>`).join('')
+      : 'None yet. Agents add them as they find out how your projects connect.';
+  }catch(e){ box.textContent = 'Could not load the notes: ' + e.message; }
+}
+
+document.getElementById('projConnect').addEventListener('click', async e => {
+  const owner = document.getElementById('projOwner').value.trim();
+  const token = document.getElementById('projToken').value.trim();
+  if(!owner){ projSay('Name the GitHub user or organisation.'); return; }
+  e.target.disabled = true;
+  projSay('Checking with GitHub...', true);
+  try{
+    const found = await api('/projects/github', {method: 'POST', headers: {'Content-Type': 'application/json'},
+                                                 body: JSON.stringify({owner, token})});
+    document.getElementById('projOwner').value = ''; document.getElementById('projToken').value = '';
+    projSay(`${found.owner} connected: ${found.repositories} repositories. Indexing ${found.indexing === 'queued' ? 'starts after the run that is going' : 'has started'}.`
+            + (found.warning ? ' ' + found.warning : ''), true);
+    loadProjects();
+  }catch(err){ projSay(err.message); }
+  finally{ e.target.disabled = false; }
+});
+
+document.getElementById('projectsCard').addEventListener('click', async e => {
+  const remove = e.target.closest('[data-disconnect]');
+  if(remove){
+    if(!confirm(`Remove ${remove.dataset.owner}? Its token and everything indexed from it are deleted.`)) return;
+    try{ await api(`/projects/github/${remove.dataset.disconnect}`, {method: 'DELETE'}); projSay(`${remove.dataset.owner} removed.`, true); loadProjects(); }
+    catch(err){ projSay(err.message); }
+  }
+  if(e.target.id === 'projReindex'){
+    try{ const r = await api('/projects/reindex', {method: 'POST'}); projSay(r.indexing === 'queued' ? 'Queued: it runs right after the indexing that is going.' : 'Indexing again.', true); loadProjects(); }
+    catch(err){ projSay(err.message); }
+  }
+  const note = e.target.closest('[data-note]');
+  if(note){
+    try{ await api(`/projects/notes/${note.dataset.note}`, {method: 'DELETE'}); loadProjectNotes(); }
+    catch(err){ projSay(err.message); }
+  }
+});
 
 async function loadMyKeys(){
   const target = document.getElementById('myKeys');
@@ -493,6 +615,7 @@ async function loadMyUsage(){
 loadMyKeys();
 loadMyModels();
 loadMyUsage();
+loadProjects();
 if(isAdmin){ loadAdmin(); setInterval(loadAdmin, 15000); }
 </script>
 {% endblock %}
