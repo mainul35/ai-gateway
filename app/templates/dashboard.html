@@ -163,26 +163,31 @@
 
   <details>
     <summary><strong>Claude desktop app</strong></summary>
-    <p>The desktop app takes a gateway only for the whole app, not per project:
-      <strong>Help &rarr; Troubleshooting &rarr; Enable Developer Mode</strong>, then
-      <strong>Developer &rarr; Configure Third-Party Inference</strong>:</p>
+    <p><strong>Automatically:</strong> the launcher command above, <code>ai-gateway launch claude-desktop</code>,
+      does everything below for you: it writes an <em>AI Gateway</em> profile into the app's settings and
+      makes it the one in use. Quit the app completely (also from the tray) and open it again. Its model
+      picker then lists this gateway's models under Claude's names - Sonnet, Opus, Haiku and Fable all run
+      <code>qwen3.6-256k</code>, which also reads images, so a picture never swaps models mid-task, and
+      Sonnet 4.6 runs <code>auto</code>. The second command, with <code>-Restore</code>
+      (<code>--restore</code> on macOS and Linux), puts the app back on your Claude account.</p>
+    <p><strong>By hand</strong>, if you would rather click: <strong>Help &rarr; Troubleshooting &rarr; Enable
+      Developer Mode</strong>, then <strong>Developer &rarr; Configure Third-Party Inference</strong>:</p>
     <ul>
       <li>Inference provider: <strong>Gateway</strong></li>
       <li>Gateway base URL: <code class="origin"></code></li>
       <li>Gateway API key: one of your keys above, auth scheme <strong>Bearer</strong></li>
-      <li>Models: the app accepts only names that look like Claude's, so write a gateway model as
-        <code>claude-</code> and its name with <code>:</code> and <code>.</code> as <code>-</code>:
-        <code>claude-gemma4-31b</code> is <code>gemma4:31b</code>, <code>claude-qwen3-next-80b</code> is
-        <code>qwen3-next-80b</code>. Put the real name in <em>Display name</em>. Any other
-        <code>claude-*</code> name, e.g. <code>claude-sonnet-4-5</code>, runs the gateway's default model.</li>
-      <li>Images need a model that sees them (<em>vision</em> in the model list above), e.g.
-        <code>claude-gemma4-31b</code>; <code>qwen3-next-80b</code> reads text only.</li>
-      <li>Leave <em>Offer 1M-context variant</em> off: no model here has a 1M window.</li>
+      <li>Models: leave the list empty and the app asks the gateway, as above. To add one of your own, the
+        app accepts only names that look like Claude's: write <code>claude-</code> and the gateway model's
+        name with <code>:</code> and <code>.</code> as <code>-</code>, and put the real name in
+        <em>Display name</em> - <code>claude-gemma4-31b</code> is <code>gemma4:31b</code>,
+        <code>claude-qwen3-next-80b</code> is <code>qwen3-next-80b</code> (text only).</li>
+      <li><em>Offer 1M-context variant</em>: turn it on for projects bigger than 256K tokens. The 1M
+        choice runs <code>qwen3.6-1m</code>, which is slower at every length, so use it only when the
+        conversation needs it.</li>
     </ul>
-    <p class="muted" style="font-size:.85rem">This moves <em>every</em> desktop session &mdash; Code and
-      Cowork &mdash; to this gateway, and Remote Control and cloud sessions are unavailable while it is
-      on. Switch it back in the same place. To keep the desktop app on Claude, use the CLI with the
-      launcher instead.</p>
+    <p class="muted" style="font-size:.85rem">Either way, this moves <em>every</em> desktop session &mdash;
+      Code and Cowork &mdash; to this gateway, and Remote Control and cloud sessions are unavailable while
+      it is on. To keep the desktop app on Claude, use Claude Code through the launcher instead.</p>
   </details>
 
   <details>

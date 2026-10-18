@@ -55,9 +55,22 @@ async def mapping():
     return {**_defaults(models), **_configured()}
 
 
+LONG_SUFFIX = "[1m]"
+
+
 async def route(asked):
-    """The gateway model (or "auto") a request naming one of the IDs means; anything else unchanged."""
+    """The gateway model (or "auto") a request naming one of the IDs means; anything else unchanged.
+
+    A name ending in [1m] is how the desktop app's "Offer 1M-context variant" and Claude Code's
+    sonnet[1m] ask for a million-token window: it goes to the gateway's 1M model (anthropic.model.long,
+    qwen3.6-1m) when there is one, and otherwise to whatever the name without it means.
+    """
     name = (asked or "").strip()
+    if name.lower().endswith(LONG_SUFFIX):
+        long = settings.get("anthropic.model.long", "ANTHROPIC_MODEL_LONG") or "qwen3.6-1m"
+        if long in await backends.available_models():
+            return long
+        name = name[:-len(LONG_SUFFIX)]
     if name in SLOT_IDS:
         return (await mapping())[name]
     return asked
