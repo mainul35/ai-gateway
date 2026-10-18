@@ -1,6 +1,6 @@
-# What the gateway's agent can look up with gateway__knowledge_search: code and documents, split
-# into passages, embedded, and searched by meaning and by exact words together. Managers and admins
-# only, like the rest of the gateway's own tools.
+# The gateway's shared sources: what managers and admins (and the playground's agent) can look up,
+# split into passages, embedded (pgvector), and searched by meaning and by exact words together.
+# People's own repositories are connected per person on the dashboard and are not listed here.
 #
 # Two kinds of source:
 #
@@ -28,10 +28,7 @@ sources:
     path: .
     description: This AI model gateway itself - FastAPI app, llama.cpp engine supervisor, playground, SSO
 
-  - name: github
-    kind: github
-    owners: [mainul35, Visual-Site-Designer-VSD]
-    exclude: [ai-gateway]          # indexed above from the deployed copy
-    include_forks: false
-    include_archived: false
-    max_repo_mb: 300
+  # GitHub repositories are no longer listed here: each person connects their own on the dashboard
+  # (Your projects), with their own token, and they are indexed for that person alone. A kind: github
+  # source without a token in config.properties failed on every run, and its failure stopped the
+  # removal of sources that had gone. It still works here if one is wanted, with a token.
