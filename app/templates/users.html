@@ -225,8 +225,14 @@ let publicExtra = [];
 async function loadPublic(){
   const box = document.getElementById('publicChecks');
   if(!box) return;
+  // Saving writes the whole list, so it stays off until the list now in force has been read: a load
+  // that failed once left Save working on nothing, and it would have cleared a list that was there
+  const save = document.getElementById('savePublic');
+  save.disabled = true;
   try{
-    const raw = ((await api('/admin/settings')).values || {})['gateway.public.models'] || '';
+    // Each setting comes as {value, is_secret, is_set}; reading it as the plain text threw, and the
+    // page showed no models to choose from at all
+    const raw = (((await api('/admin/settings')).values || {})['gateway.public.models'] || {}).value || '';
     const listed = raw.replace(/,/g, ' ').split(/\s+/).filter(Boolean);
     const known = new Set(models);
     publicExtra = listed.filter(m => !known.has(m));
@@ -235,6 +241,7 @@ async function loadPublic(){
         <code style="background:none;padding:0">${escapeHtml(m)}</code></label>`).join('') || '<span class="muted">No models.</span>')
       + (publicExtra.length ? `<p class="muted" style="grid-column:1/-1;margin:.3rem 0 0;font-size:.82rem">Also kept: ${
           publicExtra.map(m => `<code>${escapeHtml(m)}</code>`).join(' ')}</p>` : '');
+    save.disabled = !models.length && !publicExtra.length;
   }catch(e){ box.textContent = 'Could not load the public models: ' + e.message; }
 }
 document.getElementById('savePublic')?.addEventListener('click', async () => {
