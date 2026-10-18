@@ -13,6 +13,7 @@ import time
 import httpx
 
 from app import settings
+from app.settings import PROJECT_ROOT
 from app.engine.profiles import load_profiles
 from utils.ollama_client import ollama_host
 from utils.system_info import detect_gpus
@@ -25,6 +26,33 @@ BUSY_WAIT = 90      # seconds a model waits for a busy one; under the 100 s Clou
 SMALL_OLLAMA_MODEL = 4 * 1024**3  # below this an Ollama model never makes a llama.cpp model give way
 
 
+LOG_DIR = os.path.join(PROJECT_ROOT, "logs")
+LOG_CAP = 20 * 1024 * 1024       # per engine; the one before is kept as .1
+
+
+def engine_log(name):
+    return os.path.join(LOG_DIR, f"engine-{name}.log")
+
+
+async def _drain(process, path):
+    """An engine's output, into logs/engine-<name>.log, for as long as it runs."""
+    os.makedirs(LOG_DIR, exist_ok=True)
+    out = open(path, "ab")
+    try:
+        while True:
+            chunk = await process.stderr.read(65536)
+            if not chunk:
+                break
+            out.write(chunk)
+            out.flush()
+            if out.tell() > LOG_CAP:
+                out.close()
+                os.replace(path, path + ".1")
+                out = open(path, "ab")
+    finally:
+        out.close()
+
+
 class RunningModel:
     def __init__(self, profile, process):
         self.profile = profile
@@ -32,6 +60,7 @@ class RunningModel:
         self.started_at = time.monotonic()
         self.last_used_at = time.monotonic()
         self.in_flight = 0
+        self.drain = None
 
     @property
     def base_url(self):
@@ -289,6 +318,9 @@ class Supervisor:
             stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE,
         )
         model = RunningModel(profile, process)
+        # Read for as long as it runs: a pipe nobody reads fills, and the server then blocks on its
+        # next log line in the middle of somebody's answer. Kept, so its errors can be read later.
+        model.drain = asyncio.create_task(_drain(process, engine_log(profile.name)))
         ready, problem = await self._wait_until_ready(model)
         if not ready:
             with contextlib.suppress(ProcessLookupError):
@@ -316,16 +348,15 @@ class Supervisor:
     @staticmethod
     async def _stderr_tail(model, limit=500):
         """llama-server prints pages of warnings before the fatal error, so keep the end."""
-        if not model.process.stderr:
-            return "(no output)"
-        chunks = []
         with contextlib.suppress(Exception):
-            while True:
-                chunk = await asyncio.wait_for(model.process.stderr.read(65536), timeout=2)
-                if not chunk:
-                    break
-                chunks.append(chunk)
-        text = b"".join(chunks).decode(errors="replace").strip()
+            await asyncio.wait_for(asyncio.shield(model.drain), timeout=3)   # the last lines, written
+        try:
+            with open(engine_log(model.profile.name), "rb") as f:
+                f.seek(0, os.SEEK_END)
+                f.seek(max(0, f.tell() - 65536))
+                text = f.read().decode(errors="replace").strip()
+        except OSError:
+            return "(no output)"
         interesting = [line for line in text.splitlines()
                        if any(word in line.lower() for word in ("error", "failed", "cannot", "out of memory", "unable"))]
         return (interesting[-1] if interesting else text.splitlines()[-1] if text.splitlines() else "(no output)")[-limit:]

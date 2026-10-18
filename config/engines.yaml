@@ -49,6 +49,13 @@ models:
     model_path: /home/mainul35/models/Qwen3-Next-80B-A3B-Instruct-UD-Q4_K_XL.gguf
     ctx_size: 262144
     cache_reuse: 256
+    # One request at a time, each with the whole window. With several slots llama-server shares ONE
+    # window between them: three of Claude Desktop's agents working at once ran out of it together
+    # ("Context size has been exceeded", 2026-10-18) though no conversation was near the limit. A
+    # request that arrives while another is answered now waits its turn instead.
+    parallel: 1
+    # Conversations waiting their turn, or set aside for another, resume from RAM, not from scratch
+    extra_args: ["--cache-ram", "24576"]
 
   # qwen3.6 (35B MoE, 3B active, hybrid attention, vision): the coding model here since 2026-10-18.
   # Compared that day with Ornith 35B-A3B and Qwen3.8-27B + MTP on 12 coding tasks with hidden tests
@@ -82,7 +89,12 @@ models:
           GGML_BACKEND_PATH: /usr/local/lib/ollama/cuda_v13/libggml-cuda.so}
     ctx_size: 262144
     cache_reuse: 256
-    extra_args: ["--fit", "on"]
+    # One request at a time, each with the whole window. With several slots llama-server shares ONE
+    # window between them: three of Claude Desktop's agents working at once ran out of it together
+    # ("Context size has been exceeded", 2026-10-18) though no conversation was near the limit. A
+    # request that arrives while another is answered now waits its turn instead.
+    parallel: 1
+    extra_args: ["--fit", "on", "--cache-ram", "24576"]
 
   - name: qwen3.6-1m
     parameter_size: 36B
@@ -93,7 +105,9 @@ models:
           GGML_BACKEND_PATH: /usr/local/lib/ollama/cuda_v13/libggml-cuda.so}
     ctx_size: 1048576
     cache_reuse: 256
+    # One request at a time, each with the whole window (see qwen3.6-256k). With several slots llama-server shares ONE
+    parallel: 1
     # The server caps a window at the length the file says the model was trained for (256k) unless
     # told otherwise: hence the override, besides YaRN itself
-    extra_args: ["--fit", "on", "--rope-scaling", "yarn", "--rope-scale", "4", "--yarn-orig-ctx", "262144",
+    extra_args: ["--fit", "on", "--cache-ram", "24576", "--rope-scaling", "yarn", "--rope-scale", "4", "--yarn-orig-ctx", "262144",
                  "--override-kv", "qwen35moe.context_length=int:1048576"]

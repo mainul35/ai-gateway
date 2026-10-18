@@ -8,7 +8,7 @@ import httpx
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile, status
 from fastapi.responses import JSONResponse, StreamingResponse
 
-from app import access, api_images, backends, limits, settings, usage as usage_log
+from app import access, api_images, anthropic_compat as compat, backends, limits, settings, usage as usage_log
 from app.engine.supervisor import supervisor
 from app.auth import Principal, authenticate
 from app.tools import auto_model, images
@@ -105,8 +105,8 @@ async def forward(principal: Principal, endpoint: str, path: str, body: dict, sk
         running, problem = await supervisor.ensure_running(model)
         if problem:
             raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, problem)
-        backend = backends.Backend(name="llamacpp", kind="llamacpp",
-                                   base_url=f"{running.base_url}/v1", upstream_model=model)
+        backend = backends.Backend(name="llamacpp", kind="llamacpp", base_url=f"{running.base_url}/v1",
+                                   upstream_model=model, context_length=backend.context_length)
         running.in_flight += 1
     elif backend.kind == "ollama":
         problem = await supervisor.make_room_for_ollama(backend.upstream_model)
@@ -136,6 +136,9 @@ async def forward(principal: Principal, endpoint: str, path: str, body: dict, sk
     # would never reach the client; 503 says the same thing and passes through. OpenAI's SDKs
     # retry any 5xx alike, so nothing a client does changes with it.
     answer = 503 if response.status_code in (502, 504) else response.status_code
+    # Out of room for the conversation: OpenAI's own error for it, which agents answer by compacting
+    if not response.is_success and compat.context_exceeded(response.text):
+        return JSONResponse(compat.too_long_openai(backend.context_length, compat.estimate_tokens(body)), status_code=400)
     if payload is None:
         return JSONResponse({"error": {"message": response.text[:500]}}, status_code=answer)
     return JSONResponse(payload, status_code=answer)
@@ -175,8 +178,8 @@ def _streamed(principal, endpoint, path, body, model, backend):
                     return
                 state["running"] = running
                 running.in_flight += 1
-                target = backends.Backend(name="llamacpp", kind="llamacpp",
-                                          base_url=f"{running.base_url}/v1", upstream_model=model)
+                target = backends.Backend(name="llamacpp", kind="llamacpp", base_url=f"{running.base_url}/v1",
+                                          upstream_model=model, context_length=backend.context_length)
             elif target.kind == "ollama":
                 problem = await supervisor.make_room_for_ollama(target.upstream_model)
                 if problem:
@@ -191,6 +194,10 @@ def _streamed(principal, endpoint, path, body, model, backend):
                 state["status"] = response.status_code
                 if response.status_code >= 400:
                     state["error"] = (await response.aread()).decode(errors="replace")[:500]
+                    if compat.context_exceeded(state["error"]):
+                        error = compat.too_long_openai(target.context_length, compat.estimate_tokens(body))
+                        await queue.put(f"data: {json.dumps(error)}\n\n".encode())
+                        return
                     await queue.put(_sse_error(state["error"]))
                     return
                 async for line in response.aiter_lines():
