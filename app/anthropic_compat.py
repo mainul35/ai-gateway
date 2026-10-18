@@ -8,6 +8,7 @@ whole or streamed - translated back, so Claude Code cannot tell the difference.
 Pure functions only; nothing here talks to the network.
 """
 import json
+import re
 import uuid
 
 STOP_REASONS = {"stop": "end_turn", "length": "max_tokens", "tool_calls": "tool_use",
@@ -226,6 +227,37 @@ class StreamTranslator:
 
 def error_body(message, kind="api_error"):
     return {"type": "error", "error": {"type": kind, "message": message}}
+
+
+# A model server out of room for the conversation says so in its own words, as a 500: llama.cpp's
+# "Context size has been exceeded." Passed on like that, Claude Desktop showed "Service is busy" and
+# gave up, when what it would have done with the API's own error is compact the conversation and go on.
+_CONTEXT_FULL = re.compile(r"context size has been exceeded|exceeds? the available context size|"
+                           r"context_length_exceeded|maximum context length|prompt is too long", re.I)
+
+
+def context_exceeded(text):
+    return bool(text) and bool(_CONTEXT_FULL.search(text))
+
+
+def too_long(context, estimated):
+    """The Messages API's own error for it, which Claude Code and Claude Desktop answer by compacting.
+
+    The count is the client's to act on; it is never shown as smaller than the window, since several
+    requests sharing one model's memory can run out together below it.
+    """
+    context = context or 0
+    estimated = max(estimated or 0, context + 1)
+    return error_body(f"prompt is too long: {estimated} tokens > {context} maximum", "invalid_request_error")
+
+
+def too_long_openai(context, estimated):
+    """The same for OpenAI clients (OpenCode, Codex), which compact on context_length_exceeded."""
+    context = context or 0
+    return {"error": {"message": f"This model's maximum context length is {context} tokens, and this request "
+                                 f"needs about {max(estimated or 0, context + 1)}. Compact or shorten the "
+                                 f"conversation.",
+                      "type": "invalid_request_error", "param": "messages", "code": "context_length_exceeded"}}
 
 
 def _blocks(content):
