@@ -350,6 +350,19 @@ class Supervisor:
 
     # --- introspection ----------------------------------------------------
 
+    def loaded_names(self):
+        """The llama.cpp models running now, so a helper task can use one without loading another."""
+        return [name for name, m in self._running.items() if m.process.returncode is None]
+
+    async def ollama_loaded(self):
+        """Ollama's models on the GPU now; empty when Ollama cannot be asked."""
+        try:
+            async with httpx.AsyncClient(timeout=5) as client:
+                models = (await client.get(f"{ollama_host()}/api/ps")).json().get("models") or []
+        except (httpx.HTTPError, ValueError):
+            return []
+        return [m.get("name") or m.get("model") for m in models if m.get("size_vram")]
+
     def status(self):
         profiles = load_profiles()
         return {
