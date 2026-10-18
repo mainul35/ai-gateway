@@ -1250,9 +1250,6 @@ function fillTranscript(messages){
       else if(extra.generated) renderGenerated(box, extra.generated, m.stats);
       else if(extra.subtitles) renderSubtitles(box, extra.subtitles, m.content, m.stats);
       else renderAssistant(box, m.content, m.reasoning, withModel, extra.sources, m.html);
-      // Words a model wrote can be judged; a map, a picture search or a drawing are judged by looking
-      if(!extra.map && !extra.media && !extra.generated && !extra.subtitles && m.content)
-        addVerdict(box, {messageId: m.id}, m.feedback);
       box._text = m.content;
       const earlier = turn ? answered.find(a => a.turn === turn) : null;
       if(earlier){
@@ -2587,20 +2584,18 @@ function wantsAFile(question){
   return WANTS_A_FILE.test(question || '');
 }
 
-/* Helpful? Accurate? under an answer. The verdict is saved against the answer (by id, or - for one
+/* Helpful? under an answer. The verdict is saved against the answer (by id, or - for one
    that has only just streamed, which the server saved without telling the page its id - by where it
-   is and how it begins) and Auto reads it when it next picks a model for this kind of question.
-   Pressing a chosen answer again takes it back. */
+   is and how it begins). Pressing a chosen answer again takes it back. */
 function addVerdict(box, where, saved){
-  box.querySelector('.verdict')?.remove();
   const row = document.createElement('div');
   row.className = 'verdict';
-  row.title = 'Your answers teach your own Auto which model to pick for questions like this - nobody else’s';
-  const state = {helpful: saved?.helpful ?? null, accurate: saved?.accurate ?? null};
+  row.title = 'Your answers teach your own Auto which model to pick for questions like this - nobody else's';
+  const state = {helpful: saved?.helpful ?? null};
   const ask = (field, label) => `<span class="ask">${label}
       <button type="button" data-field="${field}" data-value="true">Yes</button>
       <button type="button" data-field="${field}" data-value="false">No</button></span>`;
-  row.innerHTML = ask('helpful', 'Helpful?') + ask('accurate', 'Accurate?') + '<span class="thanks"></span>';
+  row.innerHTML = ask('helpful', 'Helpful?') + '<span class="thanks"></span>';
   const show = () => row.querySelectorAll('button').forEach(b =>
     b.setAttribute('aria-pressed', String(state[b.dataset.field] === (b.dataset.value === 'true'))));
   show();
@@ -2611,7 +2606,7 @@ function addVerdict(box, where, saved){
     const before = {...state};
     state[button.dataset.field] = state[button.dataset.field] === value ? null : value;
     show();
-    const body = {helpful: state.helpful, accurate: state.accurate, category: where.category || null,
+    const body = {helpful: state.helpful, category: where.category || null,
                   ...(where.messageId ? {message_id: where.messageId}
                                       : {conversation_id: where.conversationId, starts_with: where.startsWith})};
     // A just-finished answer is written down by the server a moment after the last word arrives
@@ -2619,8 +2614,7 @@ function addVerdict(box, where, saved){
       try{
         const result = await api('/chat/feedback', {method: 'POST', headers: JSON_HEADERS, body: JSON.stringify(body)});
         where.messageId = result.message_id;
-        row.querySelector('.thanks').textContent = state.accurate === false ? 'Noted - your Auto will lean away from this model for questions like this'
-                                                 : (state.helpful !== null || state.accurate !== null) ? 'Thanks' : '';
+        row.querySelector('.thanks').textContent = state.helpful !== null ? 'Thanks' : '';
         return;
       }catch(err){
         if(attempt < 3 && /not saved/i.test(errorText(err))){ await new Promise(r => setTimeout(r, 1500)); continue; }

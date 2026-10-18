@@ -132,7 +132,7 @@ async def get_conversation(conversation_id: int, principal: Principal = Depends(
     user = _require_user(principal)
     conversation = await _owned(session, conversation_id, user, with_messages=True)
     ids = [m.id for m in conversation.messages if m.role == "assistant"]
-    judged = {f.message_id: {"helpful": f.helpful, "accurate": f.accurate} for f in (await session.execute(
+    judged = {f.message_id: {"helpful": f.helpful} for f in (await session.execute(
         select(AnswerFeedback).where(AnswerFeedback.user_id == user.id,
                                      AnswerFeedback.message_id.in_(ids)))).scalars()} if ids else {}
     return {**_conversation_json(conversation, len(conversation.messages)),
@@ -140,20 +140,17 @@ async def get_conversation(conversation_id: int, principal: Principal = Depends(
 
 
 class FeedbackIn(BaseModel):
-    # The answer: by id when the page has it, otherwise by where it is and how it begins - an answer
-    # that has just streamed is saved by the server as it finishes, and the page never learns its id
     message_id: int | None = None
     conversation_id: int | None = None
     starts_with: str = Field(default="", max_length=400)
     helpful: bool | None = None
-    accurate: bool | None = None
     category: str | None = Field(default=None, max_length=32)
 
 
 @router.post("/feedback")
 async def give_feedback(payload: FeedbackIn, principal: Principal = Depends(authenticate),
                         session: AsyncSession = Depends(get_session)):
-    """Helpful? Accurate? for one answer, from the person who asked. Asking again replaces the verdict."""
+    """Helpful? for one answer, from the person who asked. Asking again replaces the verdict."""
     user = _require_user(principal)
     if payload.message_id is not None:
         message = await session.get(ConversationMessage, payload.message_id)
@@ -175,11 +172,11 @@ async def give_feedback(payload: FeedbackIn, principal: Principal = Depends(auth
     if entry is None:
         entry = AnswerFeedback(message_id=message.id, user_id=user.id, model=message.model)
         session.add(entry)
-    entry.helpful, entry.accurate, entry.updated_at = payload.helpful, payload.accurate, utcnow()
+    entry.helpful, entry.updated_at = payload.helpful, utcnow()
     if payload.category:
         entry.category = payload.category
     await session.commit()
-    return {"message_id": message.id, "helpful": entry.helpful, "accurate": entry.accurate}
+    return {"message_id": message.id, "helpful": entry.helpful}
 
 
 @router.patch("/conversations/{conversation_id}")

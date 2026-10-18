@@ -185,6 +185,12 @@
     <p>Put this in the project's <code>.claude/settings.local.json</code> (never the committed
       <code>settings.json</code>: it holds your key), with your key in place of the placeholder:</p>
     <pre><code class="copyable" id="settingsJson"></code></pre>
+    <p class="note warn" style="font-size:.88rem;margin-top:.5rem">
+      <strong>Does not affect Claude Desktop.</strong> This config is for the <strong>Claude Code CLI</strong>
+      only (the terminal agent in your terminal). It does <em>not</em> affect the Claude desktop app (the GUI
+      app you open from your Applications folder). They are two completely separate applications. See the
+      section below for configuring the desktop app.
+    </p>
     <p class="muted" style="font-size:.85rem">If you are signed in to claude.ai, run
       <code>/status</code> in Claude Code: it should name the auth token, not your claude.ai account. If
       it names the account, use the launcher, or start Claude Code with
@@ -192,7 +198,13 @@
   </details>
 
   <details>
-    <summary><strong>Claude desktop app</strong></summary>
+    <summary><strong>Claude desktop app</strong> &mdash; the GUI application (macOS / Windows)</summary>
+    <p class="note warn" style="margin:.6rem 0 .4rem;font-size:.88rem;padding:.5rem .6rem;border-left:3px solid var(--warning);background:rgba(245,158,11,.08);border-radius:4px">
+      <strong>Completely separate from Claude Code CLI.</strong> The config above (in
+      <code>.claude/settings.local.json</code>) has <em>zero effect</em> on this app. Claude Desktop is
+      Claude.ai's own GUI — it uses its own config files, not Claude Code's. To point the desktop app at
+      this gateway you must use one of the two methods below.
+    </p>
     <p><strong>Automatically:</strong> the launcher command above, <code>ai-gateway launch claude-desktop</code>,
       does everything below for you: it writes an <em>AI Gateway</em> profile into the app's settings and
       makes it the one in use. Quit the app completely (also from the tray) and open it again. Its model
