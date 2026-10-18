@@ -4,13 +4,13 @@
   `ollama launch`. Windows (bin/ai-gateway.sh is the same for macOS and Linux).
 
 .DESCRIPTION
-  ai-gateway launch claude -Model qwen3-next-80b
-  ai-gateway launch opencode -Model qwen3-coder:30b
-  ai-gateway launch qwen -Model qwen3-coder:30b
-  ai-gateway launch codex -Model qwen3-coder:30b
+  ai-gateway launch claude -Model qwen3.6-256k
+  ai-gateway launch opencode -Model qwen3.6-256k
+  ai-gateway launch qwen -Model qwen3.6-256k
+  ai-gateway launch codex -Model qwen3.6-256k
   ai-gateway launch hermes -Model gemma4:31b
   ai-gateway launch openclaw -Model gemma4:31b
-  ai-gateway launch claude -Model qwen3-next-80b -- -p "fix the failing test"    # after --: the app's own
+  ai-gateway launch claude -Model qwen3.6-256k -- -p "fix the failing test"    # after --: the app's own
   ai-gateway launch claude-desktop             # the Claude desktop app, all its sessions
   ai-gateway launch claude-desktop -Restore    # back to your Claude account
   ai-gateway models                                                             # what you may use
@@ -148,7 +148,7 @@ if ($App -eq "claude-desktop") {
     exit 0
 }
 
-if (-not $Model) { $Model = "qwen3-next-80b" }
+if (-not $Model) { $Model = "qwen3.6-256k" }
 $Entry = $Models | Where-Object { $_.id -eq $Model } | Select-Object -First 1
 if (-not $Entry) { Fail "$Model is not a model you may use here; 'ai-gateway models' lists them" }
 if ("tools" -notin @($Entry.capabilities)) { Write-Warning "$Model is not listed as able to call tools; agents need that to do anything" }

@@ -137,12 +137,17 @@ def score(model, category, needs_vision):
     if category == "code":
         points += 3.0 if CODE_NAME.search(name) else 0.0
         points += 0.5 if "thinking" in capabilities else 0.0
+        # Coding work reads whole files and projects: a window that holds more of them is worth a
+        # little, up to 256K (beyond that the window is stretched and slower, as for "long")
+        points += min(context, 262144) / 262144
     elif category == "reasoning":
         points += 2.5 if "thinking" in capabilities else 0.0
         points += 0.5 if size >= 20 else 0.0
     elif category == "long":
-        # Reading something long is the one job where the context window decides it
-        points += min(context / 131072.0, 3.0)
+        # Reading something long is the one job where the context window decides it - up to 256K. A
+        # bigger window is a stretched one (qwen3.6-1m is YaRN x4) and slower at every length, so it
+        # is for the conversation that really needs it, chosen by name, not for every long read
+        points += min(context, 262144) / 131072.0
     elif category == "vision":
         points += 2.0 if "vision" in capabilities else 0.0
     return points

@@ -15,7 +15,7 @@
 
 .EXAMPLE
   .\bin\claude-gateway.ps1
-  .\bin\claude-gateway.ps1 -Model qwen3-coder:30b -Context 32768
+  .\bin\claude-gateway.ps1 -Model qwen3.6-256k -Context 32768
   .\bin\claude-gateway.ps1 -p "summarise this repo" --permission-mode acceptEdits
 
   -Model, -Context, -Gateway and -MaxOutput are this script's; everything else goes to claude as typed.
@@ -23,7 +23,7 @@
 
 # Read by hand rather than with param(): PowerShell would otherwise bind claude's own arguments to
 # these by position, or call `-p` ambiguous, and claude would never see them.
-$Model = "qwen3-next-80b"
+$Model = "qwen3.6-256k"
 # The model's real context window. Claude Code assumes 200k for a name it does not know, and would let
 # a conversation grow past what the model can read.
 $Context = 131072

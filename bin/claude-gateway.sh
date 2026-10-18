@@ -3,7 +3,7 @@
 # (bin/claude-gateway.ps1 is the same for Windows).
 #
 #   ./claude-gateway.sh
-#   ./claude-gateway.sh --model qwen3-coder:30b --context 32768
+#   ./claude-gateway.sh --model qwen3.6-256k --context 32768
 #   ./claude-gateway.sh -p "summarise this repo" --permission-mode acceptEdits
 #
 # --model, --context, --gateway and --max-output are this script's; everything else goes to claude as
@@ -19,7 +19,7 @@
 # Written for the bash 3.2 macOS still ships, so no associative arrays or ${var,,}.
 set -euo pipefail
 
-MODEL=qwen3-next-80b
+MODEL=qwen3.6-256k
 # The model's real context window. Claude Code assumes 200k for a name it does not know, and would let
 # a conversation grow past what the model can read.
 CONTEXT=131072
