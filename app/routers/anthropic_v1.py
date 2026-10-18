@@ -57,7 +57,7 @@ def model_for(name):
     name = (name or "").strip()
     if not name.lower().startswith("claude"):
         return name
-    main = settings.get("anthropic.model.default", "ANTHROPIC_MODEL_DEFAULT") or "qwen3-next-80b"
+    main = settings.get("anthropic.model.default", "ANTHROPIC_MODEL_DEFAULT") or "qwen3.6-256k"
     if "haiku" in name.lower():
         return settings.get("anthropic.model.small", "ANTHROPIC_MODEL_SMALL") or main
     return main

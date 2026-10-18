@@ -414,7 +414,7 @@ function renderProjectNote(){
 async function loadModels(){
   const data = (await api('/v1/models')).data.filter(m => (m.capabilities || []).includes('tools'));
   // The ones that have done this work best first; the rest in the order the gateway lists them
-  const preferred = ['qwen3-next-80b', 'qwen3-coder:30b'];
+  const preferred = ['qwen3.6-256k', 'qwen3-next-80b'];
   const rank = m => { const i = preferred.indexOf(m.id); return i < 0 ? preferred.length : i; };
   data.sort((a, b) => rank(a) - rank(b));
   document.getElementById('taskModel').innerHTML = data.map(m => `<option>${escapeHtml(m.id)}</option>`).join('');

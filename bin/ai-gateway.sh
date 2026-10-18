@@ -2,13 +2,13 @@
 # ai-gateway: start a coding agent or assistant on this AI gateway's models - the gateway's
 # `ollama launch`. macOS and Linux (bin/ai-gateway.ps1 is the same for Windows).
 #
-#   ai-gateway launch claude --model qwen3-next-80b
-#   ai-gateway launch opencode --model qwen3-coder:30b
-#   ai-gateway launch qwen --model qwen3-coder:30b
-#   ai-gateway launch codex --model qwen3-coder:30b
+#   ai-gateway launch claude --model qwen3.6-256k
+#   ai-gateway launch opencode --model qwen3.6-256k
+#   ai-gateway launch qwen --model qwen3.6-256k
+#   ai-gateway launch codex --model qwen3.6-256k
 #   ai-gateway launch hermes --model gemma4:31b
 #   ai-gateway launch openclaw --model gemma4:31b
-#   ai-gateway launch claude --model qwen3-next-80b -- -p "fix the failing test"   # after --: the app's own
+#   ai-gateway launch claude --model qwen3.6-256k -- -p "fix the failing test"   # after --: the app's own
 #   ai-gateway launch claude-desktop            # the Claude desktop app (macOS), all its sessions
 #   ai-gateway launch claude-desktop --restore  # back to your Claude account
 #   ai-gateway models                                                             # what you may use
@@ -161,7 +161,7 @@ if [ "$APP" = claude-desktop ]; then
 fi
 
 # The app's usual model here, when none is named: a big one that can call tools
-[ -n "$MODEL" ] || MODEL=qwen3-next-80b
+[ -n "$MODEL" ] || MODEL=qwen3.6-256k
 entry=$(model_entry "$MODEL" || true)     # no match is an answer, not a failure
 [ -n "$entry" ] || die "$MODEL is not a model you may use here; 'ai-gateway models' lists them"
 printf '%s' "$entry" | grep -q '"tools"' \

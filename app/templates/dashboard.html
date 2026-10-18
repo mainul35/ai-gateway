@@ -225,7 +225,7 @@ const APPS = [
 const appOs = document.getElementById('appOs');
 appOs.value = /win/i.test(navigator.userAgentData?.platform || navigator.platform || '') ? 'windows' : 'unix';
 function renderApps(){
-  const model = document.getElementById('appModel').value || 'qwen3-next-80b';
+  const model = document.getElementById('appModel').value || 'qwen3.6-256k';
   const windows = appOs.value === 'windows';
   const flag = windows ? '-Model' : '--model';
   document.getElementById('appList').innerHTML = APPS.map(a => `
@@ -254,7 +254,7 @@ async function loadAppModels(){
     select.innerHTML = models.map(m => `<option value="${escapeHtml(m.id)}">${escapeHtml(m.id)}${
       m.context_length ? ` &middot; ${m.context_length >= 1048576 ? Math.round(m.context_length / 1048576) + 'M' : Math.round(m.context_length / 1024) + 'K'} context` : ''}</option>`).join('')
       || '<option value="">no model that can call tools is available to you</option>';
-    const preferred = models.find(m => m.id === 'qwen3-next-80b') || models[0];
+    const preferred = models.find(m => m.id === 'qwen3.6-256k') || models[0];
     if(preferred) select.value = preferred.id;
   }catch(e){ /* the list stays empty; the rest of the page does not depend on it */ }
   renderApps();
@@ -263,8 +263,8 @@ loadAppModels();
 document.getElementById('settingsJson').textContent = JSON.stringify({env: {
   ANTHROPIC_BASE_URL: location.origin,
   ANTHROPIC_AUTH_TOKEN: '<your gateway API key>',
-  ANTHROPIC_MODEL: 'qwen3-next-80b',
-  ANTHROPIC_DEFAULT_HAIKU_MODEL: 'qwen3-next-80b',
+  ANTHROPIC_MODEL: 'qwen3.6-256k',
+  ANTHROPIC_DEFAULT_HAIKU_MODEL: 'qwen3.6-256k',
   CLAUDE_CODE_MAX_CONTEXT_TOKENS: '131072',
   CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS: '1',
   CLAUDE_CODE_DISABLE_THINKING: '1',

@@ -23,24 +23,6 @@ defaults:
   exclusive: true
 
 models:
-  # Measured on a 24 GB RTX 3090 (2026-09-17), all layers on GPU:
-  #   ctx 8192 -> 17.4 GB | ctx 65536 -> 19.5 GB | ctx 131072 -> 22.0 GB | ctx 65536 f16 KV -> 21.3 GB
-  #   generation 42.5 t/s, prefill ~1340 t/s at pp512/pp2048. Ollama matches the speed but cannot
-  #   set context or KV type per model, which is what this profile buys.
-  - name: qwen3.8-27b-tuned
-    parameter_size: 27.3B
-    model_path: /usr/share/ollama/.ollama/models/blobs/sha256-3e020514545c310dfc511dc8d3ddc23482b645189cb9287816d84bed6eddd4ac
-    n_gpu_layers: 999
-    ctx_size: 65536
-    # Chat clients resend the whole conversation each turn; reusing the cached prefix saves the re-read
-    cache_reuse: 256
-    # Qwen3.8 is a thinking model: by default it emits reasoning tokens before any visible answer,
-    # which looks like a hang in clients that only render "content". Off by default; a client can
-    # re-enable it per request with chat_template_kwargs {"enable_thinking": true}.
-    chat_template_kwargs: '{"enable_thinking": false}' 
-    # Headroom left over: ~4 GB. For 128k context set ctx_size 131072 (22.0 GB, tight).
-    # For better KV quality at 64k use cache_type_k/v f16 (21.3 GB).
-
   # 80B MoE (3B active, 46 GB) that does not fit in 24 GB. n_gpu_layers is left unset so
   # llama-server's --fit fills the 3090 (~22.7 GB) and keeps the remaining experts in this machine's
   # RAM; with 3B active per token that costs little.
@@ -68,10 +50,18 @@ models:
     ctx_size: 262144
     cache_reuse: 256
 
-  # qwen3.6 (35B MoE, 3B active, hybrid attention, vision) with a long window: the fastest model here
-  # for long work. The llama-b11025 build cannot load its architecture, so these run Ollama's own,
-  # newer llama-server on Ollama's file; vision comes from the same file (--mmproj on it works: the
-  # server translates Ollama's format). Ollama's build needs to be told where its CUDA backend is.
+  # qwen3.6 (35B MoE, 3B active, hybrid attention, vision): the coding model here since 2026-10-18.
+  # Compared that day with Ornith 35B-A3B and Qwen3.8-27B + MTP on 12 coding tasks with hidden tests
+  # and 3 tool-call checks: all three passed 11/12, and qwen3.6 is the one that also reads screenshots
+  # and keeps above 50 t/s across most of a 256K window, so agents need no second model for images.
+  # Unsloth's UD-Q4_K_XL file (it carries MTP layers, unused: on this MoE the draft context does not
+  # fit beside a 256K cache and the image reader, and MTP buys a MoE little), with its own vision
+  # projector. The llama-b11025 build cannot load this architecture, so these run Ollama's newer
+  # llama-server, which needs to be told where its CUDA backend is.
+  # Measured 2026-10-18 on this file, real code as the prompt, code as the answer, q8_0 KV:
+  #   256k window:   1.6k tokens  104 t/s generation
+  #                  100k tokens 1450 t/s prompt (69 s), 66 t/s;  next turn from the prompt cache 0.2 s
+  # Measured 2026-10-16 on Ollama's copy of the same model:
   # Measured 2026-10-16 with --fit (experts it cannot place stay in RAM), q8_0 KV, no prompt cache:
   #   256k window:  47k tokens 2658 t/s prompt (18 s),  86.6 t/s generation
   #                 95k tokens 2239 t/s prompt (42 s),  66.7 t/s
@@ -85,8 +75,8 @@ models:
   # and YaRN stretching costs a little quality on short work: use it only for what needs > 256k.
   - name: qwen3.6-256k
     parameter_size: 36B
-    model_path: /usr/share/ollama/.ollama/models/blobs/sha256-f5ee307a2982106a6eb82b62b2c00b575c9072145a759ae4660378acda8dcf2d
-    mmproj: /usr/share/ollama/.ollama/models/blobs/sha256-f5ee307a2982106a6eb82b62b2c00b575c9072145a759ae4660378acda8dcf2d
+    model_path: /home/mainul35/models/Qwen3.6-35B-A3B-MTP-UD-Q4_K_XL.gguf
+    mmproj: /home/mainul35/models/Qwen3.6-35B-A3B-mmproj-F16.gguf
     binary: /usr/local/lib/ollama/llama-server
     env: {LD_LIBRARY_PATH: "/usr/local/lib/ollama:/usr/local/lib/ollama/cuda_v13",
           GGML_BACKEND_PATH: /usr/local/lib/ollama/cuda_v13/libggml-cuda.so}
@@ -96,8 +86,8 @@ models:
 
   - name: qwen3.6-1m
     parameter_size: 36B
-    model_path: /usr/share/ollama/.ollama/models/blobs/sha256-f5ee307a2982106a6eb82b62b2c00b575c9072145a759ae4660378acda8dcf2d
-    mmproj: /usr/share/ollama/.ollama/models/blobs/sha256-f5ee307a2982106a6eb82b62b2c00b575c9072145a759ae4660378acda8dcf2d
+    model_path: /home/mainul35/models/Qwen3.6-35B-A3B-MTP-UD-Q4_K_XL.gguf
+    mmproj: /home/mainul35/models/Qwen3.6-35B-A3B-mmproj-F16.gguf
     binary: /usr/local/lib/ollama/llama-server
     env: {LD_LIBRARY_PATH: "/usr/local/lib/ollama:/usr/local/lib/ollama/cuda_v13",
           GGML_BACKEND_PATH: /usr/local/lib/ollama/cuda_v13/libggml-cuda.so}
