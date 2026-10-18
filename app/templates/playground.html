@@ -2590,7 +2590,7 @@ function wantsAFile(question){
 function addVerdict(box, where, saved){
   const row = document.createElement('div');
   row.className = 'verdict';
-  row.title = 'Your answers teach your own Auto which model to pick for questions like this - nobody else\'s';
+  row.title = "Your answers teach your own Auto which model to pick for questions like this - nobody else's";
   const state = {helpful: saved?.helpful ?? null};
   const ask = (field, label) => `<span class="ask">${label}
       <button type="button" data-field="${field}" data-value="true">Yes</button>
