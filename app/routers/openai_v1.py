@@ -119,15 +119,16 @@ async def forward(principal: Principal, endpoint: str, path: str, body: dict, sk
     try:
         response = await client.post(backend.url(path), json=upstream_body, headers=backend.headers())
     except httpx.HTTPError as e:
-        await client.aclose()
-        if running:
-            running.in_flight = max(0, running.in_flight - 1)
         await usage_log.record(principal, model, backend.name, endpoint, False, 503,
                                None, (time.monotonic() - started) * 1000, str(e))
         raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, f"Upstream error: {e}")
-    await client.aclose()
-    if running:
-        running.in_flight = max(0, running.in_flight - 1)
+    finally:
+        # Also when the client hangs up and the request is cancelled: an engine left counted as busy
+        # is never unloaded and holds up every swap. The count drops before the await, which a
+        # cancelled request may not get past.
+        if running:
+            running.in_flight = max(0, running.in_flight - 1)
+        await client.aclose()
     payload = response.json() if response.headers.get("content-type", "").startswith("application/json") else None
     await usage_log.record(principal, model, backend.name, endpoint, False, response.status_code,
                            (payload or {}).get("usage"), (time.monotonic() - started) * 1000,
