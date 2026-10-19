@@ -58,6 +58,8 @@ PY
 # Compiling is not enough: a backslash eaten by a shell leaves a backspace inside a regular
 # expression that compiles perfectly and matches nothing it was written to match.
 "$PYTHON" scripts/check_control_chars.py app utils scripts
+# And the pages: Python compiling says nothing about the JavaScript in them
+"$PYTHON" scripts/check_page_scripts.py
 fi
 
 STAMP=$(date +%Y%m%d-%H%M%S)
