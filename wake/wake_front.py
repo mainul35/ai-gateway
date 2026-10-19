@@ -301,23 +301,20 @@ def keep(path, body, headers):
     kept[path] = (body, [(k, v) for k, v in headers if k.decode("latin-1").lower() in KEPT_HEADERS])
 
 
-async def relay_and_keep(path, response):
-    """A file the gateway served, passed on whole and kept."""
+async def relay_whole(response):
+    """The gateway's answer read whole and passed on: (response, body)."""
     try:
         body = await response.aread()
     finally:
         await response.aclose()
-    if response.status_code == 200:
-        keep(path, body, response.headers.raw)
     out = Response(body, status_code=response.status_code)
     out.raw_headers = [(k, v) for k, v in response.headers.raw
                        if k.decode("latin-1").lower() not in HOP_BY_HOP | {"content-length"}]
     out.headers["content-length"] = str(len(body))
-    return out
+    return out, body
 
 
-def from_kept(path, method):
-    body, headers = kept[path]
+def served_kept(body, headers, method="GET"):
     out = Response(b"" if method == "HEAD" else body, status_code=200)
     out.raw_headers = list(headers) + [(b"content-length", str(len(body)).encode()),
                                        (b"x-served-by", b"wake-front (gateway asleep)")]
@@ -332,6 +329,26 @@ async def fetch_launchers():
             return
         if response.status_code == 200:
             keep(f"/downloads/{name}", response.content, response.headers.raw)
+
+
+# The model list, kept per caller. The Claude desktop app checks /v1/models when it starts and every
+# few minutes after; answered "asleep", it marks the gateway broken ("AI Gateway returned an error")
+# until checked again by hand. A list depends on who asks (the models they may use) and on whether
+# they ask as Claude's apps do (anthropic-version: Claude's names), so it is kept by both, and only
+# ever served to the same caller.
+models_kept: dict[tuple, tuple[bytes, list]] = {}
+MODELS_KEPT_MAX = 500
+
+
+def keep_models(key, body, headers):
+    models_kept.pop(key, None)
+    if len(models_kept) >= MODELS_KEPT_MAX:
+        models_kept.pop(next(iter(models_kept)))
+    models_kept[key] = (body, [(k, v) for k, v in headers if k.decode("latin-1").lower() in KEPT_HEADERS])
+
+
+def models_key(request, h):
+    return (h, bool(request.headers.get("anthropic-version"))) if h else None
 
 
 def maybe_fetch_launchers(request):
@@ -478,11 +495,20 @@ async def gateway(request: Request, rest: str):
     if state.up is False and not waking and time.monotonic() - state.checked_at > DOWN_RECHECK_SECONDS:
         await gateway_is_up()      # switched on by hand, or woken some other way
     keepable = request.method == "GET" and bool(KEPT_PATHS.match(path))
+    model_list = models_key(request, h) if request.method == "GET" and path == "/v1/models" else None
     if state.up is not False:
         try:
             response = await open_upstream(request, path, body, h)
             maybe_fetch_launchers(request)
-            return await relay_and_keep(path, response) if keepable else relay(response)
+            if not (keepable or model_list):
+                return relay(response)
+            out, whole = await relay_whole(response)
+            if response.status_code == 200:
+                if model_list:
+                    keep_models(model_list, whole, response.headers.raw)
+                else:
+                    keep(path, whole, response.headers.raw)
+            return out
         except (httpx.ConnectError, httpx.ConnectTimeout, httpx.RemoteProtocolError) as e:
             log.info("gateway unreachable (%s): treating it as asleep", type(e).__name__)
             state.up, state.checked_at = False, time.monotonic()
@@ -491,7 +517,17 @@ async def gateway(request: Request, rest: str):
     if path == "/health":
         return asleep("homelabai is asleep")            # the deploy script's check; wakes nothing
     if request.method in ("GET", "HEAD") and path in kept:
-        return from_kept(path, request.method)          # a launcher or static file: no need to wake
+        return served_kept(*kept[path], request.method)  # a launcher or static file: no need to wake
+    if model_list in models_kept:
+        return served_kept(*models_kept[model_list])    # this caller's list, as last served to them
+    if model_list and kind in ("key", "unverified", "access") and may_wake(kind, h):
+        # An app with a key starting up, with no list kept for it yet: worth waking for, unlike a
+        # browser tab's timer (which comes with a login cookie). An unverified key only once in
+        # WAKE_UNVERIFIED_COOLDOWN, as everywhere else.
+        task = start_waking(f"GET {path} (first model list for this key)")
+        if not await wait_until_up(task, HOLD_SECONDS):
+            return asleep("homelabai is waking up; retry in about 30 seconds", retry_after=30)
+        return await gateway(request, rest)
     if request.method == "OPTIONS":
         # Let a browser's preflight through, so the real request that follows can wake the machine
         return Response(status_code=204, headers={
