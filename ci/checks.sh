@@ -15,6 +15,9 @@ python3 -m compileall -q app utils scripts wake
 step "No control characters in code"
 python3 scripts/check_control_chars.py app utils scripts
 
+step "Every page's JavaScript parses"
+python3 scripts/check_page_scripts.py
+
 step "No credentials committed"
 python3 scripts/check_secrets.py --all
 
