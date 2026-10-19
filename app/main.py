@@ -39,6 +39,7 @@ async def lifespan(_: FastAPI):
         log.warning("No gateway.master.key configured; generated for this run: %s", settings.master_key())
     await supervisor.start_reaper()
     log.info("llama.cpp engine available: %s", supervisor.is_available())
+    admin.resume_installs()          # model downloads a restart cut short carry on
     refresher = None
     try:
         await knowledge.ensure_schema()
