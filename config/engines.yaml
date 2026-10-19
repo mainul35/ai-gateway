@@ -94,7 +94,15 @@ models:
     # ("Context size has been exceeded", 2026-10-18) though no conversation was near the limit. A
     # request that arrives while another is answered now waits its turn instead.
     parallel: 1
-    extra_args: ["--fit", "on", "--cache-ram", "24576"]
+    # --fit fills the GPU but for a margin, and the image reader is loaded after it: with the default
+    # margin its 248 MB working buffer did not fit ("cudaMalloc failed: out of memory" at every start)
+    # and the engine fell over at the first picture - no screenshot pasted into Claude Code was ever
+    # read. Measured 2026-10-19, 1280x800 screenshot and 600 tokens of code:
+    #   default margin  23.9 GB  picture crashes the engine              87.5 t/s
+    #   1536 MiB        23.6 GB  picture read in 2.7 s                  100.9 t/s
+    #   2048 MiB        23.1 GB  picture read in 2.9 s                   77.7 t/s
+    #   image reader on the CPU (--no-mmproj-offload): 7.6 s a picture,  96.0 t/s
+    extra_args: ["--fit", "on", "--fit-target", "1536", "--cache-ram", "24576"]
 
   - name: qwen3.6-1m
     parameter_size: 36B
@@ -108,6 +116,7 @@ models:
     # One request at a time, each with the whole window (see qwen3.6-256k). With several slots llama-server shares ONE
     parallel: 1
     # The server caps a window at the length the file says the model was trained for (256k) unless
-    # told otherwise: hence the override, besides YaRN itself
-    extra_args: ["--fit", "on", "--cache-ram", "24576", "--rope-scaling", "yarn", "--rope-scale", "4", "--yarn-orig-ctx", "262144",
+    # told otherwise: hence the override, besides YaRN itself. The margin for the image reader as in
+    # qwen3.6-256k (with 1536 MiB: picture read in 4.2 s, 51.8 t/s; without it, a picture crashed it)
+    extra_args: ["--fit", "on", "--fit-target", "1536", "--cache-ram", "24576", "--rope-scaling", "yarn", "--rope-scale", "4", "--yarn-orig-ctx", "262144",
                  "--override-kv", "qwen35moe.context_length=int:1048576"]
