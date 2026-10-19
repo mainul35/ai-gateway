@@ -50,6 +50,7 @@ IMAGE_TOKENS = 1600        # a picture, whatever its encoded size
 SAFETY = 0.94              # of the window: the estimate is an estimate
 ANSWER_CAP = 32768         # room kept for the answer, at most
 KEEP_RECENT = 6            # messages at the end never shortened
+SHORTEN_STEP = 16          # ...and the edge of the shortened part moves this many messages at a time
 TOOL_KEEP_HEAD, TOOL_KEEP_TAIL = 700, 500
 TAIL_SHARE = 0.55          # of the budget, for the recent part kept word for word after a summary
 SUMMARY_INPUT_SHARE = 0.6  # of the window, the most of the old part handed to the summariser
@@ -355,10 +356,16 @@ def budget(body, context, shape=MESSAGES):
 
 # --- step 1: old tool output, shortened -------------------------------------------------------------
 
-def shorten_old(messages, keep_recent=KEEP_RECENT, shape=MESSAGES):
-    """Tool results and pictures before the last few messages, made short. A new list."""
+def shorten_old(messages, keep_recent=KEEP_RECENT, shape=MESSAGES, step=SHORTEN_STEP):
+    """Tool results and pictures before the last few messages, made short. A new list.
+
+    The edge moves in steps of `step` messages, not one at a time: what was sent before must stay as
+    it was, or the engine cannot reuse what it read last time. qwen3.6's attention keeps part of its
+    state in a form that cannot be cut back to a changed message, so a conversation changed a few
+    messages from its end is read again from far back - 140K tokens, three minutes, every request
+    (2026-10-19). With steps, it is read again once per step."""
     out = copy.deepcopy(messages)
-    edge = max(0, len(out) - keep_recent)
+    edge = max(0, (len(out) - keep_recent) // step * step)
     old = [shape.shorten(m) if isinstance(m, dict) else m for m in out[:edge]]
     return [m for m in old if m is not None] + out[edge:]
 
@@ -383,13 +390,22 @@ def _transcript(messages, limit_chars, shape):
     return text[:head] + "\n[... the middle of the session left out ...]\n" + text[-(limit_chars - head):]
 
 
+# What a client puts into the person's turn by itself - Claude Code's reminders and command echoes,
+# and the gateway's own summary note - is not what the person said
+_INJECTED = re.compile(r"<(system-reminder|earlier-conversation-summary|command-[\w-]+|local-command-[\w-]+)>"
+                       r".*?</\1>", re.S)
+
+
 def _said(messages, shape):
     """The person's own messages among these, as text: not tool results, not long pasted text."""
     said = []
     for m in messages:
         if isinstance(m, dict) and shape.starts_a_turn(m):
-            said += [line[6:] for line in shape.transcript(m)
-                     if line.startswith("USER: ") and len(line) <= SAID_MAX_CHARS + 6]
+            for line in shape.transcript(m):
+                if line.startswith("USER: "):
+                    text = _INJECTED.sub("", line[6:]).strip()
+                    if text and len(text) <= SAID_MAX_CHARS:
+                        said.append(text)
     return said
 
 
@@ -450,12 +466,41 @@ def _key(messages):
     return hashlib.sha256(json.dumps(messages, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
 
 
-async def fit(body, context, summarise, force=False, shape=MESSAGES):
+def _strings(value):
+    """Every piece of text in a request, as the model reads it: no pictures' data, no signatures."""
+    if isinstance(value, str):
+        if not value.startswith("data:"):
+            yield value
+    elif isinstance(value, dict):
+        for key, item in value.items():
+            if key not in ("data", "signature", "encrypted_content"):
+                yield from _strings(item)
+    elif isinstance(value, list):
+        for item in value:
+            yield from _strings(item)
+
+
+async def _calibrated(body, room, shape, count):
+    """`room` in the estimate's own units, from the model's real count of the request's text.
+
+    The estimate's 3 characters a token errs on full by design, but how far depends on the text:
+    an agent's conversation of HTML and code ran near 5 (232K estimated, 142K real, 2026-10-19), so
+    it was compressed at half the window. Asked only once the estimate says it does not fit."""
+    text = "\n".join(_strings({k: body.get(k) for k in ("system", "instructions", "tools", shape.items_key)}))
+    real = await count(text) if text else None
+    if not real:
+        return room
+    factor = min(1.5, max(0.3, real / (len(text) / CHARS_PER_TOKEN)))
+    return int(room / factor)
+
+
+async def fit(body, context, summarise, force=False, shape=MESSAGES, count=None):
     """The request, made to fit `context` tokens; (body, how) - how is None when it was left alone.
 
     summarise(prompt, text) -> summary text, by the same model. force shrinks to 70% of the room,
     for when the model said the window was full although the estimate said it was not.
-    Returns (None, reason) when nothing makes it fit.
+    count(text) -> the model's own token count of text, or None; when given, the estimate is checked
+    against it before anything is changed. Returns (None, reason) when nothing makes it fit.
     """
     items = _items(body, shape)
     if not context or not items:
@@ -465,6 +510,14 @@ async def fit(body, context, summarise, force=False, shape=MESSAGES):
         room = int(room * 0.7)
     if estimate(body, shape=shape) <= room:
         return body, None
+    if count:
+        measured = await _calibrated(body, room, shape, count)
+        if measured != room:
+            log.info("context: estimate %s against %s, measured by the model: room is %s in the estimate's units",
+                     estimate(body, shape=shape), room, measured)
+            room = measured
+        if estimate(body, shape=shape) <= room:
+            return body, None
 
     # Instructions at the start (OpenAI's system messages) stay as they are, ahead of everything
     n = shape.kept_first(items)
@@ -482,7 +535,7 @@ async def fit(body, context, summarise, force=False, shape=MESSAGES):
     k = _cut(body, first, shortened, int(room * TAIL_SHARE), shape)
     if k is None:
         # One long turn with no place to cut: shorten everything but the last two messages
-        tighter = shorten_old(messages, keep_recent=2, shape=shape)
+        tighter = shorten_old(messages, keep_recent=2, shape=shape, step=1)
         if estimate(body, first + tighter, shape) <= room:
             return with_items(tighter), "shortened"
         return None, "the latest turn alone is bigger than the model's window"
@@ -550,7 +603,20 @@ async def fit_for(body, backend, chat_url, force=False, shape=MESSAGES):
             log.warning("summarising for %s failed: %s", backend.upstream_model, e)
             return ""
 
-    fitted, how = await fit(body, context, summarise, force, shape)
+    async def count(text):
+        """The model's own count: llama-server's /tokenize. Ollama has no such call; None there."""
+        if backend.kind != "llamacpp":
+            return None
+        try:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(60, connect=5)) as client:
+                response = await client.post(chat_url.split("/v1/")[0] + "/tokenize", json={"content": text},
+                                             headers=backend.headers())
+            return len(response.json()["tokens"]) if response.is_success else None
+        except (httpx.HTTPError, ValueError, KeyError) as e:
+            log.warning("counting tokens for %s failed: %s", backend.upstream_model, e)
+            return None
+
+    fitted, how = await fit(body, context, summarise, force, shape, count)
     if fitted is None:
         log.warning("%s: could not be made to fit %s tokens: %s", backend.upstream_model, context, how)
     return fitted, how
