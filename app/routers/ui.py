@@ -172,6 +172,11 @@ async def models_page(request: Request, user: User | None = Depends(current_user
     return _require_role(user, "/models", ("admin",)) or _page(request, "models.html", user)
 
 
+@router.get("/connect")
+async def connect_page(request: Request, user: User | None = Depends(current_user)):
+    return _require_login(user, "/connect") or _page(request, "connect.html", user)
+
+
 @router.get("/playground")
 async def playground_page(request: Request, user: User | None = Depends(current_user)):
     return _require_login(user, "/playground") or _page(request, "playground.html", user)
