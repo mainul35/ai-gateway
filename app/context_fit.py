@@ -1,12 +1,13 @@
 """Long conversations made to fit the model's window, by the gateway, so the work can carry on.
 
 Claude Code and Claude Desktop count tokens with Claude's tokenizer and compact a conversation when
-their count says it is nearly full. The models here count differently, and agents running at once
-used to share one window, so a conversation could arrive bigger than the model can hold: the engine
-answered "Context size has been exceeded", the app said "Service is busy", and the session was stuck.
+their count says it is nearly full; OpenCode and Codex count with their own guess at the model. The
+models here count differently, and agents running at once used to share one window, so a
+conversation could arrive bigger than the model can hold: the engine answered "Context size has been
+exceeded", the app said "Service is busy", and the session was stuck.
 
-So before a Messages API request goes on, it is measured against the model's window, leaving room for
-the answer, and when it does not fit it is made to:
+So before a request goes on, it is measured against the model's window, leaving room for the answer,
+and when it does not fit it is made to:
 
 1. Old tool output shortened. In an agent's conversation most of the bulk is what its tools returned
    many steps ago - files read, test runs, listings. The start and end of each is kept, the middle
@@ -21,14 +22,20 @@ A summary is remembered by what it summarised, so the following requests of the 
 resend the whole conversation) reuse it instead of summarising again, and the part sent stays the same
 from one request to the next: the engine's prompt cache keeps working.
 
-Works on the Messages API's own shape (app/routers/anthropic_v1.py). Pure, apart from the summarise
-function it is handed and its small memory of summaries.
+Three request shapes, each a Shape below: the Messages API (app/routers/anthropic_v1.py), OpenAI's
+chat completions (OpenCode, app/routers/openai_v1.py) and OpenAI's Responses API (Codex,
+app/routers/responses_v1.py). Pure, apart from the summarise function fit() is handed and its small
+memory of summaries; fit_for() supplies one that asks the model being fitted for.
 """
 import copy
 import hashlib
 import json
 import logging
 from collections import OrderedDict
+
+import httpx
+
+from app import settings
 
 log = logging.getLogger("context_fit")
 
@@ -48,49 +55,21 @@ created, changed or examined, with their paths; commands run and what they showe
 they were dealt with; the current state; and exactly what was in progress and what is left to do.
 Keep names, paths, numbers and versions exact. No preamble. At most about 1500 words."""
 
+SUMMARY_NOTE = ("<earlier-conversation-summary>\nThe start of this session was summarised by the gateway "
+                "to fit the model's context window:\n\n{}\n</earlier-conversation-summary>")
+PICTURE_LEFT_OUT = "[a picture was here; left out to fit the context window]"
+
 _memory = OrderedDict()     # sha256 of the summarised messages -> summary
 MEMORY_SIZE = 200
 
 
-# --- measuring ----------------------------------------------------------------------------------
-
-def _block_tokens(block):
-    kind = block.get("type")
-    if kind == "image" or kind == "document":
-        return IMAGE_TOKENS
-    if kind == "text":
-        return len(block.get("text") or "") / CHARS_PER_TOKEN
-    if kind == "tool_use":
-        return (len(json.dumps(block.get("input") or {})) + 40) / CHARS_PER_TOKEN
-    if kind == "tool_result":
-        return 20 + _content_tokens(block.get("content"))
-    if kind in ("thinking", "redacted_thinking"):
-        return len(block.get("thinking") or block.get("data") or "") / CHARS_PER_TOKEN
-    return len(json.dumps(block)) / CHARS_PER_TOKEN
+def _text_tokens(text):
+    return len(text or "") / CHARS_PER_TOKEN
 
 
-def _content_tokens(content):
-    if isinstance(content, str):
-        return len(content) / CHARS_PER_TOKEN
-    return sum(_block_tokens(b) for b in content or () if isinstance(b, dict))
+def _json_tokens(value):
+    return len(json.dumps(value, ensure_ascii=False)) / CHARS_PER_TOKEN
 
-
-def estimate(body, messages=None):
-    """Tokens the request will take, roughly and on the high side."""
-    system = body.get("system")
-    tokens = _content_tokens(system) if system else 0
-    tokens += len(json.dumps(body.get("tools") or [])) / CHARS_PER_TOKEN
-    for message in body.get("messages") if messages is None else messages:
-        tokens += 4 + _content_tokens(message.get("content"))
-    return int(tokens)
-
-
-def budget(body, context):
-    answer = min(int(body.get("max_tokens") or 8192), ANSWER_CAP)
-    return int(context * SAFETY) - answer
-
-
-# --- step 1: old tool output, shortened -------------------------------------------------------------
 
 def _shorten(text):
     if len(text) <= TOOL_KEEP_HEAD + TOOL_KEEP_TAIL + 200:
@@ -100,76 +79,280 @@ def _shorten(text):
             f"window; run the tool again if you need them ...]\n" + text[-TOOL_KEEP_TAIL:])
 
 
-def _shorten_result(content):
+def _texts(content, kinds=("text",)):
+    """The text of a content that is a string or a list of parts."""
     if isinstance(content, str):
-        return _shorten(content)
-    out = []
-    for block in content or ():
-        if isinstance(block, dict) and block.get("type") == "text":
-            out.append({**block, "text": _shorten(block.get("text") or "")})
-        elif isinstance(block, dict) and block.get("type") == "image":
-            out.append({"type": "text", "text": "[a picture the tool returned was left out to fit the context window]"})
-        else:
-            out.append(block)
-    return out
+        return content
+    return " ".join(p.get("text") or "" for p in content or () if isinstance(p, dict) and p.get("type") in kinds)
 
 
-def shorten_old(messages, keep_recent=KEEP_RECENT):
-    """Tool results and pictures before the last few messages, made short. A new list."""
-    out = copy.deepcopy(messages)
-    for message in out[:max(0, len(out) - keep_recent)]:
-        content = message.get("content")
+# --- the shapes ---------------------------------------------------------------------------------
+
+class Messages:
+    """Anthropic's Messages API: system apart, messages of content blocks, tool results in user turns."""
+    items_key = "messages"
+    answer_fields = ("max_tokens",)
+    picture_kinds = ("image", "document")
+
+    def fixed(self, body):
+        system = body.get("system")
+        return (self.content_tokens(system) if system else 0) + _json_tokens(body.get("tools") or [])
+
+    def content_tokens(self, content):
+        if isinstance(content, str):
+            return _text_tokens(content)
+        return sum(self.block_tokens(b) for b in content or () if isinstance(b, dict))
+
+    def block_tokens(self, block):
+        kind = block.get("type")
+        if kind in self.picture_kinds:
+            return IMAGE_TOKENS
+        if kind == "text":
+            return _text_tokens(block.get("text"))
+        if kind == "tool_use":
+            return (len(json.dumps(block.get("input") or {})) + 40) / CHARS_PER_TOKEN
+        if kind == "tool_result":
+            return 20 + self.content_tokens(block.get("content"))
+        if kind in ("thinking", "redacted_thinking"):
+            return _text_tokens(block.get("thinking") or block.get("data"))
+        return _json_tokens(block)
+
+    def tokens(self, item):
+        return 4 + self.content_tokens(item.get("content"))
+
+    def kept_first(self, items):
+        return 0                # the system prompt is not among the messages
+
+    def starts_a_turn(self, item):
+        """A message the person wrote, not tool results going back: the only safe place to cut."""
+        if item.get("role") != "user":
+            return False
+        content = item.get("content")
+        return isinstance(content, str) or not any(isinstance(b, dict) and b.get("type") == "tool_result"
+                                                   for b in content or ())
+
+    def _shorten_result(self, content):
+        if isinstance(content, str):
+            return _shorten(content)
+        out = []
+        for block in content or ():
+            if isinstance(block, dict) and block.get("type") == "text":
+                out.append({**block, "text": _shorten(block.get("text") or "")})
+            elif isinstance(block, dict) and block.get("type") == "image":
+                out.append({"type": "text", "text": "[a picture the tool returned was left out to fit the context window]"})
+            else:
+                out.append(block)
+        return out
+
+    def shorten(self, item):
+        """The item with its tool output shortened and pictures left out; None to leave it out."""
+        content = item.get("content")
         if not isinstance(content, list):
-            continue
-        for i, block in enumerate(content):
-            if not isinstance(block, dict):
-                continue
-            if block.get("type") == "tool_result":
-                content[i] = {**block, "content": _shorten_result(block.get("content"))}
-            elif block.get("type") == "image":
-                content[i] = {"type": "text", "text": "[a picture was here; left out to fit the context window]"}
-    return out
+            return item
+        changed = []
+        for block in content:
+            if isinstance(block, dict) and block.get("type") == "tool_result":
+                block = {**block, "content": self._shorten_result(block.get("content"))}
+            elif isinstance(block, dict) and block.get("type") == "image":
+                block = {"type": "text", "text": PICTURE_LEFT_OUT}
+            changed.append(block)
+        return {**item, "content": changed}
 
-
-# --- step 2: the older part, summarised -------------------------------------------------------------
-
-def _starts_a_turn(message):
-    """A message the person wrote, not tool results going back: the only safe place to cut."""
-    if message.get("role") != "user":
-        return False
-    content = message.get("content")
-    return isinstance(content, str) or not any(isinstance(b, dict) and b.get("type") == "tool_result"
-                                               for b in content or ())
-
-
-def _cut(body, messages, room):
-    """The earliest place to cut after which the rest fits in `room`; None when there is none."""
-    for k in range(1, len(messages)):
-        if _starts_a_turn(messages[k]) and estimate(body, messages[k:]) <= room:
-            return k
-    return None
-
-
-def _transcript(messages, limit_chars):
-    lines = []
-    for message in messages:
-        role = message.get("role")
-        content = message.get("content")
+    def transcript(self, item):
+        role = (item.get("role") or "").upper()
+        content = item.get("content")
         blocks = [{"type": "text", "text": content}] if isinstance(content, str) else content or []
         for block in blocks:
             if not isinstance(block, dict):
                 continue
             kind = block.get("type")
             if kind == "text":
-                lines.append(f"{role.upper()}: {block.get('text')}")
+                yield f"{role}: {block.get('text')}"
             elif kind == "tool_use":
-                lines.append(f"TOOL CALL {block.get('name')}: {json.dumps(block.get('input'))[:2000]}")
+                yield f"TOOL CALL {block.get('name')}: {json.dumps(block.get('input'))[:2000]}"
             elif kind == "tool_result":
-                inner = block.get("content")
-                text = inner if isinstance(inner, str) else " ".join(
-                    b.get("text") or "" for b in inner or () if isinstance(b, dict) and b.get("type") == "text")
-                lines.append(f"TOOL RESULT: {_shorten(text)}")
-    text = "\n".join(lines)
+                yield f"TOOL RESULT: {_shorten(_texts(block.get('content')))}"
+
+    def with_note(self, item, note):
+        content = item.get("content")
+        rest = [{"type": "text", "text": content}] if isinstance(content, str) else list(content or [])
+        return {**item, "content": [{"type": "text", "text": note}] + rest}
+
+
+class ChatCompletions(Messages):
+    """OpenAI's chat completions: system messages in the list, tool calls on the assistant's message,
+    each result a message of its own with role "tool"."""
+    answer_fields = ("max_completion_tokens", "max_tokens")
+    picture_kinds = ("image_url", "input_audio", "file")
+
+    def fixed(self, body):
+        return _json_tokens(body.get("tools") or [])
+
+    def tokens(self, item):
+        calls = item.get("tool_calls")
+        return 4 + self.content_tokens(item.get("content")) + (_json_tokens(calls) if calls else 0)
+
+    def kept_first(self, items):
+        """The system and developer messages at the start: the agent's instructions, always sent."""
+        n = 0
+        while n < len(items) and isinstance(items[n], dict) and items[n].get("role") in ("system", "developer"):
+            n += 1
+        return n
+
+    def starts_a_turn(self, item):
+        return item.get("role") == "user"
+
+    def shorten(self, item):
+        content = item.get("content")
+        if item.get("role") == "tool":
+            if isinstance(content, str):
+                return {**item, "content": _shorten(content)}
+            return {**item, "content": [{**p, "text": _shorten(p.get("text") or "")}
+                                        if isinstance(p, dict) and p.get("type") == "text" else p
+                                        for p in content or ()]}
+        if isinstance(content, list):
+            return {**item, "content": [{"type": "text", "text": PICTURE_LEFT_OUT}
+                                        if isinstance(p, dict) and p.get("type") in self.picture_kinds else p
+                                        for p in content]}
+        return item
+
+    def transcript(self, item):
+        role = item.get("role") or ""
+        text = _texts(item.get("content"))
+        if role == "tool":
+            yield f"TOOL RESULT: {_shorten(text)}"
+            return
+        if text:
+            yield f"{role.upper()}: {text}"
+        for call in item.get("tool_calls") or ():
+            function = (call or {}).get("function") or {}
+            yield f"TOOL CALL {function.get('name')}: {str(function.get('arguments'))[:2000]}"
+
+
+class Responses(Messages):
+    """OpenAI's Responses API: instructions apart, input a list of items - messages, function calls,
+    their outputs (each its own item, tied by call_id), and reasoning."""
+    items_key = "input"
+    answer_fields = ("max_output_tokens",)
+    picture_kinds = ("input_image", "input_file", "input_audio")
+    text_kinds = ("input_text", "output_text", "text")
+
+    def fixed(self, body):
+        return _text_tokens(body.get("instructions")) + _json_tokens(body.get("tools") or [])
+
+    def tokens(self, item):
+        kind = item.get("type") or "message"
+        if kind == "message":
+            return 4 + self.content_tokens(item.get("content"))
+        if kind.endswith("_output"):
+            output = item.get("output")
+            return 20 + (self.content_tokens(output) if isinstance(output, list) else _text_tokens(str(output or "")))
+        return _json_tokens(item)
+
+    def block_tokens(self, block):
+        if block.get("type") in self.text_kinds:
+            return _text_tokens(block.get("text"))
+        return super().block_tokens(block)
+
+    def kept_first(self, items):
+        n = 0
+        while n < len(items) and isinstance(items[n], dict) and (items[n].get("type") or "message") == "message" \
+                and items[n].get("role") in ("system", "developer"):
+            n += 1
+        return n
+
+    def starts_a_turn(self, item):
+        return (item.get("type") or "message") == "message" and item.get("role") == "user"
+
+    def _parts(self, parts):
+        return [{**p, "text": _shorten(p.get("text") or "")} if isinstance(p, dict) and p.get("type") in self.text_kinds
+                else {"type": "input_text", "text": PICTURE_LEFT_OUT}
+                if isinstance(p, dict) and p.get("type") in self.picture_kinds else p
+                for p in parts]
+
+    def shorten(self, item):
+        kind = item.get("type") or "message"
+        if kind.endswith("_output"):
+            output = item.get("output")
+            if isinstance(output, str):
+                return {**item, "output": _shorten(output)}
+            return {**item, "output": self._parts(output)} if isinstance(output, list) else item
+        if kind == "reasoning":
+            # The model's old thoughts, encrypted or not: long, and of no use many steps later
+            return None
+        content = item.get("content")
+        if kind == "message" and isinstance(content, list):
+            return {**item, "content": [{"type": "input_text", "text": PICTURE_LEFT_OUT}
+                                        if isinstance(p, dict) and p.get("type") in self.picture_kinds else p
+                                        for p in content]}
+        return item
+
+    def transcript(self, item):
+        kind = item.get("type") or "message"
+        if kind == "message":
+            text = _texts(item.get("content"), self.text_kinds)
+            if text:
+                yield f"{(item.get('role') or '').upper()}: {text}"
+        elif kind.endswith("_output"):
+            output = item.get("output")
+            text = _texts(output, self.text_kinds) if isinstance(output, list) else str(output or "")
+            yield f"TOOL RESULT: {_shorten(text)}"
+        elif kind.endswith("_call"):
+            arguments = item.get("arguments") or item.get("input") or item.get("action") or ""
+            arguments = arguments if isinstance(arguments, str) else json.dumps(arguments)
+            yield f"TOOL CALL {item.get('name') or kind}: {arguments[:2000]}"
+
+    def with_note(self, item, note):
+        content = item.get("content")
+        rest = [{"type": "input_text", "text": content}] if isinstance(content, str) else list(content or [])
+        return {**item, "content": [{"type": "input_text", "text": note}] + rest}
+
+
+MESSAGES, CHAT, RESPONSES = Messages(), ChatCompletions(), Responses()
+
+
+# --- measuring ----------------------------------------------------------------------------------
+
+def _items(body, shape):
+    items = body.get(shape.items_key)
+    return items if isinstance(items, list) else []
+
+
+def estimate(body, messages=None, shape=MESSAGES):
+    """Tokens the request will take, roughly and on the high side."""
+    items = _items(body, shape) if messages is None else messages
+    return int(shape.fixed(body) + sum(shape.tokens(i) for i in items if isinstance(i, dict)))
+
+
+def budget(body, context, shape=MESSAGES):
+    asked = next((body.get(f) for f in shape.answer_fields if body.get(f)), None)
+    answer = min(int(asked or 8192), ANSWER_CAP)
+    return int(context * SAFETY) - answer
+
+
+# --- step 1: old tool output, shortened -------------------------------------------------------------
+
+def shorten_old(messages, keep_recent=KEEP_RECENT, shape=MESSAGES):
+    """Tool results and pictures before the last few messages, made short. A new list."""
+    out = copy.deepcopy(messages)
+    edge = max(0, len(out) - keep_recent)
+    old = [shape.shorten(m) if isinstance(m, dict) else m for m in out[:edge]]
+    return [m for m in old if m is not None] + out[edge:]
+
+
+# --- step 2: the older part, summarised -------------------------------------------------------------
+
+def _cut(body, first, messages, room, shape):
+    """The earliest place to cut after which the rest fits in `room`; None when there is none."""
+    for k in range(1, len(messages)):
+        if isinstance(messages[k], dict) and shape.starts_a_turn(messages[k]) \
+                and estimate(body, first + messages[k:], shape) <= room:
+            return k
+    return None
+
+
+def _transcript(messages, limit_chars, shape):
+    text = "\n".join(line for m in messages if isinstance(m, dict) for line in shape.transcript(m))
     if len(text) <= limit_chars:
         return text
     # The start says what the task is; the end is where it stands. The middle gives way.
@@ -181,34 +364,41 @@ def _key(messages):
     return hashlib.sha256(json.dumps(messages, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
 
 
-async def fit(body, context, summarise, force=False):
+async def fit(body, context, summarise, force=False, shape=MESSAGES):
     """The request, made to fit `context` tokens; (body, how) - how is None when it was left alone.
 
     summarise(prompt, text) -> summary text, by the same model. force shrinks to 70% of the room,
     for when the model said the window was full although the estimate said it was not.
     Returns (None, reason) when nothing makes it fit.
     """
-    messages = body.get("messages") or []
-    if not context or not messages:
+    items = _items(body, shape)
+    if not context or not items:
         return body, None
-    room = budget(body, context)
+    room = budget(body, context, shape)
     if force:
         room = int(room * 0.7)
-    if estimate(body) <= room:
+    if estimate(body, shape=shape) <= room:
         return body, None
 
-    shortened = shorten_old(messages)
-    if estimate(body, shortened) <= room:
-        log.info("context: old tool output shortened, %s -> %s estimated tokens of %s",
-                 estimate(body), estimate(body, shortened), room)
-        return {**body, "messages": shortened}, "shortened"
+    # Instructions at the start (OpenAI's system messages) stay as they are, ahead of everything
+    n = shape.kept_first(items)
+    first, messages = copy.deepcopy(items[:n]), items[n:]
 
-    k = _cut(body, shortened, int(room * TAIL_SHARE))
+    def with_items(rest):
+        return {**body, shape.items_key: first + rest}
+
+    shortened = shorten_old(messages, shape=shape)
+    if estimate(body, first + shortened, shape) <= room:
+        log.info("context: old tool output shortened, %s -> %s estimated tokens of %s",
+                 estimate(body, shape=shape), estimate(body, first + shortened, shape), room)
+        return with_items(shortened), "shortened"
+
+    k = _cut(body, first, shortened, int(room * TAIL_SHARE), shape)
     if k is None:
         # One long turn with no place to cut: shorten everything but the last two messages
-        tighter = shorten_old(messages, keep_recent=2)
-        if estimate(body, tighter) <= room:
-            return {**body, "messages": tighter}, "shortened"
+        tighter = shorten_old(messages, keep_recent=2, shape=shape)
+        if estimate(body, first + tighter, shape) <= room:
+            return with_items(tighter), "shortened"
         return None, "the latest turn alone is bigger than the model's window"
 
     older = shortened[:k]
@@ -220,7 +410,7 @@ async def fit(body, context, summarise, force=False):
         # again from the start, which in a very long session would lose its middle.
         earlier, since = None, 0
         for j in range(k - 1, 0, -1):
-            if _starts_a_turn(shortened[j]):
+            if isinstance(shortened[j], dict) and shape.starts_a_turn(shortened[j]):
                 earlier = _memory.get(_key(shortened[:j]))
                 if earlier:
                     since = j
@@ -228,9 +418,9 @@ async def fit(body, context, summarise, force=False):
         limit = int(context * SUMMARY_INPUT_SHARE * CHARS_PER_TOKEN)
         if earlier:
             text = ("Summary of the session before this point:\n" + earlier + "\n\nWhat happened after it:\n"
-                    + _transcript(older[since:], limit - len(earlier)))
+                    + _transcript(older[since:], limit - len(earlier), shape))
         else:
-            text = _transcript(older, limit)
+            text = _transcript(older, limit, shape)
         summary = (await summarise(SUMMARY_PROMPT, text) or "").strip()
         if not summary:
             return None, "the model could not summarise the earlier conversation"
@@ -241,15 +431,40 @@ async def fit(body, context, summarise, force=False):
         _memory.move_to_end(key)
 
     rest = copy.deepcopy(shortened[k:])
-    note = {"type": "text", "text": ("<earlier-conversation-summary>\nThe start of this session was summarised by "
-                                     "the gateway to fit the model's context window:\n\n" + summary +
-                                     "\n</earlier-conversation-summary>")}
-    first = rest[0]
-    content = first.get("content")
-    first["content"] = [note] + ([{"type": "text", "text": content}] if isinstance(content, str) else list(content or []))
-    fitted = {**body, "messages": rest}
+    rest[0] = shape.with_note(rest[0], SUMMARY_NOTE.format(summary))
+    fitted = with_items(rest)
     log.info("context: %d earlier messages summarised, %s -> %s estimated tokens of %s",
-             k, estimate(body), estimate(fitted), room)
-    if estimate(fitted) > room:
+             k, estimate(body, shape=shape), estimate(fitted, shape=shape), room)
+    if estimate(fitted, shape=shape) > room:
         return None, "even summarised, the conversation is bigger than the model's window"
     return fitted, "summarised"
+
+
+async def fit_for(body, backend, chat_url, force=False, shape=MESSAGES):
+    """fit(), with the summary written by the model being fitted for, at its OpenAI chat endpoint
+    `chat_url`, without thinking: it is the model already loaded, and a different one would swap the
+    GPU in the middle of the person's work. (body, how); body is None when nothing makes it fit."""
+    context = backend.context_length
+    if not context:
+        return body, None
+
+    async def summarise(prompt, text):
+        request = {"model": backend.upstream_model, "stream": False, "max_tokens": 3000, "temperature": 0.2,
+                   "chat_template_kwargs": {"enable_thinking": False},
+                   "messages": [{"role": "system", "content": prompt}, {"role": "user", "content": text}]}
+        try:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(settings.request_timeout(), connect=10)) as client:
+                response = await client.post(chat_url, json=request, headers=backend.headers())
+            if not response.is_success:
+                log.warning("summarising for %s failed: %s %s", backend.upstream_model, response.status_code,
+                            response.text[:200])
+                return ""
+            return response.json()["choices"][0]["message"].get("content") or ""
+        except (httpx.HTTPError, ValueError, KeyError, IndexError) as e:
+            log.warning("summarising for %s failed: %s", backend.upstream_model, e)
+            return ""
+
+    fitted, how = await fit(body, context, summarise, force, shape)
+    if fitted is None:
+        log.warning("%s: could not be made to fit %s tokens: %s", backend.upstream_model, context, how)
+    return fitted, how

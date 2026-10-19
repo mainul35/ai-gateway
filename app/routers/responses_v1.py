@@ -1,9 +1,9 @@
 """OpenAI's Responses API (POST /v1/responses), for Codex and other clients that speak only it.
 
 Ollama and llama.cpp both answer /v1/responses themselves, so a request is passed through to the
-model's backend unchanged, as anthropic_v1 does for the Messages API: the gateway adds who may ask
-(access, the person's limits), loads the model, keeps a long stream alive through Cloudflare, and
-records the usage. Backends that do not have it are refused with a 400 rather than translated.
+model's backend, as anthropic_v1 does for the Messages API: the gateway adds who may ask (access,
+the person's limits), loads the model, makes a conversation too long for it fit (app/context_fit.py),
+keeps a long stream alive through Cloudflare, and records the usage. Backends that do not have it are refused with a 400 rather than translated.
 """
 import asyncio
 import json
@@ -13,7 +13,7 @@ import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 
-from app import access, backends, limits, settings, usage as usage_log
+from app import access, anthropic_compat as compat, backends, context_fit, limits, settings, usage as usage_log
 from app.auth import Principal, authenticate
 from app.routers.anthropic_v1 import _target
 
@@ -43,6 +43,29 @@ def _remote_images(value):
     elif isinstance(value, list):
         for item in value:
             yield from _remote_images(item)
+
+
+async def _fitted(body, backend, base, force=False):
+    """The request made to fit the model's window (app/context_fit.py), so Codex's long sessions
+    carry on instead of failing; None when nothing makes it fit."""
+    fitted, _how = await context_fit.fit_for(body, backend, f"{base}/v1/chat/completions", force,
+                                             context_fit.RESPONSES)
+    return fitted
+
+
+def _too_long(body, backend):
+    """OpenAI's error for it, which Codex answers by compacting the conversation."""
+    error = compat.too_long_openai(backend.context_length, context_fit.estimate(body, shape=context_fit.RESPONSES))
+    error["error"]["param"] = "input"
+    return error
+
+
+def _too_long_event(body, backend):
+    """The same, as the stream's failure event, the way OpenAI's Responses API reports it."""
+    failed = {"type": "response.failed",
+              "response": {"id": "resp_gateway", "object": "response", "status": "failed",
+                           "error": _too_long(body, backend)["error"]}}
+    return f"event: response.failed\ndata: {json.dumps(failed)}\n\n".encode()
 
 
 def _usage(payload):
@@ -89,8 +112,20 @@ async def _whole(principal, body, model, backend):
     except RuntimeError as e:
         return _error(503, str(e), "server_error")
     try:
+        sending = await _fitted(body, backend, base)
+        if sending is None:
+            return JSONResponse(_too_long(body, backend), status_code=400)
         async with httpx.AsyncClient(timeout=httpx.Timeout(settings.request_timeout(), connect=10)) as client:
-            response = await client.post(f"{base}/v1/responses", json=body, headers=backend.headers())
+            response = await client.post(f"{base}/v1/responses", json=sending, headers=backend.headers())
+            if not response.is_success and compat.context_exceeded(response.text):
+                # The model counts more than the estimate: made smaller, and tried once more
+                smaller = await _fitted(body, backend, base, force=True)
+                if smaller is not None and smaller is not sending:
+                    response = await client.post(f"{base}/v1/responses", json=smaller, headers=backend.headers())
+        if not response.is_success and compat.context_exceeded(response.text):
+            await usage_log.record(principal, model, backend.name, ENDPOINT, False, 400, None,
+                                   (time.monotonic() - started) * 1000, response.text[:500])
+            return JSONResponse(_too_long(body, backend), status_code=400)
         usage = _usage(response.json()) if response.is_success else None
         await usage_log.record(principal, model, backend.name, ENDPOINT, False, response.status_code, usage,
                                (time.monotonic() - started) * 1000,
@@ -122,22 +157,39 @@ def _streamed(principal, body, model, backend):
                 state.update(status=503, error=str(e))
                 await queue.put(f"event: error\ndata: {json.dumps({'type': 'error', 'message': str(e)})}\n\n".encode())
                 return
+            # Made to fit before it goes; the heartbeat keeps the stream open while a summary is written
+            sending = await _fitted(body, backend, base)
             async with httpx.AsyncClient(timeout=httpx.Timeout(settings.request_timeout(), connect=10)) as client:
-                async with client.stream("POST", f"{base}/v1/responses", json=body,
-                                         headers=backend.headers()) as response:
-                    state["status"] = response.status_code
-                    if response.status_code >= 400:
-                        text = (await response.aread()).decode(errors="replace")
-                        state["error"] = text[:500]
-                        await queue.put(f"event: error\ndata: {json.dumps({'type': 'error', 'message': text[:500]})}\n\n".encode())
+                for attempt in (1, 2):
+                    if sending is None:
+                        state.update(status=400, error="context length exceeded")
+                        await queue.put(_too_long_event(body, backend))
                         return
-                    async for line in response.aiter_lines():
-                        if line.startswith("data:") and '"response.completed"' in line:
-                            try:
-                                state["usage"] = _usage(json.loads(line[5:].strip()).get("response"))
-                            except ValueError:
-                                pass
-                        await queue.put((line + "\n").encode())
+                    async with client.stream("POST", f"{base}/v1/responses", json=sending,
+                                             headers=backend.headers()) as response:
+                        state["status"] = response.status_code
+                        if response.status_code >= 400:
+                            text = (await response.aread()).decode(errors="replace")
+                            state["error"] = text[:500]
+                            if compat.context_exceeded(text):
+                                # Nothing has gone to the client yet: made smaller, and tried once more
+                                smaller = await _fitted(body, backend, base, force=True) if attempt == 1 else None
+                                if smaller is not None and smaller is not sending:
+                                    sending = smaller
+                                    continue
+                                await queue.put(_too_long_event(body, backend))
+                                return
+                            await queue.put(f"event: error\ndata: {json.dumps({'type': 'error', 'message': text[:500]})}\n\n".encode())
+                            return
+                        state["error"] = None
+                        async for line in response.aiter_lines():
+                            if line.startswith("data:") and '"response.completed"' in line:
+                                try:
+                                    state["usage"] = _usage(json.loads(line[5:].strip()).get("response"))
+                                except ValueError:
+                                    pass
+                            await queue.put((line + "\n").encode())
+                        return
         except httpx.HTTPError as e:
             state.update(status=503, error=str(e))
             await queue.put(b'event: error\ndata: {"type": "error", "message": "upstream connection failed"}\n\n')
