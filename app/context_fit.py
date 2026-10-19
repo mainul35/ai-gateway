@@ -14,9 +14,14 @@ and when it does not fit it is made to:
    said to be left out, and the newest turns are not touched. Old pictures become a line saying one
    was there.
 2. If that is not enough, the older part of the conversation is summarised by the model itself -
-   what the task is, what was decided and done, which files changed, what is open - and the summary
-   stands in for it, ahead of the recent turns, which go on unchanged. The cut is always where the
-   person spoke, never between a tool call and its result.
+   what the person said, what the task is, what was decided and done, which files changed, what is
+   open - and the summary stands in for it, ahead of the recent turns, which go on unchanged. The cut
+   is always where the person spoke, never between a tool call and its result.
+
+   A summary that drops something the person said would lose it for the rest of the session, since
+   it is reused. So it is checked against the distinctive words of the person's own messages (names,
+   paths, identifiers, versions, things in quotes): with some missing, it is written again with them
+   named, and whatever is still missing goes in after it as the person's own sentences.
 
 A summary is remembered by what it summarised, so the following requests of the same session (which
 resend the whole conversation) reuse it instead of summarising again, and the part sent stays the same
@@ -31,6 +36,7 @@ import copy
 import hashlib
 import json
 import logging
+import re
 from collections import OrderedDict
 
 import httpx
@@ -50,10 +56,27 @@ SUMMARY_INPUT_SHARE = 0.6  # of the window, the most of the old part handed to t
 
 SUMMARY_PROMPT = """You compress the earlier part of a working session between a person and a coding
 agent, so the agent can carry on without it. Write a dense, factual summary for the agent, not for a
-reader: the task and the person's goals and preferences; decisions made and why; files and functions
-created, changed or examined, with their paths; commands run and what they showed; errors met and how
-they were dealt with; the current state; and exactly what was in progress and what is left to do.
-Keep names, paths, numbers and versions exact. No preamble. At most about 1500 words."""
+reader.
+
+Start with what the person said: every fact, name, requirement, preference and decision they stated,
+copied word for word (names, codenames, dates, numbers, paths, versions exactly as they wrote them).
+These matter most - the agent can read files again, but cannot ask what the person told it.
+
+Then: the task and the person's goals; decisions made and why; files and functions created, changed
+or examined, with their paths; commands run and what they showed; errors met and how they were dealt
+with; the current state; and exactly what was in progress and what is left to do. Keep names, paths,
+numbers and versions exact. No preamble. At most about 1500 words."""
+
+# Checking a summary kept what the person said: the distinctive words of their own messages - names
+# in capitals, paths and file names, identifiers, versions, things in quotes. Messages longer than
+# SAID_MAX_CHARS are pasted or injected text (files, AGENTS.md, a client's reminders), not said.
+SAID_MAX_CHARS = 2000
+MAX_TERMS = 60
+QUOTED_MAX_CHARS = 3000    # of the person's own sentences added when a summary still leaves terms out
+_TERM = re.compile(r"`[^`\n]{2,80}`|\"[^\"\n]{3,80}\"|\b[A-Z][A-Z0-9_]{3,}\b|[\w.~-]*[/\\][\w./\\-]+"
+                   r"|\b[\w-]+\.[a-z][a-z0-9]{0,4}\b|\b[a-z]+_[a-z0-9_]+\b|\b[A-Za-z][a-z0-9]+[A-Z]\w*\b|\bv?\d+\.\d+(?:\.\d+)*\b")
+MISSING_NOTE = ("\n\n---\nYour summary must keep each of these exactly as the person wrote them, with what "
+                "they refer to: {}")
 
 SUMMARY_NOTE = ("<earlier-conversation-summary>\nThe start of this session was summarised by the gateway "
                 "to fit the model's context window:\n\n{}\n</earlier-conversation-summary>")
@@ -360,6 +383,69 @@ def _transcript(messages, limit_chars, shape):
     return text[:head] + "\n[... the middle of the session left out ...]\n" + text[-(limit_chars - head):]
 
 
+def _said(messages, shape):
+    """The person's own messages among these, as text: not tool results, not long pasted text."""
+    said = []
+    for m in messages:
+        if isinstance(m, dict) and shape.starts_a_turn(m):
+            said += [line[6:] for line in shape.transcript(m)
+                     if line.startswith("USER: ") and len(line) <= SAID_MAX_CHARS + 6]
+    return said
+
+
+def _terms(texts):
+    """The distinctive words of these texts, in the order they first appear."""
+    terms = []
+    for text in texts:
+        for match in _TERM.finditer(text):
+            term = match.group(0).strip("`\"").rstrip(".,;:")
+            if len(term) >= 4 and term not in terms:
+                terms.append(term)
+    return terms[:MAX_TERMS]
+
+
+def _missing(summary, terms):
+    found = summary.lower()
+    return [t for t in terms if t.lower() not in found]
+
+
+def _quoted(said, missing):
+    """The person's sentences holding the missing terms, word for word, up to QUOTED_MAX_CHARS."""
+    lines, size = [], 0
+    for text in said:
+        for sentence in re.split(r"(?<=[.!?])\s+|\n+", text):
+            sentence = sentence.strip()
+            if sentence and any(t.lower() in sentence.lower() for t in missing) and sentence not in lines:
+                if size + len(sentence) > QUOTED_MAX_CHARS:
+                    return lines
+                lines.append(sentence)
+                size += len(sentence)
+    return lines
+
+
+async def _summary(summarise, text, said):
+    """A summary of `text`, made to keep the distinctive words of what the person said (`said`)."""
+    summary = (await summarise(SUMMARY_PROMPT, text) or "").strip()
+    if not summary:
+        return ""
+    terms = _terms(said)
+    missing = _missing(summary, terms)
+    if missing:
+        # Written again with them named: added at the end, so the engine reads the rest from its cache
+        again = (await summarise(SUMMARY_PROMPT, text + MISSING_NOTE.format(", ".join(missing))) or "").strip()
+        still = _missing(again, terms) if again else missing
+        log.info("context: the summary left out %d of %d terms the person used; written again, %d left out",
+                 len(missing), len(terms), len(still))
+        if again and len(still) < len(missing):
+            summary, missing = again, still
+    if missing:
+        quoted = _quoted(said, missing)
+        if quoted:
+            summary += "\n\nThe person's own words, which the summary above may leave out:\n" + \
+                "\n".join(f"- {line}" for line in quoted)
+    return summary
+
+
 def _key(messages):
     return hashlib.sha256(json.dumps(messages, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
 
@@ -421,7 +507,7 @@ async def fit(body, context, summarise, force=False, shape=MESSAGES):
                     + _transcript(older[since:], limit - len(earlier), shape))
         else:
             text = _transcript(older, limit, shape)
-        summary = (await summarise(SUMMARY_PROMPT, text) or "").strip()
+        summary = await _summary(summarise, text, _said(older, shape))
         if not summary:
             return None, "the model could not summarise the earlier conversation"
         _memory[key] = summary
