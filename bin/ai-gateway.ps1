@@ -14,6 +14,7 @@
   ai-gateway launch claude-desktop             # the Claude desktop app, all its sessions
   ai-gateway launch claude-desktop -Restore    # back to your Claude account
   ai-gateway models                                                             # what you may use
+  ai-gateway update                                                             # the newest launcher
 
   -Model, -Context (tokens; default: what the gateway says), -Gateway, -Config (set it up, do not start).
 
@@ -65,7 +66,7 @@ function ConvertFrom-JsonTable($text) { return ConvertTo-Hashtable ($text | Conv
 function Write-Utf8($path, $text) {
     [System.IO.File]::WriteAllText($path, ($text -join "`n") + "`n", (New-Object System.Text.UTF8Encoding $false))
 }
-if ($Command -notin @("launch", "models")) {
+if ($Command -notin @("launch", "models", "update")) {
     Get-Help $MyInvocation.MyCommand.Path -Detailed | Out-String | Write-Host; exit 0
 }
 
@@ -91,9 +92,43 @@ function Get-GatewayKey {
 }
 $Key = Get-GatewayKey
 
+# The gateway's machine sleeps when idle. A request with the key wakes it, and is answered 503
+# ("waking") until it is up, a minute or two: asked again until then.
+function Invoke-Gateway($path, $outFile) {
+    for ($try = 1; ; $try++) {
+        try {
+            $headers = @{ Authorization = "Bearer $Key" }
+            if ($outFile) { Invoke-WebRequest -Uri "$Gateway$path" -Headers $headers -TimeoutSec 60 -UseBasicParsing -OutFile $outFile; return }
+            return Invoke-RestMethod -Uri "$Gateway$path" -Headers $headers -TimeoutSec 60
+        } catch {
+            $status = if ($_.Exception.Response) { [int]$_.Exception.Response.StatusCode } else { 0 }
+            if ($status -ne 503 -or $try -ge 15) { throw }
+            if ($try -eq 1) { Write-Host "The gateway's machine is waking up; this takes a minute or two..." }
+            Start-Sleep -Seconds 10
+        }
+    }
+}
+
+# --- a newer launcher, from the gateway ----------------------------------------------------------
+# Downloaded with the key, so a sleeping gateway wakes for it; checked before it replaces this file
+if ($Command -eq "update") {
+    $target = $PSCommandPath; $new = "$target.new"
+    try { Invoke-Gateway "/downloads/ai-gateway.ps1" $new }
+    catch { Remove-Item $new -ErrorAction SilentlyContinue; Fail "could not download the launcher from ${Gateway}: $($_.Exception.Message)" }
+    $tokens = $null; $errors = $null
+    $null = [System.Management.Automation.Language.Parser]::ParseFile($new, [ref]$tokens, [ref]$errors)
+    if ($errors.Count -or -not (Select-String -Path $new -Pattern "function Get-GatewayKey" -Quiet)) {
+        Remove-Item $new; Fail "what the gateway sent is not the launcher; yours is unchanged"
+    }
+    if ((Get-FileHash $new).Hash -eq (Get-FileHash $target).Hash) { Remove-Item $new; Write-Host "ai-gateway is up to date."; exit 0 }
+    Move-Item $new $target -Force
+    Write-Host "ai-gateway is updated ($target)." -ForegroundColor Cyan
+    exit 0
+}
+
 # --- what the gateway says about the models ------------------------------------------------------
 try {
-    $Models = (Invoke-RestMethod -Uri "$Gateway/v1/models" -Headers @{ Authorization = "Bearer $Key" } -TimeoutSec 30).data
+    $Models = (Invoke-Gateway "/v1/models").data
 } catch { Fail "the gateway at $Gateway did not answer with a model list (is the key right?)" }
 
 if ($Command -eq "models") {

@@ -66,6 +66,10 @@ IDs, each standing for a gateway model and shown by that model's name (`app/clau
 
 Set `anthropic.desktop.models` ("claude-opus-5=gemma4:31b, ...") to choose. A person is only offered
 the models they may use. Either command closes the app (from the tray too) and opens it again.
+
+`ai-gateway update` replaces the launcher with the gateway's newest. It sends your key, so a
+sleeping gateway wakes for it (the plain download on the dashboard does not), and checks what came
+back before it replaces anything.
 **Every** desktop session moves to the gateway, Code and Cowork alike, until `--restore`.
 
 ## On the gateway
