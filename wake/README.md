@@ -19,6 +19,7 @@ is asleep, an authorised request wakes it and is answered once the gateway is up
 | Any other request, API call or a click in an open page | held until the gateway answers, then answered (after 90 s: `503` + `Retry-After: 30`) |
 | A page's timer polling (dashboard stats, task feeds, remote-folder long-poll) | `503`, wakes nothing |
 | `/health` | `503`, wakes nothing (so `bin/deploy.sh` and monitors never wake it) |
+| A launcher download (`/downloads/...`) or a static file (`/static/...`) | served from the copy kept the last time the gateway served it (the launchers are also fetched every 30 min while it is up); wakes nothing |
 
 Coming back from suspend takes a few seconds, so most of the time nobody notices. From power-off it
 is a full boot, which is what the holding and keep-alives are for.

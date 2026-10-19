@@ -11,6 +11,8 @@ Runs on proxy-vm, which never sleeps. Cloudflare Tunnel points here instead of a
                       - a page opened in a browser gets a "waking up" page that reloads itself
                     a page's timer polling (dashboard stats, task feeds) is answered 503 and wakes
                     nothing, or an open tab would keep the machine awake forever
+                    a launcher download or a static file is served from the copy kept the last
+                    time the gateway served it, and wakes nothing
 
 Only a caller that looks authorised can wake the machine, otherwise every scanner on the internet
 would keep it awake:
@@ -272,6 +274,76 @@ async def open_upstream(request, path, body, h, plain=False):
     return response
 
 
+# --- files kept for while the gateway sleeps -----------------------------------------------------
+# The launchers people download and the pages' static files need no model and no data, so a sleeping
+# gateway is not woken for them. Each one the gateway serves through here is kept, in memory, and
+# served from that copy while it sleeps. The launchers are also fetched now and then while it is up,
+# so a download works even when nobody fetched it since the last deploy.
+KEPT_PATHS = re.compile(r"^/(downloads/[\w.-]+|static/[\w./-]+)$")
+LAUNCHERS = ("ai-gateway.ps1", "ai-gateway.sh", "claude-gateway.ps1", "claude-gateway.sh")
+KEPT_HEADERS = ("content-type", "content-disposition", "cache-control", "etag", "last-modified")
+KEPT_MAX_FILE = 5 * 1024 * 1024
+KEPT_MAX_TOTAL = 50 * 1024 * 1024
+REFETCH_SECONDS = float(_env("WAKE_REFETCH_SECONDS", "1800"))
+kept: dict[str, tuple[bytes, list]] = {}
+# What a request through Cloudflare says about where it came to, for the launchers' fetch: the
+# gateway writes its public address into each launcher from these
+FORWARDED = ("host", "x-forwarded-proto", "x-forwarded-host", "cf-visitor")
+fetching = {"at": -REFETCH_SECONDS, "headers": None}
+
+
+def keep(path, body, headers):
+    if len(body) > KEPT_MAX_FILE or any(k.lower() == b"set-cookie" for k, _ in headers):
+        return
+    kept.pop(path, None)
+    if sum(len(b) for b, _ in kept.values()) + len(body) > KEPT_MAX_TOTAL:
+        return
+    kept[path] = (body, [(k, v) for k, v in headers if k.decode("latin-1").lower() in KEPT_HEADERS])
+
+
+async def relay_and_keep(path, response):
+    """A file the gateway served, passed on whole and kept."""
+    try:
+        body = await response.aread()
+    finally:
+        await response.aclose()
+    if response.status_code == 200:
+        keep(path, body, response.headers.raw)
+    out = Response(body, status_code=response.status_code)
+    out.raw_headers = [(k, v) for k, v in response.headers.raw
+                       if k.decode("latin-1").lower() not in HOP_BY_HOP | {"content-length"}]
+    out.headers["content-length"] = str(len(body))
+    return out
+
+
+def from_kept(path, method):
+    body, headers = kept[path]
+    out = Response(b"" if method == "HEAD" else body, status_code=200)
+    out.raw_headers = list(headers) + [(b"content-length", str(len(body)).encode()),
+                                       (b"x-served-by", b"wake-front (gateway asleep)")]
+    return out
+
+
+async def fetch_launchers():
+    for name in LAUNCHERS:
+        try:
+            response = await client.get(f"{UPSTREAM}/downloads/{name}", headers=fetching["headers"], timeout=10.0)
+        except httpx.HTTPError:
+            return
+        if response.status_code == 200:
+            keep(f"/downloads/{name}", response.content, response.headers.raw)
+
+
+def maybe_fetch_launchers(request):
+    """Now and then, while the gateway is up, the launchers fetched as a visitor would see them."""
+    if request.headers.get("host"):
+        fetching["headers"] = {k: request.headers[k] for k in FORWARDED if k in request.headers}
+    now = time.monotonic()
+    if fetching["headers"] and now - fetching["at"] >= REFETCH_SECONDS:
+        fetching["at"] = now
+        asyncio.get_running_loop().create_task(fetch_launchers())
+
+
 def relay(response):
     out = StreamingResponse(response.aiter_raw(), status_code=response.status_code,
                             background=BackgroundTask(response.aclose))
@@ -405,9 +477,12 @@ async def gateway(request: Request, rest: str):
     waking = state.waking is not None and not state.waking.done()
     if state.up is False and not waking and time.monotonic() - state.checked_at > DOWN_RECHECK_SECONDS:
         await gateway_is_up()      # switched on by hand, or woken some other way
+    keepable = request.method == "GET" and bool(KEPT_PATHS.match(path))
     if state.up is not False:
         try:
-            return relay(await open_upstream(request, path, body, h))
+            response = await open_upstream(request, path, body, h)
+            maybe_fetch_launchers(request)
+            return await relay_and_keep(path, response) if keepable else relay(response)
         except (httpx.ConnectError, httpx.ConnectTimeout, httpx.RemoteProtocolError) as e:
             log.info("gateway unreachable (%s): treating it as asleep", type(e).__name__)
             state.up, state.checked_at = False, time.monotonic()
@@ -415,6 +490,8 @@ async def gateway(request: Request, rest: str):
     # --- the gateway is asleep from here on ---
     if path == "/health":
         return asleep("homelabai is asleep")            # the deploy script's check; wakes nothing
+    if request.method in ("GET", "HEAD") and path in kept:
+        return from_kept(path, request.method)          # a launcher or static file: no need to wake
     if request.method == "OPTIONS":
         # Let a browser's preflight through, so the real request that follows can wake the machine
         return Response(status_code=204, headers={

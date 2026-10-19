@@ -22,10 +22,10 @@ OTHER_KEY = "sk-" + "B" * 43
 MAC = "a8:a1:59:9d:f4:ae"
 
 FAKE_BOX = textwrap.dedent('''
-    import asyncio, json, socket, sys, time
+    import asyncio, json, os, socket, sys, time
     import uvicorn
     from fastapi import FastAPI, Header, Request
-    from fastapi.responses import JSONResponse, StreamingResponse
+    from fastapi.responses import JSONResponse, PlainTextResponse, StreamingResponse
 
     wol_port, http_port, good = int(sys.argv[1]), int(sys.argv[2]), sys.argv[3]
     app = FastAPI()
@@ -38,6 +38,19 @@ FAKE_BOX = textwrap.dedent('''
 
     @app.get("/admin/system")
     async def system(): return {"ok": True}
+
+    @app.get("/downloads/{name}")
+    async def download(name: str, host: str = Header(default="")):
+        return PlainTextResponse(f"# launcher {name} for {host}\\n",
+                                 headers={"Content-Disposition": f'attachment; filename="{name}"'})
+
+    @app.get("/static/app.css")
+    async def css(): return PlainTextResponse("body{}", media_type="text/css")
+
+    @app.post("/__sleep")
+    async def sleep():
+        asyncio.get_running_loop().call_later(0.2, lambda: os._exit(0))
+        return {"sleeping": True}
 
     @app.post("/v1/chat/completions")
     async def chat(request: Request, authorization: str = Header(default="")):
@@ -135,6 +148,32 @@ def test_click_in_open_tab_wakes_then_answers(setup):
                          headers={"Sec-Fetch-Mode": "cors"}, timeout=60)
     assert response.status_code == 200 and response.json() == {"conversations": []}
     assert woken()
+
+
+def test_downloads_and_static_files_need_no_wake(setup):
+    base, woken = setup
+    assert httpx.get(f"{base}/downloads/ai-gateway.ps1").status_code == 503     # never served yet
+    # Awake: a call wakes it, a static file and one launcher pass through and are kept, and the
+    # other launchers are fetched alongside, as a visitor to the public address would get them
+    public = {"Host": "gateway.example"}
+    assert httpx.get(f"{base}/chat/conversations", cookies={"gateway_session": cookie()},
+                     headers={"Sec-Fetch-Mode": "cors", **public}, timeout=60).status_code == 200
+    assert httpx.get(f"{base}/static/app.css", headers=public).text == "body{}"
+    assert httpx.get(f"{base}/downloads/ai-gateway.ps1", headers=public).status_code == 200
+    time.sleep(1)
+    httpx.post(f"{base}/__sleep")
+    time.sleep(1)
+    # Asleep: served from the copies, nothing woken (an unknown file still is not)
+    ps1 = httpx.get(f"{base}/downloads/ai-gateway.ps1")
+    assert ps1.status_code == 200 and ps1.text == "# launcher ai-gateway.ps1 for gateway.example\n"
+    assert ps1.headers["x-served-by"].startswith("wake-front")
+    assert 'filename="ai-gateway.ps1"' in ps1.headers["content-disposition"]
+    sh = httpx.get(f"{base}/downloads/ai-gateway.sh")
+    assert sh.status_code == 200 and "gateway.example" in sh.text               # fetched, never asked for
+    css = httpx.get(f"{base}/static/app.css")
+    assert css.text == "body{}" and css.headers["content-type"].startswith("text/css")
+    assert httpx.head(f"{base}/downloads/ai-gateway.sh").status_code == 200
+    assert httpx.get(f"{base}/static/other.js").status_code == 503
 
 
 def test_rejected_key_never_wakes_again(setup):
