@@ -151,10 +151,19 @@ if [ "$APP" = claude-desktop ]; then
         }
         write(metaPath, meta);
         "ok";' >/dev/null || die "could not write the Claude desktop app's settings"
+    # The app reads which profile is in use only when it starts: so it is quit and opened again, by a
+    # process of its own - typed in a terminal inside the app, this command closes with the app
+    then=" Quit it and open it again."
+    if open -Ra Claude 2>/dev/null; then
+        nohup sh -c 'osascript -e "quit app \"Claude\"" >/dev/null 2>&1
+                     i=0; while pgrep -xq Claude && [ $i -lt 60 ]; do sleep 0.25; i=$((i + 1)); done
+                     open -a Claude' >/dev/null 2>&1 &
+        then=" It is restarting."
+    fi
     if [ "$RESTORE" = 1 ]; then
-        echo "The Claude desktop app is set back to your Claude account. Quit it and open it again."
+        echo "The Claude desktop app is set back to your Claude account.$then"
     else
-        echo "The Claude desktop app now uses $GATEWAY (profile \"AI Gateway\"): quit it and open it again."
+        echo "The Claude desktop app now uses $GATEWAY (profile \"AI Gateway\").$then"
         echo "Its model picker offers Claude's names standing for gateway models; ai-gateway launch claude-desktop --restore undoes this."
     fi
     exit 0

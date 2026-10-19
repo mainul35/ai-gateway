@@ -207,7 +207,7 @@
     </p>
     <p><strong>Automatically:</strong> the launcher command above, <code>ai-gateway launch claude-desktop</code>,
       does everything below for you: it writes an <em>AI Gateway</em> profile into the app's settings and
-      makes it the one in use. Quit the app completely (also from the tray) and open it again. Its model
+      makes it the one in use, then closes the app (also from the tray) and opens it again. Its model
       picker then lists this gateway's models under Claude's names - Sonnet, Opus, Haiku and Fable all run
       <code>qwen3.6-256k</code>, which also reads images, so a picture never swaps models mid-task, and
       Sonnet 4.6 runs <code>auto</code>. The second command, with <code>-Restore</code>
@@ -262,7 +262,7 @@ document.querySelectorAll('.agent-guide .origin-v1').forEach(e => e.textContent 
 // Applications: one command per app for the chosen model, in the shell of the chosen computer
 const APPS = [
   {id: 'claude', name: 'Claude Code', about: "Anthropic's coding agent, on the Messages API"},
-  {id: 'claude-desktop', name: 'Claude desktop app', about: 'every desktop session, macOS and Windows; quit the app (also from the tray) and open it again after either command', noModel: true,
+  {id: 'claude-desktop', name: 'Claude desktop app', about: 'every desktop session, macOS and Windows; either command closes the app and opens it again', noModel: true,
    undo: {label: 'Back to your Claude account', windows: '-Restore', unix: '--restore'}},
   {id: 'opencode', name: 'OpenCode', about: 'Open-source coding agent'},
   {id: 'codex', name: 'Codex CLI', about: "OpenAI's coding agent, on the Responses API"},
