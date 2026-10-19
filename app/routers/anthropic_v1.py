@@ -15,7 +15,6 @@ own models anyway, knowing that.
 """
 import asyncio
 import json
-import logging
 import time
 
 import httpx
@@ -115,42 +114,12 @@ async def _target(backend, model):
     return base, None
 
 
-log = logging.getLogger("anthropic")
-
-
 async def _fitted(body, backend, base, force=False):
-    """The request made to fit the model's window (app/context_fit.py): (body, how).
-
-    body is None when nothing makes it fit. A summary is written by the same model, through its
-    OpenAI chat endpoint, without thinking: it is the model already loaded, and a different one
-    would swap the GPU in the middle of the person's work.
-    """
-    context = backend.context_length
-    if not context:
-        return body, None
-
-    async def summarise(prompt, text):
-        url = f"{base}/v1/chat/completions" if backend.kind in ("ollama", "llamacpp") \
-            else backend.url("/chat/completions")
-        request = {"model": backend.upstream_model, "stream": False, "max_tokens": 3000, "temperature": 0.2,
-                   "chat_template_kwargs": {"enable_thinking": False},
-                   "messages": [{"role": "system", "content": prompt}, {"role": "user", "content": text}]}
-        try:
-            async with httpx.AsyncClient(timeout=httpx.Timeout(settings.request_timeout(), connect=10)) as client:
-                response = await client.post(url, json=request, headers=backend.headers())
-            if not response.is_success:
-                log.warning("summarising for %s failed: %s %s", backend.upstream_model, response.status_code,
-                            response.text[:200])
-                return ""
-            return response.json()["choices"][0]["message"].get("content") or ""
-        except (httpx.HTTPError, ValueError, KeyError, IndexError) as e:
-            log.warning("summarising for %s failed: %s", backend.upstream_model, e)
-            return ""
-
-    fitted, how = await context_fit.fit(body, context, summarise, force)
-    if fitted is None:
-        log.warning("%s: could not be made to fit %s tokens: %s", backend.upstream_model, context, how)
-    return fitted, how
+    """The request made to fit the model's window (app/context_fit.py): (body, how); body is None
+    when nothing makes it fit."""
+    url = f"{base}/v1/chat/completions" if backend.kind in ("ollama", "llamacpp") \
+        else backend.url("/chat/completions")
+    return await context_fit.fit_for(body, backend, url, force)
 
 
 def _passes_through(backend):

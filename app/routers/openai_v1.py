@@ -8,7 +8,7 @@ import httpx
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile, status
 from fastapi.responses import JSONResponse, StreamingResponse
 
-from app import access, api_images, anthropic_compat as compat, backends, limits, settings, usage as usage_log
+from app import access, api_images, anthropic_compat as compat, backends, context_fit, limits, settings, usage as usage_log
 from app.engine.supervisor import supervisor
 from app.auth import Principal, authenticate
 from app.tools import auto_model, images
@@ -51,6 +51,20 @@ async def _proxy(request: Request, principal: Principal, endpoint: str, path: st
     except ValueError:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Request body must be JSON")
     return await forward(principal, endpoint, path, body)
+
+
+async def _fitted(body, backend, endpoint, force=False):
+    """A chat made to fit the model's window (app/context_fit.py), so OpenCode's long sessions carry
+    on instead of failing; None when nothing makes it fit. Other endpoints go as they are."""
+    if endpoint != "chat_completions":
+        return body
+    fitted, _how = await context_fit.fit_for(body, backend, backend.url("/chat/completions"), force,
+                                             context_fit.CHAT)
+    return fitted
+
+
+def _estimate(body):
+    return context_fit.estimate(body, shape=context_fit.CHAT)
 
 
 async def forward(principal: Principal, endpoint: str, path: str, body: dict, skip_access=False):
@@ -113,11 +127,20 @@ async def forward(principal: Principal, endpoint: str, path: str, body: dict, sk
         if problem:
             raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, problem)
 
-    upstream_body = dict(body, model=backend.upstream_model)
     started = time.monotonic()
     client = httpx.AsyncClient(timeout=httpx.Timeout(settings.request_timeout(), connect=10))
     try:
-        response = await client.post(backend.url(path), json=upstream_body, headers=backend.headers())
+        sending = await _fitted(body, backend, endpoint)
+        if sending is None:
+            return JSONResponse(compat.too_long_openai(backend.context_length, _estimate(body)), status_code=400)
+        response = await client.post(backend.url(path), json=dict(sending, model=backend.upstream_model),
+                                     headers=backend.headers())
+        if not response.is_success and compat.context_exceeded(response.text):
+            # The model counts more than the estimate: made smaller, and tried once more
+            smaller = await _fitted(body, backend, endpoint, force=True)
+            if smaller is not None and smaller is not sending:
+                response = await client.post(backend.url(path), json=dict(smaller, model=backend.upstream_model),
+                                             headers=backend.headers())
     except httpx.HTTPError as e:
         await usage_log.record(principal, model, backend.name, endpoint, False, 503,
                                None, (time.monotonic() - started) * 1000, str(e))
@@ -139,7 +162,7 @@ async def forward(principal: Principal, endpoint: str, path: str, body: dict, sk
     answer = 503 if response.status_code in (502, 504) else response.status_code
     # Out of room for the conversation: OpenAI's own error for it, which agents answer by compacting
     if not response.is_success and compat.context_exceeded(response.text):
-        return JSONResponse(compat.too_long_openai(backend.context_length, compat.estimate_tokens(body)), status_code=400)
+        return JSONResponse(compat.too_long_openai(backend.context_length, _estimate(body)), status_code=400)
     if payload is None:
         return JSONResponse({"error": {"message": response.text[:500]}}, status_code=answer)
     return JSONResponse(payload, status_code=answer)
@@ -187,25 +210,40 @@ def _streamed(principal, endpoint, path, body, model, backend):
                     state.update(status=503, error=problem)
                     await queue.put(_sse_error(problem))
                     return
-            upstream_body = dict(body, model=target.upstream_model)
-            # Token counts in the final chunk, so streamed requests are still accounted for
-            upstream_body.setdefault("stream_options", {"include_usage": True})
+            # Made to fit before it goes; the heartbeat keeps the stream open while a summary is written
+            sending = await _fitted(body, target, endpoint)
             client = httpx.AsyncClient(timeout=httpx.Timeout(settings.request_timeout(), connect=10))
-            async with client.stream("POST", target.url(path), json=upstream_body, headers=target.headers()) as response:
-                state["status"] = response.status_code
-                if response.status_code >= 400:
-                    state["error"] = (await response.aread()).decode(errors="replace")[:500]
-                    if compat.context_exceeded(state["error"]):
-                        error = compat.too_long_openai(target.context_length, compat.estimate_tokens(body))
-                        await queue.put(f"data: {json.dumps(error)}\n\n".encode())
-                        return
-                    await queue.put(_sse_error(state["error"]))
+            for attempt in (1, 2):
+                if sending is None:
+                    error = compat.too_long_openai(target.context_length, _estimate(body))
+                    state.update(status=400, error=error["error"]["message"])
+                    await queue.put(f"data: {json.dumps(error)}\n\n".encode())
                     return
-                async for line in response.aiter_lines():
-                    if line:
-                        state["usage"] = usage_log.usage_from_sse_line(line) or state["usage"]
-                    # aiter_lines strips newlines; SSE needs them back
-                    await queue.put((line + "\n").encode())
+                upstream_body = dict(sending, model=target.upstream_model)
+                # Token counts in the final chunk, so streamed requests are still accounted for
+                upstream_body.setdefault("stream_options", {"include_usage": True})
+                async with client.stream("POST", target.url(path), json=upstream_body, headers=target.headers()) as response:
+                    state["status"] = response.status_code
+                    if response.status_code >= 400:
+                        state["error"] = (await response.aread()).decode(errors="replace")[:500]
+                        if compat.context_exceeded(state["error"]):
+                            # Nothing has gone to the client yet: made smaller, and tried once more
+                            smaller = await _fitted(body, target, endpoint, force=True) if attempt == 1 else None
+                            if smaller is not None and smaller is not sending:
+                                sending = smaller
+                                continue
+                            error = compat.too_long_openai(target.context_length, _estimate(body))
+                            await queue.put(f"data: {json.dumps(error)}\n\n".encode())
+                            return
+                        await queue.put(_sse_error(state["error"]))
+                        return
+                    state["error"] = None
+                    async for line in response.aiter_lines():
+                        if line:
+                            state["usage"] = usage_log.usage_from_sse_line(line) or state["usage"]
+                        # aiter_lines strips newlines; SSE needs them back
+                        await queue.put((line + "\n").encode())
+                    return
         except httpx.HTTPError as e:
             state.update(status=503, error=str(e))
             await queue.put(_sse_error("upstream connection failed"))
