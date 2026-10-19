@@ -2,6 +2,7 @@
 import asyncio
 import json
 import logging
+import os
 import re
 import threading
 from datetime import timedelta
@@ -586,6 +587,75 @@ async def _as_events(rows):
         yield f"data: {json.dumps(row)}\n\n".encode()
 
 
+# Installs in progress, written down: the download is Ollama's, but it is driven by the gateway's
+# request, which a restart (every deploy) ends - and with it the download and the job a reloaded
+# page picks up (2026-10-19). Each install stays listed until it really ends - finished, failed or
+# cancelled by someone - and the gateway resumes what is listed when it starts. Ollama keeps the
+# part already downloaded, so a resumed pull carries on from there.
+INSTALLS_FILE = os.path.join(settings.PROJECT_ROOT, "state", "installs.json")
+_installs_lock = threading.Lock()
+
+
+def _listed_installs():
+    try:
+        with open(INSTALLS_FILE, encoding="utf-8") as f:
+            return [e for e in json.load(f) if isinstance(e, dict) and e.get("name")]
+    except (OSError, ValueError):
+        return []
+
+
+def _list_install(entry, listed):
+    with _installs_lock:
+        entries = [e for e in _listed_installs() if e["name"] != entry["name"]] + ([entry] if listed else [])
+        os.makedirs(os.path.dirname(INSTALLS_FILE), exist_ok=True)
+        with open(INSTALLS_FILE + ".new", "w", encoding="utf-8") as f:
+            json.dump(entries, f)
+        os.replace(INSTALLS_FILE + ".new", INSTALLS_FILE)
+
+
+def _start_install(entry, who):
+    """Starts a pull or build as a job of its own, listed until it ends: (job, model name)."""
+    cancellation = StreamCancellation()
+    source = fitting.hf_reference(entry["model_id"], entry["quantization"])
+    if entry["mode"] == "create":
+        name = fitting.ollama_name(entry["model_id"], entry["quantization"])
+        rows = stream_create_model(name, source, {"num_ctx": fitting.clamp_context(entry["context_length"])},
+                                   cancellation)
+    else:
+        name = source
+        rows = stream_pull_model(source, cancellation)
+    entry = {**entry, "name": name}
+    _list_install(entry, True)
+    log.info("%s of %s started by %s", entry["mode"], name, who)
+
+    async def work():
+        ended = False
+        try:
+            async for event in _as_events(_final_result(rows, name)):
+                ended = ended or b'"done": true' in event
+                yield event
+        finally:
+            backends.forget_discovery()   # a new model should appear in the list at once
+            if ended:                     # not when the gateway is stopping: then it is resumed
+                _list_install(entry, False)
+
+    job = jobs.start(entry["owner"], None, "install", name, work())
+    with _cancellations_lock:
+        _cancellations[job.id] = cancellation
+    return job, name
+
+
+def resume_installs():
+    """At startup: the installs a restart cut short, started again where Ollama left them."""
+    running = {job.label for job in jobs.running_of_kind("install")}
+    for entry in _listed_installs():
+        if entry["name"] not in running:
+            try:
+                _start_install(entry, "the gateway, resuming after a restart")
+            except Exception as e:
+                log.warning("could not resume the install of %s: %s", entry["name"], e)
+
+
 @router.post("/models/install")
 async def install_model(payload: ModelInstall, principal: Principal = Depends(require_admin)):
     """Pulls a model from Hugging Face, or builds a local one with a context length of your choosing.
@@ -599,30 +669,10 @@ async def install_model(payload: ModelInstall, principal: Principal = Depends(re
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "That is not a Hugging Face repository name")
     if payload.quantization not in fitting.QUANTIZATION_LEVELS:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, f"Unknown quantization {payload.quantization}")
-    cancellation = StreamCancellation()
-    source = fitting.hf_reference(model_id, payload.quantization)
-    if payload.mode == "create":
-        name = fitting.ollama_name(model_id, payload.quantization)
-        context = fitting.clamp_context(payload.context_length)
-        rows = stream_create_model(name, source, {"num_ctx": context}, cancellation)
-    else:
-        name = source
-        rows = stream_pull_model(source, cancellation)
-
-    log.info("%s of %s started by %s", payload.mode, name,
-             getattr(principal.user, "name", None) or "master-key")
-
-    async def work():
-        try:
-            async for event in _as_events(_final_result(rows, name)):
-                yield event
-        finally:
-            backends.forget_discovery()   # a new model should appear in the list at once
-
     owner = principal.user.id if principal.user else 0
-    job = jobs.start(owner, None, "install", name, work())
-    with _cancellations_lock:
-        _cancellations[job.id] = cancellation
+    job, name = _start_install({"model_id": model_id, "quantization": payload.quantization, "mode": payload.mode,
+                                "context_length": payload.context_length, "owner": owner},
+                               getattr(principal.user, "name", None) or "master-key")
 
     async def stream():
         yield f"data: {json.dumps({'job_id': job.id, 'model_name': name})}\n\n".encode()

@@ -10,3 +10,4 @@ logs/
 .claude/
 wake/wake.env
 .ci-venv/
+state/
