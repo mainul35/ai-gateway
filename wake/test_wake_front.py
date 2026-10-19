@@ -44,6 +44,12 @@ FAKE_BOX = textwrap.dedent('''
         return PlainTextResponse(f"# launcher {name} for {host}\\n",
                                  headers={"Content-Disposition": f'attachment; filename="{name}"'})
 
+    @app.get("/v1/models")
+    async def models(authorization: str = Header(default=""), anthropic_version: str = Header(default="")):
+        if authorization != f"Bearer {good}":
+            return JSONResponse({"error": "Invalid API key"}, status_code=401)
+        return {"data": [{"id": "claude-sonnet-5" if anthropic_version else "qwen3.6-256k"}]}
+
     @app.get("/static/app.css")
     async def css(): return PlainTextResponse("body{}", media_type="text/css")
 
@@ -174,6 +180,23 @@ def test_downloads_and_static_files_need_no_wake(setup):
     assert css.text == "body{}" and css.headers["content-type"].startswith("text/css")
     assert httpx.head(f"{base}/downloads/ai-gateway.sh").status_code == 200
     assert httpx.get(f"{base}/static/other.js").status_code == 503
+
+
+def test_desktop_model_check_is_answered_while_asleep(setup):
+    base, woken = setup
+    desktop = {"Authorization": f"Bearer {GOOD_KEY}", "anthropic-version": "2023-06-01", "Sec-Fetch-Mode": "cors"}
+    # The app's first check, with no list kept yet: wakes the machine once and gets the list
+    first = httpx.get(f"{base}/v1/models", headers=desktop, timeout=60)
+    assert first.status_code == 200 and first.json()["data"][0]["id"] == "claude-sonnet-5"
+    assert woken()
+    httpx.post(f"{base}/__sleep")
+    time.sleep(1)
+    # Asleep: the same caller gets its own list back without a wake; a dashboard tab's timer does not
+    again = httpx.get(f"{base}/v1/models", headers=desktop)
+    assert again.status_code == 200 and again.json() == first.json()
+    assert again.headers["x-served-by"].startswith("wake-front")
+    assert httpx.get(f"{base}/v1/models", cookies={"gateway_session": cookie()},
+                     headers={"Sec-Fetch-Mode": "cors"}).status_code == 503
 
 
 def test_rejected_key_never_wakes_again(setup):
