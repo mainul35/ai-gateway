@@ -63,7 +63,7 @@ async def authenticate(
         data = sso.read_session(gateway_session)
         if data:
             user = await session.get(User, data["user_id"])
-            if user and user.is_active:
+            if user and user.is_active and sso.session_current(data, user):
                 return Principal(user=user)
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Missing API key")
 

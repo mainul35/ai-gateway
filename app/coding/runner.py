@@ -118,6 +118,7 @@ _queue: asyncio.Queue | None = None
 _worker: asyncio.Task | None = None
 _cancelled: set[int] = set()
 _watchers: set[int] = set()
+_current: int | None = None   # the task the worker is on, for the idle check (app/activity.py)
 
 
 class Stop(Exception):
@@ -167,6 +168,10 @@ async def create(session, principal, project, description, model, conversation_i
         raise ValueError("Start tasks while signed in, not with the master key")
     if not principal.is_manager:
         raise PermissionError("Only managers and admins can start coding tasks")
+    # On their own projects: a project's commands run in its sandbox, and a local one's on its
+    # owner's computer, so nobody else's task should be choosing what they run
+    if not principal.is_admin and project.added_by != principal.user.id:
+        raise PermissionError("Only the person who added this project, or an admin, can start tasks on it")
     if not access.can_use_model(principal, model):
         raise PermissionError(f"You do not have access to model '{model}'")
     backend = await backends.resolve(model)
@@ -236,13 +241,22 @@ def _check_cancelled(task_id):
 
 
 async def _work():
+    global _current
     while True:
         task_id = await _queue.get()
+        _current = task_id
         try:
             await run(task_id)
         except Exception:
             log.exception("coding task %s crashed", task_id)
             await set_task(task_id, status="failed", error="The task runner crashed; see the gateway log.")
+        finally:
+            _current = None
+
+
+def activity():
+    """What the runner is doing right now, for the idle check."""
+    return {"running": _current, "queued": _queue.qsize() if _queue else 0, "deploys": len(_watchers)}
 
 
 # --- the model ---------------------------------------------------------------------------------

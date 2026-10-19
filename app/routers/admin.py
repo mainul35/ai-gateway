@@ -13,13 +13,13 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from app import access, backends, catalogue, fitting, knowledge, settings, usage as usage_log
+from app import access, activity, backends, catalogue, fitting, knowledge, power, settings, usage as usage_log
 from app.tools import jobs, mcp_client, mcp_config
 from app.auth import Principal, generate_key, hash_key, require_admin, require_manager
 from app import config_writer
 from app.engine.supervisor import supervisor
 from utils import hf_client
-from utils.ollama_client import (StreamCancellation, check_ollama_status, ollama_host,
+from utils.ollama_client import (StreamCancellation, check_ollama_status,
                                  stream_create_model, stream_pull_model)
 from utils.system_info import get_system_info, measure_hardware
 from app.db import get_session
@@ -34,13 +34,13 @@ class UserIn(BaseModel):
     name: str = Field(min_length=1, max_length=128)
     email: str | None = None
     role: str = Field(default="user", pattern="^(user|manager|admin)$")
-    model_access: str | None = Field(default=None, pattern="^(all|selected|none)$")
+    model_access: str | None = Field(default=None, pattern="^(all|selected|public|none)$")
     allowed_models: list[str] | None = None
 
 
 class UserPatch(BaseModel):
     role: str | None = Field(default=None, pattern="^(user|manager|admin)$")
-    model_access: str | None = Field(default=None, pattern="^(all|selected|none)$")
+    model_access: str | None = Field(default=None, pattern="^(all|selected|public|none)$")
     allowed_models: list[str] | None = None
     is_active: bool | None = None
 
@@ -57,14 +57,19 @@ def _user_json(user):
         "model_access": user.model_access or "all",
         "allowed_models": access.parse_patterns(user.allowed_models),
         "sign_in": "local password" if user.password_hash else "single sign-on",
+        # "pending": a first SSO sign-in waiting for an admin to approve it
+        "approval": user.approval,
         # What the auth server said at their last sign-in, kept whole and shown as it arrived.
         # While permissions are being wired up to it, "what does it actually send us" is the
         # question, and a gateway that cannot answer it is no help at all.
         "claims": json.loads(user.claims) if user.claims else None,
         "claims_seen_at": user.claims_seen_at.isoformat() if user.claims_seen_at else None,
         "tool_capabilities": access.capabilities_of(user),
+        # No part of the key itself: the user list is for managing keys, not reading them, and a
+        # prefix on every row is a piece of somebody's credential on an admin's screen
         "keys": [
-            {"id": k.id, "name": k.name, "prefix": k.key_prefix, "is_active": k.is_active,
+            {"id": k.id, "name": k.name, "is_active": k.is_active,
+             "created_at": k.created_at.isoformat() if k.created_at else None,
              "last_used_at": k.last_used_at.isoformat() if k.last_used_at else None}
             for k in user.api_keys
         ],
@@ -86,6 +91,9 @@ async def _other_active_admins(session, user_id):
 def _check_can_manage(principal, target):
     if not access.can_manage(principal, target):
         raise HTTPException(status.HTTP_403_FORBIDDEN, "Managers can only manage accounts with the user role")
+    # A sign-in request is the admins' to decide: until then nobody gives it keys or access
+    if target.approval == "pending" and not principal.is_admin:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Only an admin can act on a sign-in request")
 
 
 def _check_grant_allowed(principal, model_access, allowed_models):
@@ -151,6 +159,9 @@ async def update_user(name: str, payload: UserPatch, principal: Principal = Depe
         user.model_access = model_access
         user.allowed_models = access.serialize_patterns(allowed)
 
+    if payload.is_active and user.approval == "pending":
+        raise HTTPException(status.HTTP_409_CONFLICT, "This is a sign-in request: approve it instead")
+
     if payload.is_active is not None and payload.is_active != user.is_active:
         if not payload.is_active:
             if principal.user is not None and principal.user.id == user.id:
@@ -164,6 +175,32 @@ async def update_user(name: str, payload: UserPatch, principal: Principal = Depe
     await session.commit()
     await session.refresh(user, attribute_names=["api_keys"])
     return _user_json(user)
+
+
+@router.post("/users/{name}/approve")
+async def approve_user(name: str, _: Principal = Depends(require_admin),
+                       session: AsyncSession = Depends(get_session)):
+    """Lets a first SSO sign-in in, with the public models; more can be granted after."""
+    user = await _get_user(session, name)
+    if user is None or user.approval != "pending":
+        raise HTTPException(status.HTTP_404_NOT_FOUND, f"No sign-in request from {name}")
+    user.approval = None
+    user.is_active = True
+    await session.commit()
+    await session.refresh(user, attribute_names=["api_keys"])
+    return _user_json(user)
+
+
+@router.post("/users/{name}/reject")
+async def reject_user(name: str, _: Principal = Depends(require_admin),
+                      session: AsyncSession = Depends(get_session)):
+    """Turns a sign-in request down. The request is removed; signing in again makes a new one."""
+    user = await _get_user(session, name)
+    if user is None or user.approval != "pending":
+        raise HTTPException(status.HTTP_404_NOT_FOUND, f"No sign-in request from {name}")
+    await session.delete(user)
+    await session.commit()
+    return {"rejected": name}
 
 
 @router.delete("/users/{name}")
@@ -203,21 +240,26 @@ async def revoke_key(key_id: int, principal: Principal = Depends(require_manager
 @router.get("/usage")
 async def usage_summary(days: int = 7, _: Principal = Depends(require_manager),
                         session: AsyncSession = Depends(get_session)):
+    """Usage per user and model; the dashboard groups it by user, largest first, with the per-model
+    rows as each user's breakdown."""
     since = utcnow() - timedelta(days=days)
     result = await session.execute(
         select(User.name, UsageRecord.model, func.count(UsageRecord.id),
-               func.sum(UsageRecord.prompt_tokens), func.sum(UsageRecord.completion_tokens))
+               func.sum(UsageRecord.prompt_tokens), func.sum(UsageRecord.completion_tokens),
+               func.count(UsageRecord.id).filter(UsageRecord.status_code >= 400),
+               func.max(UsageRecord.created_at))
         .join(User, User.id == UsageRecord.user_id, isouter=True)
         .where(UsageRecord.created_at >= since)
         .group_by(User.name, UsageRecord.model)
-        .order_by(func.count(UsageRecord.id).desc())
+        .order_by((func.sum(UsageRecord.prompt_tokens) + func.sum(UsageRecord.completion_tokens)).desc())
     )
     return {
         "since": since.isoformat(),
         "rows": [
             {"user": name or "master-key", "model": model, "requests": requests,
-             "prompt_tokens": int(prompt or 0), "completion_tokens": int(completion or 0)}
-            for name, model, requests, prompt, completion in result.all()
+             "prompt_tokens": int(prompt or 0), "completion_tokens": int(completion or 0),
+             "failed": int(failed or 0), "last_used": last.isoformat() if last else None}
+            for name, model, requests, prompt, completion, failed, last in result.all()
         ],
     }
 
@@ -664,9 +706,16 @@ async def system_overview(_: Principal = Depends(require_admin), session: AsyncS
     tokens_today = (await session.execute(
         select(func.coalesce(func.sum(UsageRecord.total_tokens), 0)).where(UsageRecord.created_at >= utcnow() - timedelta(days=1))
     )).scalar() or 0
+    # What is up and what is loaded - never where: no addresses, ports, process ids or file paths.
+    # The page is public-facing (an admin's browser, a screenshot, a shared screen), and those are a
+    # map of the machine behind it.
+    ollama = check_ollama_status()
+    engine = supervisor.status()
     return {
-        "ollama": {**check_ollama_status(), "host": ollama_host()},
-        "engine": supervisor.status(),
+        "ollama": {"status": ollama.get("status"), "version": ollama.get("version")},
+        "engine": {"available": engine["available"], "profiles": engine["profiles"],
+                   "running": [{k: r[k] for k in ("name", "running", "uptime_seconds", "idle_seconds",
+                                                  "in_flight", "ttl_seconds")} for r in engine["running"]]},
         "gpus": info["gpu_info"],
         "gpu_source": info["gpu_source"],
         "total_vram": info["total_vram"],
@@ -779,3 +828,35 @@ async def check_mcp_server(payload: McpCheck, _: Principal = Depends(require_adm
         raise HTTPException(status.HTTP_404_NOT_FOUND,
                             f"No server called {payload.name!r} is configured")
     return await mcp_client.probe(server)
+
+
+# --- power -------------------------------------------------------------------------------------
+
+class SuspendIn(BaseModel):
+    force: bool = False                                  # suspend even if work is running
+    delay_seconds: int = Field(default=5, ge=1, le=600)
+
+
+@router.post("/power/suspend", status_code=status.HTTP_202_ACCEPTED)
+async def suspend_machine(payload: SuspendIn | None = None, principal: Principal = Depends(require_admin)):
+    """Puts homelabai to sleep. The next request through the wake front wakes it again."""
+    payload = payload or SuspendIn()
+    busy = activity.snapshot(ignore_requests=1)          # this request is not work
+    if busy["busy"] and not payload.force:
+        raise HTTPException(status.HTTP_409_CONFLICT,
+                            {"message": "the gateway is busy; send force=true to suspend anyway",
+                             "reasons": busy["reasons"]})
+    ok, problem = await power.allowed()
+    if not ok:
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, problem)
+    if power.pending():
+        return {"suspending_in_seconds": None, "already_pending": True}
+    log.info("suspend requested by %s (force=%s)", principal.label, payload.force)
+    power.schedule(payload.delay_seconds)
+    return {"suspending_in_seconds": payload.delay_seconds, "interrupted": busy["reasons"] if payload.force else []}
+
+
+@router.delete("/power/suspend")
+async def cancel_suspend(principal: Principal = Depends(require_admin)):
+    """Calls off a suspend that has not happened yet."""
+    return {"cancelled": power.cancel()}

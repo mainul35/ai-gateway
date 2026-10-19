@@ -1,7 +1,7 @@
 """Database tables: users, API keys and per-request usage."""
 from datetime import datetime, timezone
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, LargeBinary, String, Text, func
+from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, LargeBinary, String, Text, UniqueConstraint, func
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 
@@ -22,7 +22,7 @@ class User(Base):
     role: Mapped[str] = mapped_column(String(32), default="user")  # "user" or "admin"
     # Only the built-in admin has one; SSO accounts authenticate against the auth server
     password_hash: Mapped[str | None] = mapped_column(String(256), nullable=True)
-    # "all", "selected" or "none"; admins always have every model regardless
+    # "all", "selected", "public" (the gateway.public.models list) or "none"; admins have every model
     model_access: Mapped[str] = mapped_column(String(16), default="all")
     # JSON list of model names or patterns, used when model_access is "selected"
     allowed_models: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -34,6 +34,15 @@ class User(Base):
     claims_seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    # Who this is at the auth server: "<auth server host>|<sub>". SSO accounts are found by this and
+    # nothing else - a name or an email is whatever the person typed there, and matching on it let
+    # anyone with the right display name sign in as somebody else, the built-in admin included.
+    sso_subject: Mapped[str | None] = mapped_column(String(320), nullable=True, index=True)
+    # "pending" while a first SSO sign-in waits for an admin; such an account is not active either
+    approval: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    # Stamped into every session cookie; signing out bumps it, which ends every copy of the cookie
+    # (one that was copied or stolen included) rather than only the one in that browser
+    session_epoch: Mapped[int | None] = mapped_column(Integer, nullable=True, default=0)
 
     api_keys: Mapped[list["ApiKey"]] = relationship(back_populates="user", cascade="all, delete-orphan")
 
@@ -205,6 +214,65 @@ class CodingTask(Base):
     approved_by: Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+
+
+class GitHubConnection(Base):
+    """A GitHub user or organisation whose repositories one person has asked the gateway to index.
+
+    The token, when there is one, is read-only by intent, and stored sealed (app/secretbox.py). Without
+    one only public repositories are indexed. Each person's repositories are indexed for them alone.
+    """
+    __tablename__ = "github_connections"
+    __table_args__ = (UniqueConstraint("user_id", "owner"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    owner: Mapped[str] = mapped_column(String(100))
+    token_sealed: Mapped[str | None] = mapped_column(Text, nullable=True)
+    login: Mapped[str | None] = mapped_column(String(100), nullable=True)   # whose token it is
+    repositories: Mapped[int] = mapped_column(Integer, default=0)
+    private: Mapped[int] = mapped_column(Integer, default=0)
+    can_push: Mapped[bool] = mapped_column(Boolean, default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class ProjectNote(Base):
+    """What a person's coding agents learned about one of their projects, and how it connects to others.
+
+    Shared by every session of that person, whatever workspace it runs in: an agent working on one
+    project finds what an agent working on another wrote down - "alishan_pos calls ai-gateway's
+    /v1/messages with model auto". Kept true by the agents themselves, which update or remove a note
+    the moment the code shows it is wrong (app/routers/mcp_server.py).
+    """
+    __tablename__ = "project_notes"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    project: Mapped[str] = mapped_column(String(200), index=True)
+    content: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class AnswerFeedback(Base):
+    """Whether an answer was helpful and accurate, as the person who asked judged it.
+
+    Kept per answer and person, with the model that wrote it and the kind of question it was, so that
+    person's Auto can learn which model does well for them at what (app/feedback.py) - never anyone
+    else's: one person's mistaken verdicts must not steer everybody's answers.
+    """
+    __tablename__ = "answer_feedback"
+    __table_args__ = (UniqueConstraint("message_id", "user_id"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    message_id: Mapped[int] = mapped_column(ForeignKey("conversation_messages.id", ondelete="CASCADE"), index=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    model: Mapped[str | None] = mapped_column(String(256), nullable=True, index=True)
+    category: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    helpful: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    accurate: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
 class CodingTaskEvent(Base):

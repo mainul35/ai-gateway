@@ -21,7 +21,11 @@ from app import github_access, knowledge, settings
 
 log = logging.getLogger("coding.workspace")
 
-GITHUB = re.compile(r"^(?:https://github\.com/|git@github\.com:)(?P<owner>[\w.-]+)/(?P<repo>[\w.-]+?)(?:\.git)?/?$")
+# HTTPS only. The SSH form cloned with this server's own SSH key, which reaches whatever that key
+# can: a manager could read any private repository it opens, and push to it.
+GITHUB = re.compile(r"^https://github\.com/(?P<owner>[\w.-]+)/(?P<repo>[\w.-]+?)(?:\.git)?/?$")
+# A branch name git cannot mistake for an option or a path trick
+BRANCH = re.compile(r"^(?!-)(?!.*\.\.)(?!.*//)(?!.*@\{)(?!.*\.lock$)(?!.*/$)[A-Za-z0-9._/-]{1,128}$")
 AUTHOR_NAME = "AI Gateway"
 
 
@@ -34,9 +38,16 @@ def projects_dir():
 
 
 def github_of(clone_url):
-    """(owner, repo) for a GitHub URL, else None."""
+    """(owner, repo) for a GitHub URL, else None. Never "." or "..": as a path, owner ".." and repo
+    "model-gateway" was the gateway's own live checkout."""
     match = GITHUB.match((clone_url or "").strip())
-    return (match["owner"], match["repo"]) if match else None
+    if not match or any(part.strip(".") == "" for part in (match["owner"], match["repo"])):
+        return None
+    return match["owner"], match["repo"]
+
+
+def valid_branch(name):
+    return bool(name) and BRANCH.match(name) is not None
 
 
 def token_for(clone_url):
@@ -48,29 +59,68 @@ def token_for(clone_url):
 
 
 def clone_path(name):
-    return os.path.join(projects_dir(), *name.split("/"))
+    """Where a project lives: always inside the projects folder, whatever its name says."""
+    root = os.path.realpath(projects_dir())
+    path = os.path.realpath(os.path.join(root, *name.split("/")))
+    if not path.startswith(root + os.sep) or any(part.strip(".") == "" for part in name.split("/")):
+        raise GitError(f"{name!r} is not a project name that stays inside {root}")
+    return path
 
 
 def worktree_path(task_id):
     return os.path.join(projects_dir(), ".tasks", f"task-{task_id}")
 
 
+def _check_worktree(cwd):
+    """Refuses to run git in a task worktree whose .git no longer points at the project's clone.
+
+    A task's commands run in a container that can write the worktree. If its .git - a file naming
+    the real git directory - were replaced with a directory or a pointer of the container's making,
+    git on this host would read that git directory's config, and a config can name programs git
+    runs (core.fsmonitor, hooks, diff and filter drivers): the container's code, run here, as the
+    gateway's user. sandbox.run mounts the pointer read-only; this checks it before every command.
+    """
+    tasks = os.path.realpath(os.path.join(projects_dir(), ".tasks"))
+    here = os.path.realpath(cwd)
+    if not here.startswith(tasks + os.sep):
+        return
+    pointer = os.path.join(here, ".git")
+    if os.path.islink(pointer) or not os.path.isfile(pointer):
+        raise GitError("the task's .git is not the file git worktree made; refusing to run git in it")
+    with open(pointer, encoding="utf-8", errors="replace") as handle:
+        line = handle.read(4096).strip()
+    if not line.startswith("gitdir:") or "\n" in line:
+        raise GitError("the task's .git does not name a git directory; refusing to run git in it")
+    target = os.path.realpath(os.path.join(here, line[len("gitdir:"):].strip()))
+    clones = os.path.realpath(projects_dir())
+    if (not target.startswith(clones + os.sep) or target.startswith(tasks + os.sep)
+            or f"{os.sep}.git{os.sep}worktrees{os.sep}" not in target + os.sep):
+        raise GitError("the task's .git points outside its project's clone; refusing to run git in it")
+
+
+# Whatever a repository's own config says: no fsmonitor program and no hooks
+HARDENING = ["-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null"]
+
+
 async def git(args, cwd=None, token="", timeout=600):
     """Runs git and returns its output; GitError with the end of stderr when it fails."""
-    env = {**os.environ, "GIT_TERMINAL_PROMPT": "0", "GIT_ASKPASS": "true"}
+    if cwd:
+        _check_worktree(cwd)
+    shown = list(args)
+    env = {**os.environ, "GIT_TERMINAL_PROMPT": "0", "GIT_ASKPASS": "true", "GIT_CONFIG_NOSYSTEM": "1"}
     if token:
         basic = base64.b64encode(f"x-access-token:{token}".encode()).decode()
         env.update({"GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "http.extraHeader",
                     "GIT_CONFIG_VALUE_0": f"Authorization: Basic {basic}"})
     process = await asyncio.create_subprocess_exec(
-        "git", *args, cwd=cwd, env=env, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+        "git", *HARDENING, *shown, cwd=cwd, env=env, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
     try:
         out, err = await asyncio.wait_for(process.communicate(), timeout=timeout)
     except asyncio.TimeoutError:
         process.kill()
-        raise GitError(f"git {args[0]} took longer than {timeout}s")
+        raise GitError(f"git {shown[0]} took longer than {timeout}s")
     if process.returncode != 0:
-        raise GitError(f"git {' '.join(args[:2])} failed: {err.decode(errors='replace').strip()[-600:]}")
+        raise GitError(f"git {' '.join(shown[:2])} failed: {err.decode(errors='replace').strip()[-600:]}")
     return out.decode(errors="replace")
 
 
@@ -83,7 +133,7 @@ async def clone(name, clone_url):
     token = token_for(clone_url)
     if not os.path.isdir(os.path.join(path, ".git")):
         os.makedirs(os.path.dirname(path), exist_ok=True)
-        await git(["clone", "--quiet", "--filter=blob:none", clone_url, path], token=token)
+        await git(["clone", "--quiet", "--filter=blob:none", "--", clone_url, path], token=token)
     else:
         await git(["fetch", "--quiet", "--prune", "origin"], cwd=path, token=token)
     head = (await git(["symbolic-ref", "--short", "refs/remotes/origin/HEAD"], cwd=path)).strip()

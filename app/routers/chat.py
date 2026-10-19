@@ -18,14 +18,16 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from app import access, backends, settings, usage as usage_log
+from app import access, backends, feedback, limits, settings, usage as usage_log
 from app.auth import Principal, authenticate
 from app.db import get_session, session_factory
-from app.models import ChatFile, Conversation, ConversationMessage, MemoryEntry, utcnow
+from app.models import AnswerFeedback, ChatFile, Conversation, ConversationMessage, MemoryEntry, utcnow
+from app.engine.supervisor import supervisor
 from app.routers.openai_v1 import PROXY_PATHS, forward
 from app.tools import (agent, chooser, documents, image_prompt, images, jobs, map_plan,
                         map_web, maps, markdown, mcp_client, media, memory as memory_tool,
-                        photo, places, portrait, router as intent_router, self_tools, web_search)
+                        photo, places, portrait, router as intent_router, self_tools, subtitles,
+                        turn_facts, understand, web_search)
 
 log = logging.getLogger("playground")
 
@@ -127,9 +129,54 @@ async def create_conversation(payload: ConversationIn, principal: Principal = De
 @router.get("/conversations/{conversation_id}")
 async def get_conversation(conversation_id: int, principal: Principal = Depends(authenticate),
                            session: AsyncSession = Depends(get_session)):
-    conversation = await _owned(session, conversation_id, _require_user(principal), with_messages=True)
+    user = _require_user(principal)
+    conversation = await _owned(session, conversation_id, user, with_messages=True)
+    ids = [m.id for m in conversation.messages if m.role == "assistant"]
+    judged = {f.message_id: {"helpful": f.helpful} for f in (await session.execute(
+        select(AnswerFeedback).where(AnswerFeedback.user_id == user.id,
+                                     AnswerFeedback.message_id.in_(ids)))).scalars()} if ids else {}
     return {**_conversation_json(conversation, len(conversation.messages)),
-            "messages": [_message_json(m) for m in conversation.messages]}
+            "messages": [{**_message_json(m), "feedback": judged.get(m.id)} for m in conversation.messages]}
+
+
+class FeedbackIn(BaseModel):
+    message_id: int | None = None
+    conversation_id: int | None = None
+    starts_with: str = Field(default="", max_length=400)
+    helpful: bool | None = None
+    category: str | None = Field(default=None, max_length=32)
+
+
+@router.post("/feedback")
+async def give_feedback(payload: FeedbackIn, principal: Principal = Depends(authenticate),
+                        session: AsyncSession = Depends(get_session)):
+    """Helpful? for one answer, from the person who asked. Asking again replaces the verdict."""
+    user = _require_user(principal)
+    if payload.message_id is not None:
+        message = await session.get(ConversationMessage, payload.message_id)
+        if message is not None:
+            await _owned(session, message.conversation_id, user)
+    elif payload.conversation_id is not None and payload.starts_with:
+        await _owned(session, payload.conversation_id, user)
+        message = (await session.execute(
+            select(ConversationMessage).where(ConversationMessage.conversation_id == payload.conversation_id,
+                                              ConversationMessage.role == "assistant",
+                                              ConversationMessage.content.startswith(payload.starts_with, autoescape=True))
+            .order_by(ConversationMessage.id.desc()).limit(1))).scalar_one_or_none()
+    else:
+        message = None
+    if message is None or message.role != "assistant":
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "That answer is not saved, so it cannot be rated")
+    entry = (await session.execute(select(AnswerFeedback).where(
+        AnswerFeedback.message_id == message.id, AnswerFeedback.user_id == user.id))).scalar_one_or_none()
+    if entry is None:
+        entry = AnswerFeedback(message_id=message.id, user_id=user.id, model=message.model)
+        session.add(entry)
+    entry.helpful, entry.updated_at = payload.helpful, utcnow()
+    if payload.category:
+        entry.category = payload.category
+    await session.commit()
+    return {"message_id": message.id, "helpful": entry.helpful}
 
 
 @router.patch("/conversations/{conversation_id}")
@@ -223,6 +270,40 @@ async def drop_what_followed(conversation_id: int, message_id: int,
     return {"removed": len(doomed)}
 
 
+class EditedQuestionIn(BaseModel):
+    content: str = Field(min_length=1, max_length=200_000)
+
+
+@router.patch("/conversations/{conversation_id}/messages/{message_id}")
+async def edit_question(conversation_id: int, message_id: int, payload: EditedQuestionIn,
+                        principal: Principal = Depends(authenticate),
+                        session: AsyncSession = Depends(get_session)):
+    """Rewords a question, so that it can be asked again as it should have been asked.
+
+    Everything after it goes, its own answers too: they answer words that are no longer there.
+    The playground then asks the reworded question, and the new answer is filed under it. The
+    running summary goes for the same reason as in drop_what_followed.
+    """
+    user = _require_user(principal)
+    conversation = await _owned(session, conversation_id, user, with_messages=True)
+    messages = sorted(conversation.messages, key=lambda m: m.id)
+    at = next((i for i, m in enumerate(messages) if m.id == message_id), None)
+    if at is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "That message is not in this conversation")
+    if messages[at].role != "user":
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Only your own messages can be edited")
+    messages[at].content = payload.content
+    doomed = messages[at + 1:]
+    for message in doomed:
+        await session.delete(message)
+    summary = await _conversation_memory(session, user.id, conversation_id)
+    if summary is not None:
+        await session.delete(summary)
+    conversation.updated_at = utcnow()
+    await session.commit()
+    return {"removed": len(doomed)}
+
+
 @router.get("/capabilities")
 async def capabilities(principal: Principal = Depends(authenticate)):
     """Which tools this server offers; the playground only shows toggles for these."""
@@ -240,6 +321,8 @@ async def capabilities(principal: Principal = Depends(authenticate)):
         "photo_clean": images.is_available(),
         "photo_blur": images.is_available() and photo.is_depth_available(),
         "photo_backdrop": images.is_available() and portrait.is_available(),
+        # A YouTube link's subtitles, transcribed from its sound on this server
+        "subtitles": subtitles.is_available(),
         "maps": settings.feature_enabled("maps"),
         # Whether there is anything to be agentic with: the feature on, and a tool server
         # that this host could actually run
@@ -251,6 +334,8 @@ async def capabilities(principal: Principal = Depends(authenticate)):
                             if settings.feature_enabled("maps") and places.name() == "google"
                             else ""),
         "routing": intent_router.is_enabled(),
+        # Never picked by Auto to answer: they read messages and index documents (chooser.is_helper)
+        "helper_models": chooser.helper_names(),
         "markdown": markdown.is_available(),
         "max_upload_mb": settings.max_upload_bytes() // (1024 * 1024),
     }
@@ -342,6 +427,7 @@ async def upload_file(file: UploadFile = File(...), principal: Principal = Depen
     if len(data) > limit:
         raise HTTPException(status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
                             f"{name} is larger than {limit // (1024 * 1024)} MB")
+    await limits.check_storage(principal, session, len(data))
     mime = _image_type(data)
     if name.lower().endswith(_RAW_SUFFIXES):
         raise HTTPException(status.HTTP_400_BAD_REQUEST,
@@ -539,10 +625,15 @@ async def complete(payload: CompleteIn, principal: Principal = Depends(authentic
     # Every attachment is loaded, then sorted: pictures go to a model that can see, documents go to
     # any model at all, because by the time they get there they are only text
     attached = [i for m in payload.messages for i in m.images]
+    # Counted on the message being sent: a long conversation gathers more than that over time
+    limits.check_attachments(principal, len(set(payload.messages[-1].images)) if payload.messages else 0)
     everything = await _load_files(session, user, attached)
     papers = [f for f in everything.values() if f.kind == "document"]
-    pictures = [f for f in everything.values() if f.kind != "document"]
-    if pictures and payload.vision and "vision" not in backend.capabilities:
+    # Only a picture in the message being sent stops a text-only model. One from an earlier turn
+    # failed every later question in the conversation once Auto picked a model that cannot see.
+    asked_about = set(latest_user.images) if latest_user else set()
+    if any(i in asked_about and f.kind != "document" for i, f in everything.items()) \
+            and payload.vision and "vision" not in backend.capabilities:
         raise HTTPException(status.HTTP_400_BAD_REQUEST,
                             f"{payload.model} cannot see images. Pick a model marked as "
                             "vision-capable, or attach a document instead.")
@@ -579,6 +670,19 @@ async def complete(payload: CompleteIn, principal: Principal = Depends(authentic
         # After the user's own system prompt, so theirs still comes first
         messages.insert(1 if messages and messages[0]["role"] == "system" else 0,
                         {"role": "system", "content": remembered})
+    latest_words = next((m.content for m in reversed(payload.messages) if m.role == "user"), "")
+    if payload.conversation_id is not None and turn_facts.asks_how_made(latest_words):
+        # What made the last few answers - a picture's model, a search, a map - read from what was
+        # saved with them, so a question about it is answered from the record rather than guessed.
+        # Only when the question is about that: put in front of every question, Qwen3-Next took it
+        # for the task and answered "Difference between ECC and non-ECC memory" with token counts.
+        recent = (await session.execute(
+            select(ConversationMessage).where(ConversationMessage.conversation_id == payload.conversation_id)
+            .order_by(ConversationMessage.id.desc()).limit(4 * turn_facts.RECENT))).scalars().all()
+        facts = turn_facts.context_block(list(reversed(recent)))
+        if facts:
+            messages.insert(1 if messages and messages[0]["role"] == "system" else 0,
+                            {"role": "system", "content": facts})
 
     body = {"model": payload.model, "messages": messages, "stream": True}
     if payload.temperature is not None:
@@ -624,6 +728,9 @@ async def complete(payload: CompleteIn, principal: Principal = Depends(authentic
         async for chunk in response.body_iterator:
             answer.feed(chunk)
             yield chunk
+        # Measured here, where the model's words arrive one by one. The browser's own clock can see
+        # them in a burst - after a web search, through a proxy - and once showed 1760 tok/s.
+        yield _event("stats", stats=answer.stats(), model=payload.model)
 
     async def save(_job):
         """Writes the turn down once the answer is finished, whoever is still watching."""
@@ -777,9 +884,9 @@ _refreshing = set()
 
 
 async def _refresh_memory(principal, user_id, conversation_id):
-    """Rewrites the conversation summary, then folds what it learned into the user's notes.
+    """After a turn: the conversation's running summary when it is due, and the user's notes always.
 
-    Runs after a turn, in its own session, and never disturbs the chat: failures are only logged.
+    Runs in its own session and never disturbs the chat: failures are only logged.
     """
     if conversation_id in _refreshing:
         return  # a refresh is already running; the next turn picks up whatever it misses
@@ -791,54 +898,155 @@ async def _refresh_memory(principal, user_id, conversation_id):
                 .where(Conversation.id == conversation_id, Conversation.user_id == user_id))).scalar_one_or_none()
             if conversation is None:
                 return
-            keep = settings.keep_recent_messages()
-            older = conversation.messages[:-keep] if keep else list(conversation.messages)
-            if not older:
-                return
             model = memory_tool.model_for(conversation.model)
             if not model:
                 return
-            entry = await _conversation_memory(session, user_id, conversation_id)
-            if entry is not None and entry.source == "manual":
-                return  # the user wrote these notes themselves
-            if entry is not None and len(older) - entry.covered_count < settings.summarize_every():
-                return
-
-            previous = entry.content if entry else None
-            # The whole conversation is summarised, but only the older turns count as covered: the
-            # recent ones are still sent in full, and the notes are the better for including them
-            summary = memory_tool.clean_text(await _ask_helper(
-                principal, memory_tool.summary_request(previous, memory_tool.transcript(conversation.messages),
-                                                       model)))
-            if not summary:
-                return
-            if entry is None:
-                entry = MemoryEntry(user_id=user_id, scope="conversation", conversation_id=conversation_id)
-                session.add(entry)
-            entry.content = summary
-            entry.covered_count = len(older)
-            entry.source = "auto"
-            entry.updated_at = utcnow()
-            await session.commit()
-
-            notes = [n for n in (await session.execute(select(MemoryEntry).where(
-                MemoryEntry.user_id == user_id, MemoryEntry.scope == "user"))).scalars()]
-            kept = [n for n in notes if n.source == "manual"]  # the user's own notes stay untouched
-            automatic = [n for n in notes if n.source == "auto"]
-            updated = memory_tool.parse_notes(await _ask_helper(
-                principal, memory_tool.notes_request([n.content for n in notes], summary, model)))
-            updated = [u for u in updated if u not in [k.content for k in kept]]
-            for note, content in zip(automatic, updated):
-                note.content, note.updated_at = content, utcnow()
-            for content in updated[len(automatic):]:
-                session.add(MemoryEntry(user_id=user_id, scope="user", content=content, source="auto"))
-            for note in automatic[len(updated):]:
-                await session.delete(note)   # dropped by the model, usually because it was superseded
-            await session.commit()
+            await _refresh_summary(principal, session, user_id, conversation, model)
+            notes_model = await _notes_model(conversation.model)
+            if notes_model:
+                await _check_notes(principal, session, user_id, conversation, notes_model)
     except Exception as e:  # memory is a convenience; never let it break a conversation
         log.warning("Could not refresh memory for conversation %s: %s", conversation_id, e)
     finally:
         _refreshing.discard(conversation_id)
+
+
+async def _refresh_summary(principal, session, user_id, conversation, model):
+    """Rewrites the summary of the turns that are no longer sent in full, every few turns."""
+    keep = settings.keep_recent_messages()
+    older = conversation.messages[:-keep] if keep else list(conversation.messages)
+    if not older:
+        return
+    entry = await _conversation_memory(session, user_id, conversation.id)
+    if entry is not None and entry.source == "manual":
+        return  # the user wrote these notes themselves
+    if entry is not None and len(older) - entry.covered_count < settings.summarize_every():
+        return
+    previous = entry.content if entry else None
+    # The whole conversation is summarised, but only the older turns count as covered: the recent
+    # ones are still sent in full, and the notes are the better for including them
+    summary = memory_tool.clean_text(await _ask_helper(
+        principal, memory_tool.summary_request(previous, memory_tool.transcript(conversation.messages), model)))
+    if not summary:
+        return
+    if entry is None:
+        entry = MemoryEntry(user_id=user_id, scope="conversation", conversation_id=conversation.id)
+        session.add(entry)
+    entry.content = summary
+    entry.covered_count = len(older)
+    entry.source = "auto"
+    entry.updated_at = utcnow()
+    await session.commit()
+
+
+MEMORY_TOOLS = object()     # where[] marker for the agent's memory tools, as self_tools.BUILTIN is for its own
+
+
+async def _agent_memory(user_id):
+    """The user's notes for one agent turn, keyed n1, n2 ... as the model sees them."""
+    async with session_factory()() as db:
+        notes = list((await db.execute(select(MemoryEntry).where(
+            MemoryEntry.user_id == user_id, MemoryEntry.scope == "user").order_by(MemoryEntry.id))).scalars())
+    state = {"ids": {f"n{i + 1}": n.id for i, n in enumerate(notes)},
+             "text": {f"n{i + 1}": n.content for i, n in enumerate(notes)},
+             "manual": {f"n{i + 1}" for i, n in enumerate(notes) if n.source == "manual"}}
+    state["listed"] = lambda: [(k, t, k in state["manual"]) for k, t in state["text"].items()]
+    return state
+
+
+async def _memory_edit(user_id, memory, tool, args, seen_text):
+    """One memory tool call from the agent, checked and applied at once. Returns (text, failed)."""
+    if not memory:
+        return "Memory is switched off.", True
+    edit, refused = memory_tool.check_tool_edit(tool, args, memory["text"], seen_text, memory["manual"])
+    if refused:
+        return refused, True
+    action, key, text = edit
+    async with session_factory()() as db:
+        if action == "add":
+            if len(memory["text"]) >= settings.max_user_notes():
+                return (f"Not added: there are {settings.max_user_notes()} notes, the most kept. "
+                        "Update or forget one first."), True
+            entry = MemoryEntry(user_id=user_id, scope="user", content=text, source="auto")
+            db.add(entry)
+            await db.commit()
+            key = f"n{max([int(k[1:]) for k in memory['text']] + [0]) + 1}"
+            memory["ids"][key], memory["text"][key] = entry.id, text
+            log.info("Agent noted for user %s: %s", user_id, text)
+            return f"Noted as {key}.", False
+        entry = await db.get(MemoryEntry, memory["ids"][key])
+        if entry is None or entry.user_id != user_id:
+            return f"Not changed: {key} is gone.", True
+        if action == "update":
+            log.info("Agent updated a note for user %s: %r -> %r", user_id, entry.content, text)
+            entry.content, entry.updated_at = text, utcnow()
+            memory["text"][key] = text
+        else:
+            log.info("Agent forgot a note for user %s: %r", user_id, entry.content)
+            await db.delete(entry)
+            del memory["text"][key], memory["ids"][key]
+        await db.commit()
+    return f"{key} {'updated' if action == 'update' else 'forgotten'}.", False
+
+
+NOTES_MIN_BILLIONS = 14     # smaller models were measured to record plans as facts and to duplicate notes
+
+
+async def _notes_model(conversation_model):
+    """Which model keeps the user's notes: one able to, and never one loaded just for this.
+
+    memory.model when it is set. Otherwise the conversation's own model when it is big enough, then a
+    big enough model already on the GPU. llama3.2:3b, asked to keep notes, missed a RAM upgrade, wrote
+    a planned GPU down as installed and added a note that was already there - so with only a small
+    model about, this turn's check is skipped, and the next turn with a capable one does it.
+    """
+    if settings.memory_model():
+        return settings.memory_model()
+    available = await backends.available_models()
+
+    def able(name):
+        backend = available.get(name)
+        if backend is None or chooser.is_helper(name):
+            return False
+        return chooser._parameters({"name": name, "parameter_size": (backend.details or {}).get(
+            "parameter_size", "")}) >= NOTES_MIN_BILLIONS
+    if conversation_model and able(conversation_model):
+        return conversation_model
+    for name in supervisor.loaded_names() + await supervisor.ollama_loaded():
+        if able(name):
+            return name
+    return None
+
+
+async def _check_notes(principal, session, user_id, conversation, model):
+    """Checks the latest exchange against the user's notes and applies the edits it calls for.
+
+    Every turn, so a fact that stops being true mid-task is taken out then and there, not left to
+    contradict the next conversation. The user's own notes are shown, so nothing repeats them, and
+    are never changed.
+    """
+    exchange, user_text = memory_tool.exchange_text(conversation.messages)
+    if not exchange:
+        return
+    notes = list((await session.execute(select(MemoryEntry).where(
+        MemoryEntry.user_id == user_id, MemoryEntry.scope == "user").order_by(MemoryEntry.id))).scalars())
+    by_key = {f"n{i + 1}": note for i, note in enumerate(notes)}
+    protected = {key for key, note in by_key.items() if note.source == "manual"}
+    changes = memory_tool.parse_changes(await _ask_helper(principal, memory_tool.check_request(
+        [(key, note.content, key in protected) for key, note in by_key.items()], exchange, model)),
+        {key: note.content for key, note in by_key.items()}, user_text, protected)
+    if not changes or not any(changes.values()):
+        return
+    for key, text in changes["update"].items():
+        by_key[key].content, by_key[key].updated_at = text, utcnow()
+    for key in changes["delete"]:
+        await session.delete(by_key[key])
+    room = settings.max_user_notes() - (len(notes) - len(changes["delete"]))
+    for text in changes["add"][:max(room, 0)]:
+        session.add(MemoryEntry(user_id=user_id, scope="user", content=text, source="auto"))
+    await session.commit()
+    log.info("Notes for user %s: %d updated, %d deleted, %d added", user_id,
+             len(changes["update"]), len(changes["delete"]), min(len(changes["add"]), max(room, 0)))
 
 
 class RenderIn(BaseModel):
@@ -1127,17 +1335,115 @@ async def edit_photo(payload: PhotoIn, principal: Principal = Depends(authentica
             seconds = round(time.monotonic() - started, 1)
             stored = await _save_result(db, user_id, payload.conversation_id, png,
                                         f"photo-{payload.action}.png", done,
-                                        {"source_file_id": payload.file_id}, {"total": seconds},
+                                        {"source_file_id": payload.file_id, "asked": payload.request,
+                                         "made_by": turn_facts.photo_maker(payload.action, done)},
+                                        {"total": seconds},
                                         answers_to=payload.answers_to)
             yield _event("image", file=_file_json(stored), action=payload.action,
                          did=done[:1].upper() + done[1:], saved=True, seconds=seconds)
 
+    # One picture or transcription at a time per person (app/limits.py); the slot is given back
+    # when the stream ends, however it ends
+    slot = await limits.take_gpu_slot(principal)
     if payload.conversation_id is not None:
         asked = (payload.request or payload.action).strip()[:120]
-        job = jobs.start(user.id, payload.conversation_id, "photo", asked, stream())
+        job = jobs.start(user.id, payload.conversation_id, "photo", asked, limits.holding(slot, stream()))
         return StreamingResponse(jobs.follow(job), media_type="text/event-stream",
                                  headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
-    return StreamingResponse(stream(), media_type="text/event-stream",
+    return StreamingResponse(limits.holding(slot, stream()), media_type="text/event-stream",
+                             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+
+class SubtitlesIn(BaseModel):
+    message: str = Field(min_length=1, max_length=2000)     # holds the YouTube link
+    translate: bool = False                                 # English, whatever the video speaks
+    conversation_id: int | None = None
+    answers_to: int | None = None
+
+
+@router.post("/subtitles")
+async def video_subtitles(payload: SubtitlesIn, principal: Principal = Depends(authenticate),
+                          session: AsyncSession = Depends(get_session)):
+    """Subtitles for a YouTube video, transcribed from its sound. Streams progress, then the result.
+
+    The transcript is saved as the answer's text, so the conversation can go on about the video -
+    summarise it, translate it, ask what was said - and the .srt and .vtt files are saved beside it.
+    """
+    user = _require_user(principal)
+    if not await asyncio.to_thread(subtitles.is_available):
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "Subtitles are not set up on this server")
+    video = subtitles.video_id(payload.message)
+    if not video:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "No YouTube link in the message")
+    if payload.conversation_id is not None:
+        await _owned(session, payload.conversation_id, user)
+    user_id = user.id
+
+    async def stream():
+        events = asyncio.Queue()
+
+        async def progress(stage, fraction):
+            await events.put(_event("progress", stage=stage, fraction=fraction))
+
+        started = time.monotonic()
+        job = asyncio.create_task(subtitles.subtitles(video, payload.translate, progress))
+        try:
+            while not job.done() or not events.empty():
+                getter = asyncio.create_task(events.get())
+                done, _ = await asyncio.wait({getter, job}, return_when=asyncio.FIRST_COMPLETED)
+                if getter in done:
+                    yield getter.result()
+                else:
+                    getter.cancel()
+            result = job.result()
+        except subtitles.SubtitleError as e:
+            await usage_log.record(principal, f"whisper-{subtitles.MODEL}", "whisper", "subtitles", True, 503,
+                                   None, (time.monotonic() - started) * 1000, str(e))
+            yield _error(str(e))
+            return
+        finally:
+            if not job.done():
+                job.cancel()
+        await usage_log.record(principal, f"whisper-{subtitles.MODEL}", "whisper", "subtitles", True, 200,
+                               None, (time.monotonic() - started) * 1000)
+
+        base = re.sub(r"[^\w.-]+", "-", result["title"]).strip("-")[:80] or video
+        suffix = "-en" if payload.translate else ""
+        async with session_factory()() as db:
+            files = []
+            for extension, mime, text in (("srt", "application/x-subrip", subtitles.srt(result["segments"])),
+                                          ("vtt", "text/vtt", subtitles.vtt(result["segments"]))):
+                stored = ChatFile(user_id=user_id, kind="subtitles", mime_type=mime,
+                                  name=f"{base}{suffix}.{extension}", prompt=None, data=text.encode())
+                db.add(stored)
+                files.append(stored)
+            await db.commit()
+            facts = {key: result[key] for key in ("title", "channel", "url", "duration", "language",
+                                                  "language_sure", "translated", "model", "seconds")}
+            facts.update(video=video, segments=len(result["segments"]),
+                         files={"srt": files[0].id, "vtt": files[1].id})
+            if payload.conversation_id is not None:
+                conversation = await db.get(Conversation, payload.conversation_id)
+                if conversation is not None and conversation.user_id == user_id:
+                    filed = {"subtitles": facts}
+                    if payload.answers_to is not None:
+                        filed["answers_to"] = payload.answers_to
+                    db.add(ConversationMessage(conversation_id=conversation.id, role="assistant",
+                                               content=subtitles.transcript(result),
+                                               stats=json.dumps({"total": result["seconds"]}),
+                                               attachments=json.dumps(filed)))
+                    conversation.updated_at = utcnow()
+                    await db.commit()
+        yield _event("subtitles", **facts, text=subtitles.transcript(result), saved=True)
+
+    # One picture or transcription at a time per person (app/limits.py); the slot is given back
+    # when the stream ends, however it ends
+    slot = await limits.take_gpu_slot(principal)
+    if payload.conversation_id is not None:
+        job = jobs.start(user.id, payload.conversation_id, "subtitles", payload.message[:120], limits.holding(slot, stream()))
+        return StreamingResponse(jobs.follow(job), media_type="text/event-stream",
+                                 headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+    return StreamingResponse(limits.holding(slot, stream()), media_type="text/event-stream",
                              headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
 
@@ -1149,6 +1455,8 @@ async def _choose_model(principal, session, category, has_images, prefer=None):
     """The best model this user may use for this kind of work, with the reason it was picked."""
     available = await backends.available_models()
     health = await usage_log.by_model(session, utcnow() - timedelta(days=CHOOSER_DAYS))
+    judged = await feedback.by_model(session, utcnow() - timedelta(days=CHOOSER_DAYS),
+                                     principal.user.id if principal.user else None)
     candidates = []
     for name, backend in available.items():
         if not access.can_use_model(principal, name):
@@ -1160,6 +1468,8 @@ async def _choose_model(principal, session, category, has_images, prefer=None):
             "parameter_size": details.get("parameter_size", ""),
             "context_length": backend.context_length,
             "health": health.get(name, {}),
+            "blocked": supervisor.blocked_by_busy_gpu(name, backend),
+            "feedback": judged.get(name),
         })
     return chooser.pick(candidates, category, needs_vision=has_images, prefer=prefer)
 
@@ -1487,12 +1797,22 @@ async def find_on_map(payload: MapIn, principal: Principal = Depends(authenticat
     return result
 
 
+class AttachmentIn(BaseModel):
+    kind: str = Field(default="picture", pattern="^(picture|document)$")
+    name: str = Field(default="", max_length=200)
+
+
 class RouteIn(BaseModel):
     message: str = ""
     has_images: bool = False
+    # Everything attached, pictures and documents, by kind and file name: "design a logo from this"
+    # means one thing with a brief attached and another with a photograph
+    attachments: list[AttachmentIn] = Field(default_factory=list, max_length=20)
     web_search: bool = False
     image_generation: bool = False
     maps: bool = False
+    # Off in the playground means a photograph is never given a blurred background, whatever is said
+    photo_blur: bool = True
     history: list[ChatMessageIn] = Field(default_factory=list)
     # The model the conversation is already using: it keeps the job when nothing scores better,
     # because swapping model reloads weights and throws away a warm cache
@@ -1505,7 +1825,11 @@ async def route(payload: RouteIn, principal: Principal = Depends(authenticate),
                 session: AsyncSession = Depends(get_session)):
     """What this message asks for: which tool, what kind of work, and which model should do it.
 
-    The two questions go to the small model at the same time. They are independent, so asking them
+    Normally one question: the small model describes the request from everything that came with it
+    (app/tools/understand.py), and the tool and the kind of work follow from that description. With
+    router.understand off, or when that answer cannot be read, the older questions below decide.
+
+    The two older questions go to the small model at the same time. They are independent, so asking them
     together costs one round trip rather than two, and keeping them in separate prompts keeps the
     action answer as good as it was - putting both in one prompt made it worse.
     """
@@ -1514,10 +1838,43 @@ async def route(payload: RouteIn, principal: Principal = Depends(authenticate),
         "image_generation": (payload.image_generation and images.is_available()
                              and access.can_generate_images(principal)),
         "maps": payload.maps and settings.feature_enabled("maps"),
+        # Without the depth model the blur endpoint refuses, so it is no choice to offer either
+        "photo_blur": (payload.photo_blur and payload.has_images
+                       and await asyncio.to_thread(photo.is_depth_available)),
     }
     allowed = intent_router.candidates(tools, payload.has_images)
-    history = [{"role": m.role, "content": m.content} for m in payload.history]
+    history = intent_router.plain_history(
+        [{"role": m.role, "content": m.content} for m in payload.history])
     asking_model = intent_router.is_enabled()
+
+    if asking_model and settings.get_bool("router.understand", "ROUTER_UNDERSTAND", True):
+        attachments = [a.model_dump() for a in payload.attachments] or (
+            [{"kind": "picture", "name": ""}] if payload.has_images else [])
+
+        async def second_opinion():
+            """The one-word tool question, asked at the same time, so it costs no extra wait."""
+            if len(allowed) == 1:
+                return None
+            found = intent_router.clean_answer(await _ask_helper(
+                principal, intent_router.build_request(payload.message, allowed, history)), allowed)
+            return intent_router.settle_action(found, payload.message, allowed, payload.has_images)[0]
+
+        answer, other = await asyncio.gather(
+            _ask_helper(principal, understand.build_request(payload.message, attachments, history)),
+            second_opinion())
+        reading = understand.read_answer(answer)
+        if reading is not None:
+            only = len(allowed) == 1
+            action = allowed[0] if only else understand.decide(reading, allowed, payload.has_images,
+                                                               payload.message, other)
+            decision = {"action": action,
+                        "decided_by": "the only tool switched on" if only else settings.router_model(),
+                        "understood": reading["request"]}
+            if payload.choose_model:
+                return await _with_model(principal, session, decision,
+                                         understand.category(reading, payload.has_images),
+                                         settings.router_model(), payload)
+            return decision
 
     async def decide_action():
         if len(allowed) == 1:
@@ -1559,10 +1916,17 @@ async def route(payload: RouteIn, principal: Principal = Depends(authenticate),
 
     (action, decided_by), (category, category_by), wanted = await asyncio.gather(
         decide_action(), decide_category(), look_or_change())
-    action, decided_by = intent_router.settle_picture(action, decided_by, wanted, payload.message)
+    action, decided_by = intent_router.settle_picture(action, decided_by, wanted, payload.message,
+                                                      allowed)
     decision = {"action": action, "decided_by": decided_by}
     if category is None:
         return decision
+    return await _with_model(principal, session, decision, category, category_by, payload)
+
+
+async def _with_model(principal, session, decision, category, category_by, payload):
+    """The decision, with the model to answer it when Auto is choosing."""
+    action = decision["action"]
     decision.update(category=category, category_by=category_by)
     # Only a text answer is the model's to choose: a picture is drawn by the image model, and a
     # photograph is worked on by tools that have nothing to do with the drop-down
@@ -1575,8 +1939,12 @@ async def route(payload: RouteIn, principal: Principal = Depends(authenticate),
     return decision
 
 
-async def _drawable_prompt(principal, session, user, request, conversation_id):
-    """What to draw, the wording it must spell, and the rewrite to show, if there was one."""
+async def _drawable_prompt(principal, session, user, request, conversation_id, documents=()):
+    """What to draw, the wording it must spell, and the rewrite to show, if there was one.
+
+    `documents` are (name, text) of files attached to the request - "read this and design a logo
+    for it" - and are what the prompt is written from, so they come after the conversation.
+    """
     if not image_prompt.is_enabled():
         return request, None, None
     history, made = [], []
@@ -1590,6 +1958,8 @@ async def _drawable_prompt(principal, session, user, request, conversation_id):
             generated = (json.loads(message.attachments) if message.attachments else {}).get("generated")
             if generated and generated.get("prompt"):
                 made.append(generated["prompt"])
+    for name, text in documents:
+        history.append({"role": "user", "content": f"Attached document {name}:\n{text[:DOCUMENT_CHARS_FOR_IMAGES]}"})
     # Both questions at once: what to draw, and which words have to be spelled right in it
     described, worded = await asyncio.gather(
         _ask_helper(principal, image_prompt.build_request(request, history, made)),
@@ -1600,12 +1970,16 @@ async def _drawable_prompt(principal, session, user, request, conversation_id):
     return drawn, wording, (drawn if drawn != request else None)
 
 
+DOCUMENT_CHARS_FOR_IMAGES = 6000     # of each attached document, for writing an image prompt
+
+
 class ImageIn(BaseModel):
     prompt: str = Field(min_length=1, max_length=4000)
     conversation_id: int | None = None
     size: str = "square"
     source_file_id: int | None = None      # the picture to edit
     reference_file_ids: list[int] = Field(default_factory=list, max_length=2)  # extra pictures it may use
+    document_file_ids: list[int] = Field(default_factory=list, max_length=4)   # documents to draw from
     strength: float = Field(default=0.75, ge=0.05, le=1.0)
     answers_to: int | None = None          # the question this answers, for asking it again
 
@@ -1630,11 +2004,16 @@ async def generate_image(payload: ImageIn, principal: Principal = Depends(authen
         sources = [(found[i].data, found[i].mime_type) for i in wanted]
     elif payload.reference_file_ids:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Reference images need an image to edit")
+    documents = []
+    if payload.document_file_ids:
+        found = await _load_files(session, user, payload.document_file_ids)
+        documents = [(found[i].name, found[i].prompt or "") for i in payload.document_file_ids
+                     if i in found and found[i].kind == "document"]
     user_id = user.id
     # An edit is already an instruction about a picture that exists, so it is passed through as written
     drawable, wording, rewritten = ((payload.prompt, None, None) if sources else
                                     await _drawable_prompt(principal, session, user, payload.prompt,
-                                                           payload.conversation_id))
+                                                           payload.conversation_id, documents))
 
     async def stream():
         events = asyncio.Queue()
@@ -1668,21 +2047,29 @@ async def generate_image(payload: ImageIn, principal: Principal = Depends(authen
                 job.cancel()  # the browser went away; generate() stops the job on the image server
         await usage_log.record(principal, settings.image_model_name(), "comfyui", endpoint, True, 200,
                                None, (time.monotonic() - started) * 1000)
+        # Recorded with the picture, so that "which model made this?" has a true answer later
+        engine = await images.edit_engine()
+        made_by = turn_facts.image_maker(engine, bool(sources),
+                                         bool(wording) and settings.fix_image_text() and engine == "qwen")
         async with session_factory()() as db:
             seconds = round(time.monotonic() - started, 1)
             stored = await _save_result(db, user_id, payload.conversation_id, png,
                                         f"image-{seed}.png", drawable,
                                         {"seed": seed, "size": payload.size,
                                          "asked": payload.prompt,
-                                         "source_file_id": payload.source_file_id},
+                                         "source_file_id": payload.source_file_id,
+                                         "made_by": made_by},
                                         {"total": seconds}, answers_to=payload.answers_to)
             yield _event("image", file=_file_json(stored), seed=seed, saved=True, seconds=seconds)
 
+    # One picture or transcription at a time per person (app/limits.py); the slot is given back
+    # when the stream ends, however it ends
+    slot = await limits.take_gpu_slot(principal)
     if payload.conversation_id is not None:
-        job = jobs.start(user.id, payload.conversation_id, "image", (payload.prompt or "")[:120], stream())
+        job = jobs.start(user.id, payload.conversation_id, "image", (payload.prompt or "")[:120], limits.holding(slot, stream()))
         return StreamingResponse(jobs.follow(job), media_type="text/event-stream",
                                  headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
-    return StreamingResponse(stream(), media_type="text/event-stream",
+    return StreamingResponse(limits.holding(slot, stream()), media_type="text/event-stream",
                              headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
 
@@ -1760,10 +2147,20 @@ async def run_agent(payload: AgentIn, principal: Principal = Depends(authenticat
             yield _error("None of the switched-on tool servers answered, so there are no tools "
                          "to use. Check them on the Tools page.")
             return
+        # The user's notes, as tools: a note found to be wrong is fixed then and there (_memory_edit)
+        memory = await _agent_memory(user_id) if memory_tool.is_enabled() else None
+        if memory:
+            for spec in memory_tool.memory_tools(agent.SEPARATOR):
+                where[spec["function"]["name"]] = (MEMORY_TOOLS, spec["function"]["name"].split(agent.SEPARATOR)[-1])
+                tools.append(spec)
         yield _event("tools", tools=[t["function"]["name"] for t in tools])
 
+        latest_said = next((m.content for m in reversed(payload.messages) if m.role == "user"), "")
+        seen = [latest_said or ""]      # what this turn has shown: evidence a note may be changed on
+        extra = [agent.about_self() if own else "",
+                 memory_tool.tool_guide(memory["listed"](), agent.SEPARATOR) if memory else ""]
         messages = agent.with_system([{"role": m.role, "content": m.content} for m in payload.messages],
-                                     agent.about_self() if own else "")
+                                     "\n\n".join(e for e in extra if e))
         budget = agent.Budget()
         answer, finished = "", None
 
@@ -1807,7 +2204,11 @@ async def run_agent(payload: AgentIn, principal: Principal = Depends(authenticat
                 else:
                     server, tool = known
                     try:
-                        if server is self_tools.BUILTIN:
+                        if server is MEMORY_TOOLS:
+                            text, bad = await _memory_edit(user_id, memory, tool,
+                                                           agent.arguments(call.get("arguments")),
+                                                           "\n".join(seen))
+                        elif server is self_tools.BUILTIN:
                             text, bad = await self_tools.call(
                                 tool, agent.arguments(call.get("arguments")),
                                 {"principal": principal, "model": payload.model,
@@ -1824,6 +2225,8 @@ async def run_agent(payload: AgentIn, principal: Principal = Depends(authenticat
                         text, bad = f"{e.__class__.__name__}: {e}", True
                 seconds = round(time.monotonic() - began, 1)
                 budget.take(text)
+                if known and known[0] is not MEMORY_TOOLS:
+                    seen.append(text)
                 # The same field names the live event uses, so one renderer draws both: a turn
                 # being watched and the same turn read back tomorrow
                 steps.append({"tool": call["name"], "failed": bad, "seconds": seconds,
@@ -1857,6 +2260,9 @@ async def run_agent(payload: AgentIn, principal: Principal = Depends(authenticat
                         attachments=json.dumps(filed)))
                     conversation.updated_at = utcnow()
                     await db.commit()
+            if memory_tool.is_enabled():
+                # The same check as after a chat turn, for whatever the agent did not note itself
+                asyncio.create_task(_refresh_memory(principal, user_id, payload.conversation_id))
 
     return StreamingResponse(stream(), media_type="text/event-stream",
                              headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})

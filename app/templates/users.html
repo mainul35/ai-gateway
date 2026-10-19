@@ -1,6 +1,11 @@
 {% extends "base.html" %}
 {% block title %}Users &middot; Model Gateway{% endblock %}
 {% block content %}
+<style>
+details.keys summary{cursor:pointer;color:var(--muted)}
+details.keys summary:hover{color:var(--text)}
+details.keys .key-row{display:flex;align-items:center;gap:.6rem;flex-wrap:wrap;margin-top:.4rem;font-size:.85rem}
+</style>
 <h1>Users</h1>
 <p class="sub">
   {% if user.role == 'admin' %}Manage roles, model access and keys. There is no seat limit.
@@ -9,6 +14,23 @@
 
 <div id="error" class="note err" hidden></div>
 <div id="created" class="note ok" hidden></div>
+
+{% if user.role == 'admin' %}
+<div class="card" id="requestsCard" hidden style="margin-bottom:1.5rem;border:1px solid var(--primary)">
+  <h2>Sign-in requests</h2>
+  <p class="muted" style="margin-top:0;font-size:.88rem">People who signed in through SSO for the first time.
+    Nothing works for them until you approve; approved, they get the public models below.</p>
+  <div id="requests"></div>
+</div>
+
+<div class="card" style="margin-bottom:1.5rem">
+  <h2>Public models</h2>
+  <p class="muted" style="margin-top:0;font-size:.88rem">What every account with <em>public</em> access may use:
+    approved SSO sign-ups, and anyone you set to it. Image generation is not included.</p>
+  <div id="publicChecks" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(19rem,1fr));gap:.3rem .9rem;margin-bottom:1rem"></div>
+  <button class="btn" id="savePublic">Save public models</button>
+</div>
+{% endif %}
 
 <div class="card" style="margin-bottom:1.5rem">
   <h2>Roles</h2>
@@ -43,14 +65,14 @@
       <span class="lbl">Model access</span>
       <select id="newAccess">
         <option value="">default</option><option value="all">all</option>
-        <option value="none">none</option>
+        <option value="public">public models</option><option value="none">none</option>
       </select>
     </label>
     <button class="btn" id="addUser">Add</button>
   </div>
   <p class="muted" style="margin:.75rem 0 0;font-size:.85rem">
-    People who sign in through SSO are added automatically on first login. To give someone only certain
-    models, add them with <em>none</em> and then use <em>Edit access</em>.
+    People who sign in through SSO for the first time appear as sign-in requests for an admin. To give
+    someone only certain models, add them with <em>none</em> and then use <em>Edit access</em>.
   </p>
 </div>
 
@@ -59,6 +81,7 @@
   <div class="row" style="gap:1.25rem;margin-bottom:1rem">
     <label style="margin:0"><input type="radio" name="mode" value="all" style="width:auto"> All models</label>
     <label style="margin:0"><input type="radio" name="mode" value="selected" style="width:auto"> Selected models</label>
+    <label style="margin:0"><input type="radio" name="mode" value="public" style="width:auto"> Public models</label>
     <label style="margin:0"><input type="radio" name="mode" value="none" style="width:auto"> No models</label>
   </div>
   <div id="selectedPanel">
@@ -119,10 +142,25 @@ function saidByAuthServer(u){
   </details>`;
 }
 
+// How many keys, and on opening, each one by its name and dates - never any of the key itself.
+// The list is for managing keys; a key's characters on an admin's screen help nobody and are a
+// piece of a credential on display.
+function keysCell(keys, manageable){
+  if(!keys.length) return '<span class="muted">none</span>';
+  const when = iso => iso ? new Date(iso).toLocaleDateString() : 'never';
+  const rows = keys.map(k => `<div class="key-row">
+      <span>${escapeHtml(k.name || 'key')}</span>
+      <span class="muted">made ${when(k.created_at)} · used ${when(k.last_used_at)}</span>
+      ${manageable ? `<button class="btn btn-danger btn-sm" data-revoke="${k.id}" title="Revoke this key">Revoke</button>` : ''}
+    </div>`).join('');
+  return `<details class="keys"><summary>${keys.length} ${keys.length === 1 ? 'key' : 'keys'}</summary>${rows}</details>`;
+}
+
 function accessSummary(u){
   if(u.role === 'admin') return '<span class="muted">all (admin)</span>';
   if(u.model_access === 'all') return 'all models';
   if(u.model_access === 'none') return '<span class="pill err">none</span>';
+  if(u.model_access === 'public') return 'public models';
   const list = u.allowed_models;
   if(!list.length) return '<span class="pill err">none selected</span>';
   const shown = list.slice(0, 3).map(m => `<code>${escapeHtml(m)}</code>`).join(' ');
@@ -140,8 +178,10 @@ async function loadUsers(){
   const target = document.getElementById('users');
   try{
     users = await api('/admin/users');
+    showRequests(users.filter(u => u.approval === 'pending'));
+    const listed = users.filter(u => u.approval !== 'pending');
     target.innerHTML = `<div style="overflow-x:auto"><table>
-      <tr><th>User</th><th>Role</th><th>Model access</th><th>Keys</th><th>Status</th><th></th></tr>` + users.map(u => {
+      <tr><th>User</th><th>Role</th><th>Model access</th><th>Keys</th><th>Status</th><th></th></tr>` + listed.map(u => {
         const manageable = canManage(u);
         const keys = u.keys.filter(k => k.is_active);
         return `<tr>
@@ -150,9 +190,7 @@ async function loadUsers(){
               ${saidByAuthServer(u)}</td>
           <td>${roleCell(u)}</td>
           <td>${accessSummary(u)}</td>
-          <td>${keys.length ? keys.map(k => `<code>${escapeHtml(k.prefix)}&hellip;</code>${manageable
-                ? ` <button class="btn btn-danger btn-sm" data-revoke="${k.id}" title="Revoke">&times;</button>` : ''}`).join('<br>')
-              : '<span class="muted">none</span>'}</td>
+          <td>${keysCell(keys, manageable)}</td>
           <td>${u.is_active ? '<span class="pill on">active</span>' : '<span class="pill off">disabled</span>'}</td>
           <td style="text-align:right;white-space:nowrap">${manageable ? `
             ${u.role !== 'admin' ? `<button class="btn btn-sm btn-secondary" data-access="${escapeHtml(u.name)}">Edit access</button>` : ''}
@@ -166,8 +204,59 @@ async function loadUsers(){
   }catch(e){ target.textContent = 'Could not load users: ' + e.message; }
 }
 
+// Sign-in requests, for admins: the card stays hidden while there are none
+function showRequests(pending){
+  const card = document.getElementById('requestsCard');
+  if(!card) return;
+  card.hidden = !pending.length;
+  document.getElementById('requests').innerHTML = pending.length ? `<div style="overflow-x:auto"><table>
+    <tr><th>Who</th><th>Asked</th><th></th></tr>` + pending.map(u => `<tr>
+      <td>${escapeHtml(u.name)}${u.email && u.email !== u.name ? `<br><span class="muted" style="font-size:.82rem">${escapeHtml(u.email)}</span>` : ''}
+          ${saidByAuthServer(u)}</td>
+      <td class="muted">${u.created_at ? escapeHtml(new Date(u.created_at).toLocaleString()) : ''}</td>
+      <td style="text-align:right;white-space:nowrap">
+        <button class="btn btn-sm" data-approve="${escapeHtml(u.name)}">Approve</button>
+        <button class="btn btn-sm btn-danger" data-reject="${escapeHtml(u.name)}">Reject</button></td>
+    </tr>`).join('') + '</table></div>' : '';
+}
+
+// The public list, as ticks against the models there are; patterns already in it are kept as they are
+let publicExtra = [];
+async function loadPublic(){
+  const box = document.getElementById('publicChecks');
+  if(!box) return;
+  // Saving writes the whole list, so it stays off until the list now in force has been read: a load
+  // that failed once left Save working on nothing, and it would have cleared a list that was there
+  const save = document.getElementById('savePublic');
+  save.disabled = true;
+  try{
+    // Each setting comes as {value, is_secret, is_set}; reading it as the plain text threw, and the
+    // page showed no models to choose from at all
+    const raw = (((await api('/admin/settings')).values || {})['gateway.public.models'] || {}).value || '';
+    const listed = raw.replace(/,/g, ' ').split(/\s+/).filter(Boolean);
+    const known = new Set(models);
+    publicExtra = listed.filter(m => !known.has(m));
+    box.innerHTML = (models.map(m => `<label style="margin:0;font-size:.88rem;display:flex;gap:.4rem;align-items:center">
+        <input type="checkbox" value="${escapeHtml(m)}" ${listed.includes(m) ? 'checked' : ''} style="width:auto">
+        <code style="background:none;padding:0">${escapeHtml(m)}</code></label>`).join('') || '<span class="muted">No models.</span>')
+      + (publicExtra.length ? `<p class="muted" style="grid-column:1/-1;margin:.3rem 0 0;font-size:.82rem">Also kept: ${
+          publicExtra.map(m => `<code>${escapeHtml(m)}</code>`).join(' ')}</p>` : '');
+    save.disabled = !models.length && !publicExtra.length;
+  }catch(e){ box.textContent = 'Could not load the public models: ' + e.message; }
+}
+document.getElementById('savePublic')?.addEventListener('click', async () => {
+  const chosen = [...document.querySelectorAll('#publicChecks input:checked')].map(c => c.value);
+  try{
+    await api('/admin/settings', {method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({'gateway.public.models': [...chosen, ...publicExtra].join(', ')})});
+    showCreated(chosen.length || publicExtra.length ? 'Public models saved.' : 'Public models cleared: public accounts now have none.');
+    document.getElementById('error').hidden = true;
+  }catch(e){ showError(e.message); }
+});
+
 async function loadModels(){
-  try{ models = (await api('/v1/models')).data.map(m => m.id); }
+  // "auto" is the gateway's choice among these, not a model access can be granted to
+  try{ models = (await api('/v1/models')).data.map(m => m.id).filter(id => id !== 'auto'); }
   catch(e){ models = []; }
 }
 
@@ -254,8 +343,18 @@ document.addEventListener('click', async e => {
   const newKey = e.target.closest('[data-newkey]');
   const revoke = e.target.closest('[data-revoke]');
   const active = e.target.closest('[data-active]');
+  const approve = e.target.closest('[data-approve]');
+  const reject = e.target.closest('[data-reject]');
   try{
-    if(accessBtn){
+    if(approve){
+      await api(`/admin/users/${encodeURIComponent(approve.dataset.approve)}/approve`, {method:'POST'});
+      showCreated(`<strong>${escapeHtml(approve.dataset.approve)}</strong> approved, with the public models.`);
+      loadUsers();
+    }else if(reject){
+      if(!confirm(`Turn down ${reject.dataset.reject}? The request is removed.`)) return;
+      await api(`/admin/users/${encodeURIComponent(reject.dataset.reject)}/reject`, {method:'POST'});
+      loadUsers();
+    }else if(accessBtn){
       openEditor(accessBtn.dataset.access);
     }else if(newKey){
       const created = await api('/admin/keys', {method:'POST', headers:{'Content-Type':'application/json'},
@@ -276,6 +375,6 @@ document.addEventListener('click', async e => {
   }catch(err){ showError(err.message); }
 });
 
-loadModels().then(loadUsers);
+loadModels().then(() => { loadUsers(); loadPublic(); });
 </script>
 {% endblock %}

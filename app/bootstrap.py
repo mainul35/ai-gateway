@@ -12,29 +12,56 @@ from app.security import hash_password
 log = logging.getLogger("gateway")
 
 
+# Columns added after the first release, as (table, column, type); create_all does not alter
+# existing tables
+_ADDED_COLUMNS = (
+    ("users", "password_hash", "VARCHAR(256)"),
+    # Existing accounts keep the access they effectively had before access control existed
+    ("users", "model_access", "VARCHAR(16) DEFAULT 'all'"),
+    ("users", "allowed_models", "TEXT"),
+    # What the auth server sent at the last sign-in, kept so permissions can be built on it
+    ("users", "claims", "TEXT"),
+    ("users", "claims_seen_at", "TIMESTAMPTZ"),
+    ("conversation_messages", "attachments", "TEXT"),
+    # Coding tasks on folders on people's own computers, added after the first version shipped
+    ("projects", "kind", "VARCHAR(16) DEFAULT 'git'"),
+    ("projects", "client", "VARCHAR(16)"),
+    ("coding_tasks", "originals", "TEXT"),
+    ("coding_tasks", "state", "TEXT"),
+    # SSO accounts by the auth server's own id, and sign-ins waiting for an admin
+    ("users", "sso_subject", "VARCHAR(320)"),
+    ("users", "approval", "VARCHAR(16)"),
+    ("users", "session_epoch", "INTEGER DEFAULT 0"),
+)
+
+
 async def ensure_schema():
-    """Adds columns introduced after the first release; create_all does not alter existing tables."""
+    """Adds the columns and index introduced after the first release, when they are missing.
+
+    Only when missing: ALTER TABLE takes an exclusive lock even with IF NOT EXISTS, and waits for
+    every open transaction on the table first. During a deploy the old gateway can still be draining
+    a long streamed request with a transaction open on users, and every new start then hung at
+    "Waiting for application startup" behind it - the rollback too. A change that is still needed
+    gives up after lock_timeout instead, and the start fails where it can be seen.
+    """
     async with engine().begin() as connection:
-        await connection.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS password_hash VARCHAR(256)"))
-        # Existing accounts keep the access they effectively had before access control existed
-        await connection.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS model_access VARCHAR(16) DEFAULT 'all'"))
-        await connection.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS allowed_models TEXT"))
-        # What the auth server sent at the last sign-in, kept so permissions can be built on it
-        await connection.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS claims TEXT"))
-        await connection.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS claims_seen_at "
-                                      "TIMESTAMPTZ"))
-        await connection.execute(text("ALTER TABLE conversation_messages ADD COLUMN IF NOT EXISTS attachments TEXT"))
-        # Coding tasks on folders on people's own computers, added after the first version shipped
-        await connection.execute(text("ALTER TABLE projects ADD COLUMN IF NOT EXISTS kind VARCHAR(16) DEFAULT 'git'"))
-        await connection.execute(text("ALTER TABLE projects ADD COLUMN IF NOT EXISTS client VARCHAR(16)"))
-        await connection.execute(text("ALTER TABLE coding_tasks ADD COLUMN IF NOT EXISTS originals TEXT"))
-        await connection.execute(text("ALTER TABLE coding_tasks ADD COLUMN IF NOT EXISTS state TEXT"))
+        await connection.execute(text("SET LOCAL lock_timeout = '20s'"))
+        present = {(table, column) for table, column in (await connection.execute(text(
+            "SELECT table_name, column_name FROM information_schema.columns "
+            "WHERE table_schema = current_schema()"))).all()}
+        for table, column, kind in _ADDED_COLUMNS:
+            if (table, column) not in present:
+                await connection.execute(text(f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {column} {kind}"))
         # One running summary per conversation, whatever races to write it
-        await connection.execute(text("DELETE FROM memory_entries WHERE scope = 'conversation' AND id NOT IN "
-                                      "(SELECT min(id) FROM memory_entries WHERE scope = 'conversation' "
-                                      "GROUP BY conversation_id)"))
-        await connection.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS memory_one_per_conversation "
-                                      "ON memory_entries (conversation_id) WHERE scope = 'conversation'"))
+        has_index = (await connection.execute(text(
+            "SELECT 1 FROM pg_indexes WHERE schemaname = current_schema() "
+            "AND indexname = 'memory_one_per_conversation'"))).first()
+        if not has_index:
+            await connection.execute(text("DELETE FROM memory_entries WHERE scope = 'conversation' AND id NOT IN "
+                                          "(SELECT min(id) FROM memory_entries WHERE scope = 'conversation' "
+                                          "GROUP BY conversation_id)"))
+            await connection.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS memory_one_per_conversation "
+                                          "ON memory_entries (conversation_id) WHERE scope = 'conversation'"))
 
 
 async def ensure_default_admin():

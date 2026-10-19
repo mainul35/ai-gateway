@@ -42,6 +42,15 @@ td{padding:.55rem .6rem;border-bottom:1px solid var(--input)}
 tr:last-child td{border-bottom:none}
 code{background:var(--input);padding:.12rem .4rem;border-radius:5px;font-size:.88em;word-break:break-all}
 pre{background:#0b1220;padding:.9rem 1rem;border-radius:8px;overflow-x:auto;margin:.5rem 0 0}
+/* A snippet meant to be pasted somewhere gets a Copy button in its corner. The button sits on a
+   wrapper rather than in the <pre>, which scrolls sideways and would carry the button away. */
+.copy-wrap{position:relative}
+.copy-wrap > pre{padding-right:5.2rem}
+.copy-btn{position:absolute;top:.62rem;right:.6rem;background:var(--input);color:var(--text);
+          border:1px solid var(--border);border-radius:6px;padding:.2rem .65rem;font:inherit;
+          font-size:.8rem;line-height:1.4;cursor:pointer}
+.copy-btn:hover{background:var(--border)}
+.copy-btn.done{background:var(--success);border-color:var(--success);color:#fff}
 input,select{background:var(--input);border:1px solid var(--border);border-radius:8px;color:var(--text);
      padding:.55rem .7rem;font-size:.95rem;width:100%;font-family:inherit}
 input:focus,select:focus{outline:none;border-color:var(--primary)}
@@ -102,7 +111,7 @@ label span.hint{display:block;font-size:.8rem;color:var(--muted);margin-top:.2re
   <span class="brand">Model Gateway</span>
   <a href="/dashboard">Dashboard</a>
   <a href="/playground">Playground</a>
-  {% if user.role in ('manager', 'admin') %}<a href="/tasks">Tasks</a><a href="/users">Users</a>{% endif %}
+  {% if user.role in ('manager', 'admin') %}{% if coding_on %}<a href="/tasks">Tasks</a>{% endif %}<a href="/users">Users</a>{% endif %}
   {% if user.role == 'admin' %}<a href="/models">Models</a><a href="/mcp">Tools</a><a href="/settings/sso">SSO</a><a href="/docs">API</a>{% endif %}
   <span class="spacer"></span>
   <span class="who">{{ user.name }} &middot; {{ user.role }}</span>
@@ -132,6 +141,57 @@ async function api(path, options){
   }
   return body;
 }
+
+/* Every <pre><code class="copyable"> gets a Copy button, also the ones a page draws later - the
+   launch commands are redrawn whenever another model is picked. */
+function addCopyButtons(){
+  for(const code of document.querySelectorAll('pre > code.copyable')){
+    const pre = code.parentNode;
+    let wrap = pre.parentNode;
+    if(!wrap.classList.contains('copy-wrap')){
+      wrap = document.createElement('div');
+      wrap.className = 'copy-wrap';
+      // The gap above the snippet moves to the wrapper, so the button lines up with its first line
+      wrap.style.marginTop = getComputedStyle(pre).marginTop;
+      pre.style.marginTop = '0';
+      pre.before(wrap);
+      wrap.appendChild(pre);
+    }
+    if(wrap.querySelector(':scope > .copy-btn')) continue;
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'copy-btn';
+    button.textContent = 'Copy';
+    button.title = 'Copy to the clipboard';
+    wrap.appendChild(button);
+  }
+}
+document.addEventListener('click', async e => {
+  const button = e.target.closest('.copy-btn');
+  if(!button) return;
+  const code = button.parentNode.querySelector('pre > code');
+  try{
+    await navigator.clipboard.writeText(code.textContent);
+    button.textContent = 'Copied';
+    button.classList.add('done');
+  }catch(err){
+    // No clipboard access (an old browser, or a page not served over https): select it instead
+    const range = document.createRange();
+    range.selectNodeContents(code);
+    getSelection().removeAllRanges();
+    getSelection().addRange(range);
+    button.textContent = 'Press Ctrl+C';
+  }
+  setTimeout(() => { button.textContent = 'Copy'; button.classList.remove('done'); }, 1500);
+});
+// Once a frame at most: the playground redraws an answer many times a second while it streams
+let copyButtonsQueued = false;
+new MutationObserver(() => {
+  if(copyButtonsQueued) return;
+  copyButtonsQueued = true;
+  requestAnimationFrame(() => { copyButtonsQueued = false; addCopyButtons(); });
+}).observe(document.body, {childList: true, subtree: true});
+addCopyButtons();
 </script>
 {% block scripts %}{% endblock %}
 </body>

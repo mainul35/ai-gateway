@@ -13,13 +13,44 @@ import time
 import httpx
 
 from app import settings
+from app.settings import PROJECT_ROOT
 from app.engine.profiles import load_profiles
 from utils.ollama_client import ollama_host
+from utils.system_info import detect_gpus
 
 log = logging.getLogger("engine")
 
 STARTUP_TIMEOUT = 600  # big models take a while to load from disk
 REAPER_INTERVAL = 30
+BUSY_WAIT = 90      # seconds a model waits for a busy one; under the 100 s Cloudflare allows a silent request
+SMALL_OLLAMA_MODEL = 4 * 1024**3  # below this an Ollama model never makes a llama.cpp model give way
+
+
+LOG_DIR = os.path.join(PROJECT_ROOT, "logs")
+LOG_CAP = 20 * 1024 * 1024       # per engine; the one before is kept as .1
+
+
+def engine_log(name):
+    return os.path.join(LOG_DIR, f"engine-{name}.log")
+
+
+async def _drain(process, path):
+    """An engine's output, into logs/engine-<name>.log, for as long as it runs."""
+    os.makedirs(LOG_DIR, exist_ok=True)
+    out = open(path, "ab")
+    try:
+        while True:
+            chunk = await process.stderr.read(65536)
+            if not chunk:
+                break
+            out.write(chunk)
+            out.flush()
+            if out.tell() > LOG_CAP:
+                out.close()
+                os.replace(path, path + ".1")
+                out = open(path, "ab")
+    finally:
+        out.close()
 
 
 class RunningModel:
@@ -29,6 +60,7 @@ class RunningModel:
         self.started_at = time.monotonic()
         self.last_used_at = time.monotonic()
         self.in_flight = 0
+        self.drain = None
 
     @property
     def base_url(self):
@@ -100,34 +132,151 @@ class Supervisor:
         if not self.is_available():
             return None, "llama-server binary not found; set engine.llama_server.path"
 
+        # A model in the middle of someone's answer is never stopped to make room for another: that
+        # cut the answer off, and alternating two requests kept the GPU reloading for everybody.
+        # The new model waits for it, up to BUSY_WAIT seconds, and then says the GPU is busy.
+        waited = 0.0
+        while True:
+            async with self._lock:
+                existing = self._running.get(name)
+                if existing and existing.process.returncode is None:
+                    existing.last_used_at = time.monotonic()
+                    return existing, None
+                if existing:
+                    self._running.pop(name, None)
+
+                busy = [other_name for other_name, other in self._running.items()
+                        if profile.exclusive and other.profile.exclusive and other_name != name
+                        and other.in_flight > 0 and other.process.returncode is None]
+                if not busy:
+                    if profile.exclusive and settings.get_bool("engine.unload_ollama_first",
+                                                               "ENGINE_UNLOAD_OLLAMA_FIRST"):
+                        await self._unload_ollama_models()
+                    if profile.exclusive:
+                        for other_name, other in list(self._running.items()):
+                            if other.profile.exclusive and other_name != name:
+                                log.info("Stopping %s to free VRAM for %s", other_name, name)
+                                await self._stop_locked(other_name)
+                    return await self._start_locked(profile)
+            if waited >= BUSY_WAIT:
+                return None, (f"The GPU is busy answering with {', '.join(busy)}; "
+                              f"try {name} again in a minute")
+            if waited == 0:
+                log.info("%s waits for %s to finish answering", name, ", ".join(busy))
+            await asyncio.sleep(2)
+            waited += 2
+
+    async def make_room_for_ollama(self, model):
+        """Stops idle llama.cpp models when an Ollama model is about to load and would not fit beside them.
+
+        The other half of engine.unload_ollama_first. A llama.cpp model keeps the GPU for its whole TTL
+        (qwen3-next-80b holds 22.5 GB for an hour), and Ollama loads into whatever VRAM is left: with
+        under a gigabyte free it puts 0 of gemma4:31b's 61 layers on the GPU and runs all of it on the
+        CPU, many times slower. Only when the model does not fit, though - the playground's small
+        router model writes a search query between two turns of the 80B, and stopping the 80B for that
+        would reload it on every turn. A llama.cpp model still answering someone is left alone.
+        """
+        if not settings.get_bool("engine.unload_ollama_first", "ENGINE_UNLOAD_OLLAMA_FIRST"):
+            return
+        if not any(m.profile.exclusive and m.process.returncode is None for m in self._running.values()):
+            return
+        host = ollama_host()
+        try:
+            async with httpx.AsyncClient(timeout=10) as client:
+                loaded = {e.get("name") or e.get("model"): e
+                          for e in (await client.get(f"{host}/api/ps")).json().get("models") or []}
+                here = loaded.get(model)
+                if here and here.get("size_vram", 0) >= 0.9 * here.get("size", 1):
+                    return  # already on the GPU
+                tags = (await client.get(f"{host}/api/tags")).json().get("models") or []
+                size = next((t.get("size") or 0 for t in tags if t.get("name") == model), 0)
+                # The router (qwen3:1.7b) and embedding models are small enough to run on the CPU, and
+                # never fit beside the 80B anyway: stopping it for them would reload it every turn
+                if size < SMALL_OLLAMA_MODEL:
+                    return
+                if here:
+                    # Loaded, but squeezed onto the CPU: drop it so it comes back on the GPU
+                    await client.post(f"{host}/api/generate", json={"model": model, "keep_alive": 0})
+        except (httpx.HTTPError, ValueError) as e:
+            log.warning("Could not ask Ollama about %s: %s", model, e)
+            return
+        free = sum(g["vram_free"] for g in await asyncio.to_thread(detect_gpus))
+        # Weights plus room for the KV cache and compute buffers
+        if free >= size * 1.15 + 1024**3:
+            return
+        busy = []
         async with self._lock:
-            existing = self._running.get(name)
-            if existing and existing.process.returncode is None:
-                existing.last_used_at = time.monotonic()
-                return existing, None
-            if existing:
-                self._running.pop(name, None)
+            for name, running in list(self._running.items()):
+                if not running.profile.exclusive:
+                    continue
+                if running.in_flight:
+                    busy.append(name)
+                    continue
+                log.info("Stopping %s to free VRAM for Ollama's %s (%.1f GB free, %.1f GB needed)",
+                         name, model, free / 1024**3, size / 1024**3)
+                await self._stop_locked(name)
+        if busy:
+            # Ollama was once left to fall back to the CPU here. With a vision projector it cannot:
+            # qwen3.6 died loading with "cudaMalloc failed: out of memory" while qwen3.6-1m answered
+            # a Claude Code session, and the playground showed the raw CUDA error. Said plainly instead.
+            log.warning("%s needs the GPU, but %s is answering a request", model, ", ".join(busy))
+            return (f"The GPU is busy: {', '.join(busy)} is answering another request and holds all of "
+                    f"its memory, so {model} cannot be loaded now. Try again when that finishes, or "
+                    f"pick {busy[0]} or a small model.")
+        return None
 
-            if profile.exclusive and settings.get_bool("engine.unload_ollama_first", "ENGINE_UNLOAD_OLLAMA_FIRST"):
-                await self._unload_ollama_models()
+    def blocked_by_busy_gpu(self, name, backend):
+        """Whether this model cannot be loaded now, because a model answering someone holds the GPU.
 
-            if profile.exclusive:
-                for other_name, other in list(self._running.items()):
-                    if other.profile.exclusive and other_name != name:
-                        log.info("Stopping %s to free VRAM for %s", other_name, name)
-                        await self._stop_locked(other_name)
+        For Auto, which should not pick it: an exclusive llama.cpp model would have to stop the busy
+        one, and a large Ollama model would not fit beside it (make_room_for_ollama). The busy model
+        itself is fine - its request waits its turn - and so are small Ollama models, run on the CPU.
+        """
+        busy = [n for n, m in self._running.items()
+                if m.profile.exclusive and m.in_flight and m.process.returncode is None]
+        if not busy or name in busy:
+            return False
+        if backend.kind == "llamacpp":
+            profile = load_profiles().get(name)
+            return bool(profile and profile.exclusive)
+        if backend.kind == "ollama":
+            return (backend.size_bytes or 0) >= SMALL_OLLAMA_MODEL
+        return False
 
-            model, problem = await self._start_locked(profile)
-            return model, problem
+    async def unload_everything(self):
+        """Stops every llama.cpp model and has Ollama drop its own, for a machine about to sleep.
 
-    async def _unload_ollama_models(self):
-        """Asks Ollama to drop its loaded models; they otherwise keep the GPU full (OLLAMA_KEEP_ALIVE=-1)."""
+        A suspended GPU keeps nothing worth waking up to: the first request after a wake reloads its
+        model either way, and a CUDA process carried through suspend and resume can come back unable to
+        use the card. Unloading first also means a model nobody is using never keeps the machine awake.
+        A llama.cpp model still answering someone is left alone - the caller should not be suspending
+        then, and says so. Returns what was done, for the log.
+        """
+        stopped, busy = [], []
+        async with self._lock:
+            for name, running in list(self._running.items()):
+                if running.in_flight:
+                    busy.append(name)
+                    continue
+                log.info("Unloading %s before the machine sleeps", name)
+                await self._stop_locked(name)
+                stopped.append(name)
+            await self._unload_ollama_models(gpu_only=False)
+        return {"stopped": stopped, "busy": busy}
+
+    async def _unload_ollama_models(self, gpu_only=True):
+        """Asks Ollama to drop its loaded models; they otherwise keep the GPU full (OLLAMA_KEEP_ALIVE=-1).
+
+        Only the ones on the GPU, unless gpu_only is off: the router and embedding models run on the
+        CPU (num_gpu 0), hold no VRAM, and would only be reloaded a moment later for nothing.
+        """
         host = ollama_host()
         try:
             async with httpx.AsyncClient(timeout=30) as client:
                 response = await client.get(f"{host}/api/ps")
                 response.raise_for_status()
-                loaded = [e.get("model") or e.get("name") for e in response.json().get("models") or []]
+                loaded = [e.get("model") or e.get("name") for e in response.json().get("models") or []
+                          if not gpu_only or e.get("size_vram", 1)]
                 for name in filter(None, loaded):
                     log.info("Asking Ollama to unload %s", name)
                     # keep_alive 0 unloads immediately. Ollama reports failures in the body with HTTP 200.
@@ -140,7 +289,8 @@ class Supervisor:
 
                 for _ in range(15):
                     await asyncio.sleep(1)
-                    still_loaded = (await client.get(f"{host}/api/ps")).json().get("models") or []
+                    still_loaded = [e for e in (await client.get(f"{host}/api/ps")).json().get("models") or []
+                                    if not gpu_only or e.get("size_vram", 1)]
                     if not still_loaded:
                         log.info("Ollama released its models")
                         return
@@ -152,11 +302,15 @@ class Supervisor:
         if not os.path.isfile(profile.model_path):
             return None, f"Model file not found: {profile.model_path}"
 
-        command = profile.command(self.binary())
+        binary = profile.binary or self.binary()
+        if profile.binary and not (os.path.isfile(binary) and os.access(binary, os.X_OK)):
+            return None, f"llama-server not found at {binary} (profile {profile.name})"
+        command = profile.command(binary)
         env = dict(os.environ)
         library_path = settings.get("engine.library.path", "ENGINE_LIBRARY_PATH")
-        if library_path:
+        if library_path and not profile.binary:
             env["LD_LIBRARY_PATH"] = library_path + os.pathsep + env.get("LD_LIBRARY_PATH", "")
+        env.update({str(k): str(v) for k, v in (profile.env or {}).items()})
 
         log.info("Starting %s: %s", profile.name, " ".join(command))
         process = await asyncio.create_subprocess_exec(
@@ -164,6 +318,9 @@ class Supervisor:
             stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE,
         )
         model = RunningModel(profile, process)
+        # Read for as long as it runs: a pipe nobody reads fills, and the server then blocks on its
+        # next log line in the middle of somebody's answer. Kept, so its errors can be read later.
+        model.drain = asyncio.create_task(_drain(process, engine_log(profile.name)))
         ready, problem = await self._wait_until_ready(model)
         if not ready:
             with contextlib.suppress(ProcessLookupError):
@@ -191,16 +348,15 @@ class Supervisor:
     @staticmethod
     async def _stderr_tail(model, limit=500):
         """llama-server prints pages of warnings before the fatal error, so keep the end."""
-        if not model.process.stderr:
-            return "(no output)"
-        chunks = []
         with contextlib.suppress(Exception):
-            while True:
-                chunk = await asyncio.wait_for(model.process.stderr.read(65536), timeout=2)
-                if not chunk:
-                    break
-                chunks.append(chunk)
-        text = b"".join(chunks).decode(errors="replace").strip()
+            await asyncio.wait_for(asyncio.shield(model.drain), timeout=3)   # the last lines, written
+        try:
+            with open(engine_log(model.profile.name), "rb") as f:
+                f.seek(0, os.SEEK_END)
+                f.seek(max(0, f.tell() - 65536))
+                text = f.read().decode(errors="replace").strip()
+        except OSError:
+            return "(no output)"
         interesting = [line for line in text.splitlines()
                        if any(word in line.lower() for word in ("error", "failed", "cannot", "out of memory", "unable"))]
         return (interesting[-1] if interesting else text.splitlines()[-1] if text.splitlines() else "(no output)")[-limit:]
@@ -224,6 +380,19 @@ class Supervisor:
         return True
 
     # --- introspection ----------------------------------------------------
+
+    def loaded_names(self):
+        """The llama.cpp models running now, so a helper task can use one without loading another."""
+        return [name for name, m in self._running.items() if m.process.returncode is None]
+
+    async def ollama_loaded(self):
+        """Ollama's models on the GPU now; empty when Ollama cannot be asked."""
+        try:
+            async with httpx.AsyncClient(timeout=5) as client:
+                models = (await client.get(f"{ollama_host()}/api/ps")).json().get("models") or []
+        except (httpx.HTTPError, ValueError):
+            return []
+        return [m.get("name") or m.get("model") for m in models if m.get("size_vram")]
 
     def status(self):
         profiles = load_profiles()

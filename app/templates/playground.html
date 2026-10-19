@@ -51,13 +51,31 @@ details.tuning label{margin-bottom:.85rem}
 .msg.user{background:var(--input);border-radius:12px;padding:.6rem .9rem;align-self:flex-end;max-width:85%}
 /* What you can do with something you said: copy it, or ask it again. Quiet until the message is
    pointed at, because they are for the times something went wrong rather than every turn. */
-.turn-tools{display:flex;gap:.6rem;justify-content:flex-end;margin-top:.4rem;
+.turn-tools{display:flex;flex-wrap:wrap;gap:.6rem;justify-content:flex-end;margin-top:.4rem;
             opacity:0;transition:opacity .15s}
 .msg.user:hover .turn-tools,.msg.user:focus-within .turn-tools,.turn-tools.stay{opacity:1}
 .turn-tools button{background:none;border:none;padding:0;cursor:pointer;font:inherit;
                    font-size:.74rem;color:var(--muted)}
 .turn-tools button:hover{color:var(--text);text-decoration:underline}
 .turn-tools button:disabled{opacity:.5;cursor:default;text-decoration:none}
+/* Changing what you said, in place */
+.msg.user.editing{width:min(40rem,85%)}
+.edit-box textarea,.aside textarea{width:100%;min-height:4.5rem;background:var(--bg);color:var(--text);
+     border:1px solid var(--border);border-radius:8px;padding:.5rem .6rem;font:inherit;resize:vertical}
+.edit-box .row,.aside .row{display:flex;gap:.5rem;justify-content:flex-end;margin-top:.45rem}
+/* A side question: asked about one message and answered beside the conversation, never in it */
+dialog.aside{width:min(44rem,94vw);max-height:88vh;background:var(--card);color:var(--text);
+     border:1px solid var(--border);border-radius:12px;padding:1rem 1.1rem}
+dialog.aside::backdrop{background:rgba(0,0,0,.55)}
+.aside .head{display:flex;align-items:center;gap:.5rem;margin-bottom:.4rem}
+.aside .head strong{flex:1}
+.aside .head button{background:none;border:none;color:var(--muted);font-size:1.1rem;cursor:pointer}
+.aside .about{color:var(--muted);font-size:.85rem;border-left:3px solid var(--border);padding-left:.6rem;
+     margin:0 0 .5rem;max-height:4.8em;overflow:hidden;white-space:pre-wrap}
+.aside .note{color:var(--muted);font-size:.78rem;margin:0 0 .5rem}
+.aside .answer{margin-top:.8rem;max-height:52vh;overflow:auto;white-space:pre-wrap}
+.aside .answer.md{white-space:normal}
+.aside .answer:empty{display:none}
 /* Answers to the same question, when it was asked more than once */
 .variants{display:inline-flex;align-items:center;gap:.3rem;margin-left:.5rem;font-weight:400}
 .variants button{background:none;border:none;padding:0 .15rem;cursor:pointer;color:var(--muted);
@@ -111,6 +129,16 @@ details.sources li{margin:.15rem 0}
 details.sources a{word-break:break-all}
 a.cite{font-size:.75em;vertical-align:super;text-decoration:none;padding:0 .1rem}
 .stats{font-size:.78rem;color:var(--muted);margin-top:.4rem}
+/* Was it any good: asked under each answer, kept, and read by Auto when it picks a model */
+.verdict{display:flex;flex-wrap:wrap;align-items:center;gap:.35rem .9rem;margin-top:.35rem;
+         font-size:.76rem;color:var(--muted)}
+.verdict .ask{display:inline-flex;align-items:center;gap:.3rem}
+.verdict button{background:none;border:1px solid var(--border);border-radius:999px;color:var(--muted);
+                font:inherit;padding:.05rem .55rem;cursor:pointer}
+.verdict button:hover{color:var(--text)}
+.verdict button[aria-pressed="true"]{color:#fff;background:var(--primary);border-color:var(--primary)}
+.verdict button[aria-pressed="true"][data-value="false"]{background:var(--danger);border-color:var(--danger)}
+.verdict .thanks{font-style:italic}
 .status{font-size:.85rem;color:var(--muted);display:flex;align-items:center;gap:.5rem}
 .spinner{width:.8rem;height:.8rem;border:2px solid var(--border);border-top-color:var(--primary);border-radius:50%;
          animation:spin .8s linear infinite;flex:none}
@@ -161,10 +189,11 @@ a.cite{font-size:.75em;vertical-align:super;text-decoration:none;padding:0 .1rem
 .paper{display:flex;align-items:center;gap:.5rem;height:5.5rem;width:11rem;padding:.5rem .6rem;
        border:1px solid var(--border);border-radius:8px;background:var(--input);position:relative}
 .paper .what{min-width:0}
-.paper .who{font-size:.8rem;font-weight:600;word-break:break-word;
+.paper .who,.paper .doc-name{font-size:.8rem;font-weight:600;word-break:break-word;
             display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}
 .paper .size{font-size:.7rem;color:var(--muted)}
 .paper .glyph{font-size:1.4rem;flex:none}
+a.paper{color:var(--text);text-decoration:none}
 /* The camera, when one is asked for: a live picture with a shutter under it */
 .camera{position:fixed;inset:0;z-index:60;background:rgba(0,0,0,.85);display:flex;
         flex-direction:column;align-items:center;justify-content:center;gap:1rem;padding:1rem}
@@ -176,6 +205,16 @@ a.cite{font-size:.75em;vertical-align:super;text-decoration:none;padding:0 .1rem
 .thumbs{display:flex;gap:.5rem;flex-wrap:wrap;margin-bottom:.4rem}
 .thumbs img{height:5.5rem;max-width:9rem;object-fit:cover;border-radius:8px;border:1px solid var(--border);cursor:zoom-in}
 .pending{position:relative}
+/* Messages waiting for the current answer to finish, above the composer */
+.queue{display:flex;flex-direction:column;gap:.3rem;margin-bottom:.5rem}
+.queued-item{display:flex;align-items:center;gap:.5rem;font-size:.82rem;background:var(--bg);
+             border:1px dashed var(--border);border-radius:8px;padding:.3rem .5rem}
+.queued-item .tag{font-size:.7rem;color:var(--muted);text-transform:uppercase;letter-spacing:.04em}
+.queued-item .text{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.queued-item button{background:none;border:none;color:var(--muted);cursor:pointer;font-size:1rem;line-height:1}
+/* A message just sent, before it is saved; and what is happening to it, in the conversation */
+.msg.user.sending{opacity:.85}
+.deciding-line{display:flex;align-items:center;gap:.5rem;font-size:.85rem;color:var(--muted);margin:.2rem 0 .6rem}
 .pending button{position:absolute;top:-.4rem;right:-.4rem;width:1.3rem;height:1.3rem;border-radius:50%;border:none;
                 background:var(--danger);color:#fff;cursor:pointer;font-size:.8rem;line-height:1;padding:0}
 .pending .tag{position:absolute;left:.3rem;bottom:.3rem;font-size:.65rem;background:rgba(0,0,0,.7);padding:0 .3rem;border-radius:4px}
@@ -187,6 +226,15 @@ a.cite{font-size:.75em;vertical-align:super;text-decoration:none;padding:0 .1rem
 .pending .sending .track div{height:100%;width:0;background:var(--primary);transition:width .15s}
 /* Leaves room in the transcript for the question above it and the caption below */
 .generated img{max-width:100%;max-height:min(45vh,26rem);border-radius:8px;display:block;cursor:zoom-in}
+/* Subtitles: a long transcript scrolls in its own box, so the conversation around it stays reachable */
+.subs .subs-head{margin-bottom:.5rem;font-size:.9rem}
+.subs .subs-head a{font-weight:600}
+.subs .subs-lines{max-height:min(55vh,32rem);overflow-y:auto;border:1px solid var(--border);border-radius:8px;
+                  padding:.5rem .75rem;background:var(--input);font-size:.92rem;line-height:1.5}
+.subs .subs-lines > div{display:flex;gap:.65rem;padding:.12rem 0}
+.subs .subs-time{flex:none;min-width:3.2rem;color:var(--muted);font-variant-numeric:tabular-nums;text-decoration:none}
+.subs .subs-time:hover{color:var(--primary)}
+.subs .actions{margin-top:.6rem;display:flex;flex-wrap:wrap;gap:.4rem}
 /* The description can run to sixty words; two lines of it is enough to recognise the picture by */
 .generated .caption{font-size:.82rem;color:var(--muted);margin-top:.4rem;cursor:pointer;
                     display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
@@ -333,10 +381,35 @@ a.cite{font-size:.75em;vertical-align:super;text-decoration:none;padding:0 .1rem
   .tools{gap:.35rem}
   .foot{flex-wrap:wrap;align-items:flex-start;gap:.2rem .75rem;min-height:0}
   .foot .picker{flex:1 0 100%;order:2;justify-content:flex-start;min-width:0}
-  .foot .picker select{max-width:100%;overflow:hidden;text-overflow:ellipsis}
+  /* The model name gives way, not the thinking switch beside it: with the name allowed the whole
+     row, the switch's words were cut off and a bare checkbox was left with nothing to say what it is */
+  .foot .picker select{flex:1 1 auto;min-width:0;max-width:100%;overflow:hidden;text-overflow:ellipsis}
+  .foot .picker .think-label{flex:none;overflow:visible}
 }
 @media (prefers-reduced-motion: reduce){
   .side,.scrim{transition:none}
+}
+/* --- reading mode ---------------------------------------------------------------------------
+   On a phone the site menu, the title bar and the message box together took more than half the
+   screen, and the answer was read through the slot left between them. Reading mode hides the menu
+   and the message box; the title bar stays, slim, because it holds the way back. Only offered on
+   a phone or a narrow window, and on a phone turned sideways (short, and touch only). Height alone
+   is not enough: a desktop browser window under 900px tall was offered it, and has room for all. */
+/* A thumb-sized target: at 20px it was missed more often than hit */
+.reader-btn{display:none;margin-left:auto;font-size:1.15rem;line-height:1;min-width:2.6rem;min-height:2.4rem;
+            align-items:center;justify-content:center;border-radius:8px}
+.reader-btn[aria-pressed="true"]{color:var(--primary)}
+.reader-write{position:fixed;right:1rem;bottom:calc(1rem + env(safe-area-inset-bottom));z-index:15;
+              box-shadow:0 .4rem 1.2rem rgba(0,0,0,.45)}
+@media (max-width: 860px), (max-height: 600px) and (pointer: coarse){
+  .reader-btn{display:inline-flex}
+  .topbar .column{display:flex;align-items:center;gap:.55rem}
+  .chatTitle{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  body.reading header.nav,
+  body.reading .composer-wrap{display:none}
+  /* Room under the last line, so the end of an answer is not read through the Write button */
+  body.reading .transcript{padding-bottom:4.5rem}
+  .topbar{padding:.2rem 0}
 }
 </style>
 
@@ -384,8 +457,13 @@ a.cite{font-size:.75em;vertical-align:super;text-decoration:none;padding:0 .1rem
         <button class="linkish drawer-btn" id="drawerToggle" aria-expanded="false"
                 aria-label="Show conversations">&#9776;</button>
         <span class="chatTitle" id="chatTitle">New conversation</span>
+        <button class="linkish reader-btn" id="readerToggle" aria-pressed="false"
+                title="Reading mode: hide the menu and the message box, so the answer has the whole screen"
+                aria-label="Reading mode">&#8597;</button>
       </div>
     </header>
+    <!-- Reading mode's way back: the message box, one tap away from wherever you have scrolled -->
+    <button class="btn reader-write" id="readerWrite" hidden>&#9998; Write</button>
 
     <div class="transcript" id="transcript">
       <div class="column">
@@ -399,6 +477,7 @@ a.cite{font-size:.75em;vertical-align:super;text-decoration:none;padding:0 .1rem
     <div class="composer-wrap">
       <div class="column">
         <div class="composer" id="composer">
+          <div class="queue" id="queue" hidden></div>
           <div class="thumbs" id="pending"></div>
           <textarea id="prompt" rows="1"
                     title="Enter to send, Shift+Enter for a new line"
@@ -439,9 +518,11 @@ a.cite{font-size:.75em;vertical-align:super;text-decoration:none;padding:0 .1rem
             <span class="inline" id="sizeRow" hidden>Shape
               <select id="imageSize"></select>
             </span>
-            <span class="inline" id="blurRow" hidden title="How much the background is blurred">Blur
+            <span class="inline" id="blurRow" hidden
+                  title="Off: a photograph is never given a blurred background, whatever the words say">
+              <label><input type="checkbox" id="blurAllowed"> Background blur</label>
               <input type="range" id="blurStrength" min="0.2" max="3" step="0.1" value="1"
-                     style="width:5rem">
+                     title="How much the background is blurred" style="width:5rem">
             </span>
             <span class="inline" id="backdropRow" hidden
                   title="The colour to put behind the person, for a passport or visa photo">Backdrop
@@ -478,8 +559,9 @@ a.cite{font-size:.75em;vertical-align:super;text-decoration:none;padding:0 .1rem
           </span>
           <span class="picker">
             <select id="model" title="Model"></select>
-            <label id="thinkingRow" class="inline" hidden title="Slower, better reasoning">
-              <input type="checkbox" id="thinking" style="width:auto">think
+            <label id="thinkingRow" class="inline think-label" hidden
+                   title="Thinking mode: the model reasons step by step before answering. Slower, and better on hard questions.">
+              <input type="checkbox" id="thinking" style="width:auto"><span>Thinking mode</span>
             </label>
           </span>
         </div>
@@ -584,23 +666,45 @@ function relativeTime(iso){
 const canSee = id => (models[id]?.capabilities || []).includes('vision');
 // With Auto chosen there is no model until the router has picked one, so anything that needs a name
 // now asks for one: chosenModel is what the last routing decision settled on, falling back to the
-// first model that can see, since a picture is the only case where the wrong choice simply fails.
+// smallest model that can talk (one that can see when a picture is attached). The smallest is the
+// router itself, already loaded: falling back to a 31B loaded it for nothing, and took the GPU.
 // Everything that asks "is there a picture attached" means a picture, not a PDF
 const attachedPictures = () => pending.filter(p => !p.document);
+// The attachments of the message being answered. The composer's are `pending`: they are moved here
+// when a message is sent, so that a picture attached for the next message never joins this one.
+let turnFiles = [];
+const turnPictures = () => turnFiles.filter(p => !p.document);
 const choosing = () => modelSelect.value === 'auto';
 let chosenModel = '';
-function currentModel(){
+function currentModel(needsVision = attachedPictures().length > 0 || turnPictures().length > 0){
   if(!choosing()) return modelSelect.value;
   if(chosenModel && models[chosenModel]) return chosenModel;
-  const names = Object.keys(models);
-  return names.find(n => canSee(n)) || names[0] || '';
+  return smallestModel(needsVision) || Object.keys(models)[0] || '';
+}
+// Billions of parameters from the name (qwen3:1.7b, gemma4:31b, qwen3-next-80b); 30 when it says
+// nothing, so a model of unknown size never passes for the smallest. Same rule as app/tools/chooser.py.
+function modelSize(id){
+  // Millions only with three digits or more ("596m"): "qwen3.6-1m" names a 1M window, not a size
+  const found = id.toLowerCase().match(/(?<![\d.])(?:(\d+(?:\.\d+)?)b|(\d{3,})m)(?![a-z])/);
+  return found ? (found[1] ? parseFloat(found[1]) : parseFloat(found[2]) / 1000) : 30;
+}
+function smallestModel(needsVision){
+  const helpers = new Set((caps.helper_models || []).map(h => h.replace(/:latest$/, '')));
+  const talks = id => {
+    if(helpers.has(id.replace(/:latest$/, ''))) return false;    // the gateway's own CPU helpers
+    const caps = models[id]?.capabilities || [];
+    return !/embed|rerank|guard|shield|whisper|tts|image|diffusion|flux/i.test(id)
+      && (!caps.length || caps.includes('completion')) && (!needsVision || caps.includes('vision'));
+  };
+  return Object.keys(models).filter(talks).sort((a, b) => modelSize(a) - modelSize(b))[0] || '';
 }
 
 // --- models -------------------------------------------------------------
 
 async function loadModels(){
   try{
-    const data = (await api('/v1/models')).data;
+    // "auto" from the API is the drop-down's own Auto option, already first in the list
+    const data = (await api('/v1/models')).data.filter(m => m.id !== 'auto');
     models = Object.fromEntries(data.map(m => [m.id, m]));
     if(!data.length){
       modelSelect.innerHTML = '<option value="">no models available</option>';
@@ -611,9 +715,9 @@ async function loadModels(){
     modelSelect.innerHTML = '<option value="auto">Auto · best for the question</option>'
       + data.map(m =>
         `<option value="${escapeHtml(m.id)}">${escapeHtml(m.id)}${canSee(m.id) ? '  · sees images' : ''}</option>`).join('');
-    let remembered = null;
-    try{ remembered = localStorage.getItem('pg.model'); }catch(e){}
-    if(remembered === 'auto' || (remembered && models[remembered])) modelSelect.value = remembered;
+    // Every visit starts in Auto: the router picks for each new task, and a model chosen by hand is
+    // for the conversation it was chosen in, not every one after it
+    modelSelect.value = 'auto';
     syncModel();
   }catch(e){ showError('Could not load models: ' + errorText(e)); }
 }
@@ -624,7 +728,7 @@ function syncModel(){
   syncTools();
 }
 modelSelect.addEventListener('change', () => {
-  try{ localStorage.setItem('pg.model', modelSelect.value); }catch(e){}
+  chosenModel = '';
   syncModel();
 });
 document.getElementById('temperature').addEventListener('input', e =>
@@ -852,7 +956,12 @@ async function uploadImages(files){
 const canOpenCamera = () => !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia
                                && window.isSecureContext);
 
-function showCamera(stream){
+// Front or back: the back one first (this is for photographing a thing), and Flip between them when
+// the device has both. The front camera's preview is mirrored, as people expect to see themselves;
+// the photo is taken from the stream itself, so it comes out the right way round.
+const cameraConstraints = facing => ({video: {facingMode: {ideal: facing}, width: {ideal: 1920}}, audio: false});
+
+function showCamera(stream, facing = 'environment'){
   const panel = document.createElement('div');
   panel.className = 'camera';
   panel.innerHTML = `
@@ -860,11 +969,32 @@ function showCamera(stream){
     <div class="row">
       <button class="btn btn-secondary" data-cancel>Cancel</button>
       <button class="shutter" data-shoot title="Take the photo"></button>
-      <button class="btn btn-secondary" data-flip hidden>Flip</button>
+      <button class="btn btn-secondary" data-flip hidden title="Switch between the front and back camera">&#x21C4; Flip</button>
     </div>`;
   document.body.appendChild(panel);
   const video = panel.querySelector('video');
-  video.srcObject = stream;
+  const flip = panel.querySelector('[data-flip]');
+  const show = (next, side) => {
+    stream = next; facing = side;
+    video.srcObject = stream;
+    video.style.transform = facing === 'user' ? 'scaleX(-1)' : '';
+  };
+  show(stream, facing);
+  // Device labels and counts are only known once the camera is allowed, which it now is
+  navigator.mediaDevices.enumerateDevices?.()
+    .then(devices => { flip.hidden = devices.filter(d => d.kind === 'videoinput').length < 2; })
+    .catch(() => {});
+  flip.addEventListener('click', async () => {
+    const side = facing === 'user' ? 'environment' : 'user';
+    flip.disabled = true;
+    stream.getTracks().forEach(track => track.stop());     // phones allow one camera open at a time
+    try{
+      show(await navigator.mediaDevices.getUserMedia(cameraConstraints(side)), side);
+    }catch(e){
+      showError('Could not switch camera: ' + (e.message || e.name));
+      try{ show(await navigator.mediaDevices.getUserMedia(cameraConstraints(facing)), facing); }catch(_){ close(); }
+    }finally{ flip.disabled = false; }
+  });
 
   const close = () => {
     stream.getTracks().forEach(track => track.stop());
@@ -901,9 +1031,7 @@ async function openCamera(){
   }
   try{
     // The back camera by preference: this is for photographing a thing, not oneself
-    const stream = await navigator.mediaDevices.getUserMedia({
-      video: {facingMode: {ideal: 'environment'}, width: {ideal: 1920}}, audio: false});
-    showCamera(stream);
+    showCamera(await navigator.mediaDevices.getUserMedia(cameraConstraints('environment')), 'environment');
   }catch(e){
     // Refused, or there is no camera. Either way the file input still gets a photo on a phone.
     const refused = e && (e.name === 'NotAllowedError' || e.name === 'SecurityError');
@@ -1073,6 +1201,12 @@ async function loadConversations(){
 
 function resetChat(){
   currentId = null;
+  // A new conversation is a new task: back to Auto, with no earlier pick to lean towards
+  if(modelSelect.querySelector('option[value="auto"]')){
+    modelSelect.value = 'auto';
+    chosenModel = '';
+    syncModel();
+  }
   history = [];
   savedSystem = '';
   systemBox.value = '';
@@ -1094,7 +1228,7 @@ function fillTranscript(messages){
   const answered = [];
   for(const m of messages){
     const extra = m.attachments || {};
-    const attached = (extra.images || []).map(i => ({id: i.file_id, document: !!i.document}));
+    const attached = (extra.images || []).map(i => ({id: i.file_id, document: !!i.document, name: i.name || ''}));
     const imageIds = attached.map(f => f.id);
     if(m.role === 'user'){
       // A picture that went to the image tools is kept so the question can be asked again, but is
@@ -1109,11 +1243,13 @@ function fillTranscript(messages){
       const turn = extra.answers_to || null;
       const box = answerBox(turn, m.model || (extra.map ? 'OpenStreetMap'
                                               : extra.media ? 'Picture search' : ''));
-      if(extra.agent) renderAgent(box, extra.agent, m.content, m.html, m.stats);
+      const withModel = m.stats || m.model ? {...(m.stats || {}), model: m.model} : null;
+      if(extra.agent) renderAgent(box, extra.agent, m.content, m.html, withModel);
       else if(extra.map) renderMap(box, extra.map);
       else if(extra.media) renderMedia(box, extra.media);
       else if(extra.generated) renderGenerated(box, extra.generated, m.stats);
-      else renderAssistant(box, m.content, m.reasoning, m.stats, extra.sources, m.html);
+      else if(extra.subtitles) renderSubtitles(box, extra.subtitles, m.content, m.stats);
+      else renderAssistant(box, m.content, m.reasoning, withModel, extra.sources, m.html);
       box._text = m.content;
       const earlier = turn ? answered.find(a => a.turn === turn) : null;
       if(earlier){
@@ -1139,10 +1275,11 @@ async function openConversation(id){
     currentId = conversation.id;
     savedSystem = conversation.system_prompt || '';
     systemBox.value = savedSystem;
-    if(conversation.model && models[conversation.model]){
-      modelSelect.value = conversation.model;
-      syncModel();
-    }
+    // Still Auto: the router keeps picking, and leans towards the model this conversation was
+    // using, so carrying on does not swap models for nothing
+    modelSelect.value = 'auto';
+    chosenModel = conversation.model && models[conversation.model] ? conversation.model : '';
+    syncModel();
     document.getElementById('chatTitle').textContent = conversation.title;
     chat.innerHTML = '';
     history = [];
@@ -1232,6 +1369,38 @@ document.getElementById('convs').addEventListener('dblclick', async e => {
 
 document.getElementById('newChat').addEventListener('click', () => { if(!controller) resetChat(); });
 
+// --- reading mode, on a short or narrow screen ------------------------------------------------
+// The menu and the message box hidden, so an answer gets the whole screen. Remembered in this
+// browser, and only in effect while the screen is small: turning the phone or widening the window
+// brings everything back without anyone having to find the switch.
+const readerToggle = document.getElementById('readerToggle');
+const readerWrite = document.getElementById('readerWrite');
+const smallScreen = matchMedia('(max-width: 860px), (max-height: 600px) and (pointer: coarse)');
+let reading = false;
+try{ reading = localStorage.getItem('pg.reading') === 'on'; }catch(e){}
+
+function setReading(on){
+  reading = on;
+  const active = on && smallScreen.matches;
+  document.body.classList.toggle('reading', active);
+  readerToggle.setAttribute('aria-pressed', String(active));
+  readerWrite.hidden = !active;
+  try{ localStorage.setItem('pg.reading', on ? 'on' : 'off'); }catch(e){}
+}
+readerToggle.addEventListener('click', () => setReading(!reading));
+readerWrite.addEventListener('click', () => promptBox.focus());
+smallScreen.addEventListener('change', () => setReading(reading));
+// Anything that sends you to the message box - Write, "Edit this image", asking again - has to
+// find it there, so the box comes back first
+{
+  const focusBox = promptBox.focus.bind(promptBox);
+  promptBox.focus = (...options) => {
+    if(document.body.classList.contains('reading')) setReading(false);
+    focusBox(...options);
+  };
+}
+setReading(reading);
+
 // --- the sidebar, on a narrow screen ----------------------------------------------------------
 // It slides over the conversation instead of sitting beside it, so picking something from it is a
 // choice that is then done with: it closes behind you rather than staying in the way of the answer.
@@ -1279,7 +1448,15 @@ function addUserMessage(text, imageUrls, files, asContext = true){
   if(imageUrls.length){
     const strip = document.createElement('div');
     strip.className = 'thumbs';
-    strip.innerHTML = imageUrls.map(u => `<img src="${u}" alt="attached image" data-zoom="${u}">`).join('');
+    // A document has no picture to show: drawn as an image it came out as a broken one
+    strip.innerHTML = imageUrls.map((u, i) => {
+      const file = box._files[i] || {};
+      return file.document
+        ? `<a class="paper" href="${u}" target="_blank" rel="noopener" title="Open the document">
+             <span class="glyph">${paperGlyph(file)}</span>
+             <span class="what"><span class="doc-name">${escapeHtml(file.name || 'document')}</span></span></a>`
+        : `<img src="${u}" alt="attached image" data-zoom="${u}">`;
+    }).join('');
     box.insertBefore(strip, box.querySelector('.body'));
   }
   addTurnTools(box);
@@ -1291,13 +1468,17 @@ function addUserMessage(text, imageUrls, files, asContext = true){
 function addTurnTools(box){
   const row = document.createElement('div');
   row.className = 'turn-tools';
-  row.innerHTML = '<button data-copy-turn>Copy</button><button data-resend>Ask again</button>';
+  row.innerHTML = '<button data-copy-turn>Copy</button><button data-edit>Edit</button>'
+                + '<button data-resend>Ask again</button>'
+                + '<button data-aside title="Ask something about this without adding to the conversation">Side question</button>';
   row.querySelector('[data-copy-turn]').addEventListener('click', async e => {
     await navigator.clipboard.writeText(box._text || '');
     e.target.textContent = 'Copied';
     setTimeout(() => { e.target.textContent = 'Copy'; }, 1500);
   });
+  row.querySelector('[data-edit]').addEventListener('click', () => startEdit(box));
   row.querySelector('[data-resend]').addEventListener('click', () => resend(box));
+  row.querySelector('[data-aside]').addEventListener('click', () => askAside(box));
   box.appendChild(row);
   refreshTurnTools();
 }
@@ -1308,6 +1489,8 @@ function addTurnTools(box){
 function refreshTurnTools(){
   const asked = [...chat.querySelectorAll('.msg.user')];
   asked.forEach((box, i) => {
+    const edit = box.querySelector('[data-edit]');
+    if(edit) edit.hidden = !box._messageId;
     const again = box.querySelector('[data-resend]');
     if(!again) return;
     again.hidden = !box._messageId;
@@ -1404,8 +1587,9 @@ function showAnswer(box){
 async function resend(box){
   if(turning || controller || !box._messageId) return;
   turning = true;
+  refreshSendButton();
   try{ await resendTurn(box); }
-  finally{ turning = false; }
+  finally{ turning = false; refreshSendButton(); nextInQueue(); }
 }
 
 async function resendTurn(box){
@@ -1446,13 +1630,180 @@ async function resendTurn(box){
   await send({text: box._text || '', images, again: {messageId: box._messageId, replaceAt}}, true);
 }
 
+/* Rewording something already asked. The answers to the old words go, and so does everything after
+   it, the way a question asked again from further back drops what followed; the reworded question
+   is then asked, and its answer filed under it. */
+function startEdit(box){
+  if(turning || controller || !box._messageId || box.classList.contains('editing')) return;
+  const body = box.querySelector('.body');
+  const toolRow = box.querySelector('.turn-tools');
+  const form = document.createElement('div');
+  form.className = 'edit-box';
+  form.innerHTML = '<textarea aria-label="Your message"></textarea><div class="row">'
+                 + '<button class="btn btn-secondary btn-sm" data-cancel>Cancel</button>'
+                 + '<button class="btn btn-sm" data-save>Save and ask</button></div>';
+  const area = form.querySelector('textarea');
+  area.value = box._text || '';
+  box.classList.add('editing');
+  body.hidden = true;
+  toolRow.hidden = true;
+  body.after(form);
+  area.focus();
+  area.setSelectionRange(area.value.length, area.value.length);
+  const close = () => {
+    form.remove();
+    body.hidden = false;
+    toolRow.hidden = false;
+    box.classList.remove('editing');
+  };
+  form.querySelector('[data-cancel]').addEventListener('click', close);
+  area.addEventListener('keydown', e => {
+    if(e.key === 'Escape'){ e.preventDefault(); close(); }
+    else if(e.key === 'Enter' && !e.shiftKey && !e.isComposing){ e.preventDefault(); save(); }
+  });
+  form.querySelector('[data-save]').addEventListener('click', () => save());
+
+  async function save(){
+    const text = area.value.trim();
+    if(!text){ area.focus(); return; }
+    if(text === (box._text || '').trim()){ close(); return; }
+    if(turning || controller) return;
+    const later = turnsAfter(box).filter(m => m.classList.contains('user')).length;
+    if(later && !confirm(`Editing this drops the ${later} question${later === 1 ? '' : 's'} after it, `
+                         + 'and their answers. This cannot be undone.')) return;
+    turning = true;
+    try{
+      try{
+        await api(`/chat/conversations/${currentId}/messages/${box._messageId}`,
+                  {method: 'PATCH', headers: JSON_HEADERS, body: JSON.stringify({content: text})});
+      }catch(e){
+        showError('Could not save the edit: ' + errorText(e));
+        return;
+      }
+      for(let after = box.nextElementSibling; after; ){
+        const next = after.nextElementSibling;
+        if(after.classList.contains('msg')) after.remove();
+        after = next;
+      }
+      box._text = text;
+      body.textContent = text;
+      close();
+      rebuildHistory();
+      refreshTurnTools();
+      loadConversations();
+      const images = (box._files || []).map(f => ({id: f.id, url: fileUrl(f.id),
+                                                   name: f.name || 'attachment', document: !!f.document}));
+      await send({text, images, again: {messageId: box._messageId, replaceAt: null}}, true);
+    }finally{ turning = false; refreshSendButton(); nextInQueue(); }
+  }
+}
+
+/* A side question about one message: answered from the conversation up to that point, in a panel
+   of its own, and never saved - the conversation carries on as if it had not been asked. */
+let asideController = null;
+
+function askAside(box){
+  let dialog = document.getElementById('asideDialog');
+  if(!dialog){
+    dialog = document.createElement('dialog');
+    dialog.id = 'asideDialog';
+    dialog.className = 'aside';
+    dialog.innerHTML = '<div class="head"><strong>Side question</strong>'
+      + '<button type="button" data-close title="Close" aria-label="Close">&times;</button></div>'
+      + '<div class="about"></div>'
+      + '<p class="note">Answered from the conversation up to this message. Nothing here is added to it.</p>'
+      + '<textarea placeholder="Ask about this message..." aria-label="Side question"></textarea>'
+      + '<div class="row"><button class="btn btn-danger btn-sm" data-stop hidden>Stop</button>'
+      + '<button class="btn btn-sm" data-ask>Ask</button></div><div class="answer"></div>';
+    document.body.appendChild(dialog);
+    const area = dialog.querySelector('textarea');
+    dialog.querySelector('[data-close]').addEventListener('click', () => dialog.close());
+    dialog.querySelector('[data-ask]').addEventListener('click', () => answerAside(dialog));
+    dialog.querySelector('[data-stop]').addEventListener('click', () => asideController?.abort());
+    area.addEventListener('keydown', e => {
+      if(e.key === 'Enter' && !e.shiftKey && !e.isComposing){ e.preventDefault(); answerAside(dialog); }
+    });
+    dialog.addEventListener('close', () => asideController?.abort());
+  }
+  asideController?.abort();
+  dialog._box = box;
+  dialog.querySelector('.about').textContent = box._text || '';
+  dialog.querySelector('textarea').value = '';
+  const answer = dialog.querySelector('.answer');
+  answer.textContent = '';
+  answer.classList.remove('md');
+  dialog.showModal();
+  dialog.querySelector('textarea').focus();
+}
+
+async function answerAside(dialog){
+  const area = dialog.querySelector('textarea');
+  const question = area.value.trim();
+  if(!question || asideController) return;
+  // The conversation as far as this question and the answer on screen to it
+  const upTo = [];
+  let reached = false;
+  for(const message of chat.querySelectorAll('.msg')){
+    if(message.dataset.failed) continue;
+    if(message.classList.contains('user')){
+      if(reached) break;
+      upTo.push({role: 'user', content: message._text || '', images: message._images || []});
+      reached = message === dialog._box;
+    }else if(!message.hidden && message._text){
+      upTo.push({role: 'assistant', content: message._text});
+    }
+  }
+  const messages = savedSystem ? [{role: 'system', content: savedSystem}] : [];
+  messages.push(...upTo, {role: 'user', content: question, images: []});
+  const answer = dialog.querySelector('.answer');
+  const ask = dialog.querySelector('[data-ask]');
+  const stop = dialog.querySelector('[data-stop]');
+  answer.classList.remove('md');
+  answer.textContent = 'Thinking...';
+  ask.disabled = true;
+  stop.hidden = false;
+  asideController = new AbortController();
+  let text = '';
+  try{
+    const response = await fetch('/chat/complete', {
+      method: 'POST', signal: asideController.signal, headers: JSON_HEADERS,
+      body: JSON.stringify({model: currentModel(), messages, conversation_id: null, web_search: false,
+                            max_tokens: parseInt(document.getElementById('maxTokens').value, 10) || 8192,
+                            vision: tools.vision && caps.vision})});
+    if(!response.ok){
+      const err = await response.json().catch(() => ({}));
+      throw new Error((typeof err.detail === 'string' && err.detail) || err.error?.message || `HTTP ${response.status}`);
+    }
+    await readEvents(response, chunk => {
+      if(chunk.gateway) return;
+      const words = chunk.choices?.[0]?.delta?.content;
+      if(!words) return;
+      text += words;
+      answer.textContent = text;
+    });
+    const html = await renderedHtml(text);
+    if(html){
+      answer.classList.add('md');
+      answer.innerHTML = html;
+    }else answer.textContent = text || '(no answer)';
+  }catch(e){
+    answer.textContent = e.name === 'AbortError' ? (text ? text + '\n\n(stopped)' : '(stopped)')
+                                                 : 'That did not go through: ' + errorText(e);
+  }finally{
+    asideController = null;
+    ask.disabled = false;
+    stop.hidden = true;
+  }
+}
+
 const ACTION_LABELS = {chat: 'answered directly', search: 'searched the web',
                        image: 'created an image', edit: 'edited the image',
-                       map: 'looked it up on the map', photos: 'found real pictures of it'};
+                       map: 'looked it up on the map', photos: 'found real pictures of it',
+                       subtitles: 'wrote down what the video says'};
 
 const CATEGORY_LABELS = {code: 'a coding question', vision: 'a question about the picture',
                          reasoning: 'something to work out', long: 'a long read',
-                         general: 'a general question'};
+                         general: 'a question that needs knowledge', light: 'small talk'};
 
 function noteDecision(box, decision){
   if(!decision) return;
@@ -1462,7 +1813,8 @@ function noteDecision(box, decision){
     note.className = 'muted';
     note.style.fontWeight = '400';
     note.textContent = ` · ${ACTION_LABELS[decision.action] || decision.action}`;
-    note.title = `Chosen by ${decision.decided_by || 'the gateway'} from the tools you switched on.` +
+    note.title = (decision.understood ? `Understood as: ${decision.understood}. ` : '') +
+                 `Chosen by ${decision.decided_by || 'the gateway'} from the tools you switched on.` +
                  ' Leave only one tool on to force it.';
     who.appendChild(note);
   }
@@ -1482,7 +1834,9 @@ function noteDecision(box, decision){
 
 function statsText(stats){
   if(!stats) return '';
-  return [stats.ttft != null ? `${stats.ttft}s to first token` : '',
+  // Which model wrote it, first: the name at the top of a long answer has scrolled away by here
+  return [stats.model || '',
+          stats.ttft != null ? `${stats.ttft}s to first token` : '',
           stats.tokens ? `${stats.tokens} tokens` : '',
           stats.tps ? `${stats.tps} tok/s` : '',
           stats.total != null ? `${stats.total}s total` : ''].filter(Boolean).join(' · ');
@@ -1651,9 +2005,15 @@ function preview(block, code){
   // Grown to fit what is inside it, within reason: a worksheet is a page, not a thumbnail
   inner.style.height = '60vh';
 
-  // A new tab can print, which a sandboxed frame cannot, and printing is usually the whole point
+  // A tab of its own, for reading at full size and printing. The model's page is still only ever in a
+  // sandboxed frame there: a blob URL takes this site's origin, so the page opened as itself ran as
+  // the gateway, signed in as whoever clicked - able to make keys, or change users if an admin did.
+  // The tab holds nothing else, no script of its own, and the frame has no access to this origin.
   frame.querySelector('[data-open-tab]').addEventListener('click', () => {
-    const blob = new Blob([html], {type: 'text/html'});
+    const wrapper = '<!doctype html><meta charset="utf-8"><title>Preview</title>'
+      + '<style>html,body{margin:0;height:100%;background:#fff}iframe{border:0;display:block;width:100%;height:100%}</style>'
+      + `<iframe sandbox="allow-scripts allow-modals allow-popups" referrerpolicy="no-referrer" srcdoc="${escapeHtml(html)}"></iframe>`;
+    const blob = new Blob([wrapper], {type: 'text/html'});
     const url = URL.createObjectURL(blob);
     window.open(url, '_blank', 'noopener');
     setTimeout(() => URL.revokeObjectURL(url), 60000);
@@ -1933,7 +2293,7 @@ async function sendAgent(text, again){
     showError(`${model} cannot call tools. Pick a model marked "calls tools" to use the agent.`);
     return;
   }
-  if(!again){ promptBox.value = ''; fitComposer(); history.push({role: 'user', content: text, images: []}); }
+  if(!again){ history.push({role: 'user', content: text, images: []}); }
   const asked = await askedNow(text, [], [], null, again);
 
   const box = answerBox(again ? again.messageId : asked?._messageId, model);
@@ -1984,8 +2344,9 @@ async function sendAgent(text, again){
     loadConversations();
     return;
   }
-  renderAssistant(box, answer.text, null, {total: answer.seconds}, null, answer.html);
+  renderAssistant(box, answer.text, null, {model, total: answer.seconds}, null, answer.html);
   box.insertBefore(trace, box.querySelector('.body'));   // the trace stays above the answer
+  if(currentId) addVerdict(box, {conversationId: currentId, startsWith: (answer.text || '').trim().slice(0, 200)});
   recordAnswer(box, answer.text, again ? again.replaceAt : null);
   // The server writes the turn down itself, the way the other long jobs do
   revealFrom(box);
@@ -2040,7 +2401,7 @@ async function sendMap(text, decision, fix, again){
     showError('Could not save the conversation: ' + errorText(e));
     return;
   }
-  if(!again){ promptBox.value = ''; fitComposer(); history.push({role: 'user', content: text, images: []}); }
+  if(!again){ history.push({role: 'user', content: text, images: []}); }
   const asked = await askedNow(text, [], [], null, again);
 
   const box = answerBox(again ? again.messageId : asked?._messageId, 'OpenStreetMap');
@@ -2101,7 +2462,7 @@ async function sendMedia(text, decision, again){
     showError('Could not save the conversation: ' + errorText(e));
     return;
   }
-  if(!again){ promptBox.value = ''; fitComposer(); history.push({role: 'user', content: text, images: []}); }
+  if(!again){ history.push({role: 'user', content: text, images: []}); }
   const asked = await askedNow(text, [], [], null, again);
 
   const box = answerBox(again ? again.messageId : asked?._messageId, 'Picture search');
@@ -2221,6 +2582,50 @@ const ASKED_FORMAT = /\b(markdown|md|txt|text|csv|json|yaml|yml|html)\b(?:\s+(?:
 
 function wantsAFile(question){
   return WANTS_A_FILE.test(question || '');
+}
+
+/* Helpful? under an answer. The verdict is saved against the answer (by id, or - for one
+   that has only just streamed, which the server saved without telling the page its id - by where it
+   is and how it begins). Pressing a chosen answer again takes it back. */
+function addVerdict(box, where, saved){
+  const row = document.createElement('div');
+  row.className = 'verdict';
+  row.title = "Your answers teach your own Auto which model to pick for questions like this - nobody else's";
+  const state = {helpful: saved?.helpful ?? null};
+  const ask = (field, label) => `<span class="ask">${label}
+      <button type="button" data-field="${field}" data-value="true">Yes</button>
+      <button type="button" data-field="${field}" data-value="false">No</button></span>`;
+  row.innerHTML = ask('helpful', 'Helpful?') + '<span class="thanks"></span>';
+  const show = () => row.querySelectorAll('button').forEach(b =>
+    b.setAttribute('aria-pressed', String(state[b.dataset.field] === (b.dataset.value === 'true'))));
+  show();
+  row.addEventListener('click', async e => {
+    const button = e.target.closest('button');
+    if(!button) return;
+    const value = button.dataset.value === 'true';
+    const before = {...state};
+    state[button.dataset.field] = state[button.dataset.field] === value ? null : value;
+    show();
+    const body = {helpful: state.helpful, category: where.category || null,
+                  ...(where.messageId ? {message_id: where.messageId}
+                                      : {conversation_id: where.conversationId, starts_with: where.startsWith})};
+    // A just-finished answer is written down by the server a moment after the last word arrives
+    for(let attempt = 0; ; attempt++){
+      try{
+        const result = await api('/chat/feedback', {method: 'POST', headers: JSON_HEADERS, body: JSON.stringify(body)});
+        where.messageId = result.message_id;
+        row.querySelector('.thanks').textContent = state.helpful !== null ? 'Thanks' : '';
+        return;
+      }catch(err){
+        if(attempt < 3 && /not saved/i.test(errorText(err))){ await new Promise(r => setTimeout(r, 1500)); continue; }
+        Object.assign(state, before);
+        show();
+        showError('Could not save that: ' + errorText(err));
+        return;
+      }
+    }
+  });
+  box.appendChild(row);
 }
 
 function appendStats(box, stats){
@@ -2350,7 +2755,14 @@ async function saveMessage(message){
    When the question is being asked again it is already both of those, so nothing happens. */
 async function askedNow(text, imageUrls, files, attachments, again, asContext = true){
   if(again) return chat.querySelector(`.msg.user[data-message="${again.messageId}"]`);
-  const box = addUserMessage(text, imageUrls, files, asContext);
+  let box;
+  if(provisional){
+    // Shown the moment it was sent; now it is asked, and saved
+    box = provisional;
+    provisional = null;
+    box.classList.remove('sending');
+    box._images = asContext ? (box._files || []).map(f => f.id) : [];
+  }else box = addUserMessage(text, imageUrls, files, asContext);
   const saved = await saveMessage({role: 'user', content: text, attachments: attachments || null});
   if(saved){
     box._messageId = saved.id;
@@ -2403,8 +2815,19 @@ async function postStream(path, payload){
 }
 
 function busy(on){
-  document.getElementById('send').hidden = on;
   document.getElementById('stop').hidden = !on;
+  refreshSendButton();
+}
+
+/* While a message is being answered, Send queues the next one instead of waiting for the box to
+   be free: what is typed then goes out by itself when the answer is finished. */
+function refreshSendButton(){
+  const button = document.getElementById('send');
+  const working = turning || !!controller;
+  button.hidden = false;
+  if(Object.keys(models).length) button.disabled = false;
+  button.textContent = working ? 'Queue' : 'Send';
+  button.title = working ? 'Sends this when the current answer is finished' : '';
 }
 
 // --- sending ----------------------------------------------------------------
@@ -2416,19 +2839,35 @@ async function decideAction(text, hasImages){
   if(!imageMode() && !searchOn && !choosing()) return {action: 'chat'};
   if(!caps.routing && !choosing()) return {action: imageMode() ? (hasImages ? 'edit' : 'image') : 'search'};
   setDeciding(true);
+  deciding = new AbortController();
   try{
-    const decision = await api('/chat/route', {method: 'POST', headers: JSON_HEADERS, body: JSON.stringify({
+    const decision = await api('/chat/route', {method: 'POST', signal: deciding.signal, headers: JSON_HEADERS, body: JSON.stringify({
       message: text, has_images: hasImages, web_search: searchOn, image_generation: imageMode(),
-      maps: tools.maps && caps.maps,
+      attachments: turnFiles.filter(p => !p.uploading).map(p => ({kind: p.document ? 'document' : 'picture',
+                                                               name: (p.name || '').slice(0, 200)})),
+      maps: tools.maps && caps.maps, photo_blur: blurAllowed(),
       choose_model: choosing(), current_model: chosenModel,
       history: history.slice(-4).map(h => ({role: h.role, content: h.content}))})});
     if(decision.model) chosenModel = decision.model;
     return decision;
   }catch(e){
+    // Stopped before anything was asked: the words stay in the box, to be changed or sent again
+    if(e.name === 'AbortError') return {action: 'stopped'};
     // Falling back to what the toggles alone would have done
     return {action: imageMode() && !searchOn ? (hasImages ? 'edit' : 'image') : 'chat', decided_by: 'toggles'};
-  }finally{ setDeciding(false); }
+  }finally{ deciding = null; setDeciding(false); }
 }
+
+// Background blur, allowed or not. Kept in this browser like the tool chips; on unless switched off.
+const blurBox = document.getElementById('blurAllowed');
+function blurAllowed(){ return blurBox.checked; }
+function syncBlur(){ document.getElementById('blurStrength').disabled = !blurBox.checked; }
+try{ blurBox.checked = localStorage.getItem('pg.photoBlur') !== 'off'; }catch(e){ blurBox.checked = true; }
+syncBlur();
+blurBox.addEventListener('change', () => {
+  try{ localStorage.setItem('pg.photoBlur', blurBox.checked ? 'on' : 'off'); }catch(e){}
+  syncBlur();
+});
 
 // An empty answer means the sentence decides the colour, which is usually what was typed anyway
 function chosenBackdrop(){
@@ -2440,9 +2879,22 @@ document.getElementById('backdropColour').addEventListener('change', e => {
   document.getElementById('backdropCustom').hidden = e.target.value !== 'custom';
 });
 
+/* Working out what the message asks for takes a few seconds before anything streams, and Stop is
+   there for those too: it cancels the turn before the message is sent anywhere. */
+let deciding = null;
 function setDeciding(on){
-  document.getElementById('send').disabled = on;
-  document.getElementById('deciding').hidden = !on;
+  // In the conversation, under the message it is about, rather than in the composer, which is
+  // already free for the next one
+  let line = chat.querySelector('.deciding-line');
+  if(on && !line){
+    line = document.createElement('div');
+    line.className = 'deciding-line';
+    line.innerHTML = '<span class="spinner"></span><span>Working out what you are asking for&hellip;</span>';
+    chat.appendChild(line);
+    followAlong();
+  }
+  if(!on) line?.remove();
+  busy(on);
 }
 
 /* One turn at a time. `controller` only exists once an answer is streaming, and before that a turn
@@ -2453,26 +2905,111 @@ let turning = false;
 
 async function send(redo = null, claimed = false){
   if(!claimed){
-    if(turning || controller) return;
+    if(turning || controller){
+      if(!redo) enqueue();
+      return;
+    }
     turning = true;
   }
+  refreshSendButton();
   try{ await sendTurn(redo); }
-  finally{ if(!claimed) turning = false; }
+  finally{
+    if(!claimed){
+      turning = false;
+      refreshSendButton();
+      nextInQueue();
+    }
+  }
 }
 
-/* One turn. Normally it takes what is in the composer; asking a question again passes the words
-   and the attachments back in, along with the question they belong to, and the answer joins the
-   ones already filed under it. */
-async function sendTurn(redo = null){
-  const text = redo ? redo.text : promptBox.value.trim();
-  if(controller) return;
-  if(redo) pending = redo.images || [];
+/* Messages written while another was being answered, oldest first. Each goes out on its own when
+   the one before it is finished; until then it waits above the composer, where it can be taken
+   back. */
+const queued = [];
+let provisional = null;     // the message just sent: on screen at once, saved once it is asked
+
+function enqueue(){
+  const text = promptBox.value.trim();
   if(!text && !pending.length) return;
   if(pending.some(p => p.uploading)){
     showError('One moment: the picture is still uploading.');
     return;
   }
-  const asking = redo ? redo.again : null;
+  queued.push({text, images: pending, fresh: true});
+  pending = []; renderPending();
+  promptBox.value = ''; fitComposer();
+  renderQueue();
+}
+
+function nextInQueue(){
+  if(turning || controller || !queued.length) return;
+  const next = queued.shift();
+  renderQueue();
+  setTimeout(() => send(next), 0);
+}
+
+function renderQueue(){
+  const strip = document.getElementById('queue');
+  strip.hidden = !queued.length;
+  strip.innerHTML = queued.map((q, i) => `<div class="queued-item"><span class="tag">Queued</span>
+      <span class="text">${escapeHtml(q.text || 'attachment only')}</span>
+      ${q.images.length ? `<span class="muted">+ ${q.images.length} file${q.images.length === 1 ? '' : 's'}</span>` : ''}
+      <button type="button" data-unqueue="${i}" title="Take it back into the box">&times;</button></div>`).join('');
+}
+
+document.getElementById('queue').addEventListener('click', e => {
+  const button = e.target.closest('[data-unqueue]');
+  if(!button) return;
+  const [item] = queued.splice(Number(button.dataset.unqueue), 1);
+  renderQueue();
+  // Back into the box to be changed, unless something else is being written there
+  if(item && !promptBox.value.trim() && !pending.length){
+    promptBox.value = item.text; fitComposer();
+    pending = item.images; renderPending();
+  }
+});
+
+/* One turn. Normally it takes what is in the composer; asking a question again passes the words
+   and the attachments back in, along with the question they belong to, and the answer joins the
+   ones already filed under it. */
+async function sendTurn(redo = null){
+  const fresh = !redo || !!redo.fresh;      // a new message, from the composer or the queue
+  const text = redo ? redo.text : promptBox.value.trim();
+  if(controller) return;
+  const files = redo ? (redo.images || []) : pending;
+  if(!text && !files.length) return;
+  if(files.some(p => p.uploading)){
+    showError('One moment: the picture is still uploading.');
+    return;
+  }
+  turnFiles = files;
+  if(!redo){
+    pending = []; renderPending();
+    promptBox.value = ''; fitComposer();
+  }
+  if(fresh){
+    provisional = addUserMessage(text, files.map(f => f.url || fileUrl(f.id)),
+                                 files.map(f => ({id: f.id, name: f.name, document: !!f.document})));
+    provisional.classList.add('sending');
+    followAlong();
+  }
+  try{ await routeTurn(text, fresh ? null : redo.again); }
+  finally{
+    if(provisional){
+      // It never went out - stopped while being worked out, or refused before it was asked. It
+      // goes back into the box rather than vanishing, unless the next message is being written.
+      provisional.remove();
+      provisional = null;
+      if(!promptBox.value.trim() && !pending.length){
+        promptBox.value = text; fitComposer();
+        pending = files; renderPending();
+      }
+    }
+    turnFiles = [];
+  }
+}
+
+async function routeTurn(text, asking){
   // Asked here, in the same turn as the tap that called this. On iOS the permission prompt is
   // tied to a gesture, and waiting for the router to answer first spends it: by then the ask is
   // silently refused and the map is told nobody knows where you are.
@@ -2480,7 +3017,12 @@ async function sendTurn(redo = null){
   const fix = (tools.maps && caps.maps && needsMyLocation(text, previous ? previous.content : ''))
               ? myLocation() : Promise.resolve(null);
 
-  const decision = await decideAction(text, attachedPictures().length > 0);
+  // A YouTube link asking for its words needs no model to decide it: the link and the words say it
+  const subs = !turnPictures().length ? subtitleRequest(text) : null;
+  if(subs) return sendSubtitles(text, subs, asking);
+
+  const decision = await decideAction(text, turnPictures().length > 0);
+  if(decision.action === 'stopped') return;
   // The agent is a choice, not a guess: switched on, it takes the turn
   if(tools.agent && caps.agent) return sendAgent(text, asking);
   if(decision.action === 'map') return sendMap(text, decision, fix, asking);
@@ -2492,8 +3034,8 @@ async function sendTurn(redo = null){
 }
 
 async function sendChat(text, decision, again){
-  const model = decision.model || currentModel();
-  if(attachedPictures().length && !canSee(model)){
+  const model = decision.model || currentModel(turnPictures().length > 0);
+  if(turnPictures().length && !canSee(model)){
     showError(choosing()
       ? `None of your models can see images, so ${model} cannot read this attachment.`
       : `${model} cannot see images. Pick a model marked "sees images", or remove the attachment.`);
@@ -2507,12 +3049,12 @@ async function sendChat(text, decision, again){
     showError('Could not save the conversation: ' + errorText(e));
     return;
   }
-  const files = pending.map(f => ({id: f.id, name: f.name, document: !!f.document}));
+  const files = turnFiles.map(f => ({id: f.id, name: f.name, document: !!f.document}));
   const images = files.map(f => f.id);
-  pending = []; renderPending();
-  if(!again){ promptBox.value = ''; fitComposer(); history.push({role: 'user', content: text, images}); }
+  turnFiles = [];
+  if(!again){ history.push({role: 'user', content: text, images}); }
   const asked = await askedNow(text, images.map(fileUrl), files,
-                               files.length ? {images: files.map(f => ({file_id: f.id, document: f.document}))} : null,
+                               files.length ? {images: files.map(f => ({file_id: f.id, document: f.document, name: f.name}))} : null,
                                again);
 
   const box = answerBox(again ? again.messageId : asked?._messageId, model);
@@ -2521,7 +3063,7 @@ async function sendChat(text, decision, again){
   // Three dots sit there looking the same whether the model is working or has died. The spinner is
   // the same one every other job on this page uses, and it stops the moment the first word arrives.
   setStatus(box, 'Waiting for the first words');
-  let thinkBlock = null, thinking = '', answer = '', firstTokenAt = null, usage = null, sources = null;
+  let thinkBlock = null, thinking = '', answer = '', firstTokenAt = null, usage = null, sources = null, measured = null;
   const started = performance.now();
 
   const messages = [];
@@ -2549,6 +3091,7 @@ async function sendChat(text, decision, again){
         if(event.type === 'status') setStatus(box, event.text);
         else if(event.type === 'notice') showError(event.text);
         else if(event.type === 'sources'){ sources = event.sources; renderSources(box, sources); }
+        else if(event.type === 'stats') measured = event.stats;   // timed where the words arrive, not here
         return;
       }
       if(chunk.usage) usage = chunk.usage;
@@ -2590,10 +3133,12 @@ async function sendChat(text, decision, again){
   const genSeconds = firstTokenAt ? (performance.now() - firstTokenAt) / 1000 : total;
   const tokens = usage?.completion_tokens;
   const stats = {
+    model,
     ttft: firstTokenAt ? +((firstTokenAt - started) / 1000).toFixed(1) : null,
     tokens: tokens || null,
     tps: tokens && genSeconds > 0 ? +(tokens / genSeconds).toFixed(1) : null,
     total: +total.toFixed(1),
+    ...(measured ? {ttft: measured.ttft, tokens: measured.tokens, tps: measured.tps} : {}),
   };
   if(!answer && !thinking){
     // Nothing came back, so nothing was saved either. Say why here, where the question is, and
@@ -2604,6 +3149,7 @@ async function sendChat(text, decision, again){
     return;
   }
   renderAssistant(box, answer, thinking, stats, sources, await renderedHtml(answer));
+  if(currentId) addVerdict(box, {conversationId: currentId, startsWith: answer.slice(0, 200), category: decision.category});
 
   recordAnswer(box, answer, again ? again.replaceAt : null);
   // The server writes the answer down itself as the job finishes, so that walking away mid-answer
@@ -2635,8 +3181,144 @@ function failedTurn(box, trouble){
 }
 
 // A photograph, not a drawing: noise taken off, or the background blurred. Never both at once.
+// --- subtitles of a YouTube video ---------------------------------------------------------------
+// Transcribed from the video's own sound by Whisper on the gateway's GPU, not taken from YouTube.
+const YOUTUBE_LINK = /https?:\/\/(?:www\.|m\.|music\.)?(?:youtube\.com\/(?:watch\?(?:[^\s#]*&)?v=|shorts\/|live\/|embed\/)|youtu\.be\/)([A-Za-z0-9_-]{11})\S*/i;
+const WANTS_WORDS = /\b(subtitles?|sub-?titles?|captions?|cc|transcri\w*|srt|vtt|what (does|did|do) (he|she|they|it) say|written down|in words)\b/i;
+const WANTS_ENGLISH = /\b(english|translat\w*)\b/i;
+
+/* {translate} when the message asks for a video's subtitles, else null. A link on its own counts:
+   pasting a video with nothing else to say is asking what is in it, and the words are that. */
+function subtitleRequest(text){
+  if(!caps.subtitles) return null;
+  const link = YOUTUBE_LINK.exec(text || '');
+  if(!link) return null;
+  const rest = text.replace(link[0], '').trim();
+  if(rest && !WANTS_WORDS.test(rest)) return null;
+  return {action: 'subtitles', translate: WANTS_ENGLISH.test(rest), decided_by: 'keywords'};
+}
+
+async function sendSubtitles(text, decision, again){
+  showError('');
+  try{
+    await ensureConversation(text, currentModel());
+  }catch(e){
+    showError('Could not save the conversation: ' + errorText(e));
+    return;
+  }
+  if(!again){ history.push({role: 'user', content: text, images: []}); }
+  const asked = await askedNow(text, [], [], null, again);
+  const box = answerBox(again ? again.messageId : asked?._messageId, 'Subtitles');
+  noteDecision(box, decision);
+  setStatus(box, 'Starting');
+  let result = null, trouble = '';
+  controller = new AbortController();
+  busy(true);
+  try{
+    const response = await postStream('/chat/subtitles', {
+      message: text, translate: !!decision.translate, conversation_id: currentId,
+      answers_to: box.dataset.turn ? Number(box.dataset.turn) : null});
+    await readEvents(response, chunk => {
+      if(chunk.error){ trouble = chunk.error.message; return; }
+      const event = chunk.gateway;
+      if(!event) return;
+      if(event.type === 'progress'){
+        setStatus(box, event.fraction != null ? `${event.stage} · ${Math.round(event.fraction * 100)}%` : event.stage,
+                  event.fraction);
+      }else if(event.type === 'subtitles'){
+        result = event;
+      }
+    });
+  }catch(e){
+    if(e.name !== 'AbortError') trouble = errorText(e);
+  }finally{
+    controller = null;
+    busy(false);
+  }
+  setStatus(box, null);
+  if(!result){
+    if(trouble){ failedTurn(box, trouble); loadConversations(); return; }
+    box.querySelector('.body').textContent =
+      'The connection dropped before the subtitles came back. If they finished, they are saved in '
+      + 'this conversation: open it again from the list to see.';
+    loadConversations();
+    return;
+  }
+  renderSubtitles(box, result, result.text, {total: result.seconds});
+  revealFrom(box);
+  // Saved by the server; this keeps the page's own copy of the conversation in step with it
+  recordAnswer(box, result.text, again ? again.replaceAt : null);
+  if(memory.enabled) setTimeout(loadMemory, 4000);
+  loadConversations();
+}
+
+/* The transcript, with each line's time a link into the video at that moment, and the files.
+   `text` is the saved answer: a heading line, a blank line, then "[m:ss] words" per line. */
+function renderSubtitles(box, facts, text, stats){
+  box.querySelector('.who').textContent = 'Subtitles';
+  const body = box.querySelector('.body');
+  body.className = 'body subs';
+  const language = facts.translated ? `translated to English` : `in ${languageName(facts.language)}`;
+  const minutes = facts.duration ? ` · ${Math.floor(facts.duration / 60)}:${String(facts.duration % 60).padStart(2, '0')}` : '';
+  body.innerHTML = `
+    <div class="subs-head"><a target="_blank" rel="noopener"></a><span class="muted"></span></div>
+    <div class="subs-lines"></div>
+    <div class="actions">
+      <a class="btn btn-sm btn-secondary" style="text-decoration:none" data-file="srt">Download .srt</a>
+      <a class="btn btn-sm btn-secondary" style="text-decoration:none" data-file="vtt">Download .vtt</a>
+      <button class="btn btn-sm btn-secondary" data-copy-subs>Copy text</button>
+      <button class="btn btn-sm btn-secondary" data-english hidden>Translate to English</button>
+    </div>`;
+  const title = body.querySelector('.subs-head a');
+  title.textContent = facts.title || 'YouTube video';
+  title.href = facts.url;
+  body.querySelector('.subs-head .muted').textContent =
+    ` · ${language}${minutes} · ${facts.segments} lines · transcribed by ${facts.model || 'Whisper'}`;
+  const lines = body.querySelector('.subs-lines');
+  const saidLines = [];     // "[m:ss] words", as the copy is given
+  for(const line of (text || '').split('\n')){
+    const found = /^\[(\d+(?::\d\d){1,2})\] (.*)$/.exec(line);
+    if(!found) continue;
+    const row = document.createElement('div');
+    const at = document.createElement('a');
+    at.className = 'subs-time';
+    at.target = '_blank'; at.rel = 'noopener';
+    at.textContent = found[1];
+    at.href = `${facts.url}&t=${found[1].split(':').reduce((total, part) => total * 60 + Number(part), 0)}s`;
+    const words = document.createElement('span');
+    words.textContent = found[2];
+    row.append(at, words);
+    lines.appendChild(row);
+    saidLines.push(line);
+  }
+  for(const kind of ['srt', 'vtt']){
+    const link = body.querySelector(`[data-file="${kind}"]`);
+    const id = facts.files?.[kind];
+    if(!id){ link.remove(); continue; }
+    link.href = fileUrl(id);
+    link.download = `${(facts.title || 'subtitles').replace(/[^\w.-]+/g, '-').slice(0, 80)}${facts.translated ? '-en' : ''}.${kind}`;
+  }
+  body.querySelector('[data-copy-subs]').addEventListener('click', e => {
+    navigator.clipboard?.writeText(saidLines.join('\n'));
+    e.target.textContent = 'Copied';
+    setTimeout(() => { e.target.textContent = 'Copy text'; }, 1500);
+  });
+  const english = body.querySelector('[data-english]');
+  english.hidden = facts.translated || facts.language === 'en';
+  english.addEventListener('click', () => {
+    if(controller) return;
+    sendSubtitles(`Subtitles in English: ${facts.url}`, {action: 'subtitles', translate: true, decided_by: 'you'});
+  });
+  if(stats?.total != null) appendStats(box, `${stats.total}s`);
+}
+
+function languageName(code){
+  try{ return new Intl.DisplayNames(['en'], {type: 'language'}).of(code) || code; }catch(e){ return code || 'its own language'; }
+}
+
 async function sendPhoto(text, decision, again){
-  const source = pending[0];
+  // The first picture: a document attached alongside it is not a photograph to work on
+  const source = turnPictures()[0];
   if(!source){ showError('Attach a photo first.'); return; }
   showError('');
   const cleaning = decision.action === 'clean';
@@ -2647,9 +3329,9 @@ async function sendPhoto(text, decision, again){
     showError('Could not save the conversation: ' + errorText(e));
     return;
   }
-  const references = pending.slice(1);
-  pending = []; renderPending();
-  if(!again){ promptBox.value = ''; fitComposer(); history.push({role: 'user', content: text, images: []}); }
+  const references = turnFiles.filter(f => f !== source);
+  turnFiles = [];
+  if(!again){ history.push({role: 'user', content: text, images: []}); }
   const asked = await askedNow(text, [source, ...references].map(f => f.url),
                                [{id: source.id, name: source.name}],
                                {mode: 'photo', images: [{file_id: source.id}]}, again, false);
@@ -2707,8 +3389,13 @@ async function sendPhoto(text, decision, again){
 async function sendImage(text, decision, again){
   if(!text){ showError('Describe the image you want.'); return; }
   showError('');
-  const source = pending[0] || null;
-  const references = pending.slice(1, editLimit());
+  // Pictures and documents are told apart: the first picture is the one to edit, and documents are
+  // read for what to draw. Taking the first attachment, whatever it was, sent a PDF to the image
+  // editor as the picture to change, where it failed as "cannot identify image file".
+  const pictures = turnPictures();
+  const source = pictures[0] || null;
+  const references = pictures.slice(1, editLimit());
+  const documentsToRead = turnFiles.filter(p => p.document);
   const size = document.getElementById('imageSize').value;
   const strength = parseFloat(document.getElementById('strength').value);
   try{
@@ -2717,9 +3404,9 @@ async function sendImage(text, decision, again){
     showError('Could not save the conversation: ' + errorText(e));
     return;
   }
-  pending = []; renderPending();
+  turnFiles = [];
   // Image turns are kept in the transcript as text only, so a chat model later knows what was made
-  if(!again){ promptBox.value = ''; fitComposer(); history.push({role: 'user', content: text, images: []}); }
+  if(!again){ history.push({role: 'user', content: text, images: []}); }
   const asked = await askedNow(text, source ? [source, ...references].map(f => f.url) : [],
                                source ? [source, ...references].map(f => ({id: f.id, name: f.name})) : [],
                                {mode: 'image', images: source ? [source, ...references].map(f => ({file_id: f.id})) : []},
@@ -2738,7 +3425,8 @@ async function sendImage(text, decision, again){
                                                        conversation_id: currentId,
                                                        answers_to: box.dataset.turn ? Number(box.dataset.turn) : null,
                                                        source_file_id: source ? source.id : null,
-                                                       reference_file_ids: references.map(f => f.id)});
+                                                       reference_file_ids: references.map(f => f.id),
+                                                       document_file_ids: documentsToRead.slice(0, 4).map(f => f.id)});
     await readEvents(response, chunk => {
       const event = chunk.gateway;
       if(!event) return;
@@ -2783,7 +3471,7 @@ async function sendImage(text, decision, again){
 // Wrapped, not passed straight in: a click handler is called with the event, and send now
 // takes an argument - the button would have handed it a MouseEvent to re-ask
 document.getElementById('send').addEventListener('click', () => send());
-document.getElementById('stop').addEventListener('click', () => controller?.abort());
+document.getElementById('stop').addEventListener('click', () => { deciding?.abort(); controller?.abort(); });
 function fitComposer(){
   promptBox.style.height = 'auto';
   promptBox.style.height = promptBox.scrollHeight + 'px';

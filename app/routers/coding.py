@@ -10,19 +10,27 @@ import re
 
 import httpx
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app import github_access, knowledge
+from app import github_access, knowledge, settings
 from app.auth import Principal, require_admin, require_manager
 from app.coding import detect, remote, runner, workspace
 from app.db import get_session
 from app.models import CodingTask, CodingTaskEvent, Project
 
-router = APIRouter(prefix="/coding", tags=["coding"])
+def _switched_on(request: Request):
+    """Every coding endpoint, not only the ones that start work, is closed while coding.enabled is off:
+    listing, approving and retrying tasks, and the channel a local helper polls for commands. Only the
+    GitHub tokens stay reachable - the knowledge base reads repositories with them too."""
+    if not runner.is_enabled() and not request.url.path.startswith("/coding/github"):
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "Coding tasks are switched off (coding.enabled)")
+
+
+router = APIRouter(prefix="/coding", tags=["coding"], dependencies=[Depends(_switched_on)])
 
 IMAGE = re.compile(r"^[a-z0-9][a-z0-9._/:@-]{0,200}$")
 
@@ -110,6 +118,30 @@ class ProjectPatch(BaseModel):
     notes: str | None = Field(default=None, max_length=8000)
 
 
+def _owns(principal, project):
+    """A project is its owner's - the person who added it - and the admins'. Managers used to be
+    able to change any project's commands and start tasks on any of them, including another
+    person's folder on their own computer."""
+    return principal.is_admin or (principal.user is not None and project.added_by == principal.user.id)
+
+
+def _require_owner(principal, project):
+    if not _owns(principal, project):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Only the person who added this project, or an admin, can do that")
+
+
+def allowed_owners():
+    """The GitHub owners a manager may add projects from: coding.github.owners, plus every owner the
+    gateway holds a token for (those are the repositories it is meant to work on). Admins may add any."""
+    listed = (settings.get("coding.github.owners", "CODING_GITHUB_OWNERS") or "").replace(",", " ").split()
+    return {o.lower() for o in listed} | {e["owner"].lower() for e in github_access.owners()}
+
+
+def _check_branch(name):
+    if not workspace.valid_branch(name):
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, f"{name!r} is not a branch name")
+
+
 def _project_name(clone_url):
     found = workspace.github_of(clone_url)
     if found:
@@ -129,9 +161,18 @@ async def add_project(payload: ProjectIn, principal: Principal = Depends(require
                       session: AsyncSession = Depends(get_session)):
     _enabled()
     url = payload.clone_url.strip()
-    if not workspace.github_of(url) and not principal.is_admin:
+    found_github = workspace.github_of(url)
+    if not found_github and not principal.is_admin:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Give the project's GitHub address, "
                                                           "e.g. https://github.com/owner/repo")
+    if not principal.is_admin and found_github[0].lower() not in allowed_owners():
+        raise HTTPException(status.HTTP_403_FORBIDDEN,
+                            f"Projects from {found_github[0]} are not allowed here; an admin can add them, "
+                            "or allow the owner (coding.github.owners)")
+    if payload.sandbox_network is not None and not principal.is_admin:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Only an admin can choose whether a project gets a network")
+    if payload.base_branch:
+        _check_branch(payload.base_branch.strip())
     if payload.deploy_command and not principal.is_admin:
         raise HTTPException(status.HTTP_403_FORBIDDEN, "Only an admin can set a deploy command")
     if payload.sandbox_image and not IMAGE.match(payload.sandbox_image):
@@ -140,9 +181,11 @@ async def add_project(payload: ProjectIn, principal: Principal = Depends(require
     if (await session.execute(select(Project).where(Project.name == name))).scalar_one_or_none():
         raise HTTPException(status.HTTP_409_CONFLICT, f"{name} is already a project")
     try:
+        workspace.clone_path(name)
         default_branch = await workspace.clone(name, url)
     except workspace.GitError as e:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, f"Could not clone it: {e}")
+    _check_branch((payload.base_branch or default_branch).strip())
     found = detect.detect(detect.LocalFolder(workspace.clone_path(name)))
     project = Project(name=name, kind="git", clone_url=url,
                       base_branch=(payload.base_branch or default_branch).strip(),
@@ -298,7 +341,12 @@ async def change_project(project_id: int, payload: ProjectPatch, principal: Prin
     project = await session.get(Project, project_id)
     if project is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "No such project")
+    _require_owner(principal, project)
     changes = payload.model_dump(exclude_unset=True)
+    if "sandbox_network" in changes and not principal.is_admin:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Only an admin can choose whether a project gets a network")
+    if changes.get("base_branch"):
+        _check_branch(changes["base_branch"].strip())
     if "deploy_command" in changes and not principal.is_admin:
         raise HTTPException(status.HTTP_403_FORBIDDEN, "Only an admin can set a deploy command")
     if "sandbox_image" in changes and not IMAGE.match(changes["sandbox_image"] or ""):

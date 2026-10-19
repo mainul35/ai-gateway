@@ -46,7 +46,30 @@ def read_state(token):
 
 
 def issue_session(user):
-    return _serializer("session").dumps({"user_id": user.id, "name": user.name, "issued_at": int(time.time())})
+    return _serializer("session").dumps({"user_id": user.id, "name": user.name, "issued_at": int(time.time()),
+                                         "epoch": user.session_epoch or 0})
+
+
+def session_current(data, user):
+    """Whether a session read from a cookie is still this user's: not signed out since it was made."""
+    return bool(data) and user is not None and data.get("epoch", 0) == (user.session_epoch or 0)
+
+
+def cookie_secure(request):
+    """Session cookies only over HTTPS when the page came over HTTPS - the public address always
+    does (Cloudflare says so in X-Forwarded-Proto) - so a plain-HTTP test on the LAN still works."""
+    proto = request.headers.get("x-forwarded-proto", request.url.scheme)
+    return proto.split(",")[0].strip().lower() == "https"
+
+
+def safe_next(target, default="/dashboard"):
+    """Where to go after signing in: a path on this site and nothing else. "//evil.example" and
+    "/\\evil.example" are other sites to a browser, though they start with a slash."""
+    target = target or ""
+    if (not target.startswith("/") or target.startswith(("//", "/\\"))
+            or any(ord(ch) < 32 or ch == "\\" for ch in target)):
+        return default
+    return target
 
 
 def read_session(token):
@@ -144,16 +167,44 @@ def capability_claims(userinfo, granted_scope=""):
     return kept
 
 
+def _issuer():
+    """Which auth server this is, for telling its subjects apart from another's."""
+    from urllib.parse import urlparse
+    return (urlparse(settings.sso_authorize_url() or "").hostname or "sso").lower()
+
+
+def subject_key(subject):
+    return f"{_issuer()}|{subject}"
+
+
+def _verified(userinfo):
+    """Whether the auth server vouches for the email. An email it has not checked is just text the
+    person typed, so it decides nothing here: not which account, not whether they are an admin.
+    sso.require.verified.email=false trusts every email, for an auth server that never sends the
+    claim and only ever holds checked addresses."""
+    if not settings.get_bool("sso.require.verified.email", "SSO_REQUIRE_VERIFIED_EMAIL", True):
+        return True
+    claim = settings.get("sso.claim.email_verified", "SSO_CLAIM_EMAIL_VERIFIED") or "email_verified"
+    value = (userinfo or {}).get(claim)
+    return value is True or str(value).strip().lower() == "true"
+
+
 def identity_from_userinfo(userinfo):
-    """Maps provider claims onto our user fields, using the configured claim names."""
+    """Maps provider claims onto our user fields, using the configured claim names.
+
+    `subject` is what the account is found by; `name` is only what it is called here, the email
+    when there is one, else the display name, else the subject.
+    """
     subject = str(userinfo.get(settings.sso_claim_id()) or "").strip()
     email = str(userinfo.get(settings.sso_claim_email()) or "").strip()
     name = str(userinfo.get(settings.sso_claim_name()) or "").strip()
-    # Prefer a stable, human-readable account name; fall back to the subject claim
     account = email or name or subject
-    return {"subject": subject, "email": email or None, "name": account or None}
+    return {"subject": subject, "email": email or None, "name": account[:120] or None,
+            "email_verified": bool(email) and _verified(userinfo)}
 
 
-def role_for(email):
+def role_for(email, verified=True):
+    """Admin only for a listed email the auth server has verified: an unverified one is whatever
+    anybody chose to register with, the admin's own address included."""
     admins = [a.strip().lower() for a in (settings.sso_admin_emails() or "").split(",") if a.strip()]
-    return "admin" if email and email.lower() in admins else "user"
+    return "admin" if email and verified and email.lower() in admins else "user"

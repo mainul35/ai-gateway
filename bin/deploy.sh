@@ -8,6 +8,9 @@
 #                      gateway deploys itself from a clone on its own server (default: mainul35@homelabai)
 #   DEPLOY_DIR         project directory on it     (default: model-gateway, relative to the remote home)
 #   DEPLOY_PUBLIC_URL  public URL to check after   (default: https://ai-gateway.mainul35.dev)
+#   DEPLOY_SKIP_CHECKS 1 skips the local compile checks, when the code was already checked (the
+#                      Jenkins deploy job, which deploys what the build job tested; its agent has no Python)
+#   DEPLOY_SSH_OPTS    extra ssh options, e.g. "-i key -o StrictHostKeyChecking=accept-new" (Jenkins)
 #
 # Never touched on the server: config/config.properties (secrets, SSO settings), .venv, logs, .env.
 set -euo pipefail
@@ -18,7 +21,9 @@ PUBLIC_URL=${DEPLOY_PUBLIC_URL:-https://ai-gateway.mainul35.dev}
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 cd "$ROOT"
 
-PYTHON=${PYTHON:-$(command -v python || command -v python3)}
+# "|| true": the Jenkins agent has no Python, and under set -e a lookup that finds nothing ended the
+# script on this line - before a word was printed - although DEPLOY_SKIP_CHECKS means it is never used
+PYTHON=${PYTHON:-$(command -v python || command -v python3 || true)}
 
 step() { printf '\n==> %s\n' "$*"; }
 
@@ -28,10 +33,14 @@ on_server() {
     if [ "$HOST" = local ]; then
         (cd "$HOME" && bash -c "$*")
     else
-        ssh -o BatchMode=yes "$HOST" "$*"
+        # shellcheck disable=SC2086  # DEPLOY_SSH_OPTS is a list of options
+        ssh -o BatchMode=yes -o ConnectTimeout=10 ${DEPLOY_SSH_OPTS:-} "$HOST" "$*"
     fi
 }
 
+if [ "${DEPLOY_SKIP_CHECKS:-0}" = 1 ]; then
+    step "Skipping the local checks (DEPLOY_SKIP_CHECKS=1)"
+else
 step "Checking the code compiles before sending anything"
 "$PYTHON" - <<'PY'
 import pathlib, sys
@@ -49,8 +58,16 @@ PY
 # Compiling is not enough: a backslash eaten by a shell leaves a backspace inside a regular
 # expression that compiles perfectly and matches nothing it was written to match.
 "$PYTHON" scripts/check_control_chars.py app utils scripts
+# And the pages: Python compiling says nothing about the JavaScript in them
+"$PYTHON" scripts/check_page_scripts.py
+fi
 
 STAMP=$(date +%Y%m%d-%H%M%S)
+
+# Keep the server from going to sleep halfway through: ops/idle-shutdown treats a fresh
+# /tmp/gateway-deploying as work. Removed again however this script ends.
+on_server "touch /tmp/gateway-deploying" </dev/null || { echo "server unreachable - is it asleep? (bin/wake-homelabai.sh)"; exit 1; }
+trap 'on_server "rm -f /tmp/gateway-deploying" </dev/null >/dev/null 2>&1 || true' EXIT
 
 step "Backing up the current server code ($STAMP)"
 on_server "cd $REMOTE_DIR && mkdir -p .deploy-backup && \
@@ -63,7 +80,7 @@ step "Syncing the project"
 tar czf - \
     --exclude='__pycache__' --exclude='*.pyc' \
     --exclude='config/config.properties' \
-    app utils bin config/engines.yaml config/models.yaml config/mcp.yaml config/knowledge.yaml config/searxng scripts \
+    app utils bin config/engines.yaml config/models.yaml config/mcp.yaml config/knowledge.yaml config/searxng scripts ops \
     docker-compose.gateway.yml docker-compose.homelab.yml .env.example \
     requirements.txt requirements-gateway.txt \
   | on_server "tar xzf - -C $REMOTE_DIR && echo synced"
@@ -90,19 +107,34 @@ restart() {
     # Uvicorn drains what it is serving before it goes, and a picture job can take a minute. Starting
     # the new one while the old still holds the port makes it exit, and the watchdog then restarts
     # every minute until someone notices.
-    pkill -f 'uvicorn app.main:app' >/dev/null 2>&1
-    for _ in $(seq 1 30); do
-        (echo > /dev/tcp/127.0.0.1/9000) >/dev/null 2>&1 || break
+    #
+    # Waited for until the process is gone, not just the port: uvicorn lets go of the port as soon as
+    # it starts shutting down, then keeps draining - and a long streamed request it is still serving
+    # can hold a database transaction open, which the new one's start-up then queues behind. The
+    # [u] keeps the pattern from matching this shell's own command line.
+    pkill -f '[u]vicorn app.main:app' >/dev/null 2>&1
+    for _ in $(seq 1 45); do
+        pgrep -f '[u]vicorn app.main:app' >/dev/null || break
         sleep 1
     done
-    (echo > /dev/tcp/127.0.0.1/9000) >/dev/null 2>&1 && { pkill -9 -f 'uvicorn app.main:app'; sleep 2; }
-    ./bin/gateway-start.sh
+    if pgrep -f '[u]vicorn app.main:app' >/dev/null; then
+        echo "the old gateway is still draining after 45 s; stopping it"
+        pkill -9 -f '[u]vicorn app.main:app'
+        sleep 2
+    fi
+    GATEWAY_DEPLOY=1 ./bin/gateway-start.sh
     for _ in $(seq 1 30); do
         sleep 1
         curl -sf -m 3 http://127.0.0.1:9000/health >/dev/null 2>&1 && return 0
     done
     return 1
 }
+
+# The idle-sleep script is installed by hand (it needs root); say so when this deploy brought a newer one
+if [ -f /usr/local/sbin/idle-shutdown ] && ! cmp -s ops/idle-shutdown/idle-shutdown.sh /usr/local/sbin/idle-shutdown; then
+    echo "note: ops/idle-shutdown/idle-shutdown.sh differs from the installed /usr/local/sbin/idle-shutdown;"
+    echo "      to install it: sudo install -m 755 $PWD/ops/idle-shutdown/idle-shutdown.sh /usr/local/sbin/idle-shutdown"
+fi
 
 if restart; then
     echo "healthy: $(curl -s http://127.0.0.1:9000/health)"

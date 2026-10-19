@@ -23,6 +23,7 @@ import importlib.util
 import logging
 import os
 import re
+import shutil
 import time
 from dataclasses import dataclass, field
 
@@ -30,8 +31,8 @@ import httpx
 import yaml
 from sqlalchemy import text
 
-from app import github_access, settings
-from app.db import engine
+from app import github_access, secretbox, settings
+from app.db import engine, session_factory
 from utils.ollama_client import ollama_host
 
 log = logging.getLogger("knowledge")
@@ -123,11 +124,34 @@ SCHEMA = [
     "CREATE INDEX IF NOT EXISTS knowledge_chunks_embedding ON knowledge_chunks "
     "USING hnsw (embedding vector_cosine_ops)",
     "CREATE INDEX IF NOT EXISTS knowledge_chunks_words ON knowledge_chunks USING gin (tsv)",
+    # Whose source it is: NULL for the ones configured in config/knowledge.yaml (the admin's), a
+    # user's id for the repositories that person connected. Every reader filters on it.
+    "ALTER TABLE knowledge_sources ADD COLUMN IF NOT EXISTS owner_id INTEGER",
+    "CREATE INDEX IF NOT EXISTS knowledge_sources_owner ON knowledge_sources (owner_id)",
 ]
+
+# People's own repositories, besides the configured ones
+USER_MAX_REPOS = 40          # per person, newest pushed first; indexing runs on this machine's CPU
+USER_MAX_REPO_MB = 300
+USER_PREFIX = "u"            # a person's sources are stored as u<id>/<owner>/<repo>
+
+
+def user_source(user_id, owner, repo):
+    return f"{USER_PREFIX}{user_id}/{owner}/{repo}"
+
+
+def shown(name):
+    """A source's name as its owner knows it: u12/mainul35/alishan_pos is mainul35/alishan_pos."""
+    head, _, rest = name.partition("/")
+    return rest if head[:1] == USER_PREFIX and head[1:].isdigit() and rest else name
 
 
 async def ensure_schema():
     async with engine().begin() as connection:
+        # CREATE INDEX IF NOT EXISTS still locks the table first; behind a transaction left open by a
+        # gateway that is shutting down, give up (the caller carries on without the knowledge base)
+        # rather than hold the whole start up
+        await connection.execute(text("SET LOCAL lock_timeout = '20s'"))
         for statement in SCHEMA:
             await connection.execute(text(statement))
 
@@ -256,22 +280,29 @@ class Source:
     kind: str                   # "folder" or "github-repo"
     root: str                   # directory on this machine
     description: str = ""
-    clone: dict = field(default_factory=dict)   # for a GitHub repository: owner, repo, branch
+    clone: dict = field(default_factory=dict)   # for a GitHub repository: owner, repo, branch (, token)
+    owner_id: int | None = None                 # the person it belongs to; None for configured ones
 
 
-async def _github_repos(client, owner, spec):
-    """Every repository of a user or an organisation that the token can see."""
-    token = github_token(owner)
-    if not token:
+async def _github_repos(client, owner, spec, token=None, required=True):
+    """Every repository of a user or an organisation that the token can see.
+
+    Without a token, when that is allowed (a person who only has public repositories), GitHub's
+    public listing - which shows public repositories only.
+    """
+    token = token if token is not None else github_token(owner)
+    if not token and required:
         raise RuntimeError(f"no GitHub token for {owner}: add one on the Tasks page, under GitHub access")
-    headers = {"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json"}
+    headers = {"Accept": "application/vnd.github+json", **({"Authorization": f"Bearer {token}"} if token else {})}
     repos, page = [], 1
     while True:
         response = await client.get(f"https://api.github.com/orgs/{owner}/repos",
                                     params={"per_page": 100, "page": page, "type": "all"}, headers=headers)
         if response.status_code == 404:          # a user, not an organisation
-            response = await client.get("https://api.github.com/user/repos",
-                                        params={"per_page": 100, "page": page, "affiliation": "owner"},
+            response = await client.get("https://api.github.com/user/repos" if token
+                                        else f"https://api.github.com/users/{owner}/repos",
+                                        params={"per_page": 100, "page": page,
+                                                **({"affiliation": "owner"} if token else {"type": "owner"})},
                                         headers=headers)
         if response.status_code >= 400:
             raise RuntimeError(f"GitHub said {response.status_code} listing {owner}'s repositories: "
@@ -315,6 +346,41 @@ async def resolve_sources():
                                 {"owner": owner, "repo": repo["name"], "branch": repo.get("default_branch") or "main"}))
                     except (RuntimeError, httpx.HTTPError) as e:
                         problems.append(f"{owner}: {e}")
+        users, user_problems = await _people_sources(client, checkout_dir)
+    return sources + users, problems + user_problems
+
+
+async def _people_sources(client, checkout_dir):
+    """The repositories people connected on their own page, each person's under their own name."""
+    from app.models import GitHubConnection     # here: app.models imports nothing from this module
+    from sqlalchemy import select
+    async with session_factory()() as session:
+        connections = list((await session.execute(select(GitHubConnection))).scalars())
+    sources, problems = [], []
+    for connection in connections:
+        try:
+            token = secretbox.unseal(connection.token_sealed) if connection.token_sealed else ""
+        except ValueError:
+            problems.append(f"{connection.owner} (user {connection.user_id}): its token can no longer be read; "
+                            "connect it again")
+            continue
+        try:
+            repos = await _github_repos(client, connection.owner, {"max_repo_mb": USER_MAX_REPO_MB},
+                                        token=token, required=False)
+        except (RuntimeError, httpx.HTTPError) as e:
+            problems.append(f"{connection.owner} (user {connection.user_id}): {e}")
+            continue
+        # The ones worked on most recently, when there are more than one person may have indexed
+        repos.sort(key=lambda r: r.get("pushed_at") or "", reverse=True)
+        for repo in repos[:USER_MAX_REPOS]:
+            name = user_source(connection.user_id, connection.owner, repo["name"])
+            sources.append(Source(
+                name, "github-repo",
+                os.path.join(checkout_dir, f"{USER_PREFIX}{connection.user_id}", connection.owner, repo["name"]),
+                repo.get("description") or "",
+                {"owner": connection.owner, "repo": repo["name"], "branch": repo.get("default_branch") or "main",
+                 "token": token},
+                owner_id=connection.user_id))
     return sources, problems
 
 
@@ -335,7 +401,8 @@ async def _git(args, cwd=None, token=""):
 async def update_checkout(source):
     """Clones or fast-forwards a shallow copy of a repository's default branch."""
     clone = source.clone
-    token = github_token(clone["owner"])
+    # A person's own token for their repositories; the configured ones for the configured
+    token = clone["token"] if "token" in clone else github_token(clone["owner"])
     url = f"https://github.com/{clone['owner']}/{clone['repo']}.git"
     if not os.path.isdir(os.path.join(source.root, ".git")):
         os.makedirs(os.path.dirname(source.root), exist_ok=True)
@@ -409,16 +476,16 @@ async def _record(source, files=None, chunks=None, error=None):
     async with engine().begin() as connection:
         # asyncpg needs every parameter's type spelled out when it appears in more than one place
         await connection.execute(text(
-            "INSERT INTO knowledge_sources (name, kind, location, description, files, chunks, indexed_at, error) "
+            "INSERT INTO knowledge_sources (name, kind, location, description, files, chunks, indexed_at, error, owner_id) "
             "VALUES (:n, :k, :l, :d, coalesce(CAST(:f AS integer), 0), coalesce(CAST(:c AS integer), 0), "
-            "        CASE WHEN CAST(:e AS text) IS NULL THEN now() END, CAST(:e AS text)) "
-            "ON CONFLICT (name) DO UPDATE SET kind = :k, location = :l, description = :d, "
+            "        CASE WHEN CAST(:e AS text) IS NULL THEN now() END, CAST(:e AS text), CAST(:o AS integer)) "
+            "ON CONFLICT (name) DO UPDATE SET kind = :k, location = :l, description = :d, owner_id = CAST(:o AS integer), "
             "files = coalesce(CAST(:f AS integer), knowledge_sources.files), "
             "chunks = coalesce(CAST(:c AS integer), knowledge_sources.chunks), "
             "indexed_at = CASE WHEN CAST(:e AS text) IS NULL THEN now() ELSE knowledge_sources.indexed_at END, "
             "error = CAST(:e AS text)"),
             {"n": source.name, "k": source.kind, "l": source.root, "d": source.description,
-             "f": files, "c": chunks, "e": error})
+             "f": files, "c": chunks, "e": error, "o": source.owner_id})
 
 
 async def reindex(only=None):
@@ -460,7 +527,30 @@ async def reindex(only=None):
                         await connection.execute(text("DELETE FROM knowledge_sources WHERE name = :s"), {"s": name})
         finally:
             progress.update(running=False, finished_at=time.time(), source=None)
+    if _waiting:
+        asyncio.create_task(reindex(_waiting.pop(0)))
     return True
+
+
+_waiting = []     # runs asked for while another was going, as their `only` patterns
+
+
+async def forget(user_id, owner):
+    """Everything indexed from one person's GitHub connection, gone: passages, files and the clones."""
+    prefix = f"{USER_PREFIX}{user_id}/{owner}/"
+    async with engine().begin() as connection:
+        names = [row[0] for row in (await connection.execute(text(
+            "SELECT name FROM knowledge_sources WHERE owner_id = :u AND name LIKE :p"),
+            {"u": user_id, "p": prefix.replace("_", "\\_") + "%"})).all()]
+        for name in names:
+            for table in ("knowledge_chunks", "knowledge_files"):
+                await connection.execute(text(f"DELETE FROM {table} WHERE source = :s"), {"s": name})
+            await connection.execute(text("DELETE FROM knowledge_sources WHERE name = :s"), {"s": name})
+    checkout_dir = load_config().get("checkout_dir") or os.path.join(PROJECT_ROOT, "knowledge-repos")
+    clones = os.path.realpath(os.path.join(checkout_dir, f"{USER_PREFIX}{user_id}", owner))
+    if clones.startswith(os.path.realpath(checkout_dir) + os.sep) and os.path.isdir(clones):
+        await asyncio.to_thread(shutil.rmtree, clones, True)
+    return len(names)
 
 
 def start_reindex(only=None):
@@ -469,6 +559,15 @@ def start_reindex(only=None):
         return False
     asyncio.create_task(reindex(only))
     return True
+
+
+def request_reindex(only):
+    """Starts a run now, or right after the one that is going. Returns "started" or "queued"."""
+    if start_reindex(only):
+        return "started"
+    if only not in _waiting:
+        _waiting.append(only)
+    return "queued"
 
 
 async def refresh_loop():
@@ -496,11 +595,25 @@ async def last_indexed():
 # --- reading -----------------------------------------------------------------------------------
 
 
-async def list_sources():
+# Whose sources a reader sees. Nobody's (owner_id None) means the configured sources alone, which is
+# what every caller that does not say otherwise gets: a person's private code is only ever read for
+# that person. include_global adds the configured ones to a person's own - for the admin and managers.
+_VISIBLE = ("(CAST(:uid AS integer) IS NOT NULL AND owner_id = CAST(:uid AS integer)) "
+            "OR (owner_id IS NULL AND (CAST(:uid AS integer) IS NULL OR CAST(:glob AS boolean)))")
+
+
+async def source_names(owner_id=None, include_global=True):
+    async with engine().begin() as connection:
+        return [row[0] for row in (await connection.execute(text(
+            f"SELECT name FROM knowledge_sources WHERE {_VISIBLE}"),
+            {"uid": owner_id, "glob": include_global})).all()]
+
+
+async def list_sources(owner_id=None, include_global=True):
     async with engine().begin() as connection:
         rows = (await connection.execute(text(
-            "SELECT name, kind, description, files, chunks, indexed_at, error FROM knowledge_sources "
-            "ORDER BY name"))).mappings().all()
+            "SELECT name, kind, description, files, chunks, indexed_at, error, owner_id FROM knowledge_sources "
+            f"WHERE {_VISIBLE} ORDER BY name"), {"uid": owner_id, "glob": include_global})).mappings().all()
     return [{**row, "indexed_at": row["indexed_at"].isoformat() if row["indexed_at"] else None} for row in rows]
 
 
@@ -522,8 +635,15 @@ _STOP = {"the", "and", "for", "are", "was", "how", "what", "why", "does", "this"
          "where", "which", "when", "who", "can", "into", "about", "there", "have", "has", "use", "used"}
 
 
-async def search(query, source=None, limit=8):
-    """Passages that answer a question, best first: meaning and exact words, merged by rank."""
+async def search(query, source=None, limit=8, owner_id=None, include_global=True):
+    """Passages that answer a question, best first: meaning and exact words, merged by rank.
+
+    Only from the sources the reader may see (source_names): the configured ones when no owner is
+    given, otherwise that person's own, plus the configured ones when include_global.
+    """
+    allowed = await source_names(owner_id, include_global)
+    if not allowed:
+        return []
     vector = _vector((await embed([query], query=True))[0])
     tsquery = _tsquery(query)
     pattern = source.replace("*", "%") if source else None
@@ -531,11 +651,13 @@ async def search(query, source=None, limit=8):
         WITH by_meaning AS (
             SELECT id, row_number() OVER (ORDER BY embedding <=> CAST(:v AS vector)) AS r
             FROM knowledge_chunks WHERE (CAST(:src AS text) IS NULL OR source ILIKE :src)
+                                        AND source = ANY(CAST(:allowed AS text[]))
             ORDER BY embedding <=> CAST(:v AS vector) LIMIT 40),
         by_words AS (
             SELECT id, row_number() OVER (ORDER BY ts_rank_cd(tsv, q) DESC) AS r
             FROM knowledge_chunks, to_tsquery('english', CAST(:tq AS text)) q
             WHERE CAST(:tq AS text) <> '' AND tsv @@ q AND (CAST(:src AS text) IS NULL OR source ILIKE :src)
+                  AND source = ANY(CAST(:allowed AS text[]))
             ORDER BY ts_rank_cd(tsv, q) DESC LIMIT 40)
         SELECT c.source, c.path, c.start_line, c.end_line, c.content,
                coalesce(1.0 / (60 + m.r), 0) + coalesce(1.0 / (60 + w.r), 0) AS score
@@ -544,13 +666,16 @@ async def search(query, source=None, limit=8):
         WHERE m.id IS NOT NULL OR w.id IS NOT NULL
         ORDER BY score DESC LIMIT :k""")
     async with engine().begin() as connection:
-        rows = (await connection.execute(sql, {"v": vector, "src": pattern, "tq": tsquery or "",
+        rows = (await connection.execute(sql, {"v": vector, "src": pattern, "tq": tsquery or "", "allowed": allowed,
                                                "k": max(1, min(int(limit), 20))})).mappings().all()
     return [dict(row, score=round(float(row["score"]), 4)) for row in rows]
 
 
-async def read_file(source, path, start_line=1, end_line=None):
-    """Lines of an indexed file, for when a passage is not enough. Only files that are indexed."""
+async def read_file(source, path, start_line=1, end_line=None, owner_id=None, include_global=True):
+    """Lines of an indexed file, for when a passage is not enough. Only files that are indexed, in
+    sources the reader may see."""
+    if source not in await source_names(owner_id, include_global):
+        raise ValueError(f"{shown(source)}/{path} is not in the index; search for it first")
     async with engine().begin() as connection:
         indexed = (await connection.execute(text(
             "SELECT 1 FROM knowledge_files WHERE source = :s AND path = :p"), {"s": source, "p": path})).scalar()

@@ -47,14 +47,16 @@ PHOTOS - asks to be SHOWN something that really exists: a product, a brand, a bu
          exist. Asking to see something mentioned earlier in the conversation - "show me the ones
          you suggested", "what does that one look like" - is PHOTOS.
 EDIT   - asks for the attached picture to be changed as a picture: "make it night", "remove the car",
-         "add a hat", "make it look like a painting".
+         "add a hat", "make it look like a painting". Light and colour are EDIT too: brighter,
+         darker, more light on part of it, warmer, more contrast, more vivid.
 CLEAN  - asks for the quality of a photograph to be improved, with nothing in it changed: noise or
          grain removed, haze or mist cleared, softness sharpened, or made good enough to crop into
          or enlarge. "Make it sharper", "it looks hazy", "too grainy" are all CLEAN. If the scene
          itself would look different afterwards - the weather, the season, the time of day, the
          style, anything added or taken away - it is EDIT, not CLEAN.
 BLUR   - asks for the background of a photograph to be blurred, or for the subject to stand out
-         from it: shallower depth of field than the camera gave.
+         from it: shallower depth of field than the camera gave. Only when the words ask for blur,
+         bokeh or depth of field; any other change to a photograph is not BLUR.
 MAP    - asks about somewhere on the earth: finding a place, what is at a coordinate, getting
          from one place to another, how far or how long a journey is, or what of some kind is
          nearby or along the way. Wanting to go somewhere is MAP even when it is phrased as a
@@ -85,6 +87,8 @@ Examples:
 "show me a video of a Shinkansen leaving Tokyo station" -> PHOTOS
 "can I see the actual product?" -> PHOTOS
 "make it night with northern lights" -> EDIT
+"Make the kid standing in a beach, and sea is behind him" -> EDIT
+"put her in front of the Eiffel tower" -> EDIT
 "remove the noise from this photo" -> CLEAN
 "too grainy, clean it up so I can crop in" -> CLEAN
 "the tower looks hazy, make it sharper" -> CLEAN
@@ -92,6 +96,12 @@ Examples:
 "make it look like winter" -> EDIT
 "add fog to this picture" -> EDIT
 "blur the background so the bird stands out" -> BLUR
+"brighten the light in the road of this photo" -> EDIT
+"make it brighter" -> EDIT
+"darken the sky a little" -> EDIT
+"Make the photo grayscale" -> EDIT
+"turn this photo sepia" -> EDIT
+"increase the contrast" -> EDIT
 "where is Dhaka University" -> MAP
 "route from Gulshan to the airport" -> MAP
 "find petrol stations along the way to Chittagong" -> MAP
@@ -161,16 +171,43 @@ IMAGE_WORDS = re.compile(
     r"\b(image|picture|photo|photograph|drawing|painting|illustration|logo|icon|poster|wallpaper|"
     r"art|artwork|banner|cover|emblem|badge|avatar|sticker|mockup|thumbnail)\b"
     r"|^\s*(an? |the )?(image|picture|photo|drawing|painting|illustration|logo|poster|wallpaper) of\b", re.I)
+# Asking for how a picture looks to change: a verb asking for it, then a look. Both halves, because
+# either alone is too common in a message that only shows a picture - "here is a black and white
+# photo of my grandfather" names a look and asks for nothing, and "make it work" asks for something
+# that is not a look. "Make the photo grayscale" went to chat, and the chat model, unable to draw,
+# answered with a made-up tool call in JSON.
+LOOKS = (r"gr[ae]y ?scale|black (and|&) white|b ?& ?w|monochrome|sepia|vintage|retro|"
+         r"brighter|darker|lighter|warmer|cooler|vivid|vibrant|colou?rful|saturated|"
+         r"more contrast|less contrast|high contrast|hdr|"
+         r"(a |an )?(painting|cartoon|anime|sketch|watercolou?r|oil painting|pencil drawing)")
+LOOK_CHANGE = re.compile(
+    rf"\b(make|turn|convert|render|change)\b[^.?!]{{0,40}}\b({LOOKS})\b"
+    r"|\b(increase|decrease|reduce|boost|raise|lower|adjust|lift)\w*\s+(the\s+|its\s+)?"
+    r"(brightness|contrast|saturation|exposure|white balance|warmth|vibrance|shadows|highlights)\b"
+    r"|\b(brighten|darken|lighten|desaturate|colou?ri[sz]e)\b", re.I)
+SHARPEN_WORDS = re.compile(r"\b(sharp\w*|crisp\w*|denois\w*|de-noise|noise|noisy|grain\w*|"
+                           r"clean(ing)? up|clear(er)? up|in focus|unblur\w*|deblur\w*)\b", re.I)
+# "Can you make it grayscale?" ends in a question mark and is a request all the same
+POLITE_ASK = re.compile(r"^\s*(please\b|(can|could|would|will) you\b)", re.I)
 EDIT_WORDS = re.compile(
     r"\b(make it|turn it|change|replace|remove|delete|erase|add|put|swap|recolou?r|repaint|crop|zoom|"
-    r"brighten|darken|blur)\b", re.I)
+    r"brighten|darken|blur)\b"
+    # A new picture made from the attached one: "use my photo to generate an image of me with a
+    # puppy", "make a picture of me as an astronaut". With a photo attached that is an edit of it -
+    # the person in it kept - not a drawing from nothing, and not a question about it.
+    r"|\b(use|using|based on)\s+(my|this|the|that|these|those)\s+(photo|picture|image|pic|selfie)s?\b"
+    r"|\b(generate|create|make|draw|design|render|produce)\s+(me\s+)?((an?|another|new)\s+)*"
+    r"(image|picture|photo|portrait|drawing|illustration|avatar|version)\b"
+    rf"|{LOOK_CHANGE.pattern}", re.I)
 CLEAN_WORDS = re.compile(
     r"\b(noise|noisy|grain|grainy|denoise|de-noise|speckl\w*|iso|clean(ing)? up|clean it up|"
     r"sharp\w*|crisp\w*|clarity|haz\w*|mist\w*|foggy|smog|milky|washed out|soft|blurry|"
     r"crop into|zoom into|enlarge|upscale|restore)\b", re.I)
 BLUR_WORDS = re.compile(
     r"\b(bokeh|background blur|blur the background|depth of field|dof|stand out from|"
-    r"separate\w* from the background|portrait mode)\b", re.I)
+    r"separate\w* from the background|portrait mode)\b"
+    # "make the background blurry", "blur everything behind her"
+    r"|\bblur\w*\b[^.?!]{0,30}\b(background|behind)\b|\b(background|behind)\b[^.?!]{0,30}\bblur\w*", re.I)
 BACKDROP_WORDS = re.compile(
     r"\bpassport\b|\bvisa photo\w*|\bid photo\b|"
     # a colour named next to the background, either way round: "white background", "background to blue"
@@ -196,7 +233,11 @@ def is_enabled():
 
 
 def candidates(tools, has_images):
-    """The actions the user's toggles allow for this message."""
+    """The actions the user's toggles allow for this message.
+
+    Background blur can be switched off on its own ("photo_blur": False), and then it is not a
+    choice at all - the one way to be sure a photograph never comes back blurred.
+    """
     allowed = [CHAT]
     if tools.get("maps") and not has_images:
         allowed.append(MAP)
@@ -204,8 +245,24 @@ def candidates(tools, has_images):
     if tools.get("web_search") and not has_images:
         allowed += [SEARCH, PHOTOS]     # finding a photograph is a web search with a different eye
     if tools.get("image_generation"):
-        allowed += [EDIT, CLEAN, BLUR, BACKDROP] if has_images else [IMAGE]
+        if has_images:
+            allowed += [EDIT, CLEAN] + ([BLUR] if tools.get("photo_blur", True) else []) + [BACKDROP]
+        else:
+            allowed.append(IMAGE)
     return allowed
+
+
+# The three photograph tools each do one fixed thing, whatever the sentence says: CLEAN takes noise
+# off, BLUR blurs by distance, BACKDROP puts a plain colour behind a person. Asked to "brighten the
+# light in the road", the small model answered BLUR, and the photograph came back with its background
+# blurred and the road no brighter. So one of them is only believed when the words ask for what it
+# does; anything else that changes a photograph goes to the editor, which follows the instruction.
+NAMED_BY = {CLEAN: CLEAN_WORDS, BLUR: BLUR_WORDS, BACKDROP: BACKDROP_WORDS}
+
+
+def _named(action, text):
+    words = NAMED_BY.get(action)
+    return words is None or bool(words.search(text or ""))
 
 
 # Putting a picture in front of somebody is not asking them to redraw it. "Here is what I found
@@ -255,6 +312,13 @@ def by_keywords(message, allowed, has_images):
         return BACKDROP
     if MAP in allowed and not has_images and MAP_WORDS.search(text):
         return MAP
+    # Before CLEAN, whose words include "blurry": "make the background blurry" asks for blur, and
+    # clean-up would sharpen it instead. With blur switched off it is an ordinary edit.
+    if has_images and BLUR_WORDS.search(text) and not SHARPEN_WORDS.search(text):
+        if BLUR in allowed:
+            return BLUR
+        if EDIT in allowed:
+            return EDIT
     if has_images and CLEAN in allowed and CLEAN_WORDS.search(text):
         return CLEAN
     if has_images and BLUR in allowed and BLUR_WORDS.search(text):
@@ -286,8 +350,10 @@ READ   - the picture is there to be looked at. Evidence, a screenshot of a probl
          what is in it, point at part of it, ask a question about it, or simply put it forward
          with no request at all.
 CHANGE - the message asks for the picture itself to come back different: something added, removed
-         or altered in it, the background replaced or recoloured, the quality improved, the
-         background blurred.
+         or altered in it, a person or thing in it put somewhere else or dressed differently, the
+         background replaced or recoloured, the quality improved, the background blurred. A new
+         picture made from this one - the person in it shown doing something else, in another
+         scene, in another style - is CHANGE too: they want a picture back, with them in it.
 
 The test is whether words would satisfy them. If what they want back is an answer, it is READ.
 Only if what they want back is a new picture is it CHANGE. A picture with no request attached to
@@ -303,9 +369,19 @@ Examples:
 "is this the right setting?" -> READ
 "make it night with northern lights" -> CHANGE
 "remove the car" -> CHANGE
+"Make the kid standing in a beach, and sea is behind him" -> CHANGE
+"This is me. Use my photo to generate an image of me taking care of a puppy" -> CHANGE
+"make a picture of me as an astronaut" -> CHANGE
+"turn this photo of me into a cartoon avatar" -> CHANGE
+"put her in front of the Eiffel tower" -> CHANGE
+"make him wear a red jacket" -> CHANGE
+"what is the kid holding?" -> READ
 "white background for my passport photo" -> CHANGE
 "too grainy, clean it up" -> CHANGE
 "blur the background so the bird stands out" -> CHANGE
+"Make the photo grayscale" -> CHANGE
+"brighten the street of the image" -> CHANGE
+"increase the contrast" -> CHANGE
 
 Answer with READ or CHANGE."""
 
@@ -338,16 +414,54 @@ def read_picture_answer(text):
     return None
 
 
-def settle_picture(action, by, wanted, message):
-    """Reading beats changing when the model says the picture was given to be looked at.
+# An instruction about the picture, by its shape: it opens with a verb that changes something, or
+# asks politely. "Fix" is left out on purpose - "fix this error" under a screenshot is about code.
+# Words about what a screenshot of text says, rather than about a picture: the settings, code and
+# documents people photograph or capture to ask about
+# documents people photograph or capture to ask about. Only words that mean nothing in a photograph:
+# "field", "line" or "row" would take "put him in a field" away from the editor.
+ABOUT_TEXT = re.compile(
+    r"\b(config\w*|settings?|port (number|\d+|to \d+)|source code|code|function|method|variable|"
+    r"parameter|query|command|registry|stack ?trace|log file|property|properties|env(ironment)? var\w*|"
+    r"error (line|message)s?|log (line|entry|entries|output)s?)\b"
+    r"|\.(ya?ml|json|xml|properties|ini|conf|toml|py|java|js|ts|sql|sh)\b", re.I)
 
-    Only ever in that direction. The two wrong answers are not equal: reading a picture that was
-    meant to be edited wastes a sentence, and editing a picture that was meant to be read spends a
-    minute of GPU and hands back a fabricated screenshot in place of the evidence.
+
+# "Make sure", "let me know", "give me the steps", "set the port", "apply this fix", "edit this file"
+# are said about screenshots of code too, so only verbs that change a picture count.
+INSTRUCTION = re.compile(
+    r"^\s*(please\s+)?(make(?!\s+sure)|turn|put|place|change|replace|remove|delete|erase|add|move|"
+    r"convert|transform|swap|brighten|darken|lighten|crop|recolou?r|repaint)\b", re.I)
+
+
+def settle_picture(action, by, wanted, message, allowed=(CHAT, EDIT, CLEAN, BACKDROP)):
+    """The read-or-change question, asked on its own, settles what the seven-way choice got wrong.
+
+    Reading beats changing when the model says the picture was given to be looked at: editing a
+    picture meant to be read spends a minute of GPU and hands back a fabricated screenshot in place
+    of the evidence. So that direction needs only the model's word.
+
+    The other direction needs more. "Make the kid stand on a beach with the sea behind him" went to
+    chat after a few turns about the same photo, and the chat model, unable to draw, answered with a
+    made-up tool call. Changing is believed over CHAT when the separate question says CHANGE and the
+    words are shaped like an instruction, and nothing in them only shows the picture.
     """
+    text = message or ""
+    # "Change the port to 8080 in this config" uses an edit word about a screenshot of text. Both
+    # router answers called it a change; the change wanted is to the configuration, and redrawing
+    # the screenshot answers nothing. Words that only mean something on a screen keep it chat.
+    if action in (EDIT, CLEAN, BLUR, BACKDROP) and ABOUT_TEXT.search(text):
+        return CHAT, "keywords"
+    if wanted == CHANGE and action == CHAT and EDIT in allowed \
+            and (INSTRUCTION.search(text) or POLITE_ASK.search(text)) and not _only_showing(text):
+        by_words = by_keywords(text, list(allowed), True)
+        return (by_words if by_words in (EDIT, CLEAN, BLUR, BACKDROP) else EDIT), \
+            settings.router_model() or "keywords"
     if wanted is None or action not in (EDIT, CLEAN, BLUR, BACKDROP):
         return action, by
-    if wanted == READ and not _asks_for_a_change(message or ""):
+    # And READ alone does not overrule a sentence shaped like an instruction: after a few turns about
+    # the same photo it said READ for "Make the kid stand on a beach" while the main answer was EDIT
+    if wanted == READ and not _asks_for_a_change(text) and not INSTRUCTION.search(text):
         return CHAT, settings.router_model() or "keywords"
     return action, by
 
@@ -376,6 +490,19 @@ def clean_category(text, has_images=False):
         if word in CATEGORIES:
             return "vision" if has_images and word == "vision" else word
     return None
+
+
+# A chat model asked for a picture it cannot make sometimes answers with a tool call of its own
+# invention: { "action": "img_gen", "action_input": "..." }. Left in the history, the router reads
+# it as how this conversation goes - after one, the same request went to chat again every time.
+INVENTED_CALL = re.compile(r'^\s*(```\w*\s*)?\{\s*"action"\s*:', re.S)
+
+
+def plain_history(history):
+    """The conversation as the router should see it, with invented tool calls said in words."""
+    return [{**m, "content": "(a picture was asked for, and none was made)"}
+            if m.get("role") == "assistant" and INVENTED_CALL.match(m.get("content") or "") else m
+            for m in history]
 
 
 def settle_category(answered, message, has_images=False):
@@ -469,6 +596,20 @@ def settle_action(answered, message, allowed, has_images):
     # only put it forward and ask for no change to it, reading it is the answer
     if answered in (EDIT, CLEAN, BLUR, BACKDROP) and has_images and _only_showing(message):
         return CHAT, "keywords"
+    # The other way round: with a picture attached, the words plainly ask for it to look different,
+    # and the model said CHAT. Earlier turns about the same photo were enough to tip it there; the
+    # chat model cannot change a picture, so the answer would be words about a picture never made.
+    if answered == CHAT and has_images and EDIT in allowed and LOOK_CHANGE.search(message or "") \
+            and (not (message or "").rstrip().endswith("?") or POLITE_ASK.search(message or "")):
+        by_words = by_keywords(message, allowed, has_images)
+        return (by_words if by_words in (EDIT, CLEAN, BLUR, BACKDROP) else EDIT), "keywords"
+    # A fixed-purpose photograph tool the words never asked for: the words decide instead, and when
+    # they name no tool of their own, the editor takes it, because it does what it is told
+    if answered in NAMED_BY and not _named(answered, message):
+        by_words = by_keywords(message, allowed, has_images)
+        if by_words in (EDIT, CLEAN, BLUR, BACKDROP):
+            return by_words, "keywords"
+        return (EDIT if EDIT in allowed else CHAT), "keywords"
     if answered and answered != CHAT:
         return answered, "model"
     if MAP in allowed and not has_images and MAP_WORDS.search(message or ""):
@@ -486,11 +627,19 @@ def settle_action(answered, message, allowed, has_images):
 
 
 def clean_answer(text, allowed):
-    """Pulls the action word out of the model's reply; None when it did not name an allowed one."""
+    """Pulls the action word out of the model's reply; None when it did not name an allowed one.
+
+    With a picture attached IMAGE is not on offer - a new picture there is an edit of the one
+    attached - but the small model still says IMAGE for "use my photo to generate an image of me
+    with a puppy". That is what it means, so it is read as EDIT rather than thrown away, which left
+    the keyword fallback to answer it as a chat.
+    """
     words = re.findall(r"[a-z]+", re.sub(r"<think>.*?</think>", "", (text or ""), flags=re.S).lower())
     for word in words:
         if word in allowed:
             return word
+        if word == IMAGE and IMAGE not in allowed and EDIT in allowed:
+            return EDIT
     return None
 
 

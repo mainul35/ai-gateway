@@ -13,30 +13,45 @@ be known rather than guessed. A model that has been failing is not the best mode
 import logging
 import re
 
+from app import settings
+
 log = logging.getLogger("tools.chooser")
 
 # What a message is asking for. The router names one of these; the scoring below turns it into a model.
-CATEGORIES = ("code", "vision", "reasoning", "long", "general")
+# "light" is small talk - thanks, a joke, a quick rewrite - and is the one kind given to the smallest
+# model; "general" is a real question that needs knowledge, which a 1.7B answers badly.
+CATEGORIES = ("code", "vision", "reasoning", "long", "general", "light")
 
 CODE_NAME = re.compile(r"coder|code|starcoder|deepseek-?c", re.I)
 # A model whose name says it is for one narrow thing is a poor default for everything else
-SPECIALIST = re.compile(r"embed|rerank|guard|shield|whisper|tts", re.I)
+# The image models Ollama lists (Qwen-Image's GGUF says "completion") are not for conversation either
+SPECIALIST = re.compile(r"embed|rerank|guard|shield|whisper|tts|image|diffusion|flux", re.I)
 
 BROKEN_SHARE = 0.5      # failing this often, with enough attempts to mean it, is broken
 ENOUGH_TRIES = 2
-SLOW_MS = 60_000        # a minute per answer is worth a point against, not a disqualification
+SLOW_MS = 60_000
+UNKNOWN_SIZE = 30.0   # billions; what a model is taken to be when nothing says        # a minute per answer is worth a point against, not a disqualification
 
 
 def _parameters(model):
-    """Billions of parameters, as a number. "31.3B" -> 31.3, "596.05M" -> 0.6."""
+    """Billions of parameters, as a number. "31.3B" -> 31.3, "596.05M" -> 0.6.
+
+    From what the model reports, else from its name (qwen3-next-80b, gemma4:31b, qwen3:1.7b): our
+    llama.cpp profiles report nothing. UNKNOWN_SIZE when neither says, so that a model of unknown
+    size never passes for the smallest.
+    """
     text = (model.get("parameter_size") or "").strip().upper()
     found = re.match(r"([\d.]+)\s*([BMT])?", text)
     if not found:
-        return 0.0
+        # Millions only with three digits or more ("596m"): "qwen3.6-1m" is a 1M window, not a size
+        named = re.search(r"(?<![\d.])(?:(\d+(?:\.\d+)?)b|(\d{3,})m)(?![a-z])", (model.get("name") or "").lower())
+        if not named:
+            return UNKNOWN_SIZE
+        return float(named.group(1)) if named.group(1) else float(named.group(2)) / 1000
     try:
         size = float(found.group(1))
     except ValueError:
-        return 0.0
+        return UNKNOWN_SIZE
     return {"M": size / 1000, "T": size * 1000}.get(found.group(2), size)
 
 
@@ -56,13 +71,52 @@ def _reliability(health):
     return score
 
 
+def is_helper(name):
+    """One of the gateway's own helper models: the router and the embedder, run on the CPU.
+
+    They are there to read every message and index documents, not to answer: Auto gave the CPU
+    copy of the 1.7B router a question about mixing a 3090 and a 2080 Ti in one machine.
+    """
+    return (name or "").removesuffix(":latest") in {h.removesuffix(":latest") for h in helper_names()}
+
+
+def helper_names():
+    """The helper models' names as configured, for the playground's own Auto fallback to skip."""
+    return sorted(n for n in (settings.router_model(), settings.get("knowledge.embedding.model")) if n)
+
+
+ENOUGH_VOTES = 3       # verdicts before they count; fewer is one person's bad day
+
+
+def judged(feedback, category):
+    """What this person said about the model's answers, as points: from -1.4 to +0.6.
+
+    The playground asks "Helpful?"; the "Accurate?" question it asked before 2026-10-19 is gone, but
+    the verdicts given to it still count, as the same kind of vote. For this kind of question when
+    there are enough verdicts on it, otherwise over all questions. Centred on 70% good, so a model
+    has to be marked good most of the time to gain, and one marked bad half the time loses more than
+    any small-model bonus is worth.
+    """
+    for counts in ((feedback or {}).get(category), (feedback or {}).get("all")):
+        counts = counts or {}
+        good = counts.get("helpful", 0) + counts.get("accurate", 0)
+        votes = good + counts.get("unhelpful", 0) + counts.get("inaccurate", 0)
+        if votes >= ENOUGH_VOTES:
+            return (good / votes - 0.7) * 2
+    return 0.0
+
+
 def score(model, category, needs_vision):
     """How well this model suits the work, or None when it cannot or should not do it."""
     name = model.get("name") or ""
     capabilities = set(model.get("capabilities") or ())
+    if is_helper(name):
+        return None
+    if model.get("blocked"):
+        return None            # it cannot load now: a model answering someone else holds the GPU
     if needs_vision and "vision" not in capabilities:
         return None            # it cannot see the picture it is being asked about
-    if SPECIALIST.search(name):
+    if SPECIALIST.search(name) or (capabilities and "completion" not in capabilities):
         return None            # an embedding model is not going to hold a conversation
     reliability = _reliability(model.get("health"))
     if reliability is None:
@@ -70,9 +124,14 @@ def score(model, category, needs_vision):
 
     size = _parameters(model)
     context = model.get("context_length") or 0
-    points = reliability
-    # Size stands in for quality, but gently: a 30B is better than a 3B, not ten times better
-    points += min(size / 12.0, 2.0)
+    points = reliability + judged(model.get("feedback"), category)
+    if category == "light":
+        # Small talk goes to the smallest model: it answers in a second and leaves the GPU to
+        # whatever needs it. Everything that needs knowledge gets a bigger one.
+        points -= min(size / 12.0, 2.0)
+    else:
+        # Size stands in for quality, but gently: a 30B is better than a 3B, not ten times better
+        points += min(size / 12.0, 2.0)
 
     # A model tuned for code is the right answer to a coding question and a slightly wrong answer to
     # everything else: it won "summarise this transcript" on a tie-break, which is how this was found
@@ -82,22 +141,25 @@ def score(model, category, needs_vision):
     if category == "code":
         points += 3.0 if CODE_NAME.search(name) else 0.0
         points += 0.5 if "thinking" in capabilities else 0.0
+        # Coding work reads whole files and projects: a window that holds more of them is worth a
+        # little, up to 256K (beyond that the window is stretched and slower, as for "long")
+        points += min(context, 262144) / 262144
     elif category == "reasoning":
         points += 2.5 if "thinking" in capabilities else 0.0
         points += 0.5 if size >= 20 else 0.0
     elif category == "long":
-        # Reading something long is the one job where the context window decides it
-        points += min(context / 131072.0, 3.0)
+        # Reading something long is the one job where the context window decides it - up to 256K. A
+        # bigger window is a stretched one (qwen3.6-1m is YaRN x4) and slower at every length, so it
+        # is for the conversation that really needs it, chosen by name, not for every long read
+        points += min(context, 262144) / 131072.0
     elif category == "vision":
         points += 2.0 if "vision" in capabilities else 0.0
-    else:                       # general
-        points += 0.5 if "tools" in capabilities else 0.0
     return points
 
 
 def why(model, category):
     """A short sentence for the reason it was picked, in the words of what was actually known."""
-    reasons = []
+    reasons = ["smallest that will do"] if category == "light" else []
     capabilities = set(model.get("capabilities") or ())
     name = model.get("name") or ""
     if category == "vision" or "vision" in capabilities:
@@ -116,6 +178,12 @@ def why(model, category):
     return ", ".join(reasons[:3])
 
 
+def smallest(models, needs_vision=False):
+    """Auto's model before the router has said anything: the smallest one that can hold a conversation."""
+    able = [m for m in models if score(m, "light", needs_vision) is not None]
+    return min(able, key=_parameters)["name"] if able else None
+
+
 def pick(models, category, needs_vision=False, prefer=None):
     """The best of these models for this work, or None when none of them will do.
 
@@ -132,6 +200,7 @@ def pick(models, category, needs_vision=False, prefer=None):
         return None
     best_points = max(points for points, _ in scored)
     shortlist = [model for points, model in scored if points >= best_points - 0.25]
+    shortlist.sort(key=_parameters)        # a near-tie goes to the smaller model, which is quicker
     chosen = next((m for m in shortlist if m.get("name") == prefer), shortlist[0])
     log.debug("category %s -> %s from %d candidates", category, chosen.get("name"), len(scored))
     return {"model": chosen["name"], "why": why(chosen, category),
