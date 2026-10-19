@@ -85,20 +85,24 @@ def helper_names():
     return sorted(n for n in (settings.router_model(), settings.get("knowledge.embedding.model")) if n)
 
 
-ENOUGH_VOTES = 3       # accuracy verdicts before they count; fewer is one person's bad day
+ENOUGH_VOTES = 3       # verdicts before they count; fewer is one person's bad day
 
 
 def judged(feedback, category):
-    """What people said about this model's accuracy, as points: from -1.4 to +0.6.
+    """What this person said about the model's answers, as points: from -1.4 to +0.6.
 
-    For this kind of question when there are enough verdicts on it, otherwise over all questions.
-    Centred on 70% accurate, so a model has to be marked right most of the time to gain, and one
-    marked wrong half the time loses more than any small-model bonus is worth.
+    The playground asks "Helpful?"; the "Accurate?" question it asked before 2026-10-19 is gone, but
+    the verdicts given to it still count, as the same kind of vote. For this kind of question when
+    there are enough verdicts on it, otherwise over all questions. Centred on 70% good, so a model
+    has to be marked good most of the time to gain, and one marked bad half the time loses more than
+    any small-model bonus is worth.
     """
     for counts in ((feedback or {}).get(category), (feedback or {}).get("all")):
-        votes = (counts or {}).get("accurate", 0) + (counts or {}).get("inaccurate", 0)
+        counts = counts or {}
+        good = counts.get("helpful", 0) + counts.get("accurate", 0)
+        votes = good + counts.get("unhelpful", 0) + counts.get("inaccurate", 0)
         if votes >= ENOUGH_VOTES:
-            return (counts["accurate"] / votes - 0.7) * 2
+            return (good / votes - 0.7) * 2
     return 0.0
 
 

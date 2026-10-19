@@ -1,8 +1,9 @@
-"""What a person said about their answers: helpful or not, accurate or not, per model and kind of question.
+"""What a person said about their answers: helpful or not, per model and kind of question.
 
-The playground asks under each answer. The verdicts are read back here for Auto (app/tools/chooser.py),
-which leans away from a model this person keeps marking inaccurate for some kind of question and
-towards one they keep marking accurate. Only ever their own: one person's careless or mistaken
+The playground asks "Helpful?" under each answer (it once also asked "Accurate?"; those older verdicts
+are still read). They are read back here for Auto (app/tools/chooser.py), which leans away from a model
+this person keeps marking unhelpful for some kind of question and towards one they keep marking
+helpful. Only ever their own: one person's careless or mistaken
 verdicts would otherwise steer everybody's answers, so each person's votes shape their Auto alone.
 """
 from sqlalchemy import case, func, select
