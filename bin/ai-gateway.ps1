@@ -118,6 +118,24 @@ if ($App -eq "claude-desktop") {
         if (Test-Path $path) { Copy-Item $path "$path.bak-ai-gateway" -Force }
         Write-Utf8 $path ($value | ConvertTo-Json -Depth 20)
     }
+    # The app reads which profile is in use only when it starts: so it is closed and opened again.
+    # Only the desktop app's own processes, known by where they are installed - Claude Code is a
+    # claude.exe too. The restart runs as a process of its own, started through WMI and so outside
+    # this shell's job: typed in a terminal inside the app, this command closes with the app, and the
+    # restart still finishes. False when the app is not installed.
+    function Restart-ClaudeDesktop {
+        $app = Get-StartApps | Where-Object { $_.Name -eq "Claude" } | Select-Object -First 1
+        if (-not $app) { return $false }
+        $mine = '\\WindowsApps\\Claude_|\\AnthropicClaude\\'
+        $find = "Get-Process -Name claude -ErrorAction SilentlyContinue | Where-Object { `$_.Path -match '$mine' }"
+        $script = "$find | Stop-Process -Force -ErrorAction SilentlyContinue; " +
+                  "for (`$i = 0; `$i -lt 60 -and ($find); `$i++) { Start-Sleep -Milliseconds 250 }; " +
+                  "Start-Process 'shell:AppsFolder\$($app.AppID)'"
+        $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($script))
+        $started = Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{
+            CommandLine = "powershell.exe -NoProfile -NonInteractive -WindowStyle Hidden -EncodedCommand $encoded" }
+        return $started.ReturnValue -eq 0
+    }
     $mode = if ($Restore) { "1p" } else { "3p" }
     # Where the app reads which profile is in use: its plain folders, and a Store install's own copy
     $configs = @("$local\Claude-3p\claude_desktop_config.json", "$local\Claude\claude_desktop_config.json") +
@@ -131,7 +149,8 @@ if ($App -eq "claude-desktop") {
         if ($meta.appliedId -eq $id) { $meta.Remove("appliedId") }
         Remove-Item $profilePath -ErrorAction SilentlyContinue
         Write-Json $metaPath $meta
-        Write-Host "The Claude desktop app is set back to your Claude account. Quit it (also from the tray) and open it again."
+        if (Restart-ClaudeDesktop) { Write-Host "The Claude desktop app is set back to your Claude account, and is restarting." }
+        else { Write-Host "The Claude desktop app is set back to your Claude account. Quit it (also from the tray) and open it again." }
         exit 0
     }
     $meta.appliedId = $id; $meta.entries += @{ id = $id; name = $name }
@@ -143,7 +162,8 @@ if ($App -eq "claude-desktop") {
     $p.Remove("inferenceModels")      # the app asks the gateway for its models instead
     Write-Json $profilePath $p
     Write-Json $metaPath $meta
-    Write-Host "The Claude desktop app now uses $Gateway (profile `"AI Gateway`"): quit it (also from the tray) and open it again." -ForegroundColor Cyan
+    if (Restart-ClaudeDesktop) { Write-Host "The Claude desktop app now uses $Gateway (profile `"AI Gateway`"), and is restarting." -ForegroundColor Cyan }
+    else { Write-Host "The Claude desktop app now uses $Gateway (profile `"AI Gateway`"): quit it (also from the tray) and open it again." -ForegroundColor Cyan }
     Write-Host "Its model picker offers Claude's names standing for gateway models; 'ai-gateway launch claude-desktop -Restore' undoes this."
     exit 0
 }
