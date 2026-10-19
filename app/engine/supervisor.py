@@ -100,8 +100,44 @@ class Supervisor:
         return bool(binary) and os.path.isfile(binary) and os.access(binary, os.X_OK)
 
     async def start_reaper(self):
+        await self.stop_strays()
         if self._reaper is None:
             self._reaper = asyncio.create_task(self._reap_idle_loop())
+
+    async def stop_strays(self):
+        """Engines a previous gateway started and never stopped, stopped now.
+
+        A restart that cannot wait for the old gateway to drain kills it (bin/deploy.sh gives it 45 s),
+        and then nothing stops its engines: one kept qwen3.6 on the GPU for eight hours, unknown to
+        the new gateway, which would have started a second copy on the same port and found no room
+        (2026-10-19). An engine is known by its own command line - one of our profiles' names after
+        --alias and its port after --port - so Ollama's runner, also a llama-server, is never touched.
+        """
+        ours = {(p.name, str(p.port)) for p in load_profiles().values()}
+        tracked = {model.process.pid for model in self._running.values() if getattr(model, "process", None)}
+        strays = []
+        for pid in filter(str.isdigit, os.listdir("/proc") if os.path.isdir("/proc") else []):
+            try:
+                with open(f"/proc/{pid}/cmdline", "rb") as f:
+                    args = f.read().decode(errors="replace").split("\0")
+            except OSError:
+                continue
+            if not args or not os.path.basename(args[0]).startswith("llama-server") or int(pid) in tracked:
+                continue
+            named = dict(zip(args, args[1:]))
+            if (named.get("--alias"), named.get("--port")) in ours:
+                strays.append((int(pid), named["--alias"]))
+        for pid, name in strays:
+            log.warning("stopping %s (pid %s): left running by a gateway that did not stop it", name, pid)
+            with contextlib.suppress(ProcessLookupError):
+                os.kill(pid, 15)
+        for _ in range(20):
+            if not any(os.path.exists(f"/proc/{pid}") for pid, _ in strays):
+                return
+            await asyncio.sleep(0.5)
+        for pid, _ in strays:
+            with contextlib.suppress(ProcessLookupError):
+                os.kill(pid, 9)
 
     async def shutdown(self):
         if self._reaper:
