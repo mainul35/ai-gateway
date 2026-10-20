@@ -421,6 +421,12 @@ class Supervisor:
         """The llama.cpp models running now, so a helper task can use one without loading another."""
         return [name for name, m in self._running.items() if m.process.returncode is None]
 
+    def loaded(self, name):
+        """The engine of one model when it is running already; None when it is not. Never starts one:
+        a caller that only peeks or counts must not load a model nobody asked to answer with."""
+        model = self._running.get(name)
+        return model if model is not None and model.process.returncode is None else None
+
     async def ollama_loaded(self):
         """Ollama's models on the GPU now; empty when Ollama cannot be asked."""
         try:
