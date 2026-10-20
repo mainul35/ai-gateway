@@ -120,3 +120,24 @@ models:
     # qwen3.6-256k (with 1536 MiB: picture read in 4.2 s, 51.8 t/s; without it, a picture crashed it)
     extra_args: ["--fit", "on", "--fit-target", "1536", "--cache-ram", "24576", "--rope-scaling", "yarn", "--rope-scale", "4", "--yarn-orig-ctx", "262144",
                  "--override-kv", "qwen35moe.context_length=int:1048576"]
+
+  # Qwen3.8-Flash-Next GSQ-RCO Coder (ISTA-DASLab; 177B MoE, about 3B active, vision), the second coding
+  # model since 2026-10-20: for the bigger tasks, qwen3.6-256k for the quick ones. Only file offered is
+  # IQ1_M (1.9 bits a weight): the model in 29.6 GB, plus a 28.8 GB n-gram table llama.cpp keeps in RAM.
+  # Its architecture (qwen4exp) loads in llama-b11025, the default binary, and not in Ollama's build.
+  # 8 GB of the model does not fit beside a 256K cache on the 3090, so it is slower everywhere:
+  #   1.6k tokens  191 t/s prompt,  32.4 t/s generation
+  #    51k tokens  285 t/s prompt (3 min),   24.1 t/s
+  #   101k tokens  320 t/s prompt (5.3 min), 18.9 t/s; next turn from the prompt cache 0.7 s
+  # but it codes better: 11/12 tasks and 3/3 tool checks (qwen3.6: 11/12, 2/3), and on a real multi-file
+  # task through Claude Code (count_tokens, 8 hidden tests) 8/8 in 29 min and 45 turns, where qwen3.6
+  # got 7/8 in 38 min and 98 turns. A second 3090 would hold all of it and lift the speed.
+  - name: qwen3.8-flash-coder
+    parameter_size: 177B
+    model_path: /home/mainul35/models/qwen3.8-flash-next-coder/Qwen3.8-Flash-Next-GSQ-RCO-IQ1_M-00001-of-00002.gguf
+    mmproj: /home/mainul35/models/qwen3.8-flash-next-coder/mmproj-Qwen3.8-Flash-Next-BF16.gguf
+    ctx_size: 262144
+    # One request at a time, each with the whole window (see qwen3.6-256k)
+    parallel: 1
+    # The image reader's room, as for qwen3.6; conversations set aside resume from RAM
+    extra_args: ["--fit", "on", "--fit-target", "1536", "--cache-ram", "24576"]
