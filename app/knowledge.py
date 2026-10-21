@@ -553,6 +553,23 @@ async def forget(user_id, owner):
     return len(names)
 
 
+async def forget_user(user_id):
+    """Everything indexed for one person, from all their GitHub owners: passages, files and clones.
+    For a person deleted for good - nothing in the index points at users, so nothing else removes it."""
+    async with engine().begin() as connection:
+        names = [row[0] for row in (await connection.execute(text(
+            "SELECT name FROM knowledge_sources WHERE owner_id = :u"), {"u": user_id})).all()]
+        for name in names:
+            for table in ("knowledge_chunks", "knowledge_files"):
+                await connection.execute(text(f"DELETE FROM {table} WHERE source = :s"), {"s": name})
+            await connection.execute(text("DELETE FROM knowledge_sources WHERE name = :s"), {"s": name})
+    checkout_dir = load_config().get("checkout_dir") or os.path.join(PROJECT_ROOT, "knowledge-repos")
+    clones = os.path.realpath(os.path.join(checkout_dir, f"{USER_PREFIX}{user_id}"))
+    if clones.startswith(os.path.realpath(checkout_dir) + os.sep) and os.path.isdir(clones):
+        await asyncio.to_thread(shutil.rmtree, clones, True)
+    return len(names)
+
+
 def start_reindex(only=None):
     """Starts a run in the background. False when one is already going."""
     if _lock.locked():
