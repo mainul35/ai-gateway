@@ -1207,7 +1207,18 @@ async function loadConversations(){
   }catch(e){ target.innerHTML = `<span class="muted">Could not load: ${escapeHtml(errorText(e))}</span>`; }
 }
 
-function resetChat(){
+// The open conversation is in the address (/playground?c=12), so a reload, a bookmark or a copied link
+// opens it again, and Back and Forward move between conversations. window.history by name: `history`
+// on this page is the conversation sent to the model.
+function conversationInUrl(id, how = 'push'){
+  const url = new URL(location.href);
+  if(id) url.searchParams.set('c', id); else url.searchParams.delete('c');
+  if(how === 'none' || url.href === location.href) return;
+  window.history[how === 'replace' ? 'replaceState' : 'pushState']({conversation: id || null}, '', url);
+}
+
+function resetChat(how = 'push'){
+  conversationInUrl(null, how);
   currentId = null;
   // A new conversation is a new task: back to Auto, with no earlier pick to lean towards
   if(modelSelect.querySelector('option[value="auto"]')){
@@ -1276,11 +1287,12 @@ function fillTranscript(messages){
   refreshTurnTools();
 }
 
-async function openConversation(id){
+async function openConversation(id, how = 'push'){
   if(controller) return;
   try{
     const conversation = await api(`/chat/conversations/${id}`);
     currentId = conversation.id;
+    conversationInUrl(conversation.id, how);
     savedSystem = conversation.system_prompt || '';
     systemBox.value = savedSystem;
     // Still Auto: the router keeps picking, and leans towards the model this conversation was
@@ -2873,6 +2885,7 @@ async function ensureConversation(firstMessage, model){
   const created = await api('/chat/conversations', {method: 'POST', headers: JSON_HEADERS,
     body: JSON.stringify({title: firstMessage.slice(0, 80) || 'Images', model, system_prompt: system || null})});
   currentId = created.id;
+  conversationInUrl(created.id, 'replace');      // the new conversation, saved: now it has an address
   savedSystem = system;
   document.getElementById('chatTitle').textContent = created.title;
 }
@@ -3616,7 +3629,26 @@ promptBox.addEventListener('keydown', e => {
   if(e.key === 'Enter' && !e.shiftKey){ e.preventDefault(); send(); }
 });
 
+// The conversation the address names, on arriving and on Back or Forward; one that is gone (deleted,
+// or not this person's) leaves a new conversation and says why
+async function openFromUrl(how){
+  const id = Number(new URL(location.href).searchParams.get('c'));
+  if(!id){ if(currentId) resetChat('none'); return; }
+  if(id === currentId) return;
+  await openConversation(id, how);
+  if(currentId !== id){
+    conversationInUrl(null, 'replace');
+    showError("That conversation is not there any more (it was deleted, or it is someone else's).");
+  }
+}
+window.addEventListener('popstate', () => { if(!controller) openFromUrl('none'); });
+
 fitComposer();
-Promise.all([loadModels(), loadCapabilities()]).then(() => Promise.all([loadConversations(), loadMemory()]));
+// The conversation in the address opens once the models are known, whatever becomes of the list
+// and the memory panel beside it
+Promise.all([loadModels(), loadCapabilities()]).then(() => {
+  openFromUrl('replace');
+  return Promise.all([loadConversations(), loadMemory()]);
+});
 </script>
 {% endblock %}
