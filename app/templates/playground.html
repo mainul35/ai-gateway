@@ -637,6 +637,7 @@ let history = [];        // turns sent to the model: [{role, content, images: [f
 let models = {};         // model id -> {owned_by, capabilities}
 let conversations = [];
 let currentId = null;    // saved conversation being continued, if any
+let currentUid = null;   // ...and the random id its address shows
 let savedSystem = '';    // system prompt stored with the current conversation
 let controller = null;
 let caps = {web_search: false, vision: false, image_generation: false, maps: false,
@@ -1207,7 +1208,8 @@ async function loadConversations(){
   }catch(e){ target.innerHTML = `<span class="muted">Could not load: ${escapeHtml(errorText(e))}</span>`; }
 }
 
-// The open conversation is in the address (/playground?c=12), so a reload, a bookmark or a copied link
+// The open conversation is in the address by its random uid (/playground?c=<uuid>), never its row
+// number, which counts up and gives away how many there are. A reload, a bookmark or a copied link
 // opens it again, and Back and Forward move between conversations. window.history by name: `history`
 // on this page is the conversation sent to the model.
 function conversationInUrl(id, how = 'push'){
@@ -1220,6 +1222,7 @@ function conversationInUrl(id, how = 'push'){
 function resetChat(how = 'push'){
   conversationInUrl(null, how);
   currentId = null;
+  currentUid = null;
   // A new conversation is a new task: back to Auto, with no earlier pick to lean towards
   if(modelSelect.querySelector('option[value="auto"]')){
     modelSelect.value = 'auto';
@@ -1292,7 +1295,8 @@ async function openConversation(id, how = 'push'){
   try{
     const conversation = await api(`/chat/conversations/${id}`);
     currentId = conversation.id;
-    conversationInUrl(conversation.id, how);
+    currentUid = conversation.uid;
+    conversationInUrl(conversation.uid, how);
     savedSystem = conversation.system_prompt || '';
     systemBox.value = savedSystem;
     // Still Auto: the router keeps picking, and leans towards the model this conversation was
@@ -2885,7 +2889,8 @@ async function ensureConversation(firstMessage, model){
   const created = await api('/chat/conversations', {method: 'POST', headers: JSON_HEADERS,
     body: JSON.stringify({title: firstMessage.slice(0, 80) || 'Images', model, system_prompt: system || null})});
   currentId = created.id;
-  conversationInUrl(created.id, 'replace');      // the new conversation, saved: now it has an address
+  currentUid = created.uid;
+  conversationInUrl(created.uid, 'replace');     // the new conversation, saved: now it has an address
   savedSystem = system;
   document.getElementById('chatTitle').textContent = created.title;
 }
@@ -3632,12 +3637,14 @@ promptBox.addEventListener('keydown', e => {
 // The conversation the address names, on arriving and on Back or Forward; one that is gone (deleted,
 // or not this person's) leaves a new conversation and says why
 async function openFromUrl(how){
-  const id = Number(new URL(location.href).searchParams.get('c'));
-  if(!id){ if(currentId) resetChat('none'); return; }
-  if(id === currentId) return;
-  await openConversation(id, how);
-  if(currentId !== id){
-    conversationInUrl(null, 'replace');
+  const key = (new URL(location.href).searchParams.get('c') || '').trim();
+  if(!key){ if(currentId) resetChat('none'); return; }
+  if(key === currentUid) return;
+  const before = currentId;
+  // A link from before addresses had uids (?c=113) still opens, and the address becomes its uid
+  await openConversation(encodeURIComponent(key), /^\d+$/.test(key) ? 'replace' : how);
+  if(currentId === before || (currentUid !== key && String(currentId) !== key)){
+    resetChat('replace');          // not left showing whatever was open before, under an empty address
     showError("That conversation is not there any more (it was deleted, or it is someone else's).");
   }
 }

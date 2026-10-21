@@ -75,7 +75,10 @@ def _require_user(principal):
 
 
 async def _owned(session, conversation_id, user, with_messages=False):
-    query = select(Conversation).where(Conversation.id == conversation_id, Conversation.user_id == user.id)
+    """The person's conversation by its number, or by its uid (the playground's address)."""
+    key = (Conversation.id == int(conversation_id) if str(conversation_id).isdigit()
+           else Conversation.uid == str(conversation_id))
+    query = select(Conversation).where(key, Conversation.user_id == user.id)
     if with_messages:
         query = query.options(selectinload(Conversation.messages))
     conversation = (await session.execute(query)).scalar_one_or_none()
@@ -87,7 +90,7 @@ async def _owned(session, conversation_id, user, with_messages=False):
 
 def _conversation_json(conversation, message_count=None):
     data = {
-        "id": conversation.id, "title": conversation.title, "model": conversation.model,
+        "id": conversation.id, "uid": conversation.uid, "title": conversation.title, "model": conversation.model,
         "system_prompt": conversation.system_prompt,
         "created_at": conversation.created_at.isoformat(), "updated_at": conversation.updated_at.isoformat(),
     }
@@ -136,7 +139,7 @@ async def create_conversation(payload: ConversationIn, principal: Principal = De
 
 
 @router.get("/conversations/{conversation_id}")
-async def get_conversation(conversation_id: int, principal: Principal = Depends(authenticate),
+async def get_conversation(conversation_id: str, principal: Principal = Depends(authenticate),
                            session: AsyncSession = Depends(get_session)):
     user = _require_user(principal)
     conversation = await _owned(session, conversation_id, user, with_messages=True)

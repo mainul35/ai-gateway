@@ -1,4 +1,5 @@
 """Database tables: users, API keys and per-request usage."""
+import uuid
 from datetime import datetime, timezone
 
 from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, LargeBinary, String, Text, UniqueConstraint, func
@@ -87,6 +88,9 @@ class Conversation(Base):
     __tablename__ = "conversations"
 
     id: Mapped[int] = mapped_column(primary_key=True)
+    # What the playground's address shows (/playground?c=<uid>): a random UUID, not the row number,
+    # which counts up and says how many conversations there are. Other tables still point at id.
+    uid: Mapped[str] = mapped_column(String(36), unique=True, index=True, default=lambda: str(uuid.uuid4()))
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
     title: Mapped[str] = mapped_column(String(200), default="New conversation")
     model: Mapped[str | None] = mapped_column(String(256), nullable=True)

@@ -15,6 +15,7 @@ log = logging.getLogger("gateway")
 # Columns added after the first release, as (table, column, type); create_all does not alter
 # existing tables
 _ADDED_COLUMNS = (
+    ("conversations", "uid", "VARCHAR(36)"),
     ("users", "password_hash", "VARCHAR(256)"),
     # Existing accounts keep the access they effectively had before access control existed
     ("users", "model_access", "VARCHAR(16) DEFAULT 'all'"),
@@ -52,6 +53,12 @@ async def ensure_schema():
         for table, column, kind in _ADDED_COLUMNS:
             if (table, column) not in present:
                 await connection.execute(text(f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {column} {kind}"))
+        # Conversations from before they had a uid get one, and uids stay unique
+        if (await connection.execute(text("SELECT 1 FROM conversations WHERE uid IS NULL LIMIT 1"))).first():
+            await connection.execute(text("UPDATE conversations SET uid = gen_random_uuid()::text WHERE uid IS NULL"))
+        if not (await connection.execute(text(
+                "SELECT 1 FROM pg_indexes WHERE schemaname = current_schema() AND indexname = 'conversations_uid'"))).first():
+            await connection.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS conversations_uid ON conversations (uid)"))
         # One running summary per conversation, whatever races to write it
         has_index = (await connection.execute(text(
             "SELECT 1 FROM pg_indexes WHERE schemaname = current_schema() "
