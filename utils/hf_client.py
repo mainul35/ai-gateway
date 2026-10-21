@@ -120,20 +120,59 @@ def get_parameter_count(info, model_sizes):
     return 0, "unknown"
 
 
-def get_gguf_files(info, quant_keys):
-    """Maps each quantization key to the total size of the matching GGUF file(s) in the repo."""
+# A GGUF whose name names none of the standard quantizations - NVIDIA's "...-24GB.gguf", Unsloth's
+# "UD-Q4_K_XL", ISTA's "IQ1_M" - is still a model: it is listed under a key of its own, "file:<name>"
+FILE_KEY = "file:"
+_SHARD = re.compile(r"-\d{5}-of-\d{5}(?=\.gguf$)", re.I)
+_QUANT_LABEL = re.compile(r"(UD-)?([IT]?Q\d(_[A-Z0-9]+)*|BF16|F16|F32|(?:MX|NV)FP4(?:_[A-Z0-9]+)*)(?=[.\-/]|$)", re.I)
+# Helpers published beside a model, not models: speculative-decoding drafts and correctors
+_HELPER = re.compile(r"(^|/)(mtp|draft|lilicorr)[-_]", re.I)
+
+
+def gguf_files_detailed(info, quant_keys):
+    """Each model file (or set of shards) the repo publishes: {key: {"size", "files", "label"}}.
+
+    The standard quantizations are keyed by their QUANTIZATION_LEVELS key, everything else by
+    FILE_KEY + its name without the shard suffix, so each is its own row instead of being ignored: a
+    repository of only such files used to be reported as having no GGUF at all. "label" is the
+    quantization its name shows (UD-Q4_K_XL, IQ1_M), or "" when it shows none. Image readers (mmproj)
+    are not models and are left out.
+    """
     found = {}
     for sibling in info.get("siblings", []):
-        path = (sibling.get("rfilename") or "").lower()
-        if not path.endswith(".gguf") or "mmproj" in path:
+        original = sibling.get("rfilename") or ""
+        path = original.lower()
+        if not path.endswith(".gguf") or "mmproj" in path or _HELPER.search(original):
             continue
-        for key in quant_keys:
-            # The key must not continue with "_" so q4_0 doesn't match Q4_0_4_4 and q6_k doesn't match Q6_K_L
-            if re.search(rf"(^|[^a-z0-9]){re.escape(key)}(?=[.\-/]|$)", path):
-                # Split GGUF files (model-00001-of-00002.gguf) are summed together
-                found[key] = found.get(key, 0) + (sibling.get("size") or 0)
-                break
+        key = next((k for k in quant_keys
+                    # The key must not continue with "_" so q4_0 doesn't match Q4_0_4_4 and q6_k doesn't match Q6_K_L
+                    if re.search(rf"(^|[^a-z0-9]){re.escape(k)}(?=[.\-/]|$)", path)), None)
+        label = ""
+        if key is None:
+            group = _SHARD.sub("", original)
+            key = FILE_KEY + group
+            shown = _QUANT_LABEL.findall(os.path.basename(group)[:-5])
+            label = "".join(shown[-1][:2]).upper() if shown else ""
+        # Split GGUF files (model-00001-of-00002.gguf) are summed together
+        entry = found.setdefault(key, {"size": 0, "files": [], "label": label})
+        entry["size"] += sibling.get("size") or 0
+        entry["files"].append(original)
+    for entry in found.values():
+        entry["files"].sort()
     return found
+
+
+def mmproj_files(info):
+    """The repository's image readers, preferring F16 (what llama.cpp is usually given) to BF16 and F32."""
+    files = [s.get("rfilename") for s in info.get("siblings", [])
+             if (s.get("rfilename") or "").lower().endswith(".gguf") and "mmproj" in (s.get("rfilename") or "").lower()]
+    rank = lambda p: (0 if "f16" in p.lower() and "bf16" not in p.lower() else 1 if "bf16" in p.lower() else 2, p)
+    return sorted(files, key=rank)
+
+
+def get_gguf_files(info, quant_keys):
+    """Maps each quantization key to the total size of the matching GGUF file(s) in the repo."""
+    return {key: entry["size"] for key, entry in gguf_files_detailed(info, quant_keys).items()}
 
 
 def get_model_config(model_id):
