@@ -197,7 +197,10 @@ async function loadUsers(){
             ${u.is_active ? `<button class="btn btn-sm btn-secondary" data-newkey="${escapeHtml(u.name)}">New key</button>` : ''}
             ${u.name === me.name ? '' : u.is_active
                 ? `<button class="btn btn-sm btn-danger" data-active="${escapeHtml(u.name)}" data-value="false">Disable</button>`
-                : `<button class="btn btn-sm" data-active="${escapeHtml(u.name)}" data-value="true">Enable</button>`}`
+                : `<button class="btn btn-sm" data-active="${escapeHtml(u.name)}" data-value="true">Enable</button>`}
+            ${me.role === 'admin' && u.name !== me.name
+                ? `<button class="btn btn-sm btn-danger" data-purge="${escapeHtml(u.name)}"
+                     title="Removes the account and everything that is theirs, for good">Delete permanently</button>` : ''}`
             : '<span class="muted" style="font-size:.82rem">admin only</span>'}</td>
         </tr>`;
       }).join('') + `</table></div>`;
@@ -345,7 +348,22 @@ document.addEventListener('click', async e => {
   const active = e.target.closest('[data-active]');
   const approve = e.target.closest('[data-approve]');
   const reject = e.target.closest('[data-reject]');
+  const purge = e.target.closest('[data-purge]');
   try{
+    if(purge){
+      // Typed, not clicked: nothing about this can be undone
+      const name = purge.dataset.purge;
+      const typed = prompt(`Delete ${name} permanently?\n\nTheir account, API keys, conversations, files, memory, `
+        + `GitHub connection, project notes and shared pages are removed, and what was indexed from their `
+        + `repositories. Usage history stays, without their name. This cannot be undone.\n\nType the name to confirm:`);
+      if(typed === null) return;
+      if(typed.trim() !== name){ showError(`The name did not match; ${name} was not deleted.`); return; }
+      const done = await api(`/admin/users/${encodeURIComponent(name)}/permanently`, {method: 'DELETE'});
+      showCreated(`<strong>${escapeHtml(done.deleted)}</strong> was deleted permanently`
+        + (done.indexed_sources_removed ? `, with ${done.indexed_sources_removed} indexed repositories.` : '.'));
+      loadUsers();
+      return;
+    }
     if(approve){
       await api(`/admin/users/${encodeURIComponent(approve.dataset.approve)}/approve`, {method:'POST'});
       showCreated(`<strong>${escapeHtml(approve.dataset.approve)}</strong> approved, with the public models.`);

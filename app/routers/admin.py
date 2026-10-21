@@ -211,6 +211,37 @@ async def deactivate_user(name: str, principal: Principal = Depends(require_mana
     return await update_user(name, UserPatch(is_active=False), principal, session)
 
 
+@router.delete("/users/{name}/permanently")
+async def delete_user_permanently(name: str, principal: Principal = Depends(require_admin),
+                                  session: AsyncSession = Depends(get_session)):
+    """A person removed for good, not just disabled: their keys, conversations, files, memory, feedback,
+    GitHub connection, project notes and shared pages go with them (the tables cascade), and so does
+    what was indexed from their repositories. Usage records stay, no longer naming anyone, so the
+    accounting adds up; coding tasks and projects stay too. Admins only, never yourself, never the
+    last active admin. Not undoable."""
+    user = await _get_user(session, name)
+    if user is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, f"User {name} not found")
+    if principal.user is not None and principal.user.id == user.id:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "You cannot delete your own account")
+    if user.role == "admin":
+        admins = (await session.execute(select(func.count()).select_from(User).where(
+            User.role == "admin", User.is_active.is_(True), User.id != user.id))).scalar()
+        if not admins:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "That is the last active admin")
+    user_id = user.id
+    try:
+        sources = await knowledge.forget_user(user_id)
+    except Exception as e:                  # an index that cannot be reached does not keep the person
+        log.warning("could not clear the index of user %s: %s", name, e)
+        sources = 0
+    await session.delete(user)
+    await session.commit()
+    log.info("user %s (id %s) deleted permanently by %s; %s indexed source(s) removed", name, user_id,
+             getattr(principal.user, "name", None) or "master-key", sources)
+    return {"deleted": name, "indexed_sources_removed": sources}
+
+
 @router.post("/keys", status_code=status.HTTP_201_CREATED)
 async def create_key(payload: KeyIn, principal: Principal = Depends(require_manager),
                      session: AsyncSession = Depends(get_session)):
