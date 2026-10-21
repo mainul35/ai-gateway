@@ -199,6 +199,24 @@ def test_desktop_model_check_is_answered_while_asleep(setup):
                      headers={"Sec-Fetch-Mode": "cors"}).status_code == 503
 
 
+def test_shared_page_link_wakes_once(setup):
+    base, woken = setup
+    nav = {"Sec-Fetch-Mode": "navigate"}
+    # An address that is not a share link wakes nothing; neither does a script fetching one
+    assert "Wake it up" in httpx.get(f"{base}/p/short", headers=nav).text
+    assert httpx.get(f"{base}/p/" + "a" * 24).status_code == 503
+    time.sleep(0.5)
+    assert not woken()
+    # A person opening a share link gets the waking page, and the machine wakes
+    page = httpx.get(f"{base}/p/" + "a" * 24, headers=nav)
+    assert page.status_code == 503 and "Wake it up" not in page.text
+    for _ in range(40):
+        if woken():
+            break
+        time.sleep(0.5)
+    assert woken()
+
+
 def test_rejected_key_never_wakes_again(setup):
     base, woken = setup
     # Wake with a good key, then let the gateway reject another key once

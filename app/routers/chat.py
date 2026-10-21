@@ -33,6 +33,15 @@ log = logging.getLogger("playground")
 
 router = APIRouter(prefix="/chat", tags=["chat"])
 
+# Asked for a web page: the model is told which picture addresses load (see where it is used)
+WANTS_A_PAGE = re.compile(r"\b(web ?page|web ?site|landing page|home ?page|html|single[- ]page|page design|portfolio site)\b", re.I)
+PAGE_IMAGES = """If you write a web page, every picture in it must load. Never write a photo address from
+memory: made-up Unsplash, Pexels or similar links do not exist and show as broken images. For each
+picture use https://picsum.photos/seed/<one-word-subject>/<width>/<height> (for example
+https://picsum.photos/seed/beach/800/600) and give it an alt text naming what it shows, such as
+alt="Tropical beach at sunset": the page's preview replaces each picture with a real photo of what
+its alt text names. CSS background pictures follow the same rule."""
+
 TITLE_LENGTH = 80
 LIST_LIMIT = 200
 
@@ -671,6 +680,12 @@ async def complete(payload: CompleteIn, principal: Principal = Depends(authentic
         messages.insert(1 if messages and messages[0]["role"] == "system" else 0,
                         {"role": "system", "content": remembered})
     latest_words = next((m.content for m in reversed(payload.messages) if m.role == "user"), "")
+    if WANTS_A_PAGE.search(latest_words or ""):
+        # Models write photo addresses from memory, and they do not exist: three made-up Unsplash
+        # photos in a travel page, all 404 (2026-10-21). Picsum always answers, and the preview swaps
+        # each picture for a real photo of what its alt text names (playground.html, PAGE_FIXER).
+        messages.insert(1 if messages and messages[0]["role"] == "system" else 0,
+                        {"role": "system", "content": PAGE_IMAGES})
     if payload.conversation_id is not None and turn_facts.asks_how_made(latest_words):
         # What made the last few answers - a picture's model, a search, a map - read from what was
         # saved with them, so a question about it is answered from the record rather than guessed.
