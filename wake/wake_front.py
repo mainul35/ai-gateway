@@ -60,6 +60,8 @@ BOOT_TIMEOUT = float(_env("WAKE_BOOT_TIMEOUT", "300"))         # give up waking 
 RESEND_SECONDS = float(_env("WAKE_RESEND_SECONDS", "15"))      # a lost packet is resent
 UNVERIFIED_COOLDOWN = float(_env("WAKE_UNVERIFIED_COOLDOWN", "600"))
 BUTTON_COOLDOWN = float(_env("WAKE_BUTTON_COOLDOWN", "120"))
+SHARE_WAKE_COOLDOWN = float(_env("WAKE_SHARE_COOLDOWN", "300"))
+SHARED_PAGE = re.compile(r"^/p/[A-Za-z0-9_-]{16,64}$")       # app/routers/shares.py
 SESSION_SECRET = _env("WAKE_SESSION_SECRET")                   # = gateway.session.secret
 SESSION_COOKIE = _env("WAKE_SESSION_COOKIE", "gateway_session")
 SESSION_MAX_AGE = 60 * 60 * 24 * 7
@@ -83,6 +85,7 @@ class State:
     rejected: set[str] = set()     # ...and the ones it answered 401 to
     unverified_wakes: dict[str, float] = {}
     last_button = 0.0
+    last_share_wake = -1e9
 
 
 state = State()
@@ -538,6 +541,12 @@ async def gateway(request: Request, rest: str):
     if is_navigation(request):
         if may_wake(kind, h):
             start_waking(f"page {path} ({kind})")
+        elif SHARED_PAGE.match(path) and time.monotonic() - state.last_share_wake >= SHARE_WAKE_COOLDOWN:
+            # A page somebody shared is opened by people with no account - that is the point of it - so
+            # its link may wake the machine, but no more often than this: the token is checked only by
+            # the gateway, once awake, and a guessed address must not keep the machine up
+            state.last_share_wake = time.monotonic()
+            start_waking(f"shared page {path[:12]}...")
         return waking_page(state.waking is not None and not state.waking.done())
 
     if is_background_poll(request, path) or not may_wake(kind, h):
