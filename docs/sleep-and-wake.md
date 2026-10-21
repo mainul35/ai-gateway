@@ -97,10 +97,23 @@ Busy means any one of:
 | a deploy is running (`/tmp/gateway-deploying`, written by `bin/deploy.sh`, honoured for 30 min) | a deploy is never cut off halfway |
 | someone typed in an SSH or console session in the last `SESSION_IDLE_MAX_MIN` | you are working on it. A session left open but untouched does not count |
 | the gateway reports work (`GET /internal/activity`, loopback only) | a request being answered or streamed, a request in the last 90 s, a coding task running or queued, a deploy being watched, a playground job, a llama.cpp request. This catches what GPU numbers miss, like a coding task between two model calls |
-| a process in `BUSY_PROCESSES` is running | package installs (`apt`, `dpkg`), `rsync` |
+| a job registered with `bin/keep-awake`, while its process lives | a job of yours that works quietly; the hold ends with the process, crashed or finished |
+| a process doing real work: `PROC_CPU_MIN` % of a core or `PROC_IO_MB_MIN` MB a minute of disk | a model generating, a download writing to disk, a build, a pipeline, a script started with `nohup` - measured from each process's CPU and disk counters between two checks |
+| a command in a terminal session (SSH, tmux) using any CPU (`PROC_CPU_TTY_MIN` %) | a long command you started, even with nobody typing; an idle shell, an editor or `top` does not count |
+| a download or install tool running 30 s or more (`DOWNLOAD_PROCESSES`, `DOWNLOAD_COMMANDS`, `BUSY_PROCESSES`) | `curl`, `wget`, `git`, `rsync`, `apt`, `ollama pull`, `docker pull`/`build`..., however slow |
 | 1-minute load average above `LOAD_MAX` | something CPU-heavy outside the gateway |
 | GPU above `GPU_UTIL_MAX` % (peak over 5 s) | inference or image generation not started through the gateway |
 | network above `NET_KBPS_MAX` KB/s | a download or transfer |
+
+Services that are never idle - microk8s and its network, container runtimes (`PROC_IGNORE`) - are left
+out of the process measurements; each busy line in the log names the process that kept the machine up.
+
+**Keeping it awake for a job of your own:** most work needs nothing (it uses CPU or disk, or is a
+download or a terminal command), but a job that waits quietly does. Run it as
+`~/model-gateway/bin/keep-awake <command>`, or register one already running with
+`keep-awake --pid <pid>`; `keep-awake --list` shows what holds the machine. Never refresh
+`/tmp/gateway-deploying` for this: nothing clears it, and a loop doing that once kept the machine up
+9.5 hours after its download had finished (2026-10-21).
 
 A coding task **waiting for your approval** is not running, so it lets the machine sleep; approving it
 later wakes it. Time spent asleep is not counted as idle time: after waking, the clock starts again.
