@@ -11,6 +11,8 @@ Runs on proxy-vm, which never sleeps. Cloudflare Tunnel points here instead of a
                       - a page opened in a browser gets a "waking up" page that reloads itself
                     a page's timer polling (dashboard stats, task feeds) is answered 503 and wakes
                     nothing, or an open tab would keep the machine awake forever
+                    a launcher download or a static file is served from the copy kept the last
+                    time the gateway served it, and wakes nothing
 
 Only a caller that looks authorised can wake the machine, otherwise every scanner on the internet
 would keep it awake:
@@ -58,6 +60,8 @@ BOOT_TIMEOUT = float(_env("WAKE_BOOT_TIMEOUT", "300"))         # give up waking 
 RESEND_SECONDS = float(_env("WAKE_RESEND_SECONDS", "15"))      # a lost packet is resent
 UNVERIFIED_COOLDOWN = float(_env("WAKE_UNVERIFIED_COOLDOWN", "600"))
 BUTTON_COOLDOWN = float(_env("WAKE_BUTTON_COOLDOWN", "120"))
+SHARE_WAKE_COOLDOWN = float(_env("WAKE_SHARE_COOLDOWN", "300"))
+SHARED_PAGE = re.compile(r"^/p/[A-Za-z0-9_-]{16,64}$")       # app/routers/shares.py
 SESSION_SECRET = _env("WAKE_SESSION_SECRET")                   # = gateway.session.secret
 SESSION_COOKIE = _env("WAKE_SESSION_COOKIE", "gateway_session")
 SESSION_MAX_AGE = 60 * 60 * 24 * 7
@@ -81,6 +85,7 @@ class State:
     rejected: set[str] = set()     # ...and the ones it answered 401 to
     unverified_wakes: dict[str, float] = {}
     last_button = 0.0
+    last_share_wake = -1e9
 
 
 state = State()
@@ -272,6 +277,93 @@ async def open_upstream(request, path, body, h, plain=False):
     return response
 
 
+# --- files kept for while the gateway sleeps -----------------------------------------------------
+# The launchers people download and the pages' static files need no model and no data, so a sleeping
+# gateway is not woken for them. Each one the gateway serves through here is kept, in memory, and
+# served from that copy while it sleeps. The launchers are also fetched now and then while it is up,
+# so a download works even when nobody fetched it since the last deploy.
+KEPT_PATHS = re.compile(r"^/(downloads/[\w.-]+|static/[\w./-]+)$")
+LAUNCHERS = ("ai-gateway.ps1", "ai-gateway.sh", "claude-gateway.ps1", "claude-gateway.sh")
+KEPT_HEADERS = ("content-type", "content-disposition", "cache-control", "etag", "last-modified")
+KEPT_MAX_FILE = 5 * 1024 * 1024
+KEPT_MAX_TOTAL = 50 * 1024 * 1024
+REFETCH_SECONDS = float(_env("WAKE_REFETCH_SECONDS", "1800"))
+kept: dict[str, tuple[bytes, list]] = {}
+# What a request through Cloudflare says about where it came to, for the launchers' fetch: the
+# gateway writes its public address into each launcher from these
+FORWARDED = ("host", "x-forwarded-proto", "x-forwarded-host", "cf-visitor")
+fetching = {"at": -REFETCH_SECONDS, "headers": None}
+
+
+def keep(path, body, headers):
+    if len(body) > KEPT_MAX_FILE or any(k.lower() == b"set-cookie" for k, _ in headers):
+        return
+    kept.pop(path, None)
+    if sum(len(b) for b, _ in kept.values()) + len(body) > KEPT_MAX_TOTAL:
+        return
+    kept[path] = (body, [(k, v) for k, v in headers if k.decode("latin-1").lower() in KEPT_HEADERS])
+
+
+async def relay_whole(response):
+    """The gateway's answer read whole and passed on: (response, body)."""
+    try:
+        body = await response.aread()
+    finally:
+        await response.aclose()
+    out = Response(body, status_code=response.status_code)
+    out.raw_headers = [(k, v) for k, v in response.headers.raw
+                       if k.decode("latin-1").lower() not in HOP_BY_HOP | {"content-length"}]
+    out.headers["content-length"] = str(len(body))
+    return out, body
+
+
+def served_kept(body, headers, method="GET"):
+    out = Response(b"" if method == "HEAD" else body, status_code=200)
+    out.raw_headers = list(headers) + [(b"content-length", str(len(body)).encode()),
+                                       (b"x-served-by", b"wake-front (gateway asleep)")]
+    return out
+
+
+async def fetch_launchers():
+    for name in LAUNCHERS:
+        try:
+            response = await client.get(f"{UPSTREAM}/downloads/{name}", headers=fetching["headers"], timeout=10.0)
+        except httpx.HTTPError:
+            return
+        if response.status_code == 200:
+            keep(f"/downloads/{name}", response.content, response.headers.raw)
+
+
+# The model list, kept per caller. The Claude desktop app checks /v1/models when it starts and every
+# few minutes after; answered "asleep", it marks the gateway broken ("AI Gateway returned an error")
+# until checked again by hand. A list depends on who asks (the models they may use) and on whether
+# they ask as Claude's apps do (anthropic-version: Claude's names), so it is kept by both, and only
+# ever served to the same caller.
+models_kept: dict[tuple, tuple[bytes, list]] = {}
+MODELS_KEPT_MAX = 500
+
+
+def keep_models(key, body, headers):
+    models_kept.pop(key, None)
+    if len(models_kept) >= MODELS_KEPT_MAX:
+        models_kept.pop(next(iter(models_kept)))
+    models_kept[key] = (body, [(k, v) for k, v in headers if k.decode("latin-1").lower() in KEPT_HEADERS])
+
+
+def models_key(request, h):
+    return (h, bool(request.headers.get("anthropic-version"))) if h else None
+
+
+def maybe_fetch_launchers(request):
+    """Now and then, while the gateway is up, the launchers fetched as a visitor would see them."""
+    if request.headers.get("host"):
+        fetching["headers"] = {k: request.headers[k] for k in FORWARDED if k in request.headers}
+    now = time.monotonic()
+    if fetching["headers"] and now - fetching["at"] >= REFETCH_SECONDS:
+        fetching["at"] = now
+        asyncio.get_running_loop().create_task(fetch_launchers())
+
+
 def relay(response):
     out = StreamingResponse(response.aiter_raw(), status_code=response.status_code,
                             background=BackgroundTask(response.aclose))
@@ -405,9 +497,21 @@ async def gateway(request: Request, rest: str):
     waking = state.waking is not None and not state.waking.done()
     if state.up is False and not waking and time.monotonic() - state.checked_at > DOWN_RECHECK_SECONDS:
         await gateway_is_up()      # switched on by hand, or woken some other way
+    keepable = request.method == "GET" and bool(KEPT_PATHS.match(path))
+    model_list = models_key(request, h) if request.method == "GET" and path == "/v1/models" else None
     if state.up is not False:
         try:
-            return relay(await open_upstream(request, path, body, h))
+            response = await open_upstream(request, path, body, h)
+            maybe_fetch_launchers(request)
+            if not (keepable or model_list):
+                return relay(response)
+            out, whole = await relay_whole(response)
+            if response.status_code == 200:
+                if model_list:
+                    keep_models(model_list, whole, response.headers.raw)
+                else:
+                    keep(path, whole, response.headers.raw)
+            return out
         except (httpx.ConnectError, httpx.ConnectTimeout, httpx.RemoteProtocolError) as e:
             log.info("gateway unreachable (%s): treating it as asleep", type(e).__name__)
             state.up, state.checked_at = False, time.monotonic()
@@ -415,6 +519,18 @@ async def gateway(request: Request, rest: str):
     # --- the gateway is asleep from here on ---
     if path == "/health":
         return asleep("homelabai is asleep")            # the deploy script's check; wakes nothing
+    if request.method in ("GET", "HEAD") and path in kept:
+        return served_kept(*kept[path], request.method)  # a launcher or static file: no need to wake
+    if model_list in models_kept:
+        return served_kept(*models_kept[model_list])    # this caller's list, as last served to them
+    if model_list and kind in ("key", "unverified", "access") and may_wake(kind, h):
+        # An app with a key starting up, with no list kept for it yet: worth waking for, unlike a
+        # browser tab's timer (which comes with a login cookie). An unverified key only once in
+        # WAKE_UNVERIFIED_COOLDOWN, as everywhere else.
+        task = start_waking(f"GET {path} (first model list for this key)")
+        if not await wait_until_up(task, HOLD_SECONDS):
+            return asleep("homelabai is waking up; retry in about 30 seconds", retry_after=30)
+        return await gateway(request, rest)
     if request.method == "OPTIONS":
         # Let a browser's preflight through, so the real request that follows can wake the machine
         return Response(status_code=204, headers={
@@ -425,6 +541,12 @@ async def gateway(request: Request, rest: str):
     if is_navigation(request):
         if may_wake(kind, h):
             start_waking(f"page {path} ({kind})")
+        elif SHARED_PAGE.match(path) and time.monotonic() - state.last_share_wake >= SHARE_WAKE_COOLDOWN:
+            # A page somebody shared is opened by people with no account - that is the point of it - so
+            # its link may wake the machine, but no more often than this: the token is checked only by
+            # the gateway, once awake, and a guessed address must not keep the machine up
+            state.last_share_wake = time.monotonic()
+            start_waking(f"shared page {path[:12]}...")
         return waking_page(state.waking is not None and not state.waking.done())
 
     if is_background_poll(request, path) or not may_wake(kind, h):

@@ -80,7 +80,23 @@ function aboutModel(data){
     <p class="muted" style="margin:.35rem 0 0;font-size:.85rem">${escapeHtml(facts.join(' · '))}</p>
     <p class="muted" style="margin:.2rem 0 0;font-size:.85rem">
       This machine: ${escapeHtml(system.total_vram ? formatBytes(system.total_vram) + ' of VRAM' : 'no GPU')},
-      ${escapeHtml(formatBytes(system.available_ram || 0))} of RAM free.</p>`;
+      ${escapeHtml(formatBytes(system.available_ram || 0))} of RAM free.</p>
+    ${llamacppLine(data)}`;
+}
+
+// Which of this machine's llama.cpp builds can load the model's architecture: some models run there
+// and nowhere else (Ollama's build does not know every architecture its own llama-server is given)
+function llamacppLine(data){
+  const l = data.llamacpp || {};
+  if(!l.architecture || !(l.builds || []).length) return '';
+  const able = l.builds.filter(b => b.supported).map(b => b.name);
+  const not = l.builds.filter(b => b.supported === false).map(b => b.name);
+  return `<p class="muted" style="margin:.2rem 0 0;font-size:.85rem">
+    llama.cpp: architecture <code>${escapeHtml(l.architecture)}</code>
+    ${able.length ? `loads in ${escapeHtml(able.join(' and '))}` : '<strong>no build here can load it</strong> - a newer llama.cpp is needed'}${
+      not.length && able.length ? `, not in ${escapeHtml(not.join(' or '))}` : ''}${
+      l.context_length ? ` &middot; ${Math.round(l.context_length / 1024)}K native context` : ''}${
+      l.image_reader ? ' &middot; reads images' : ''}.</p>`;
 }
 
 const RUN_STYLE = {'GPU': 'on', 'GPU + CPU': 'off', 'CPU': 'err'};
@@ -108,6 +124,7 @@ function fitRows(data){
     return '<p class="note warn" style="margin:0">None of its quantizations fit in this machine\'s memory.</p>';
   }
   const installable = data.is_gguf_repo;
+  const engine = ((data.llamacpp || {}).builds || []).some(b => b.supported);
   const rows = data.recommendations.map(r => `
     <tr${r.recommended ? ' style="background:rgba(99,102,241,.12)"' : ''}>
       <td><strong>${escapeHtml(r.name)}</strong>${r.recommended ? ' <span class="pill on">pick this</span>' : ''}
@@ -116,10 +133,14 @@ function fitRows(data){
       <td>${r.estimated_size_gb} GB${r.size_is_exact ? '' : '<span class="muted"> est.</span>'}</td>
       <td>${r.memory_needed_gb} GB${r.vram_usage_percent ? `<div class="muted" style="font-size:.78rem">${r.vram_usage_percent}% of VRAM</div>` : ''}</td>
       <td>${escapeHtml(r.quality)}</td>
-      ${installable ? `<td style="white-space:nowrap">
-        <button class="btn btn-sm" data-install="pull" data-quant="${escapeHtml(r.quantization)}">Pull</button>
+      ${installable && r.available ? `<td style="white-space:nowrap">
+        ${r.ollama ? `<button class="btn btn-sm" data-install="pull" data-quant="${escapeHtml(r.quantization)}"
+                title="Ollama downloads it as published">Pull</button>
         <button class="btn btn-sm btn-secondary" data-install="create" data-quant="${escapeHtml(r.quantization)}"
-                title="Builds a local model with the context length below">Build</button>
+                title="Builds a local model with the context length below">Build</button>` : ''}
+        ${engine ? `<button class="btn btn-sm btn-secondary" data-install="engine" data-quant="${escapeHtml(r.quantization)}"
+                title="Downloads it into ~/models (resumable) and adds a llama.cpp engine for it">llama.cpp</button>` : ''}
+        ${!r.ollama && !engine ? '<span class="muted" style="font-size:.78rem">neither Ollama nor llama.cpp here</span>' : ''}
       </td>` : '<td></td>'}
     </tr>`).join('');
   const cache = data.kv_cache || {};
@@ -134,7 +155,8 @@ function fitRows(data){
                min="256" max="${cache.max_context_length || 1048576}">
       </label>
       <span class="muted" style="font-size:.82rem">Pull takes the model as published; Build makes a
-        local copy fixed to that context length.</span>
+        local copy fixed to that context length; llama.cpp downloads it into <code>~/models</code>
+        (resuming however often the line drops) and adds an engine for it, as the gateway runs qwen3.6.</span>
     </div>` : ''}`;
 }
 
@@ -228,7 +250,9 @@ function installEnded(finished){
   const heading = document.getElementById('installHeading');
   if(finished && finished.success){
     heading.textContent = 'Installed';
-    document.getElementById('installStage').textContent = `Ready to use as ${finished.model_name}`;
+    document.getElementById('installStage').textContent = installMode === 'engine'
+      ? `Ready to use as ${finished.model_name} (a llama.cpp engine: its settings are in config/engines.local.yaml)`
+      : `Ready to use as ${finished.model_name}`;
     document.getElementById('installBar').style.width = '100%';
     document.getElementById('installPercent').textContent = '100%';
   }else if(finished && finished.cancelled){
@@ -277,9 +301,12 @@ async function rejoinInstall(){
   }
 }
 
+let installMode = null;
+
 async function install(mode, quantization){
   if(installJob){ showError('Something is already installing.'); return; }
   showError('');
+  installMode = mode;
   showInstallCard(found.model_info.id);
   let finished = null;
   try{

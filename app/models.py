@@ -285,3 +285,23 @@ class CodingTaskEvent(Base):
     text: Mapped[str] = mapped_column(Text, default="")
     data: Mapped[str | None] = mapped_column(Text, nullable=True)   # JSON
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class SharedPage(Base):
+    """A web page a model wrote in the playground, shared by link (GET /p/<token>, no sign-in).
+
+    Kept as the person shared it, with the preview's image repairs in it. Served only with a
+    sandbox Content-Security-Policy, so it runs as an opaque origin: a page a model wrote can never
+    act as the gateway or reach anyone's session (app/routers/shares.py). Sharing the same page again
+    gives back the same link; deleting the row ends the link.
+    """
+    __tablename__ = "shared_pages"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    token: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    title: Mapped[str] = mapped_column(String(200), default="")
+    html: Mapped[str] = mapped_column(Text)
+    sha256: Mapped[str] = mapped_column(String(64), index=True)
+    views: Mapped[int] = mapped_column(Integer, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)

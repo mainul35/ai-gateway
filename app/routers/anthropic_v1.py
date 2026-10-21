@@ -15,6 +15,7 @@ own models anyway, knowing that.
 """
 import asyncio
 import json
+import logging
 import time
 
 import httpx
@@ -30,8 +31,11 @@ from app.tools import auto_model
 router = APIRouter(prefix="/v1", tags=["anthropic"])
 hello = APIRouter(tags=["anthropic"])
 
+log = logging.getLogger("gateway")
+
 HEARTBEAT_SECONDS = 15
 ENDPOINT = "anthropic_messages"
+TOKENIZE_TIMEOUT = 20   # counting is a courtesy, not the request's purpose; then fall back to the estimate
 _DONE = object()
 # Backends found not to have /v1/messages, by name; translated from then on
 _no_messages: set[str] = set()
@@ -126,6 +130,71 @@ def _passes_through(backend):
     return backend.kind in ("ollama", "llamacpp") and backend.name not in _no_messages
 
 
+def _counted_text(body):
+    """The text of a request as the model would read it, and its pictures counted aside.
+
+    Everything llama-server's /tokenize is given: the system prompt, every message's text, tool calls'
+    names and inputs, tool results' contents, and the tool definitions as their JSON. A picture or
+    document block is not text - its data never reaches the tokenizer - but still costs the window
+    context_fit.IMAGE_TOKENS, the figure the estimate gives it.
+    """
+    parts, media = [], 0
+
+    def content(value):
+        nonlocal media
+        if isinstance(value, str):
+            parts.append(value)
+            return
+        for block in value or ():
+            if not isinstance(block, dict):
+                continue
+            kind = block.get("type")
+            if kind in context_fit.MESSAGES.picture_kinds:
+                media += 1
+            elif kind == "text":
+                parts.append(block.get("text") or "")
+            elif kind == "tool_use":
+                parts.append(block.get("name") or "")
+                parts.append(json.dumps(block.get("input") or {}))
+            elif kind == "tool_result":
+                content(block.get("content"))
+            elif kind in ("thinking", "redacted_thinking"):
+                parts.append(block.get("thinking") or block.get("data") or "")
+
+    content(body.get("system"))
+    for message in body.get("messages") or ():
+        if isinstance(message, dict):
+            content(message.get("content"))
+    parts.append(json.dumps(body.get("tools") or []))
+    return "\n".join(part for part in parts if part), media
+
+
+async def _real_count(body, backend, model):
+    """The model's own token count of a request, or None when no engine can give one.
+
+    Only a llama.cpp engine that is already running answers it, and only its /tokenize is asked of it:
+    counting never starts, loads or swaps a model. No engine, not llama.cpp, a failed or timed-out
+    call - None, and the caller keeps the estimate.
+    """
+    if backend.kind != "llamacpp":
+        return None
+    running = supervisor.loaded(model)
+    if running is None:
+        return None
+    text, media = _counted_text(body)
+    try:
+        with supervisor.track_request(running):      # not reaped mid-count
+            async with httpx.AsyncClient(timeout=httpx.Timeout(TOKENIZE_TIMEOUT, connect=5)) as client:
+                response = await client.post(f"{running.base_url}/tokenize", json={"content": text},
+                                             headers=backend.headers())
+        if not response.is_success:
+            return None
+        return len(response.json()["tokens"]) + media * context_fit.IMAGE_TOKENS
+    except (httpx.HTTPError, ValueError, KeyError) as e:
+        log.warning("count_tokens: %s /tokenize failed: %s", model, e)
+        return None
+
+
 def _upstream_headers(request, backend):
     headers = {"content-type": "application/json"}
     # Passed on as they came: the docs ask gateways not to filter these
@@ -152,9 +221,25 @@ async def count_tokens(request: Request, principal: Principal = Depends(authenti
         body = await request.json()
     except ValueError:
         return _error(400, "Request body must be JSON", "invalid_request_error")
-    # The same count the gateway fits conversations by (app/context_fit.py), on the high side: a client
-    # that compacts by it does so before the model's window, not after
-    return {"input_tokens": context_fit.estimate(body)}
+
+    # Resolved exactly as /v1/messages does, so the count comes from the model the request would run on
+    asked = await claude_desktop.route(body.get("model"))
+    model = await _model_named(asked)
+    if not model:
+        return _error(400, "Field 'model' is required", "invalid_request_error")
+    if not access.can_use_model(principal, model):
+        return _error(403, f"You do not have access to model '{model}'", "permission_error")
+    backend = await backends.resolve(model)
+    if backend is None:
+        return _error(404, f"Model '{model}' is not available on this gateway"
+                           + (f" (asked for as '{asked}')" if asked != model else ""), "not_found_error")
+
+    # Claude Code compacts a conversation by this count, so an overestimate of 3 characters a token
+    # makes it compact far too early on our models: ask the running engine the real number when one
+    # can answer cheaply, and keep the estimate (app/context_fit.py, on the high side, a client
+    # compacts by it before the model's window, not after) when it cannot.
+    counted = await _real_count(body, backend, model)
+    return {"input_tokens": counted if counted is not None else context_fit.estimate(body)}
 
 
 @router.post("/messages")

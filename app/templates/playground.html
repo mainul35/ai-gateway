@@ -307,6 +307,14 @@ a.paper{color:var(--text);text-decoration:none}
 .preview .bar-top{display:flex;align-items:center;gap:.5rem;padding:.35rem .6rem;background:var(--card);
                   border-bottom:1px solid var(--border);font-size:.78rem;color:var(--muted)}
 .preview .bar-top .spacer{flex:1}
+.preview.folded iframe,.preview.folded .share-row{display:none}
+.preview:fullscreen,.preview.maxed{display:flex;flex-direction:column;border-radius:0}
+.preview.maxed{position:fixed;inset:0;z-index:1000;margin:0}
+.preview:fullscreen iframe,.preview.maxed iframe{flex:1;height:auto!important}
+.preview .share-row{display:flex;flex-wrap:wrap;align-items:center;gap:.5rem;padding:.4rem .6rem;
+                    border-bottom:1px solid var(--border);font-size:.8rem;color:var(--muted)}
+.preview .share-row[hidden]{display:none}
+.preview .share-row input{flex:1;min-width:14rem;font-size:.8rem;padding:.25rem .4rem}
 .code-tools{display:flex;gap:.4rem;justify-content:flex-end;margin:-.4rem 0 .6rem}
 .code-tools button{background:none;border:1px solid var(--border);color:var(--muted);border-radius:6px;
                    font-size:.72rem;padding:.12rem .45rem;cursor:pointer;font-family:inherit}
@@ -1977,20 +1985,83 @@ function fileName(text, extension){
 // A whole HTML document, rather than a snippet of markup
 const WHOLE_PAGE = /<!doctype html|<html[\s>]/i;
 
+// Runs inside a page the model wrote (injected by withPictures), never in this page. Models write
+// photo addresses from memory and they do not exist - a travel page's three Unsplash photos were all
+// 404 (2026-10-21) - so each picture is given a real photo of what its alt text names, from Openverse
+// (openly licensed photos, served to any origin), with Picsum, which always answers, behind it. A
+// picture that fails to load gets the same; Picsum placeholders the model was told to use are swapped
+// for photos as soon as the page is up. Background pictures that fail fall back the same way.
+function pageFixer(){
+  try{
+    const tried = new WeakSet(), lookups = {};
+    let count = 0;
+    const words = text => (text || '').replace(/[^\p{L}\p{N} ]+/gu, ' ').trim().split(/\s+/).filter(Boolean).slice(0, 4).join(' ');
+    const picsum = (text, n) => 'https://picsum.photos/seed/'
+      + encodeURIComponent((words(text) || 'photo-' + n).toLowerCase().replace(/\s+/g, '-')) + '/800/600';
+    // Openverse takes 15-25 s to answer (measured 2026-10-21): given up on after 30
+    const photos = query => lookups[query] || (lookups[query] =
+      fetch('https://api.openverse.org/v1/images/?page_size=12&mature=false&q=' + encodeURIComponent(query),
+            {signal: AbortSignal.timeout ? AbortSignal.timeout(30000) : undefined})
+        .then(r => r.ok ? r.json() : {}).then(d => (d.results || []).filter(x => x.url)).catch(() => []));
+    // A broken picture shows a Picsum photo at once, and the photo of its subject when the search answers
+    async function give(img, broken){
+      tried.add(img);
+      const n = count++, query = words(img.alt || img.title || img.getAttribute('aria-label'));
+      img.dataset.fallback = picsum(query, n);
+      if(broken) img.src = img.dataset.fallback;
+      const found = query ? await photos(query) : [];
+      if(found.length) img.src = found[n % found.length].url;
+    }
+    window.addEventListener('error', e => {
+      const img = e.target;
+      if(!img || img.tagName !== 'IMG') return;
+      if(!tried.has(img)) give(img, true);
+      else if(img.dataset.fallback && img.src !== img.dataset.fallback) img.src = img.dataset.fallback;
+    }, true);
+    document.addEventListener('DOMContentLoaded', () => {
+      document.querySelectorAll('img[src*="picsum.photos"]').forEach(img => { if(!tried.has(img)) give(img, false); });
+      let n = 0;
+      document.querySelectorAll('body *').forEach(el => {
+        if(n > 200) return;
+        const match = /url\(["']?([^"')]+)["']?\)/.exec(getComputedStyle(el).backgroundImage || '');
+        if(!match) return;
+        n++;
+        const probe = new Image();
+        probe.onerror = () => {
+          const label = el.getAttribute('aria-label') || (el.querySelector('h1,h2,h3') || el).textContent;
+          el.style.backgroundImage = `url("${picsum(label, n)}")`;
+        };
+        probe.src = match[1];
+      });
+    });
+  }catch(e){ /* a page that cannot be repaired is shown as it is */ }
+}
+
+function withPictures(html){
+  const script = `<script>(${pageFixer.toString()})();<\/script>`;
+  const head = /<head[^>]*>/i.exec(html);
+  return head ? html.slice(0, head.index + head[0].length) + script + html.slice(head.index + head[0].length)
+              : script + html;
+}
+
 // Shown in a sandboxed frame with no same-origin permission, so the page inside gets an opaque
 // origin of its own: it can run its own scripts, and it cannot read this page, its cookies, its
 // storage, or the conversation. A model writes this HTML, so it is treated as something a stranger
 // wrote - which it is.
 function preview(block, code){
-  const html = code.textContent;
+  const html = withPictures(code.textContent);
   const frame = document.createElement('div');
   frame.className = 'preview';
   frame.innerHTML = `
     <div class="bar-top">
       <span data-preview-state>Rendering&hellip;</span><span class="spacer"></span>
+      <button class="linkish" data-full>Full screen</button>
+      <button class="linkish" data-fold>Minimise</button>
+      <button class="linkish" data-share>Share</button>
       <button class="linkish" data-open-tab>Open in a tab</button>
       <button class="linkish" data-show-code>Show the code</button>
     </div>
+    <div class="share-row" hidden></div>
     <iframe sandbox="allow-scripts allow-modals" referrerpolicy="no-referrer" title="preview"></iframe>`;
   const inner = frame.querySelector('iframe');
   // Kept dark and labelled until it has painted, so that a frame which is slow, or which fails,
@@ -2024,6 +2095,70 @@ function preview(block, code){
     block.hidden = !showCode;
     inner.hidden = showCode;
     toggle.textContent = showCode ? 'Show the page' : 'Show the code';
+  });
+
+  // The whole screen for the page, and back with Esc or the same button. Where the browser refuses
+  // real full screen (an embedded view, a phone), the page fills the window instead.
+  const full = frame.querySelector('[data-full]');
+  const label = () => {
+    full.textContent = document.fullscreenElement === frame || frame.classList.contains('maxed')
+      ? 'Exit full screen' : 'Full screen';
+  };
+  const unmax = e => { if(e.key === 'Escape'){ frame.classList.remove('maxed'); label(); } };
+  // The window first, at once; real full screen on top where the browser grants it (it may refuse,
+  // or never answer at all, as an embedded view does)
+  full.addEventListener('click', () => {
+    if(frame.classList.contains('maxed') || document.fullscreenElement === frame){
+      frame.classList.remove('maxed');
+      if(document.fullscreenElement === frame) document.exitFullscreen().catch(() => {});
+      return label();
+    }
+    frame.classList.add('maxed');
+    label();
+    if(frame.requestFullscreen) frame.requestFullscreen().catch(() => {});
+  });
+  // Leaving real full screen with Esc leaves the filled window too
+  document.addEventListener('fullscreenchange', () => {
+    if(!document.fullscreenElement) frame.classList.remove('maxed');
+  });
+  document.addEventListener('fullscreenchange', label);
+  document.addEventListener('keydown', unmax);
+
+  // Folded down to its bar, out of the way of the conversation, and opened again
+  const fold = frame.querySelector('[data-fold]');
+  fold.addEventListener('click', () => {
+    const folding = fold.textContent === 'Minimise';
+    frame.classList.toggle('folded', folding);
+    fold.textContent = folding ? 'Expand' : 'Minimise';
+  });
+
+  // A link anyone can open without signing in (app/routers/shares.py serves it sandboxed). The page
+  // is shared as shown, pictures repaired; sharing it again gives the same link.
+  const shareRow = frame.querySelector('.share-row');
+  frame.querySelector('[data-share]').addEventListener('click', async () => {
+    shareRow.hidden = false;
+    shareRow.textContent = 'Making a link…';
+    const title = (/<title[^>]*>([^<]*)<\/title>/i.exec(html) || [])[1] || 'Shared page';
+    try{
+      const made = await api('/chat/shares', {method: 'POST', headers: {'Content-Type': 'application/json'},
+                                               body: JSON.stringify({html, title: title.trim().slice(0, 200)})});
+      const link = location.origin + made.path;
+      shareRow.innerHTML = `<span>Anyone with this link can open the page:</span>
+        <input readonly value="${escapeHtml(link)}">
+        <button class="linkish" data-copy-link>Copy</button>
+        <a class="linkish" href="${escapeHtml(link)}" target="_blank" rel="noopener noreferrer">Open</a>
+        <button class="linkish" data-stop>Stop sharing</button>`;
+      shareRow.querySelector('input').addEventListener('focus', e => e.target.select());
+      shareRow.querySelector('[data-copy-link]').addEventListener('click', e => {
+        navigator.clipboard.writeText(link).then(() => { e.target.textContent = 'Copied'; });
+      });
+      shareRow.querySelector('[data-stop]').addEventListener('click', async () => {
+        try{
+          await api(`/chat/shares/${encodeURIComponent(made.token)}`, {method: 'DELETE'});
+          shareRow.textContent = 'No longer shared: the link now says the page is not there.';
+        }catch(e){ shareRow.textContent = `Could not stop sharing: ${e.message}`; }
+      });
+    }catch(e){ shareRow.textContent = `Could not share it: ${e.message}`; }
   });
   block.parentNode.insertBefore(frame, block);
   block.hidden = true;

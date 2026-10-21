@@ -1,0 +1,53 @@
+#!/usr/bin/env bash
+# keep-awake: keeps homelabai from suspending exactly as long as a job runs, and not a second longer.
+#
+#   keep-awake <command> [args...]    run the command; awake until it ends (its exit code is passed on)
+#   keep-awake --pid <pid> [name]     awake until a process already running ends (a nohup job)
+#   keep-awake --list                 what holds the machine awake now
+#
+# Each job is a file in /tmp/keep-awake holding its process id. The idle check
+# (ops/idle-shutdown/idle-shutdown.sh) counts a file only while that process is alive and deletes it
+# once the process is gone, so a finished, killed or crashed job can never keep the machine up.
+# Most work needs none of this - a process using CPU or disk, a download or a command in a terminal
+# keeps it awake by itself - but a job that waits quietly (a slow transfer, a script between polls) does.
+set -euo pipefail
+
+DIR=${KEEP_AWAKE_DIR:-/tmp/keep-awake}
+mkdir -p "$DIR" 2>/dev/null || true
+
+usage() { sed -n '2,13p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
+
+case "${1:-}" in
+    ""|-h|--help)
+        usage ;;
+    --list)
+        found=0
+        for held in "$DIR"/*; do
+            [ -f "$held" ] || continue
+            pid=$(tr -dc 0-9 < "$held")
+            if [ -n "$pid" ] && [ -d "/proc/$pid" ]; then
+                echo "$(basename "$held"): pid $pid, $(ps -o etime= -p "$pid" | tr -d ' ') so far"
+                found=1
+            fi
+        done
+        [ "$found" = 1 ] || echo "nothing registered"
+        ;;
+    --pid)
+        pid=${2:?--pid needs a process id}
+        [ -d "/proc/$pid" ] || { echo "keep-awake: no process $pid" >&2; exit 1; }
+        name=${3:-$(ps -o comm= -p "$pid")}
+        echo "$pid" > "$DIR/$name-$pid"
+        echo "homelabai stays awake while $name (pid $pid) runs"
+        ;;
+    *)
+        "$@" &
+        pid=$!
+        held="$DIR/$(basename "$1")-$pid"
+        echo "$pid" > "$held"
+        trap 'kill "$pid" 2>/dev/null' INT TERM
+        status=0
+        wait "$pid" || status=$?
+        rm -f "$held"
+        exit "$status"
+        ;;
+esac

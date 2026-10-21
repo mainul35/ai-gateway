@@ -12,6 +12,7 @@
 #   ai-gateway launch claude-desktop            # the Claude desktop app (macOS), all its sessions
 #   ai-gateway launch claude-desktop --restore  # back to your Claude account
 #   ai-gateway models                                                             # what you may use
+#   ai-gateway update                                                             # the newest launcher
 #
 # Options: --model (default: the app's usual one here), --context (tokens; default: what the gateway
 # says the model has), --gateway (default below), --config (set the app up, do not start it).
@@ -32,7 +33,7 @@ set -euo pipefail
 GATEWAY=${AI_GATEWAY_URL:-https://ai-gateway.mainul35.dev}
 APPS="claude claude-desktop opencode qwen codex hermes openclaw"
 
-usage() { sed -n '2,25p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
+usage() { sed -n '2,26p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
 die() { echo "ai-gateway: $*" >&2; exit 1; }
 
 # --- arguments ---------------------------------------------------------------------------------
@@ -57,9 +58,9 @@ done
 GATEWAY=${GATEWAY%/}
 case "$command" in
     launch) ;;
-    models) ;;
+    models|update) ;;
     ""|-h|--help|help) usage ;;
-    *) die "unknown command '$command' (launch, models)" ;;
+    *) die "unknown command '$command' (launch, models, update)" ;;
 esac
 if [ "$command" = launch ]; then
     case " $APPS " in *" $APP "*) ;; *) die "launch which app? one of: $APPS" ;; esac
@@ -85,9 +86,38 @@ read_key() {
 }
 KEY=$(read_key)
 
+# The gateway's machine sleeps when idle. A request with the key wakes it, and is answered 503
+# ("waking") until it is up, a minute or two: asked again until then. Into the file $2.
+gateway_get() {
+    local try=1 code
+    while :; do
+        code=$(curl -sS -m 60 -o "$2" -w '%{http_code}' -H "Authorization: Bearer $KEY" "$GATEWAY$1") || code=000
+        [ "$code" = 200 ] && return 0
+        [ "$code" = 503 ] && [ $try -lt 15 ] || return 1
+        [ $try = 1 ] && echo "The gateway's machine is waking up; this takes a minute or two..." >&2
+        try=$((try + 1)); sleep 10
+    done
+}
+
+# --- a newer launcher, from the gateway ----------------------------------------------------------
+# Downloaded with the key, so a sleeping gateway wakes for it; checked before it replaces this file
+if [ "$command" = update ]; then
+    target=${BASH_SOURCE[0]}; new="$target.new"
+    gateway_get /downloads/ai-gateway.sh "$new" || { rm -f "$new"; die "could not download the launcher from $GATEWAY"; }
+    if ! bash -n "$new" 2>/dev/null || ! grep -q '^read_key()' "$new"; then
+        rm -f "$new"; die "what the gateway sent is not the launcher; yours is unchanged"
+    fi
+    if cmp -s "$new" "$target"; then rm -f "$new"; echo "ai-gateway is up to date."; exit 0; fi
+    cat "$new" > "$target" && rm -f "$new"      # written into, so the file keeps its permissions
+    echo "ai-gateway is updated ($target)."
+    exit 0
+fi
+
 # --- what the gateway says about the models ------------------------------------------------------
-models_json=$(curl -fsS -m 30 -H "Authorization: Bearer $KEY" "$GATEWAY/v1/models") \
-    || die "the gateway at $GATEWAY did not answer with a model list (is the key right?)"
+models_file=$(mktemp)
+gateway_get /v1/models "$models_file" \
+    || { rm -f "$models_file"; die "the gateway at $GATEWAY did not answer with a model list (is the key right?)"; }
+models_json=$(cat "$models_file"); rm -f "$models_file"
 # One line, no spaces around the JSON punctuation, so the matching below never depends on formatting
 models_json=$(printf '%s' "$models_json" | tr -d '\n\r' | sed 's/"[[:space:]]*:[[:space:]]*/":/g; s/,[[:space:]]*"/,"/g; s/,[[:space:]]*{/,{/g')
 
@@ -151,10 +181,19 @@ if [ "$APP" = claude-desktop ]; then
         }
         write(metaPath, meta);
         "ok";' >/dev/null || die "could not write the Claude desktop app's settings"
+    # The app reads which profile is in use only when it starts: so it is quit and opened again, by a
+    # process of its own - typed in a terminal inside the app, this command closes with the app
+    then=" Quit it and open it again."
+    if open -Ra Claude 2>/dev/null; then
+        nohup sh -c 'osascript -e "quit app \"Claude\"" >/dev/null 2>&1
+                     i=0; while pgrep -xq Claude && [ $i -lt 60 ]; do sleep 0.25; i=$((i + 1)); done
+                     open -a Claude' >/dev/null 2>&1 &
+        then=" It is restarting."
+    fi
     if [ "$RESTORE" = 1 ]; then
-        echo "The Claude desktop app is set back to your Claude account. Quit it and open it again."
+        echo "The Claude desktop app is set back to your Claude account.$then"
     else
-        echo "The Claude desktop app now uses $GATEWAY (profile \"AI Gateway\"): quit it and open it again."
+        echo "The Claude desktop app now uses $GATEWAY (profile \"AI Gateway\").$then"
         echo "Its model picker offers Claude's names standing for gateway models; ai-gateway launch claude-desktop --restore undoes this."
     fi
     exit 0

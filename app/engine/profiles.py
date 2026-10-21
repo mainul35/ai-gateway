@@ -91,28 +91,52 @@ def engines_file():
     return path if os.path.isabs(path) else os.path.join(PROJECT_ROOT, path)
 
 
-def load_profiles():
-    """Reads the profile file on each call, so edits apply without a restart."""
+def local_engines_file():
+    """Profiles this machine added for itself - models downloaded for llama.cpp from the Models page.
+    Kept apart from engines.yaml, which comes from git and is replaced by every deploy."""
+    return os.path.join(os.path.dirname(engines_file()), "engines.local.yaml")
+
+
+def _read(path):
     try:
-        with open(engines_file(), encoding="utf-8") as f:
-            data = yaml.safe_load(f) or {}
+        with open(path, encoding="utf-8") as f:
+            return yaml.safe_load(f) or {}
     except (OSError, yaml.YAMLError):
         return {}
 
+
+def load_profiles():
+    """Reads the profile files on each call, so edits apply without a restart: engines.yaml, then the
+    local ones, which take ports after it and the same defaults."""
+    data = _read(engines_file())
+    if not data:
+        return {}
     defaults = data.get("defaults") or {}
     profiles = {}
     next_port = int(data.get("start_port", 8090))
-    for entry in data.get("models") or []:
+    known = {f for f in EngineProfile.__dataclass_fields__ if f not in ("name", "model_path", "port")}
+    for entry in (data.get("models") or []) + (_read(local_engines_file()).get("models") or []):
         merged = {**defaults, **entry}
         name = merged.get("name")
         model_path = merged.get("model_path")
-        if not name or not model_path:
+        if not name or not model_path or name in profiles:
             continue
         port = int(merged.get("port") or next_port)
         next_port = max(next_port, port + 1)
-        known = {f for f in EngineProfile.__dataclass_fields__ if f not in ("name", "model_path", "port")}
         profiles[name] = EngineProfile(
             name=name, model_path=model_path, port=port,
             **{k: v for k, v in merged.items() if k in known},
         )
     return profiles
+
+
+def add_local_profile(entry):
+    """Adds (or replaces, by name) a profile in engines.local.yaml."""
+    path = local_engines_file()
+    data = _read(path)
+    models = [m for m in (data.get("models") or []) if m.get("name") != entry["name"]] + [entry]
+    with open(path + ".new", "w", encoding="utf-8") as f:
+        f.write("# Engine profiles this machine added for itself (Models page: Download for llama.cpp).\n"
+                "# Read after config/engines.yaml, with its defaults; deploys leave this file alone.\n")
+        yaml.safe_dump({"models": models}, f, sort_keys=False, allow_unicode=True, width=120)
+    os.replace(path + ".new", path)

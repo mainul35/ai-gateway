@@ -1,0 +1,178 @@
+{% extends "base.html" %}
+{% block title %}Connect an AI Agent &middot; Model Gateway{% endblock %}
+{% block content %}
+<style>
+.connect-page details{border-top:1px solid var(--border);padding:.7rem 0}
+.connect-page summary{cursor:pointer;font-size:1rem}
+.connect-page ol,.connect-page ul{margin:.6rem 0 .4rem;padding-left:1.3rem;line-height:1.6}
+.connect-page .apps .app-row{border-top:1px solid var(--border);padding:.55rem 0}
+.connect-page .apps pre{margin:.35rem 0 0}
+.connect-page .step{margin:.8rem 0 .3rem}
+.connect-page .step-n{display:inline-flex;align-items:center;justify-content:center;width:1.3rem;height:1.3rem;border-radius:50%;background:var(--primary);color:#fff;font-size:.75rem;font-weight:700;margin-right:.4rem;vertical-align:.1em}
+.connect-page .app-title{margin-bottom:.2rem}
+</style>
+<h1>Connect an AI Agent</h1>
+<p class="sub">Coding agents can use this gateway's models with one of your API keys. Use a model that can call tools (the model list on the Dashboard marks them <em>tools</em>; the picker below offers only those), and tell the agent its real context size.</p>
+
+<div class="card">
+  <h2>Applications &mdash; start an agent on one of these models</h2>
+  <label style="margin:.7rem 0 .2rem;width:auto;display:inline-block"><span class="lbl">Your computer</span>
+    <select id="appOs" style="width:auto">
+      <option value="unix">macOS / Linux</option><option value="windows">Windows</option></select></label>
+
+  <p class="step"><span class="step-n">1</span><strong>Install the launcher</strong> &mdash; once per computer. It
+    asks for your API key the first time (or reads <code>AI_GATEWAY_API_KEY</code>) and can keep it for next time.</p>
+  <pre><code class="copyable" id="appInstall"></code></pre>
+  <p class="muted" id="appInstallNote" style="font-size:.85rem;margin-top:.3rem"></p>
+
+  <p class="step"><span class="step-n">2</span><strong>Start an app</strong> on a model, in the folder you want
+    to work in.</p>
+  <label style="margin:0 0 .4rem;display:block"><span class="lbl">Model</span>
+    <select id="appModel"></select></label>
+  <div id="appList" class="apps"></div>
+
+  <p class="muted" style="font-size:.85rem;margin-top:.6rem">Each app is pointed at this gateway in a place of its own, so
+    the way you use it otherwise is untouched: Claude Code in <code>~/.claude-gateway</code>, Hermes in
+    <code>~/.hermes-gateway</code>; OpenCode, Qwen Code and Codex for that one run only. OpenClaw keeps one
+    config, so an <code>ai-gateway</code> provider is added to it (backed up first). An app that is not
+    installed is not installed for you: the launcher prints its install command. Add
+    <code>--config</code> to set an app up without starting it, and anything after <code>--</code> goes
+    to the app as typed. <code>ai-gateway models</code> lists what you may use.
+    Claude Code, OpenCode and Codex also get <em>Your projects</em> as tools: they can search and read
+    your other repositories and share notes across workspaces. Qwen Code does not yet.</p>
+</div>
+
+<div class="card" style="margin-top:1.5rem">
+  <h2>Claude Code</h2>
+  <p class="muted">Settings for one project, any system.</p>
+  <p>Put this in the project's <code>.claude/settings.local.json</code> (never the committed
+    <code>settings.json</code>: it holds your key), with your key in place of the placeholder:</p>
+  <pre><code class="copyable" id="settingsJson"></code></pre>
+  <p class="note warn" style="font-size:.88rem;margin-top:.5rem">
+    <strong>Does not affect Claude Desktop.</strong> This config is for the <strong>Claude Code CLI</strong>
+    only (the terminal agent in your terminal). It does <em>not</em> affect the Claude desktop app (the GUI
+    app you open from your Applications folder). They are two completely separate applications.
+  </p>
+  <p class="muted" style="font-size:.85rem">If you are signed in to claude.ai, run
+    <code>/status</code> in Claude Code: it should name the auth token, not your claude.ai account. If
+    it names the account, use the launcher, or start Claude Code with
+    <code>CLAUDE_CONFIG_DIR</code> pointing at a separate folder.</p>
+</div>
+
+<div class="card" style="margin-top:1.5rem">
+  <h2>Claude Desktop</h2>
+  <p class="muted">The GUI application (macOS / Windows).</p>
+  <p class="note warn" style="margin:.6rem 0 .4rem;font-size:.88rem;padding:.5rem .6rem;border-left:3px solid var(--warning);background:rgba(245,158,11,.08);border-radius:4px">
+    <strong>Completely separate from Claude Code CLI.</strong> The config above (in
+    <code>.claude/settings.local.json</code>) has <em>zero effect</em> on this app. Claude Desktop is
+    Claude.ai's own GUI &mdash; it uses its own config files, not Claude Code's.
+  </p>
+  <p><strong>Automatically:</strong> the launcher command above, <code>ai-gateway launch claude-desktop</code>,
+    does everything below for you: it writes an <em>AI Gateway</em> profile into the app's settings and
+    makes it the one in use, then closes the app (also from the tray) and opens it again. Its model
+    picker then lists this gateway's models under Claude's names - Sonnet, Opus, Haiku and Fable all run
+    <code>qwen3.6-256k</code>, which also reads images, so a picture never swaps models mid-task, and
+    Sonnet 4.6 runs <code>auto</code>. The second command, with <code>-Restore</code>
+    (<code>--restore</code> on macOS and Linux), puts the app back on your Claude account.</p>
+  <p><strong>By hand</strong>, if you would rather click: <strong>Help &rarr; Troubleshooting &rarr; Enable
+    Developer Mode</strong>, then <strong>Developer &rarr; Configure Third-Party Inference</strong>:</p>
+  <ul>
+    <li>Inference provider: <strong>Gateway</strong></li>
+    <li>Gateway base URL: <code class="origin"></code></li>
+    <li>Gateway API key: one of your keys, auth scheme <strong>Bearer</strong></li>
+    <li>Models: leave the list empty and the app asks the gateway, as above. To add one of your own, the
+      app accepts only names that look like Claude's: write <code>claude-</code> and the gateway model's
+      name with <code>:</code> and <code>.</code> as <code>-</code>, and put the real name in
+      <em>Display name</em> - <code>claude-gemma4-31b</code> is <code>gemma4:31b</code>,
+      <code>claude-qwen3-next-80b</code> is <code>qwen3-next-80b</code> (text only).</li>
+    <li><em>Offer 1M-context variant</em>: turn it on for projects bigger than 256K tokens. The 1M
+      choice runs <code>qwen3.6-1m</code>, which is slower at every length, so use it only when the
+      conversation needs it.</li>
+  </ul>
+  <p class="muted" style="font-size:.85rem">Either way, this moves <em>every</em> desktop session &mdash;
+    Code and Cowork &mdash; to this gateway, and Remote Control and cloud sessions are unavailable while
+    it is on. To keep the desktop app on Claude, use Claude Code through the launcher instead.</p>
+</div>
+
+<div class="card" style="margin-top:1.5rem">
+  <h2>Other agents</h2>
+  <p class="muted">Qwen Code, Cline, Continue, Open WebUI, OpenAI SDKs.</p>
+  <ul>
+    <li>OpenAI-compatible base URL: <code class="origin-v1"></code></li>
+    <li>Anthropic-compatible base URL (Messages API): <code class="origin"></code></li>
+    <li>API key: one of your keys above</li>
+    <li>Model <code>auto</code> lets the gateway choose for each request, as the playground's Auto does:
+      the smallest model for everyday questions, a coding, reasoning or vision model when the
+      request needs one. In the Claude desktop app, name it <code>claude-auto</code>. Coding agents do
+      better on one fixed model that can call tools.</li>
+  </ul>
+  <p class="muted" style="font-size:.82rem;margin-top:.5rem">Anthropic does not support Claude Code on
+    models other than Claude; it works here, and open models are weaker at its tool use than Claude.</p>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+document.querySelectorAll('.agent-guide .origin').forEach(e => e.textContent = location.origin);
+document.querySelectorAll('.agent-guide .origin-v1').forEach(e => e.textContent = location.origin + '/v1');
+const APPS = [
+  {id: 'claude', name: 'Claude Code', about: "Anthropic's coding agent, on the Messages API"},
+  {id: 'claude-desktop', name: 'Claude desktop app', about: 'every desktop session, macOS and Windows; either command closes the app and opens it again', noModel: true,
+   undo: {label: 'Back to your Claude account', windows: '-Restore', unix: '--restore'}},
+  {id: 'opencode', name: 'OpenCode', about: 'Open-source coding agent'},
+  {id: 'codex', name: 'Codex CLI', about: "OpenAI's coding agent, on the Responses API"},
+  {id: 'qwen', name: 'Qwen Code', about: "Qwen's coding agent"},
+  {id: 'hermes', name: 'Hermes Agent', about: 'Self-improving agent by Nous Research'},
+  {id: 'openclaw', name: 'OpenClaw', about: 'Personal assistant across chat apps'},
+];
+const appOs = document.getElementById('appOs');
+appOs.value = /win/i.test(navigator.userAgentData?.platform || navigator.platform || '') ? 'windows' : 'unix';
+function renderApps(){
+  const model = document.getElementById('appModel').value || 'qwen3.6-256k';
+  const windows = appOs.value === 'windows';
+  const flag = windows ? '-Model' : '--model';
+  document.getElementById('appList').innerHTML = APPS.map(a => `
+    <div class="app-row"><div><strong>${a.name}</strong> <span class="muted">&middot; ${a.about}</span>
+      <pre><code class="copyable">ai-gateway launch ${a.id}${a.noModel ? '' : ` ${flag} ${escapeHtml(model)}`}</code></pre>
+      ${a.undo ? `<div class="muted" style="margin-top:.4rem">${a.undo.label}</div>
+      <pre><code class="copyable">ai-gateway launch ${a.id} ${windows ? a.undo.windows : a.undo.unix}</code></pre>` : ''}</div></div>`).join('');
+  document.getElementById('appInstallNote').textContent = windows
+    ? 'ai-gateway then works in this window straight away, and in every PowerShell window opened after.'
+    : 'If ai-gateway is then not found, ~/.local/bin is not on your PATH: add export PATH="$HOME/.local/bin:$PATH" to ~/.bashrc (or ~/.zshrc) and open a new terminal.';
+  document.getElementById('appInstall').textContent = windows
+    ? [`New-Item -ItemType Directory -Force "$HOME\\.ai-gateway\\bin" | Out-Null`,
+       `Invoke-RestMethod ${location.origin}/downloads/ai-gateway.ps1 -OutFile "$HOME\\.ai-gateway\\bin\\ai-gateway.ps1"`,
+       `# on your PATH for good (only if it is not there yet), and in this window right away:`,
+       `$dir = "$HOME\\.ai-gateway\\bin"; $p = [Environment]::GetEnvironmentVariable("Path", "User")`,
+       `if (($p -split ';') -notcontains $dir) { [Environment]::SetEnvironmentVariable("Path", "$p;$dir", "User") }`,
+       `if (($env:Path -split ';') -notcontains $dir) { $env:Path += ";$dir" }`].join('\n')
+    : [`mkdir -p ~/.local/bin`,
+       `curl -fsSL ${location.origin}/downloads/ai-gateway.sh -o ~/.local/bin/ai-gateway`,
+       `chmod +x ~/.local/bin/ai-gateway`].join('\n');
+}
+appOs.addEventListener('change', renderApps);
+document.getElementById('appModel').addEventListener('change', renderApps);
+async function loadAppModels(){
+  try{
+    const models = (await api('/v1/models')).data.filter(m => m.id !== 'auto' && (m.capabilities || []).includes('tools'));
+    const select = document.getElementById('appModel');
+    select.innerHTML = models.map(m => `<option value="${escapeHtml(m.id)}">${escapeHtml(m.id)}${
+      m.context_length ? ` &middot; ${m.context_length >= 1048576 ? Math.round(m.context_length / 1048576) + 'M' : Math.round(m.context_length / 1024) + 'K'} context` : ''}</option>`).join('')
+      || '<option value="">no model that can call tools is available to you</option>';
+    const preferred = models.find(m => m.id === 'qwen3.6-256k') || models[0];
+    if(preferred) select.value = preferred.id;
+  }catch(e){ /* the list stays empty; the rest of the page does not depend on it */ }
+  renderApps();
+}
+setTimeout(loadAppModels, 0);
+document.getElementById('settingsJson').textContent = JSON.stringify({env: {
+  ANTHROPIC_BASE_URL: location.origin,
+  ANTHROPIC_AUTH_TOKEN: '<your gateway API key>',
+  ANTHROPIC_MODEL: 'qwen3.6-256k',
+  ANTHROPIC_DEFAULT_HAIKU_MODEL: 'qwen3.6-256k',
+  CLAUDE_CODE_MAX_CONTEXT_TOKENS: '131072',
+  CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS: '1',
+  CLAUDE_CODE_DISABLE_THINKING: '1',
+}}, null, 2);
+</script>
+{% endblock %}

@@ -9,6 +9,7 @@ The arithmetic is unchanged from the model checker it came from. It is an estima
 sizes are exact when the repository publishes GGUF files and calculated from the parameter count when
 it does not.
 """
+import os
 import re
 
 # "bpw" is the approximate effective bits per weight of each llama.cpp GGUF quantization
@@ -44,14 +45,37 @@ MEMORY_HEADROOM = 0.9            # leaves some memory for the operating system a
 RUN_MODE_ORDER = {"GPU": 0, "GPU + CPU": 1, "CPU": 2}
 
 
-def recommend(system_info, param_count, kv_cache_bytes, gguf_files):
-    """Every quantization that would run here, best first, with one marked as the one to take."""
+def _quality(bpw):
+    return ("Low" if bpw < 3.4 else "Low-Medium" if bpw < 4.3 else "Medium" if bpw < 5.3
+            else "High" if bpw < 7.5 else "Very High")
+
+
+def published_level(key, entry, param_count):
+    """A QUANTIZATION_LEVELS-like entry for a file that names no standard quantization (UD-Q4_K_XL,
+    IQ1_M, or nothing at all), its bits per weight worked out from its size."""
+    bpw = entry["size"] * 8 / param_count if param_count else 0
+    name = entry.get("label") or "As published"
+    return {"name": name, "bits": round(bpw) if bpw else 0, "bpw": round(bpw, 2),
+            "quality": _quality(bpw) if bpw else "Unknown", "speed": "",
+            "description": os.path.basename(key.split(":", 1)[1])
+                           + (f" ({len(entry['files'])} parts)" if len(entry["files"]) > 1 else "")}
+
+
+def recommend(system_info, param_count, kv_cache_bytes, gguf_files, gguf_details=None):
+    """Every quantization that would run here, best first, with one marked as the one to take.
+
+    gguf_details (utils.hf_client.gguf_files_detailed) adds the files that name no standard
+    quantization, each as its own row."""
     total_vram = system_info["total_vram"]
     gpu_budget = total_vram * MEMORY_HEADROOM
     ram_budget = system_info["available_ram"] * MEMORY_HEADROOM
     recommendations = []
+    levels = dict(QUANTIZATION_LEVELS)
+    for key, entry in (gguf_details or {}).items():
+        if key not in levels:
+            levels[key] = published_level(key, entry, param_count)
 
-    for quant_name, quant_info in QUANTIZATION_LEVELS.items():
+    for quant_name, quant_info in levels.items():
         # For a GGUF repository only the quantizations actually published can be pulled
         if gguf_files and quant_name not in gguf_files:
             continue
@@ -78,6 +102,8 @@ def recommend(system_info, param_count, kv_cache_bytes, gguf_files):
             "memory_needed_gb": round(memory_needed / (1024 ** 3), 2),
             "vram_usage_percent": round(memory_needed / total_vram * 100, 1) if total_vram else None,
             "run_mode": run_mode, "available": quant_name in gguf_files, "recommended": False,
+            # Ollama loads a model only from a single file; one in parts runs in llama.cpp alone
+            "parts": len(((gguf_details or {}).get(quant_name) or {}).get("files") or []) or 1,
         })
 
     if recommendations:
@@ -118,17 +144,36 @@ def kv_cache(model_architecture):
     }
 
 
-def hf_reference(model_id, quantization):
+def tag_of(quantization, label=""):
+    """The tag Ollama knows a quantization by: the standard name, the label a file's name shows
+    (UD-Q4_K_XL), or none - a repository's only model, which Hugging Face serves as :latest."""
+    if quantization in QUANTIZATION_LEVELS:
+        return QUANTIZATION_LEVELS[quantization]["name"]
+    return label or ""
+
+
+def hf_reference(model_id, quantization, label=""):
     """What Ollama calls this quantization of this repository."""
-    return f"hf.co/{model_id}:{QUANTIZATION_LEVELS[quantization]['name']}"
+    tag = tag_of(quantization, label)
+    return f"hf.co/{model_id}:{tag}" if tag else f"hf.co/{model_id}"
 
 
-def ollama_name(model_id, quantization):
-    """A short local name for a model created from a repository, e.g. "mistral-7b:q4_k_m"."""
+def short_name(model_id):
     repo = model_id.split("/")[-1].lower()
     repo = re.sub(r"[-_.]gguf$", "", repo)
-    repo = re.sub(r"[^a-z0-9_.-]", "-", repo).strip("-.")
-    return f"{repo or 'model'}:{quantization}"
+    return re.sub(r"[^a-z0-9_.-]", "-", repo).strip("-.") or "model"
+
+
+def ollama_name(model_id, quantization, label=""):
+    """A short local name for a model created from a repository, e.g. "mistral-7b:q4_k_m"."""
+    tag = (tag_of(quantization, label) or "latest").lower()
+    return f"{short_name(model_id)}:{tag}"
+
+
+def engine_name(model_id, quantization, label=""):
+    """The name a llama.cpp engine profile gets, e.g. "glm-4.7-flash-ud-q4_k_xl"."""
+    tag = tag_of(quantization, label).lower()
+    return f"{short_name(model_id)}-{tag}" if tag else short_name(model_id)
 
 
 def clamp_context(value):
