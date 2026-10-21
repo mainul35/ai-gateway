@@ -19,7 +19,8 @@ from app.tools import jobs, mcp_client, mcp_config
 from app.auth import Principal, generate_key, hash_key, require_admin, require_manager
 from app import config_writer
 from app.engine.supervisor import supervisor
-from utils import hf_client
+from app.engine import builds as engine_builds, profiles as engine_profiles
+from utils import hf_client, hf_download
 from utils.ollama_client import (StreamCancellation, check_ollama_status,
                                  stream_create_model, stream_pull_model)
 from utils.system_info import get_system_info, measure_hardware
@@ -507,9 +508,11 @@ class ModelCheck(BaseModel):
 
 class ModelInstall(BaseModel):
     model_id: str = Field(min_length=1, max_length=256)
-    quantization: str = Field(min_length=1, max_length=32)
-    # "pull" takes the published GGUF as it is; "create" builds a local model with a context length
-    mode: str = Field(default="pull", pattern="^(pull|create)$")
+    # A QUANTIZATION_LEVELS key, or utils.hf_client.FILE_KEY + a file's name for one that names none
+    quantization: str = Field(min_length=1, max_length=300)
+    # "pull" takes the published GGUF as it is; "create" builds a local model with a context length;
+    # "engine" downloads it for llama.cpp and adds an engine profile (config/engines.local.yaml)
+    mode: str = Field(default="pull", pattern="^(pull|create|engine)$")
     context_length: int = fitting.DEFAULT_CONTEXT_LENGTH
 
 
@@ -524,10 +527,20 @@ def _look_up(model_id):
         return {"error": info["error"], "status_code": info.get("status_code", 503)}
     sizes = hf_client.get_model_sizes(info)
     param_count, param_source = hf_client.get_parameter_count(info, sizes)
-    gguf_files = hf_client.get_gguf_files(info, fitting.QUANTIZATION_LEVELS)
+    details = hf_client.gguf_files_detailed(info, fitting.QUANTIZATION_LEVELS)
+    gguf_files = {key: entry["size"] for key, entry in details.items()}
     architecture = hf_client.get_model_architecture(info["id"], info)
     cache = fitting.kv_cache(architecture)
     system = get_system_info()
+    recommendations = fitting.recommend(system, param_count, cache["kv_cache_recommended_bytes"],
+                                        gguf_files, details)
+    for row in recommendations:
+        entry = details.get(row["quantization"]) or {}
+        # Ollama pulls one file by its tag; a model in parts, or an unnamed file beside others, it cannot
+        row["ollama"] = bool(entry) and row["parts"] == 1 and bool(
+            row["quantization"] in fitting.QUANTIZATION_LEVELS or entry.get("label") or len(details) == 1)
+        row["label"] = entry.get("label", "")
+    gguf = info.get("gguf") or {}
     return {
         "model_info": hf_client.public_model_info(info),
         # Ollama installs GGUF and nothing else, so a repository without it needs somewhere to go
@@ -538,8 +551,13 @@ def _look_up(model_id):
         "model_architecture": architecture,
         "system_info": system,
         "kv_cache": cache,
-        "recommendations": fitting.recommend(system, param_count,
-                                             cache["kv_cache_recommended_bytes"], gguf_files),
+        "recommendations": recommendations,
+        # Which of this machine's llama.cpp builds can load it (app/engine/builds.py), for the
+        # "Download for llama.cpp" route: some models run there and not in Ollama
+        "llamacpp": {"architecture": gguf.get("architecture") or "",
+                     "context_length": gguf.get("context_length") or 0,
+                     "image_reader": bool(hf_client.mmproj_files(info)),
+                     "builds": engine_builds.supports(gguf.get("architecture")) if gguf_files else []},
     }
 
 
@@ -613,12 +631,71 @@ def _list_install(entry, listed):
         os.replace(INSTALLS_FILE + ".new", INSTALLS_FILE)
 
 
+ENGINE_CONTEXT_MAX = 65536    # a new engine's window; a model known to afford more gets it in its profile
+
+
+def _engine_rows(entry, name, cancellation):
+    """A model downloaded for llama.cpp, then made an engine: progress events, as an Ollama pull's.
+
+    Blocking, run off the event loop like the pulls. The repository is read again here rather than
+    trusted from the page, so a download resumed after a restart works from the same facts.
+    """
+    model_id, key = entry["model_id"], entry["quantization"]
+    yield {"status": "reading the repository"}
+    info = hf_client.get_model_info(model_id)
+    if "error" in info:
+        yield {"error": info["error"]}
+        return
+    files = (hf_client.gguf_files_detailed(info, fitting.QUANTIZATION_LEVELS).get(key) or {}).get("files")
+    if not files:
+        yield {"error": f"{model_id} publishes no file for {key}"}
+        return
+    gguf = info.get("gguf") or {}
+    architecture = gguf.get("architecture") or ""
+    yield {"status": f"asking this machine's llama.cpp builds about {architecture or 'its architecture'}"}
+    able = [b for b in engine_builds.supports(architecture) if b["supported"]]
+    if not able:
+        yield {"error": f"None of this machine's llama.cpp builds can load {architecture or 'this model'}: "
+                        f"a newer llama.cpp is needed"}
+        return
+    build = next((b for b in able if b["default"]), able[0])
+    readers = hf_client.mmproj_files(info)[:1]
+    sizes = {s.get("rfilename"): s.get("size") or 0 for s in info.get("siblings", [])}
+    folder = os.path.join(os.path.expanduser("~"), "models", fitting.short_name(model_id))
+    for event in hf_download.download(model_id, files + readers, folder, cancellation, sizes):
+        if event.get("status") == "success":
+            break
+        yield event
+        if "error" in event or event.get("cancelled"):
+            return
+    profile = {"name": name, "model_path": os.path.join(folder, os.path.basename(files[0])),
+               "ctx_size": min(int(gguf.get("context_length") or ENGINE_CONTEXT_MAX), ENGINE_CONTEXT_MAX),
+               "parallel": 1,
+               # --fit places what fits on the GPU and the rest in RAM; room kept for an image reader
+               "extra_args": ["--fit", "on"] + (["--fit-target", "1536"] if readers else []) + ["--cache-ram", "24576"]}
+    if gguf.get("total"):
+        profile["parameter_size"] = f"{round(gguf['total'] / 1e9)}B"
+    if readers:
+        profile["mmproj"] = os.path.join(folder, os.path.basename(readers[0]))
+    if not build["default"]:
+        profile["binary"] = build["binary"]
+        profile["env"] = next((b["env"] for b in engine_builds.builds() if b["binary"] == build["binary"]), {})
+    engine_profiles.add_local_profile(profile)
+    log.info("engine %s added (%s, %s)", name, build["name"], profile["model_path"])
+    yield {"status": "success"}
+
+
 def _start_install(entry, who):
-    """Starts a pull or build as a job of its own, listed until it ends: (job, model name)."""
+    """Starts a pull, build or llama.cpp download as a job of its own, listed until it ends:
+    (job, model name)."""
     cancellation = StreamCancellation()
-    source = fitting.hf_reference(entry["model_id"], entry["quantization"])
-    if entry["mode"] == "create":
-        name = fitting.ollama_name(entry["model_id"], entry["quantization"])
+    label = entry.get("label", "")
+    source = fitting.hf_reference(entry["model_id"], entry["quantization"], label)
+    if entry["mode"] == "engine":
+        name = fitting.engine_name(entry["model_id"], entry["quantization"], label)
+        rows = _engine_rows(entry, name, cancellation)
+    elif entry["mode"] == "create":
+        name = fitting.ollama_name(entry["model_id"], entry["quantization"], label)
         rows = stream_create_model(name, source, {"num_ctx": fitting.clamp_context(entry["context_length"])},
                                    cancellation)
     else:
@@ -667,11 +744,24 @@ async def install_model(payload: ModelInstall, principal: Principal = Depends(re
     model_id = payload.model_id.strip()
     if not hf_client.is_valid_model_id(model_id):
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "That is not a Hugging Face repository name")
+    label = ""
     if payload.quantization not in fitting.QUANTIZATION_LEVELS:
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, f"Unknown quantization {payload.quantization}")
+        if not payload.quantization.startswith(hf_client.FILE_KEY):
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, f"Unknown quantization {payload.quantization}")
+        # A file that names no standard quantization: Ollama finds it by the label its name shows
+        info = await asyncio.to_thread(hf_client.get_model_info, model_id)
+        details = hf_client.gguf_files_detailed(info, fitting.QUANTIZATION_LEVELS) if "error" not in info else {}
+        entry = details.get(payload.quantization)
+        if not entry:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, f"{model_id} publishes no such file")
+        label = entry["label"]
+        if payload.mode != "engine" and (len(entry["files"]) > 1 or not (label or len(details) == 1)):
+            raise HTTPException(status.HTTP_400_BAD_REQUEST,
+                                "Ollama cannot pull that one (a model in parts, or a file it cannot name); "
+                                "download it for llama.cpp instead")
     owner = principal.user.id if principal.user else 0
     job, name = _start_install({"model_id": model_id, "quantization": payload.quantization, "mode": payload.mode,
-                                "context_length": payload.context_length, "owner": owner},
+                                "context_length": payload.context_length, "owner": owner, "label": label},
                                getattr(principal.user, "name", None) or "master-key")
 
     async def stream():
