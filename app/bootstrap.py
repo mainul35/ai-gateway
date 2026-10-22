@@ -20,6 +20,7 @@ _ADDED_COLUMNS = (
     # Existing accounts keep the access they effectively had before access control existed
     ("users", "model_access", "VARCHAR(16) DEFAULT 'all'"),
     ("users", "allowed_models", "TEXT"),
+    ("users", "desktop_model", "VARCHAR(256)"),
     # What the auth server sent at the last sign-in, kept so permissions can be built on it
     ("users", "claims", "TEXT"),
     ("users", "claims_seen_at", "TIMESTAMPTZ"),

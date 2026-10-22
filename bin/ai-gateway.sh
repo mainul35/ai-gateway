@@ -99,6 +99,20 @@ gateway_get() {
     done
 }
 
+# A JSON body $2 sent to the gateway's $1 with PUT, waiting out a wake the same way; the answer on stdout
+gateway_put() {
+    local try=1 code out
+    out=$(mktemp)
+    while :; do
+        code=$(curl -sS -m 60 -o "$out" -w '%{http_code}' -X PUT -H "Authorization: Bearer $KEY"                -H 'Content-Type: application/json' --data "$2" "$GATEWAY$1") || code=000
+        [ "$code" = 503 ] && [ $try -lt 15 ] || break
+        [ $try = 1 ] && echo "The gateway's machine is waking up; this takes a minute or two..." >&2
+        try=$((try + 1)); sleep 10
+    done
+    cat "$out"; rm -f "$out"
+    [ "$code" = 200 ]
+}
+
 # --- a newer launcher, from the gateway ----------------------------------------------------------
 # Downloaded with the key, so a sleeping gateway wakes for it; checked before it replaces this file
 if [ "$command" = update ]; then
@@ -181,6 +195,18 @@ if [ "$APP" = claude-desktop ]; then
         }
         write(metaPath, meta);
         "ok";' >/dev/null || die "could not write the Claude desktop app's settings"
+    # The app picks among Claude's names, and the gateway decides what each stands for: given --model,
+    # every name the app starts on stands for it, for this key's person (app/claude_desktop.py).
+    # Without one - and on --restore - that choice is cleared and the names go back to the defaults.
+    chosen=null; chose=0
+    if [ "$RESTORE" != 1 ] && [ -n "$MODEL" ]; then
+        chosen=${MODEL//\\/\\\\}; chosen="\"${chosen//\"/\\\"}\""
+    fi
+    if answer=$(gateway_put /auth/desktop-model "{\"model\":$chosen}"); then
+        [ "$chosen" != null ] && chose=1
+    else
+        echo "The gateway did not take the model choice: $answer" >&2
+    fi
     # The app reads which profile is in use only when it starts: so it is quit and opened again, by a
     # process of its own - typed in a terminal inside the app, this command closes with the app
     then=" Quit it and open it again."
@@ -194,7 +220,9 @@ if [ "$APP" = claude-desktop ]; then
         echo "The Claude desktop app is set back to your Claude account.$then"
     else
         echo "The Claude desktop app now uses $GATEWAY (profile \"AI Gateway\").$then"
-        echo "Its model picker offers Claude's names standing for gateway models; ai-gateway launch claude-desktop --restore undoes this."
+        if [ "$chose" = 1 ]; then echo "It runs $MODEL, whichever of Claude's names it shows (Sonnet 4.6 stays Auto)."
+        else echo "Its model picker offers Claude's names standing for gateway models; --model <name> makes them all one model."; fi
+        echo "ai-gateway launch claude-desktop --restore undoes this."
     fi
     exit 0
 fi

@@ -49,16 +49,26 @@ def _defaults(models):
             "claude-fable-5": coder, "claude-sonnet-4-6": "auto"}
 
 
-async def mapping():
-    """{Claude ID: gateway model or "auto"} for every ID."""
+async def mapping(principal=None):
+    """{Claude ID: gateway model or "auto"} for every ID, for this person.
+
+    Someone who chose a model for their desktop app (`ai-gateway launch claude-desktop -Model x`,
+    users.desktop_model) gets it behind every one of Claude's main names - Sonnet, Opus, Haiku, Fable -
+    so whichever the app asks for, and its background calls too, run the model they chose and the
+    GPU never swaps mid-task. Sonnet 4.6 stays Auto. Their choice is used only while it is still a
+    model there is and they may use."""
     models = await backends.available_models()
-    return {**_defaults(models), **_configured()}
+    found = {**_defaults(models), **_configured()}
+    chosen = getattr(getattr(principal, "user", None), "desktop_model", None)
+    if chosen and (chosen == "auto" or (chosen in models and access.can_use_model(principal, chosen))):
+        found.update({slot["id"]: chosen for slot in SLOTS if slot["default"]})
+    return found
 
 
 LONG_SUFFIX = "[1m]"
 
 
-async def route(asked):
+async def route(asked, principal=None):
     """The gateway model (or "auto") a request naming one of the IDs means; anything else unchanged.
 
     A name ending in [1m] is how the desktop app's "Offer 1M-context variant" and Claude Code's
@@ -72,16 +82,17 @@ async def route(asked):
             return long
         name = name[:-len(LONG_SUFFIX)]
     if name in SLOT_IDS:
-        return (await mapping())[name]
+        return (await mapping(principal))[name]
     return asked
 
 
 async def catalogue(principal):
     """GET /v1/models as the desktop app wants it: Claude's IDs, the gateway models' names."""
     models = await backends.available_models()
+    chosen = await mapping(principal)
     data = []
     for slot in SLOTS:
-        target = (await mapping())[slot["id"]]
+        target = chosen[slot["id"]]
         if target == "auto":
             shown, context = "auto - the gateway picks per request", 131072
         elif target in models and access.can_use_model(principal, target):

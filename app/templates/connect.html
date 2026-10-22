@@ -117,7 +117,7 @@ document.querySelectorAll('.agent-guide .origin').forEach(e => e.textContent = l
 document.querySelectorAll('.agent-guide .origin-v1').forEach(e => e.textContent = location.origin + '/v1');
 const APPS = [
   {id: 'claude', name: 'Claude Code', about: "Anthropic's coding agent, on the Messages API"},
-  {id: 'claude-desktop', name: 'Claude desktop app', about: 'every desktop session, macOS and Windows; either command closes the app and opens it again', noModel: true,
+  {id: 'claude-desktop', name: 'Claude desktop app', about: 'every desktop session, macOS and Windows; it runs the model chosen above under every Claude name; either command closes the app and opens it again',
    undo: {label: 'Back to your Claude account', windows: '-Restore', unix: '--restore'}},
   {id: 'opencode', name: 'OpenCode', about: 'Open-source coding agent'},
   {id: 'codex', name: 'Codex CLI', about: "OpenAI's coding agent, on the Responses API"},
