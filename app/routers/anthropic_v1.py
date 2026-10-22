@@ -223,7 +223,7 @@ async def count_tokens(request: Request, principal: Principal = Depends(authenti
         return _error(400, "Request body must be JSON", "invalid_request_error")
 
     # Resolved exactly as /v1/messages does, so the count comes from the model the request would run on
-    asked = await claude_desktop.route(body.get("model"))
+    asked = await claude_desktop.route(body.get("model"), principal)
     model = await _model_named(asked)
     if not model:
         return _error(400, "Field 'model' is required", "invalid_request_error")
@@ -258,7 +258,7 @@ async def messages(request: Request, principal: Principal = Depends(authenticate
         return _error(400, str(e), "invalid_request_error")
 
     # One of Claude's own IDs, as the desktop app sends them, means the gateway model it stands for
-    asked = await claude_desktop.route(body.get("model"))
+    asked = await claude_desktop.route(body.get("model"), principal)
     # "auto", or "claude-auto" from the desktop app, which takes only Claude-looking names: the
     # gateway picks the model for this request, as the playground's Auto does
     if auto_model.is_auto(asked) or (asked or "").strip().lower() == "claude-auto":

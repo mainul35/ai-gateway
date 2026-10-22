@@ -11,8 +11,8 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from app import access, settings, sso
-from app.auth import generate_key, hash_key
+from app import access, backends, claude_desktop, settings, sso
+from app.auth import Principal, authenticate, generate_key, hash_key
 from app.db import get_session
 from app.models import ApiKey, UsageRecord, User, utcnow
 
@@ -192,6 +192,31 @@ async def me(user: User = Depends(current_user)):
         "keys": [{"id": k.id, "name": k.name, "prefix": k.key_prefix, "is_active": k.is_active}
                  for k in user.api_keys if k.is_active],
     }
+
+
+class DesktopModelIn(BaseModel):
+    model: str | None = Field(default=None, max_length=256)
+
+
+@router.put("/desktop-model")
+async def set_desktop_model(payload: DesktopModelIn, principal: Principal = Depends(authenticate),
+                            session: AsyncSession = Depends(get_session)):
+    """The model this person's Claude desktop app runs (app/claude_desktop.py), or none for the defaults.
+    Set by `ai-gateway launch claude-desktop -Model x` with the person's own key."""
+    if principal.user is None:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "The master key has no desktop app to set")
+    chosen = (payload.model or "").strip() or None
+    if chosen and chosen != "auto":
+        models = await backends.available_models()
+        if chosen not in models:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, f"There is no model {chosen} here")
+        if not access.can_use_model(principal, chosen):
+            raise HTTPException(status.HTTP_403_FORBIDDEN, f"You do not have access to {chosen}")
+    user = await session.get(User, principal.user.id)
+    user.desktop_model = chosen
+    await session.commit()
+    principal.user.desktop_model = chosen
+    return {"desktop_model": chosen, "mapping": await claude_desktop.mapping(principal)}
 
 
 class SelfKeyIn(BaseModel):

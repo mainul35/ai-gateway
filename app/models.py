@@ -27,6 +27,9 @@ class User(Base):
     model_access: Mapped[str] = mapped_column(String(16), default="all")
     # JSON list of model names or patterns, used when model_access is "selected"
     allowed_models: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # The model this person's Claude desktop app runs, whichever of Claude's names it asks for
+    # (app/claude_desktop.py); set by `ai-gateway launch claude-desktop -Model`, None for the defaults
+    desktop_model: Mapped[str | None] = mapped_column(String(256), nullable=True)
     # Everything the auth server said at the last sign-in, as it said it. Kept whole rather than
     # picked apart: what a provider puts in a token changes, and a gateway that reads three fields
     # and throws the rest away cannot answer "what does it actually send us" - which is the first

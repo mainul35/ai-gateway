@@ -93,11 +93,15 @@ function Get-GatewayKey {
 $Key = Get-GatewayKey
 
 # The gateway's machine sleeps when idle. A request with the key wakes it, and is answered 503
-# ("waking") until it is up, a minute or two: asked again until then.
-function Invoke-Gateway($path, $outFile) {
+# ("waking") until it is up, a minute or two: asked again until then. With $put, that is sent as JSON.
+function Invoke-Gateway($path, $outFile, $put) {
     for ($try = 1; ; $try++) {
         try {
             $headers = @{ Authorization = "Bearer $Key" }
+            if ($put) {
+                return Invoke-RestMethod -Method Put -Uri "$Gateway$path" -Headers $headers -TimeoutSec 60 `
+                    -ContentType "application/json" -Body ($put | ConvertTo-Json -Compress)
+            }
             if ($outFile) { Invoke-WebRequest -Uri "$Gateway$path" -Headers $headers -TimeoutSec 60 -UseBasicParsing -OutFile $outFile; return }
             return Invoke-RestMethod -Uri "$Gateway$path" -Headers $headers -TimeoutSec 60
         } catch {
@@ -171,6 +175,16 @@ if ($App -eq "claude-desktop") {
             CommandLine = "powershell.exe -NoProfile -NonInteractive -WindowStyle Hidden -EncodedCommand $encoded" }
         return $started.ReturnValue -eq 0
     }
+    # The app picks among Claude's names, and the gateway decides what each stands for: given -Model,
+    # every name the app starts on stands for it, for this key's person (app/claude_desktop.py).
+    # Without one - and on -Restore - that choice is cleared and the names go back to the defaults.
+    function Set-DesktopModel($model) {
+        try { $null = Invoke-Gateway "/auth/desktop-model" $null @{ model = $(if ($model) { $model } else { $null }) }; return $true }
+        catch {
+            $why = if ($_.ErrorDetails.Message) { $_.ErrorDetails.Message } else { $_.Exception.Message }
+            Write-Host "The gateway did not take the model choice: $why" -ForegroundColor Yellow; return $false
+        }
+    }
     $mode = if ($Restore) { "1p" } else { "3p" }
     # Where the app reads which profile is in use: its plain folders, and a Store install's own copy
     $configs = @("$local\Claude-3p\claude_desktop_config.json", "$local\Claude\claude_desktop_config.json") +
@@ -181,6 +195,7 @@ if ($App -eq "claude-desktop") {
     $meta = Read-Json $metaPath
     $meta.entries = @(@($meta.entries) | Where-Object { $_ -and $_.id -ne $id })
     if ($Restore) {
+        $null = Set-DesktopModel $null
         if ($meta.appliedId -eq $id) { $meta.Remove("appliedId") }
         Remove-Item $profilePath -ErrorAction SilentlyContinue
         Write-Json $metaPath $meta
@@ -197,9 +212,12 @@ if ($App -eq "claude-desktop") {
     $p.Remove("inferenceModels")      # the app asks the gateway for its models instead
     Write-Json $profilePath $p
     Write-Json $metaPath $meta
+    $chose = (Set-DesktopModel $Model) -and $Model
     if (Restart-ClaudeDesktop) { Write-Host "The Claude desktop app now uses $Gateway (profile `"AI Gateway`"), and is restarting." -ForegroundColor Cyan }
     else { Write-Host "The Claude desktop app now uses $Gateway (profile `"AI Gateway`"): quit it (also from the tray) and open it again." -ForegroundColor Cyan }
-    Write-Host "Its model picker offers Claude's names standing for gateway models; 'ai-gateway launch claude-desktop -Restore' undoes this."
+    if ($chose) { Write-Host "It runs $Model, whichever of Claude's names it shows (Sonnet 4.6 stays Auto)." -ForegroundColor Cyan }
+    else { Write-Host "Its model picker offers Claude's names standing for gateway models; -Model <name> makes them all one model." }
+    Write-Host "'ai-gateway launch claude-desktop -Restore' undoes this."
     exit 0
 }
 
