@@ -10,7 +10,7 @@
 //   gateway-wake-front  the wake front (wake/), which does run as a container on proxy-vm.
 //
 // Run it with "Build with Parameters" and a branch: nothing triggers it automatically.
-// Setup: jenkins/SETUP.md.
+// Setup: docs/setup-guide.md, Parts 4 to 8.
 pipeline {
     agent any
 
@@ -21,7 +21,7 @@ pipeline {
     }
 
     // NOTE: `BRANCH` is defined in the JOB UI as an Active Choices parameter -- a live dropdown of
-    // ai-gateway's branches (SETUP.md 4a) -- NOT here. A declarative `parameters { }` block would
+    // ai-gateway's branches (docs/setup-guide.md, step 7.2) -- NOT here. A declarative `parameters { }` block would
     // overwrite that UI-defined parameter on every run, so it is intentionally omitted.
 
     environment {

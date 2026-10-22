@@ -51,7 +51,7 @@ curl -s localhost:9100/__wake/status
 
 Host networking is required (WoL broadcasts must reach the LAN). Without Docker, see
 `gateway-wake-front.service`. After that, the Jenkins job `deploy-ai-gateway` deploys it
-([docs/deployment.md](../docs/deployment.md)); the full guide is [docs/sleep-and-wake.md](../docs/sleep-and-wake.md).
+([docs/deployment.md](../docs/deployment.md)); the step-by-step setup is [docs/setup-guide.md](../docs/setup-guide.md).
 
 Tests: `pip install -r wake/requirements.txt pytest && pytest wake/`
 

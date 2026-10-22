@@ -20,8 +20,8 @@ deploy-ai-gateway  (Build Now → pick a tag)
 
 Rollback: run `deploy-ai-gateway` again and pick the previous tag.
 
-**Setting it up** (Harbor project and robot, three Jenkins credentials, the two jobs, the `BRANCH`
-dropdown): [`jenkins/SETUP.md`](../jenkins/SETUP.md).
+**Setting it up** (Harbor project and robot, the SSH key, three Jenkins credentials, the two jobs):
+[setup-guide.md](setup-guide.md), Parts 4 to 8.
 
 ## Files
 
@@ -30,7 +30,7 @@ dropdown): [`jenkins/SETUP.md`](../jenkins/SETUP.md).
 | `jenkins/build-ai-gateway.Jenkinsfile` | the build job |
 | `jenkins/deploy-ai-gateway.Jenkinsfile` | the deploy job |
 | `jenkins/release.Dockerfile` | packs one commit's code into the `gateway-release` image |
-| `jenkins/SETUP.md` | step-by-step setup |
+| `docs/setup-guide.md` | step-by-step setup |
 | `ci/checks.sh` | the checks the build job runs; run it locally too |
 | `bin/deploy.sh` | deploys the gateway's code to homelabai (used by the deploy job, and by hand) |
 | `bin/wake-homelabai.sh` | wakes homelabai and waits for the gateway |
@@ -52,8 +52,8 @@ A wake front deployed by hand and one deployed by Jenkins are the same container
 
 ## What deploys never touch
 
-These need root or hold secrets, so they stay manual ([sleep-and-wake.md](sleep-and-wake.md),
-"Setting it up"):
+These need root or hold secrets, so they stay manual ([setup-guide.md](setup-guide.md),
+Part 1):
 
 - `config/config.properties` on homelabai (secrets, SSO)
 - the idle timer in `/usr/local/sbin` and `/etc/default/idle-shutdown`. When a deploy brings a newer
