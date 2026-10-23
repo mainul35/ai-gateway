@@ -7,6 +7,7 @@ import re
 import threading
 from datetime import timedelta
 
+import httpx
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
@@ -21,7 +22,7 @@ from app import config_writer
 from app.engine.supervisor import supervisor
 from app.engine import builds as engine_builds, profiles as engine_profiles
 from utils import hf_client, hf_download
-from utils.ollama_client import (StreamCancellation, check_ollama_status,
+from utils.ollama_client import (StreamCancellation, check_ollama_status, ollama_host,
                                  stream_create_model, stream_pull_model)
 from utils.system_info import get_system_info, measure_hardware
 from app.db import get_session
@@ -850,6 +851,70 @@ async def engine_stop(name: str, _: Principal = Depends(require_admin)):
     return {"stopped": await supervisor.stop(name)}
 
 
+async def _ollama_models():
+    """Ollama's installed models, each with whether it is loaded and how much of it is on the GPU.
+    Names and sizes only: nothing about where Ollama runs (see system_overview)."""
+    host = ollama_host()
+    try:
+        async with httpx.AsyncClient(timeout=5) as client:
+            tags = (await client.get(f"{host}/api/tags")).json().get("models") or []
+            loaded = {e.get("name") or e.get("model"): e
+                      for e in (await client.get(f"{host}/api/ps")).json().get("models") or []}
+    except (httpx.HTTPError, ValueError):
+        return []
+    rows = []
+    for tag in tags:
+        name = tag.get("name") or tag.get("model")
+        if not name:
+            continue
+        here = loaded.get(name)
+        rows.append({"name": name, "size": tag.get("size") or 0, "loaded": bool(here),
+                     "memory": (here or {}).get("size") or 0, "on_gpu": (here or {}).get("size_vram") or 0})
+    rows.sort(key=lambda r: (not r["loaded"], r["name"]))
+    return rows
+
+
+class OllamaModel(BaseModel):
+    model: str = Field(min_length=1, max_length=256)
+
+
+@router.post("/ollama/load")
+async def ollama_load(payload: OllamaModel, _: Principal = Depends(require_admin)):
+    """Loads an installed Ollama model, as a request for it would: idle llama.cpp models give way
+    first when it would not fit beside them (supervisor.make_room_for_ollama)."""
+    if payload.model not in {r["name"] for r in await _ollama_models()}:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, f"Ollama has no model {payload.model}")
+    problem = await supervisor.make_room_for_ollama(payload.model)
+    if problem:
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, problem)
+    try:
+        # A generate with no prompt only loads; Ollama's own keep-alive then applies
+        async with httpx.AsyncClient(timeout=httpx.Timeout(600, connect=10)) as client:
+            response = await client.post(f"{ollama_host()}/api/generate", json={"model": payload.model})
+        body = response.json() if response.headers.get("content-type", "").startswith("application/json") else {}
+    except (httpx.HTTPError, ValueError) as e:
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, f"Ollama did not answer: {e}")
+    if response.status_code >= 400 or body.get("error"):
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE,
+                            f"Ollama could not load {payload.model}: {body.get('error') or response.text[:300]}")
+    return {"loaded": payload.model}
+
+
+@router.post("/ollama/unload")
+async def ollama_unload(payload: OllamaModel, _: Principal = Depends(require_admin)):
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            response = await client.post(f"{ollama_host()}/api/generate",
+                                         json={"model": payload.model, "keep_alive": 0})
+        body = response.json() if response.headers.get("content-type", "").startswith("application/json") else {}
+    except (httpx.HTTPError, ValueError) as e:
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, f"Ollama did not answer: {e}")
+    if response.status_code >= 400 or body.get("error"):
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE,
+                            f"Ollama could not unload {payload.model}: {body.get('error') or response.text[:300]}")
+    return {"unloaded": payload.model}
+
+
 @router.get("/settings")
 async def read_settings(_: Principal = Depends(require_admin)):
     return {"config_file": config_writer.config.config_file_path(), "values": config_writer.read_settings()}
@@ -883,7 +948,8 @@ async def system_overview(_: Principal = Depends(require_admin), session: AsyncS
     ollama = check_ollama_status()
     engine = supervisor.status()
     return {
-        "ollama": {"status": ollama.get("status"), "version": ollama.get("version")},
+        "ollama": {"status": ollama.get("status"), "version": ollama.get("version"),
+                   "models": await _ollama_models() if ollama.get("status") == "running" else []},
         "engine": {"available": engine["available"], "profiles": engine["profiles"],
                    "running": [{k: r[k] for k in ("name", "running", "uptime_seconds", "idle_seconds",
                                                   "in_flight", "ttl_seconds")} for r in engine["running"]]},

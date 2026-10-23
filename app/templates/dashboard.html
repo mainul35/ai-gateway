@@ -49,6 +49,11 @@
 </div>
 
 <div class="card" style="margin-bottom:1.5rem">
+  <h2>Ollama</h2>
+  <div id="ollamaModels" class="muted">Loading&hellip;</div>
+</div>
+
+<div class="card" style="margin-bottom:1.5rem">
   <h2>Usage, last 7 days</h2>
   <p class="muted" style="margin:-.3rem 0 .6rem;font-size:.85rem">Heaviest first, by tokens. Click a user for their breakdown.</p>
   <div id="usage" class="muted">Loading&hellip;</div>
@@ -405,6 +410,28 @@ async function loadAdmin(){
         }).join('') + `</table>`
       : '<span class="muted">No profiles defined in config/engines.yaml.</span>';
 
+    // Ollama's installed models, loaded ones first; how much of a loaded one is on the GPU, since
+    // Ollama puts whatever does not fit on the CPU without saying so
+    const installed = ollama.models || [];
+    document.getElementById('ollamaModels').innerHTML = ollama.status !== 'running'
+      ? `<span class="muted">Ollama is ${escapeHtml(ollama.status)}.</span>`
+      : !installed.length ? '<span class="muted">No models installed in Ollama.</span>'
+      : `<table><tr><th>Model</th><th>Size</th><th>State</th><th></th></tr>` + installed.map(m => {
+          const key = 'ollama:' + m.name;
+          const pending = engineActions.get(key);
+          const label = pending ? ENGINE_PENDING_LABEL[pending] : m.loaded ? 'Unload' : 'Load';
+          const gpu = m.memory ? Math.round(m.on_gpu / m.memory * 100) : 0;
+          return `<tr><td>${escapeHtml(m.name)}</td>
+            <td class="muted">${formatBytes(m.size)}</td>
+            <td>${m.loaded
+              ? `<span class="pill ${gpu >= 90 ? 'on' : 'off'}">loaded</span>
+                 <span class="muted" style="font-size:.82rem">${formatBytes(m.memory)}, ${gpu ? gpu + '% on GPU' : 'on the CPU'}</span>`
+              : '<span class="pill off">not loaded</span>'}</td>
+            <td style="text-align:right">
+              <button class="btn btn-sm ${m.loaded ? 'btn-danger' : ''}" data-engine="${escapeHtml(key)}"
+                      data-action="${m.loaded ? 'stop' : 'start'}" ${pending ? 'disabled' : ''}>${label}</button></td></tr>`;
+        }).join('') + `</table>`;
+
     renderUsage(usage.rows);
   }catch(e){ showError('Could not load dashboard: ' + e.message); }
 }
@@ -421,7 +448,15 @@ document.addEventListener('click', async e => {
   engineActions.set(name, action);
   button.disabled = true;
   button.textContent = ENGINE_PENDING_LABEL[action];
-  try{ await api(`/admin/engines/${encodeURIComponent(name)}/${action}`, {method:'POST'}); }
+  try{
+    if(name.startsWith('ollama:')){
+      // Ollama's names hold ':' and '/', so the model goes in the body
+      await api(`/admin/ollama/${action === 'start' ? 'load' : 'unload'}`, {method: 'POST',
+        headers: {'Content-Type': 'application/json'}, body: JSON.stringify({model: name.slice(7)})});
+    }else{
+      await api(`/admin/engines/${encodeURIComponent(name)}/${action}`, {method:'POST'});
+    }
+  }
   catch(err){ showError(err.message); }
   finally{ engineActions.delete(name); loadAdmin(); }
 });
