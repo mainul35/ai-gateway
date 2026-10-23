@@ -396,7 +396,7 @@ function modelCard(m){
       ].filter(Boolean).join(' · ')
     : 'No requests recorded in the window.';
   const button = m.can_delete
-    ? `<button class="btn btn-danger btn-sm" data-delete="${escapeHtml(m.name)}">Delete</button>`
+    ? `<button class="btn btn-danger btn-sm" data-delete="${escapeHtml(m.name)}" data-backend="${escapeHtml(m.backend)}">Delete</button>`
     : `<span class="muted" style="font-size:.8rem" title="${escapeHtml(m.delete_note)}">kept elsewhere</span>`;
   return `<div style="border:1px solid var(--border);border-radius:10px;padding:.8rem 1rem;margin-bottom:.7rem">
     <div style="display:flex;gap:.6rem;align-items:baseline;flex-wrap:wrap">
@@ -428,8 +428,10 @@ document.getElementById('models').addEventListener('click', async e => {
   const button = e.target.closest('[data-delete]');
   if(!button) return;
   const name = button.dataset.delete;
-  if(!confirm(`Delete ${name} from the Ollama server?\n\nThis frees its disk space and cannot be undone `
-              + `without pulling it again.`)) return;
+  const where = button.dataset.backend === 'llamacpp'
+    ? 'from the server: its llama.cpp engine and its files in ~/models' : 'from the Ollama server';
+  if(!confirm(`Delete ${name} ${where}?\n\nThis frees its disk space and cannot be undone `
+              + `without downloading it again.`)) return;
   button.disabled = true;
   const original = button.textContent;
   button.textContent = 'Deleting…';
