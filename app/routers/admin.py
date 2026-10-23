@@ -617,6 +617,24 @@ class Cancel(BaseModel):
     job_id: int
 
 
+def _build_answers(model_id, info, files, architecture):
+    """Which of this machine's llama.cpp builds can run these files: first whether each knows the
+    architecture's name, then - when one does - whether it really loads them (builds.load_test).
+    [{"name", "binary", "default", "supported", "tested", "problem"}]. Blocking; threaded."""
+    named = engine_builds.supports(architecture)
+    if not files or not any(b["supported"] for b in named):
+        return [b | {"tested": False, "problem": ""} for b in named]
+    sizes = {s.get("rfilename"): s.get("size") or 0 for s in info.get("siblings", [])}
+    tested = {t["binary"]: t for t in engine_builds.load_test(model_id, files, hf_client.mmproj_files(info)[:1], sizes)}
+    answers = []
+    for build in named:
+        result = tested.get(build["binary"]) or {}
+        loads = result.get("loads")
+        answers.append(build | {"supported": build["supported"] if loads is None else loads,
+                                "tested": loads is not None, "problem": result.get("problem") or ""})
+    return answers
+
+
 def _look_up(model_id):
     """Everything Hugging Face and this machine have to say about a repository. Blocking; threaded."""
     info = hf_client.get_model_info(model_id)
@@ -638,6 +656,10 @@ def _look_up(model_id):
             row["quantization"] in fitting.QUANTIZATION_LEVELS or entry.get("label") or len(details) == 1)
         row["label"] = entry.get("label", "")
     gguf = info.get("gguf") or {}
+    # The file tried in each build: the one the page suggests, else the first that fits at all
+    pick = next((r for r in recommendations if r.get("recommended") and r.get("available")),
+                next((r for r in recommendations if r.get("available")), None))
+    tried = (details.get(pick["quantization"]) or {}).get("files") or [] if pick else []
     return {
         "model_info": hf_client.public_model_info(info),
         # Ollama installs GGUF and nothing else, so a repository without it needs somewhere to go
@@ -654,7 +676,8 @@ def _look_up(model_id):
         "llamacpp": {"architecture": gguf.get("architecture") or "",
                      "context_length": gguf.get("context_length") or 0,
                      "image_reader": bool(hf_client.mmproj_files(info)),
-                     "builds": engine_builds.supports(gguf.get("architecture")) if gguf_files else []},
+                     "tested_with": os.path.basename(tried[0]) if tried else "",
+                     "builds": _build_answers(model_id, info, tried, gguf.get("architecture")) if gguf_files else []},
     }
 
 
@@ -749,11 +772,13 @@ def _engine_rows(entry, name, cancellation):
         return
     gguf = info.get("gguf") or {}
     architecture = gguf.get("architecture") or ""
-    yield {"status": f"asking this machine's llama.cpp builds about {architecture or 'its architecture'}"}
-    able = [b for b in engine_builds.supports(architecture) if b["supported"]]
+    yield {"status": "loading it in this machine's llama.cpp builds (its headers only, nothing downloaded yet)"}
+    answers = _build_answers(model_id, info, files, architecture)
+    able = [b for b in answers if b["supported"]]
     if not able:
-        yield {"error": f"None of this machine's llama.cpp builds can load {architecture or 'this model'}: "
-                        f"a newer llama.cpp is needed"}
+        why = next((b["problem"] for b in answers if b["problem"]), "")
+        yield {"error": f"None of this machine's llama.cpp builds can load {architecture or 'this model'}"
+                        + (f" ({why})" if why else "") + ": a newer llama.cpp is needed"}
         return
     build = next((b for b in able if b["default"]), able[0])
     readers = hf_client.mmproj_files(info)[:1]

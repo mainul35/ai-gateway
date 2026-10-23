@@ -91,12 +91,18 @@ function llamacppLine(data){
   if(!l.architecture || !(l.builds || []).length) return '';
   const able = l.builds.filter(b => b.supported).map(b => b.name);
   const not = l.builds.filter(b => b.supported === false).map(b => b.name);
+  // Loaded for real (a stand-in of the file: its header and zeros) when any build was tried; the
+  // reason the first one refused it, when none loads it
+  const tested = l.builds.some(b => b.tested);
+  const why = (l.builds.find(b => b.problem && b.supported === false) || {}).problem;
   return `<p class="muted" style="margin:.2rem 0 0;font-size:.85rem">
     llama.cpp: architecture <code>${escapeHtml(l.architecture)}</code>
     ${able.length ? `loads in ${escapeHtml(able.join(' and '))}` : '<strong>no build here can load it</strong> - a newer llama.cpp is needed'}${
       not.length && able.length ? `, not in ${escapeHtml(not.join(' or '))}` : ''}${
       l.context_length ? ` &middot; ${Math.round(l.context_length / 1024)}K native context` : ''}${
-      l.image_reader ? ' &middot; reads images' : ''}.</p>`;
+      l.image_reader ? ' &middot; reads images' : ''}.
+    ${tested && l.tested_with ? `<br><span style="font-size:.8rem">Found by loading ${escapeHtml(l.tested_with)} in each build, before downloading it.</span>` : ''}
+    ${!able.length && why ? `<br><span style="font-size:.8rem">${escapeHtml(why)}</span>` : ''}</p>`;
 }
 
 const RUN_STYLE = {'GPU': 'on', 'GPU + CPU': 'off', 'CPU': 'err'};
