@@ -119,6 +119,20 @@ function elsewhere(data){
     </div>`;
 }
 
+function convertedNote(data){
+  const from = data.converted_from;
+  if(!from) return '';
+  const info = data.model_info || {};
+  const links = from.conversions.filter(o => o.id !== info.id).map(o =>
+    `<button class="btn btn-sm btn-secondary" data-repo="${escapeHtml(o.id)}" style="margin:.2rem .3rem 0 0">
+       ${escapeHtml(o.id)} <span class="muted">${Math.round(o.downloads / 1000)}k</span></button>`).join('');
+  return `<div class="note" style="margin:0 0 .9rem">
+      <code>${escapeHtml(from.id)}</code> publishes no GGUF files, the only thing Ollama and llama.cpp
+      load, so this is a GGUF conversion of it that somebody has made.
+      ${links ? `<div style="margin-top:.5rem">Other conversions:</div>${links}` : ''}
+    </div>`;
+}
+
 function fitRows(data){
   if(!data.recommendations.length){
     return '<p class="note warn" style="margin:0">None of its quantizations fit in this machine\'s memory.</p>';
@@ -162,7 +176,10 @@ function fitRows(data){
 
 let found = null;
 
-async function check(){
+// A repository of safetensors only has nothing to download here. When somebody has converted it, the
+// most downloaded conversion is checked straight away instead - its sizes are exact and its files
+// installable - and `original` (the repository asked for, and its other conversions) says so above it.
+async function check(original){
   const repo = document.getElementById('repo').value.trim();
   if(!repo) return;
   showError('');
@@ -172,8 +189,14 @@ async function check(){
   try{
     found = await api('/admin/models/check', {method: 'POST', headers: {'Content-Type': 'application/json'},
                                               body: JSON.stringify({model_id: repo})});
+    const others = found.gguf_alternatives || [];
+    if(!original && !found.is_gguf_repo && others.length){
+      document.getElementById('repo').value = others[0].id;
+      return await check({id: repo, conversions: others});
+    }
+    found.converted_from = original || null;
     document.getElementById('about').innerHTML = aboutModel(found);
-    document.getElementById('fit').innerHTML = fitRows(found);
+    document.getElementById('fit').innerHTML = convertedNote(found) + fitRows(found);
     document.getElementById('found').hidden = false;
   }catch(e){ showError(e.message); }
   finally{
@@ -182,7 +205,7 @@ async function check(){
   }
 }
 
-document.getElementById('check').addEventListener('click', check);
+document.getElementById('check').addEventListener('click', () => check());
 document.getElementById('repo').addEventListener('keydown', e => { if(e.key === 'Enter') check(); });
 
 // --- installing -----------------------------------------------------------------------------
@@ -329,7 +352,7 @@ document.getElementById('fit').addEventListener('click', e => {
   const conversion = e.target.closest('[data-repo]');
   if(conversion){
     document.getElementById('repo').value = conversion.dataset.repo;
-    check();
+    check(found && found.converted_from);
   }
 });
 

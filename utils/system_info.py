@@ -42,22 +42,27 @@ def detect_gpus():
 
 
 def get_system_info():
-    configured_vram_gb = config.get_float("ollama.server.vram.gb", "OLLAMA_SERVER_VRAM_GB")
-    configured_ram_gb = config.get_float("ollama.server.ram.gb", "OLLAMA_SERVER_RAM_GB")
+    """The hardware models are sized against: what is detected here, every GPU added up.
 
-    if configured_vram_gb is not None:
-        vram = int(configured_vram_gb * 1024**3)
-        gpu_info = [{"name": "Ollama server GPU", "vram_total": vram, "vram_free": vram, "index": 0}] if vram > 0 else []
-    else:
-        gpu_info = detect_gpus()
+    ollama.server.vram.gb / ram.gb are for an app that runs apart from the Ollama server, where none
+    of it can be seen: the VRAM size counts only when no GPU is visible, and the RAM size only then
+    too. A size left set from an earlier machine would otherwise hide a card added since."""
+    gpu_info, gpu_source = detect_gpus(), "detected"
+    configured_ram_gb = None
+    if not gpu_info:
+        configured_vram_gb = config.get_float("ollama.server.vram.gb", "OLLAMA_SERVER_VRAM_GB")
+        configured_ram_gb = config.get_float("ollama.server.ram.gb", "OLLAMA_SERVER_RAM_GB")
+        if configured_vram_gb:
+            vram = int(configured_vram_gb * 1024**3)
+            gpu_info, gpu_source = [{"name": "Ollama server GPU", "vram_total": vram, "vram_free": vram, "index": 0}], "config"
 
     mem = psutil.virtual_memory()
     swap = psutil.swap_memory()
-    configured_ram = int(configured_ram_gb * 1024**3) if configured_ram_gb is not None else None
+    configured_ram = int(configured_ram_gb * 1024**3) if configured_ram_gb else None
 
     return {
         "gpu_info": gpu_info,
-        "gpu_source": "config" if configured_vram_gb is not None else "detected",
+        "gpu_source": gpu_source,
         "total_vram": sum(gpu["vram_total"] for gpu in gpu_info),
         "total_ram": configured_ram if configured_ram is not None else mem.total,
         "available_ram": configured_ram if configured_ram is not None else mem.available,
