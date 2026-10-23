@@ -71,19 +71,28 @@ def search_gguf(model_id, limit=6):
 
     Ollama can only install GGUF, so a repository that publishes only safetensors is a dead end
     however well it would fit. Somebody has usually converted it already, and this is how they are
-    found: the same name, filtered to GGUF, most downloaded first.
+    found: the same name, filtered to GGUF, most downloaded first. Only those with the model's
+    weights: a repository tagged GGUF may hold just the image reader (mmproj), the weights never
+    uploaded, and there is nothing in it to run.
     """
     name = model_id.split("/")[-1]
     try:
         response = requests.get(f"{HF_API_BASE}/models", headers=_headers(), timeout=TIMEOUT,
                                 params={"search": name, "filter": "gguf", "sort": "downloads",
-                                        "direction": -1, "limit": limit + 1})
+                                        "direction": -1, "limit": limit * 2 + 1,
+                                        "expand[]": ["siblings", "downloads", "likes"]})
         response.raise_for_status()
         found = response.json()
     except (requests.RequestException, ValueError):
         return []
+
+    def has_weights(m):
+        names = [(s.get("rfilename") or "").lower() for s in m.get("siblings") or () if isinstance(s, dict)]
+        return any(n.endswith(".gguf") and "mmproj" not in n for n in names)
+
     return [{"id": m["id"], "downloads": m.get("downloads") or 0, "likes": m.get("likes") or 0}
-            for m in found if isinstance(m, dict) and m.get("id") and m["id"] != model_id][:limit]
+            for m in found if isinstance(m, dict) and m.get("id") and m["id"] != model_id
+            and has_weights(m)][:limit]
 
 
 def public_model_info(info):
