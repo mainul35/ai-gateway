@@ -9,6 +9,10 @@ TIMEOUT = 15
 
 MODEL_ID_PATTERN = re.compile(r"^[A-Za-z0-9][\w.-]*(/[\w.-]+)?$")
 WEIGHT_EXTENSIONS = (".safetensors", ".bin", ".pt", ".pth")
+# The precision or format a model was published in, at the end of its name: not part of what its
+# GGUF conversions are called
+PRECISION_SUFFIX = re.compile(r"[-_.](BF16|FP16|F16|FP32|F32|FP8|FP4|NVFP4|MXFP4|INT8|INT4|W4A16|AWQ|GPTQ|EXL2)$",
+                              re.IGNORECASE)
 
 # Different model families name the same config fields differently (e.g. GPT-2 uses n_embd).
 CONFIG_ALIASES = {
@@ -71,15 +75,22 @@ def search_gguf(model_id, limit=6):
 
     Ollama can only install GGUF, so a repository that publishes only safetensors is a dead end
     however well it would fit. Somebody has usually converted it already, and this is how they are
-    found: the same name, filtered to GGUF, most downloaded first. Only those with the model's
-    weights: a repository tagged GGUF may hold just the image reader (mmproj), the weights never
-    uploaded, and there is nothing in it to run.
+    found: the same name, filtered to GGUF. The name without the precision it was published in
+    (nvidia's ...-BF16 is converted as ...-GGUF, not ...-BF16-GGUF), and the conversions named
+    after exactly it first, most downloaded first: a variant (Uncensored, 24GB) only after them.
+    Only those with the model's weights: a repository tagged GGUF may hold just the image reader
+    (mmproj), the weights never uploaded, and there is nothing in it to run.
     """
     name = model_id.split("/")[-1]
+    while True:
+        bare = PRECISION_SUFFIX.sub("", name)
+        if bare == name or not bare:
+            break
+        name = bare
     try:
         response = requests.get(f"{HF_API_BASE}/models", headers=_headers(), timeout=TIMEOUT,
                                 params={"search": name, "filter": "gguf", "sort": "downloads",
-                                        "direction": -1, "limit": limit * 2 + 1,
+                                        "direction": -1, "limit": limit * 3 + 1,
                                         "expand[]": ["siblings", "downloads", "likes"]})
         response.raise_for_status()
         found = response.json()
@@ -90,9 +101,14 @@ def search_gguf(model_id, limit=6):
         names = [(s.get("rfilename") or "").lower() for s in m.get("siblings") or () if isinstance(s, dict)]
         return any(n.endswith(".gguf") and "mmproj" not in n for n in names)
 
+    def named_after(m):
+        own = m["id"].split("/")[-1].lower()
+        return own in (name.lower() + "-gguf", name.lower() + "_gguf")
+
+    usable = [m for m in found if isinstance(m, dict) and m.get("id") and m["id"] != model_id and has_weights(m)]
+    usable.sort(key=lambda m: (not named_after(m), -(m.get("downloads") or 0)))
     return [{"id": m["id"], "downloads": m.get("downloads") or 0, "likes": m.get("likes") or 0}
-            for m in found if isinstance(m, dict) and m.get("id") and m["id"] != model_id
-            and has_weights(m)][:limit]
+            for m in usable][:limit]
 
 
 def public_model_info(info):
