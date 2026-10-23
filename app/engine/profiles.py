@@ -130,11 +130,27 @@ def load_profiles():
     return profiles
 
 
+def local_profiles():
+    """The entries of engines.local.yaml, as written there."""
+    return [m for m in (_read(local_engines_file()).get("models") or []) if isinstance(m, dict) and m.get("name")]
+
+
 def add_local_profile(entry):
     """Adds (or replaces, by name) a profile in engines.local.yaml."""
+    _write_local([m for m in local_profiles() if m.get("name") != entry["name"]] + [entry])
+
+
+def remove_local_profile(name):
+    """Takes a profile out of engines.local.yaml; the entry removed, or None when it is not there."""
+    models = local_profiles()
+    removed = next((m for m in models if m.get("name") == name), None)
+    if removed is not None:
+        _write_local([m for m in models if m is not removed])
+    return removed
+
+
+def _write_local(models):
     path = local_engines_file()
-    data = _read(path)
-    models = [m for m in (data.get("models") or []) if m.get("name") != entry["name"]] + [entry]
     with open(path + ".new", "w", encoding="utf-8") as f:
         f.write("# Engine profiles this machine added for itself (Models page: Download for llama.cpp).\n"
                 "# Read after config/engines.yaml, with its defaults; deploys leave this file alone.\n")

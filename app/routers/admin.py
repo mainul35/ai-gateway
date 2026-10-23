@@ -403,12 +403,68 @@ def _notes(name, backend, usage, used_for, granted, reachable):
 
 
 def _deletability(backend):
-    """Only models Ollama holds can be deleted from here; the rest are someone else's to remove."""
+    """Models Ollama holds, and llama.cpp models downloaded from this page (engines.local.yaml), can be
+    deleted from here; the rest come from git and are someone else's to remove."""
     if backend.kind == "ollama":
         return True, ""
     if backend.kind == "llamacpp":
+        if backend.upstream_model in {m["name"] for m in engine_profiles.local_profiles()}:
+            return True, ""
         return False, "This is one of the gateway's own llama.cpp profiles. Remove it from config/engines.yaml."
     return False, "This one is defined in config/models.yaml. Remove the entry there."
+
+
+# Where the Models page downloads llama.cpp models to; nothing outside it is ever deleted from here
+MODELS_ROOT = os.path.join(os.path.expanduser("~"), "models")
+SPLIT_PART = re.compile(r"^(.*)-\d{5}-of-(\d{5})\.gguf$")
+
+
+def _engine_files(entry, others):
+    """The files a downloaded llama.cpp model is: its GGUF - every part, when it is split - and its
+    image reader unless another profile reads images with the same one. Only files under MODELS_ROOT."""
+    files = []
+    model_path = entry.get("model_path") or ""
+    split = SPLIT_PART.match(os.path.basename(model_path))
+    if split:
+        folder = os.path.dirname(model_path)
+        files += [os.path.join(folder, f"{split.group(1)}-{i:05d}-of-{split.group(2)}.gguf")
+                  for i in range(1, int(split.group(2)) + 1)]
+    elif model_path:
+        files.append(model_path)
+    mmproj = entry.get("mmproj")
+    if mmproj and not any(p.mmproj == mmproj for p in others.values()):
+        files.append(mmproj)
+    root = os.path.realpath(MODELS_ROOT) + os.sep
+    return [f for f in files if os.path.realpath(f).startswith(root) and os.path.isfile(f)]
+
+
+async def _delete_engine_model(name):
+    """Stops a downloaded llama.cpp model, takes its profile out and deletes its files: (freed bytes,
+    problem). Not while it is answering someone."""
+    running = next((r for r in supervisor.status().get("running") or [] if r.get("name") == name), None)
+    if running and running.get("in_flight"):
+        return 0, f"{name} is answering a request. Try again when it has finished."
+    await supervisor.stop(name)
+    entry = engine_profiles.remove_local_profile(name)
+    if entry is None:
+        return 0, f"{name} is not one of the models downloaded here"
+    freed, folders = 0, set()
+    for path in _engine_files(entry, engine_profiles.load_profiles()):
+        try:
+            size = os.path.getsize(path)
+            os.remove(path)
+            freed += size
+            folders.add(os.path.dirname(path))
+        except OSError as e:
+            log.warning("Could not delete %s: %s", path, e)
+    for folder in folders:
+        if os.path.realpath(folder) != os.path.realpath(MODELS_ROOT):
+            try:
+                os.rmdir(folder)        # only when empty
+            except OSError:
+                pass
+    backends.forget_discovery()
+    return freed, None
 
 
 @router.get("/models")
@@ -482,7 +538,8 @@ class ModelDelete(BaseModel):
 @router.post("/models/delete")
 async def delete_model(payload: ModelDelete, principal: Principal = Depends(require_admin),
                        session: AsyncSession = Depends(get_session)):
-    """Deletes a model from the Ollama server. Not undoable without pulling it again."""
+    """Deletes a model from Ollama, or a llama.cpp model downloaded from this page. Not undoable
+    without downloading it again."""
     backend = await backends.resolve(payload.name)   # asks Ollama again when the name is unfamiliar
     if backend is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, f"No model called {payload.name}")
@@ -500,6 +557,14 @@ async def delete_model(payload: ModelDelete, principal: Principal = Depends(requ
             raise HTTPException(status.HTTP_409_CONFLICT,
                                 "Not deleted: " + ", and ".join(blocking)
                                 + ". Confirm again to delete it anyway.")
+
+    if backend.kind == "llamacpp":
+        freed, problem = await _delete_engine_model(payload.name)
+        if problem:
+            raise HTTPException(status.HTTP_409_CONFLICT, problem)
+        log.info("llama.cpp model %s deleted by %s, %.1f GB freed", payload.name,
+                 getattr(principal.user, "name", None) or "master-key", freed / 1024**3)
+        return {"deleted": payload.name, "size_bytes": freed}
 
     problem = await backends.delete_ollama_model(payload.name)
     if problem:
