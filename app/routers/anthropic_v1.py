@@ -126,6 +126,48 @@ async def _fitted(body, backend, base, force=False):
     return await context_fit.fit_for(body, backend, url, force)
 
 
+# What a usage's input counts are reported under; Claude Code adds them up to see how full the window is
+INPUT_COUNTS = ("input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens")
+
+
+def _scale(original, sent):
+    """How much bigger the request a client sent is than the one the model read, once made to fit.
+
+    The model counts only what it was given. Told that, a client never sees its conversation grow past
+    what the shortening hides, and keeps on until nothing can be shortened any more: Claude Code then
+    compacts only after a request is refused, from a conversation already over the window. Reported
+    at the size it sent, it compacts in time."""
+    if sent is None or sent is original:
+        return 1.0
+    return max(1.0, context_fit.estimate(original) / max(1, context_fit.estimate(sent)))
+
+
+def _scaled_usage(usage, scale):
+    if scale > 1 and isinstance(usage, dict):
+        for name in INPUT_COUNTS:
+            if isinstance(usage.get(name), int):
+                usage[name] = round(usage[name] * scale)
+    return usage
+
+
+def _reported(text, scale):
+    """Messages API events (SSE text) with their input counts at the size the client sent (_scale)."""
+    if scale <= 1 or "input_tokens" not in text:
+        return text
+    lines = text.split("\n")
+    for i, line in enumerate(lines):
+        if line.startswith("data:") and "input_tokens" in line:
+            try:
+                event = json.loads(line[5:])
+            except ValueError:
+                continue
+            if isinstance(event, dict):
+                _scaled_usage(event.get("usage"), scale)
+                _scaled_usage((event.get("message") or {}).get("usage"), scale)
+                lines[i] = "data: " + json.dumps(event)
+    return "\n".join(lines)
+
+
 def _passes_through(backend):
     return backend.kind in ("ollama", "llamacpp") and backend.name not in _no_messages
 
@@ -319,9 +361,11 @@ async def _whole(request, principal, body, model, backend):
             if _passes_through(backend):
                 response = await client.post(f"{base}/v1/messages", headers=_upstream_headers(request, backend),
                                              json=dict(body, model=backend.upstream_model))
+                sent = body
                 if not response.is_success and compat.context_exceeded(response.text):
                     smaller, _how = await _fitted(original, backend, base, force=True)
                     if smaller is not None and smaller is not body:
+                        sent = smaller
                         response = await client.post(f"{base}/v1/messages", headers=_upstream_headers(request, backend),
                                                      json=dict(smaller, model=backend.upstream_model))
                 if response.status_code != 404:
@@ -337,6 +381,10 @@ async def _whole(request, principal, body, model, backend):
                     if not response.is_success and compat.context_exceeded(response.text):
                         return JSONResponse(compat.too_long(backend.context_length, compat.estimate_tokens(body)),
                                             status_code=400)
+                    if response.is_success:
+                        answer = response.json()
+                        _scaled_usage(answer.get("usage"), _scale(original, sent))
+                        return JSONResponse(answer)
                     # Error bodies go back as they came: Claude Code's retries read their wording
                     return Response(response.content, status_code=503 if response.status_code in (502, 504)
                                     else response.status_code, media_type="application/json")
@@ -356,7 +404,9 @@ async def _whole(request, principal, body, model, backend):
             payload = response.json()
             await usage_log.record(principal, model, backend.name, ENDPOINT, False, 200, payload.get("usage"),
                                    (time.monotonic() - started) * 1000)
-            return JSONResponse(compat.from_openai_response(payload, model))
+            answer = compat.from_openai_response(payload, model)
+            _scaled_usage(answer.get("usage"), _scale(original, body))
+            return JSONResponse(answer)
     except httpx.HTTPError as e:
         await usage_log.record(principal, model, backend.name, ENDPOINT, False, 503, None,
                                (time.monotonic() - started) * 1000, str(e))
@@ -376,7 +426,7 @@ def _streamed(request, principal, body, model, backend):
     which is how the Messages API reports one mid-stream.
     """
     queue: asyncio.Queue = asyncio.Queue()
-    state = {"running": None, "status": 200, "error": None, "usage": {}}
+    state = {"running": None, "status": 200, "error": None, "usage": {}, "scale": 1.0}
     started = time.monotonic()
     headers = _upstream_headers(request, backend)
 
@@ -394,7 +444,7 @@ def _streamed(request, principal, body, model, backend):
                     # Nothing has been sent on yet: made smaller, and tried again before anyone sees it
                     smaller, _how = await _fitted(body, backend, base, force=True)
                     if smaller is not None and smaller is not sending:
-                        state.update(status=200, error=None)
+                        state.update(status=200, error=None, scale=_scale(body, smaller))
                         return await relay(client, base, smaller, retried=True)
                 if compat.context_exceeded(text):
                     await queue.put(compat.sse("error", compat.too_long(backend.context_length,
@@ -410,7 +460,7 @@ def _streamed(request, principal, body, model, backend):
             async for line in response.aiter_lines():
                 if line:
                     state["usage"] = compat.usage_from_event(line, state["usage"])
-                await queue.put((line + "\n").encode())
+                await queue.put((_reported(line, state["scale"]) + "\n").encode())
             return True
 
     async def translate(client, base, sending):
@@ -442,8 +492,8 @@ def _streamed(request, principal, body, model, backend):
                 state["usage"] = usage_log.usage_from_sse_line(line) or state["usage"]
                 events = translator.feed(chunk)
                 if events:
-                    await queue.put(events)
-            await queue.put(translator.finish())
+                    await queue.put(_reported(events.decode(), state["scale"]).encode())
+            await queue.put(_reported(translator.finish().decode(), state["scale"]).encode())
 
     async def produce():
         try:
@@ -461,6 +511,7 @@ def _streamed(request, principal, body, model, backend):
                 state.update(status=400, error="prompt is too long")
                 await queue.put(compat.sse("error", compat.too_long(backend.context_length, compat.estimate_tokens(body))))
                 return
+            state["scale"] = _scale(body, sending)
             async with httpx.AsyncClient(timeout=httpx.Timeout(settings.request_timeout(), connect=10)) as client:
                 if _passes_through(backend):
                     if await relay(client, base, sending):
