@@ -403,14 +403,10 @@ def _notes(name, backend, usage, used_for, granted, reachable):
 
 
 def _deletability(backend):
-    """Models Ollama holds, and llama.cpp models downloaded from this page (engines.local.yaml), can be
-    deleted from here; the rest come from git and are someone else's to remove."""
-    if backend.kind == "ollama":
+    """Models Ollama holds and the llama.cpp ones - downloaded here or in config/engines.yaml - can be
+    deleted from here; the rest are someone else's to remove."""
+    if backend.kind in ("ollama", "llamacpp"):
         return True, ""
-    if backend.kind == "llamacpp":
-        if backend.upstream_model in {m["name"] for m in engine_profiles.local_profiles()}:
-            return True, ""
-        return False, "This is one of the gateway's own llama.cpp profiles. Remove it from config/engines.yaml."
     return False, "This one is defined in config/models.yaml. Remove the entry there."
 
 
@@ -419,35 +415,39 @@ MODELS_ROOT = os.path.join(os.path.expanduser("~"), "models")
 SPLIT_PART = re.compile(r"^(.*)-\d{5}-of-(\d{5})\.gguf$")
 
 
+def _gguf_parts(model_path):
+    """A GGUF's files: every part of one split in several (-00001-of-00003.gguf), else itself."""
+    split = SPLIT_PART.match(os.path.basename(model_path or ""))
+    if not split:
+        return [model_path] if model_path else []
+    folder = os.path.dirname(model_path)
+    return [os.path.join(folder, f"{split.group(1)}-{i:05d}-of-{split.group(2)}.gguf")
+            for i in range(1, int(split.group(2)) + 1)]
+
+
 def _engine_files(entry, others):
-    """The files a downloaded llama.cpp model is: its GGUF - every part, when it is split - and its
-    image reader unless another profile reads images with the same one. Only files under MODELS_ROOT."""
-    files = []
-    model_path = entry.get("model_path") or ""
-    split = SPLIT_PART.match(os.path.basename(model_path))
-    if split:
-        folder = os.path.dirname(model_path)
-        files += [os.path.join(folder, f"{split.group(1)}-{i:05d}-of-{split.group(2)}.gguf")
-                  for i in range(1, int(split.group(2)) + 1)]
-    elif model_path:
-        files.append(model_path)
-    mmproj = entry.get("mmproj")
-    if mmproj and not any(p.mmproj == mmproj for p in others.values()):
-        files.append(mmproj)
+    """The files a llama.cpp model is - its GGUF, every part of it, and its image reader - less any
+    another profile still uses: qwen3.6-256k and qwen3.6-1m are one GGUF and one reader. Only files
+    under MODELS_ROOT."""
+    shared = {os.path.realpath(f) for p in others.values() for f in _gguf_parts(p.model_path) + [p.mmproj] if f}
+    files = _gguf_parts(entry.get("model_path")) + ([entry["mmproj"]] if entry.get("mmproj") else [])
     root = os.path.realpath(MODELS_ROOT) + os.sep
-    return [f for f in files if os.path.realpath(f).startswith(root) and os.path.isfile(f)]
+    return [f for f in files if os.path.realpath(f) not in shared
+            and os.path.realpath(f).startswith(root) and os.path.isfile(f)]
 
 
 async def _delete_engine_model(name):
-    """Stops a downloaded llama.cpp model, takes its profile out and deletes its files: (freed bytes,
-    problem). Not while it is answering someone."""
+    """Stops a llama.cpp model, takes its profile out (engine_profiles.remove_profile) and deletes its
+    files: (freed bytes, problem). Not while it is answering someone."""
     running = next((r for r in supervisor.status().get("running") or [] if r.get("name") == name), None)
     if running and running.get("in_flight"):
         return 0, f"{name} is answering a request. Try again when it has finished."
+    profile = engine_profiles.load_profiles().get(name)
+    if profile is None:
+        return 0, f"There is no llama.cpp model called {name}"
     await supervisor.stop(name)
-    entry = engine_profiles.remove_local_profile(name)
-    if entry is None:
-        return 0, f"{name} is not one of the models downloaded here"
+    engine_profiles.remove_profile(name)
+    entry = {"model_path": profile.model_path, "mmproj": profile.mmproj}
     freed, folders = 0, set()
     for path in _engine_files(entry, engine_profiles.load_profiles()):
         try:

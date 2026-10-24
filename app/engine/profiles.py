@@ -115,11 +115,18 @@ def load_profiles():
     profiles = {}
     next_port = int(data.get("start_port", 8090))
     known = {f for f in EngineProfile.__dataclass_fields__ if f not in ("name", "model_path", "port")}
-    for entry in (data.get("models") or []) + (_read(local_engines_file()).get("models") or []):
+    local = _read(local_engines_file())
+    removed = set(local.get("removed") or ())
+    for entry in (data.get("models") or []) + (local.get("models") or []):
         merged = {**defaults, **entry}
         name = merged.get("name")
         model_path = merged.get("model_path")
         if not name or not model_path or name in profiles:
+            continue
+        if name in removed:
+            # Deleted from the Models page. Its place in the port order is kept, so the profiles after
+            # it keep their ports
+            next_port = max(next_port, int(merged.get("port") or next_port) + 1)
             continue
         port = int(merged.get("port") or next_port)
         next_port = max(next_port, port + 1)
@@ -136,23 +143,33 @@ def local_profiles():
 
 
 def add_local_profile(entry):
-    """Adds (or replaces, by name) a profile in engines.local.yaml."""
-    _write_local([m for m in local_profiles() if m.get("name") != entry["name"]] + [entry])
+    """Adds (or replaces, by name) a profile in engines.local.yaml - no longer removed, if it was."""
+    _write_local([m for m in local_profiles() if m.get("name") != entry["name"]] + [entry],
+                 removed=[n for n in _read(local_engines_file()).get("removed") or () if n != entry["name"]])
 
 
-def remove_local_profile(name):
-    """Takes a profile out of engines.local.yaml; the entry removed, or None when it is not there."""
+def remove_profile(name):
+    """Deletes a profile: one of this machine's is taken out of engines.local.yaml, one of
+    engines.yaml's - which every deploy writes back - is listed there as removed. True when there
+    was such a profile."""
     models = local_profiles()
-    removed = next((m for m in models if m.get("name") == name), None)
-    if removed is not None:
-        _write_local([m for m in models if m is not removed])
-    return removed
+    if any(m.get("name") == name for m in models):
+        _write_local([m for m in models if m.get("name") != name])
+        return True
+    if name in load_profiles():
+        _write_local(models, removed=sorted(set(_read(local_engines_file()).get("removed") or ()) | {name}))
+        return True
+    return False
 
 
-def _write_local(models):
+def _write_local(models, removed=None):
     path = local_engines_file()
+    if removed is None:
+        removed = list(_read(path).get("removed") or ())
     with open(path + ".new", "w", encoding="utf-8") as f:
         f.write("# Engine profiles this machine added for itself (Models page: Download for llama.cpp).\n"
-                "# Read after config/engines.yaml, with its defaults; deploys leave this file alone.\n")
-        yaml.safe_dump({"models": models}, f, sort_keys=False, allow_unicode=True, width=120)
+                "# Read after config/engines.yaml, with its defaults; deploys leave this file alone.\n"
+                "# removed: engines.yaml's profiles deleted from the Models page, skipped when read.\n")
+        yaml.safe_dump({"models": models} | ({"removed": removed} if removed else {}), f,
+                       sort_keys=False, allow_unicode=True, width=120)
     os.replace(path + ".new", path)

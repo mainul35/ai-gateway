@@ -111,7 +111,10 @@ async def _add_ollama_capabilities(host, tags, discovered):
                     response = await client.post(f"{host}/api/show", json={"model": tag["name"]})
                     response.raise_for_status()
                     shown = response.json()
-                    _capabilities_by_digest[tag.get("digest")] = set(shown.get("capabilities") or ())
+                    found = set(shown.get("capabilities") or ())
+                    # An embedding model answers no chat: whatever else its template claims (Ollama
+                    # lists qwen3-embedding with tools and thinking), only "embedding" is true of it
+                    _capabilities_by_digest[tag.get("digest")] = {"embedding"} if "embedding" in found else found
                     # Every family names its own window: qwen3.context_length, llama.context_length
                     info = shown.get("model_info") or {}
                     _context_by_digest[tag.get("digest")] = next(
