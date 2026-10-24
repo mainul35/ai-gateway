@@ -3,6 +3,11 @@
 A model can write anything, so raw HTML in an answer is escaped rather than passed through, links
 open in a new tab, and pictures are shown as links instead of being fetched: an answer must not be
 able to make the browser call out to somewhere of its own choosing.
+
+Formulas - $...$, $$...$$, \\(...\\), \\[...\\] - are taken out before any Markdown is read, so that
+an _ or a * in them is not made italic, and handed to the page as written, marked class="math";
+the page draws them with KaTeX (app/static/katex). A plain $5 and $10 is not a formula: a $...$ span
+counts only when it has a backslash command, a ^ or a _ in it.
 """
 import logging
 import re
@@ -19,6 +24,9 @@ except ImportError:  # the gateway still runs, answers just stay plain text
 
 SAFE_LINK = re.compile(r"^(https?:|mailto:|/chat/files/|#)", re.I)
 CHAT_FILE = re.compile(r"^/chat/files/\d+$")
+MATHS = re.compile(r"\\[A-Za-z]|[\^_]")
+# Where each kind of formula opens: (opening, closing, shown on its own line)
+DELIMITERS = (("$$", "$$", True), ("\\[", "\\]", True), ("\\(", "\\)", False))
 _renderer = None
 
 
@@ -63,6 +71,40 @@ def _build():
                 if child.type == "text":
                     child.content = tex.unwrap(child.content)
 
+    def maths(state, silent):
+        """A formula starting here becomes one token, its text untouched by the rest of Markdown."""
+        src, start = state.src, state.pos
+        found = None
+        for opening, closing, display in DELIMITERS:
+            if src.startswith(opening, start):
+                end = src.find(closing, start + len(opening))
+                if end > start + len(opening):
+                    found = (src[start + len(opening):end], end + len(closing), display)
+                break
+        if found is None and src.startswith("$", start) and not src.startswith("$$", start):
+            # $x$: no space just inside either dollar, no digit just after the closing one ($5 and $10)
+            end = src.find("$", start + 1)
+            while end > 0 and src[end - 1] == "\\":            # \$ is a dollar inside the formula
+                end = src.find("$", end + 1)
+            inner = src[start + 1:end] if 0 < end - start <= 300 else ""
+            if (inner and not inner[0].isspace() and not inner[-1].isspace() and "\n\n" not in inner
+                    and not src[end + 1:end + 2].isdigit() and MATHS.search(inner)):
+                found = (inner, end + 1, False)
+        if found is None or not found[0].strip():
+            return False
+        if not silent:
+            token = state.push("maths", "", 0)
+            token.content = found[0].strip()
+            token.info = "1" if found[2] else "0"
+        state.pos = found[1]
+        return True
+
+    def maths_html(self, tokens, index, options, env):
+        token = tokens[index]
+        return f'<span class="math" data-display="{token.info}">{escapeHtml(token.content)}</span>'
+
+    parser.inline.ruler.before("escape", "maths", maths)
+    parser.add_render_rule("maths", maths_html)
     parser.add_render_rule("link_open", link_open)
     parser.add_render_rule("image", image)
     parser.core.ruler.push("symbols", symbols)
