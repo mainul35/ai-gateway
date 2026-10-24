@@ -168,6 +168,8 @@ def illustrate_request(model, title, scenes, lang):
 def parse_illustrated(answer, title, scenes, lang):
     """The storyboard of a given story: its own words for its language, the translation for the other,
     a picture for every scene. Every scene must be there, or nothing is made."""
+    if answer is None:
+        raise VideoError(MODEL_DOWN)
     match = re.search(r"\{.*\}", re.sub(r"<think>.*?</think>", "", answer or "", flags=re.S), re.S)
     try:
         drawn = json.loads(match.group(0)) if match else {}
@@ -233,6 +235,10 @@ class VideoError(Exception):
     """Said back to the person as the reason no video was made."""
 
 
+# No answer at all is the model not running, not the story: said as such
+MODEL_DOWN = "The model that writes the story could not be started just now; try again in a few minutes"
+
+
 # --- the storyboard -------------------------------------------------------------------------------
 
 def choose_request(model, latest, earlier, documents):
@@ -280,6 +286,8 @@ def story_request(model, request, material, facts, pictures=()):
 
 def parse_story(text):
     """The storyboard out of the model's answer: checked, trimmed, every scene with what it needs."""
+    if text is None:
+        raise VideoError(MODEL_DOWN)
     match = re.search(r"\{.*\}", re.sub(r"<think>.*?</think>", "", text or "", flags=re.S), re.S)
     if not match:
         raise VideoError("The story could not be written: the model did not answer with a storyboard")
