@@ -7,6 +7,13 @@ Kokoro's English text handling does not run on the gateway's 3.14). Reads one JS
 
   English  Kokoro-82M (hexgrad), voice am_michael: a calm male narrator
   Bangla   Meta's MMS-TTS for Bengali (facebook/mms-tts-ben)
+
+The environment on homelabai (~/tts-venv, about 1.5 GB), made with uv:
+  uv venv -p 3.12 ~/tts-venv
+  uv pip install -p ~/tts-venv/bin/python --index-url https://download.pytorch.org/whl/cpu torch
+  uv pip install -p ~/tts-venv/bin/python kokoro soundfile transformers imageio-ffmpeg
+  uv pip install -p ~/tts-venv/bin/python <en_core_web_sm-3.8.0 wheel from spaCy's GitHub releases>
+The fonts for the words on screen go in video.fonts.dir (~/fonts): NotoSansBengali.ttf, DejaVuSans.ttf.
 """
 import json
 import re
