@@ -39,14 +39,7 @@ LEAD_IN = 0.6                         # silence before a scene's narration start
 MIN_SCENES, MAX_SCENES = 5, 16
 SIZE = "wide"                          # images.SIZES: 1344 x 768
 
-STORY_PROMPT = """You write short, true, calm illustrated stories for children and families, told in scenes.
-
-Use ONLY the facts in the SOURCES and the MATERIAL below. Never invent events, numbers, names or
-quotations. When the sources disagree, or scholars and historians hold different views, say so
-plainly in a scene near the end ("Some scholars say ..., others ..."). If something is not known, say
-that it is not known. Keep a warm, gentle, interesting voice - no cliffhangers, no frightening detail.
-
-Write 8 to 14 scenes. Each scene:
+SCENE_RULES = """Each scene:
 - "narration_en": one or two short sentences in English, at most 32 words, easy for a child.
 - "narration_bn": the same in natural Bangla (Bengali script).
 - "picture": what to draw, in English, as a calm wide illustration: places, nature, sky, light,
@@ -63,6 +56,47 @@ Answer with JSON only, no other text:
  "scenes": [{"narration_en": "...", "narration_bn": "...", "picture": "...", "people": "none"}],
  "perspectives": ["one line for each other view mentioned, in English"],
  "sources": [numbers of the SOURCES used]}"""
+
+STORY_PROMPT = """You write short, true, calm illustrated stories for children and families, told in scenes.
+
+Use ONLY the facts in the SOURCES and the MATERIAL below. Never invent events, numbers, names or
+quotations. When the sources disagree, or scholars and historians hold different views, say so
+plainly in a scene near the end ("Some scholars say ..., others ..."). If something is not known, say
+that it is not known. Keep a warm, gentle, interesting voice - no cliffhangers, no frightening detail.
+
+Write 8 to 14 scenes. """ + SCENE_RULES
+
+# A story the person wrote is told as it is. Searched for and mixed with what the web said, the first
+# one given (2026-10-24) came back as a summary of the sources instead of the story.
+GIVEN_PROMPT = """You turn a story the person wrote into a calm illustrated video for children and families,
+told in scenes.
+
+Tell THE STORY exactly as given: it is the only source, and the person wants it told as they wrote it,
+not summarised.
+- Every sentence of the story is told, in its order, in the scenes - its events, names, places,
+  numbers, quotations, its details (when, how, why: "during the night", "he hid a glass of water",
+  "because it was dark no one would notice") and its closing lesson or advice, in full.
+- Use the story's own sentences. Change words only to make a hard word easy for a child or a long
+  sentence two shorter ones; never change what happens or what is said.
+- Add nothing from outside it: no facts, background, dates, explanations, morals or conclusions it
+  does not have.
+- For this story a scene's narration may be up to three sentences and 45 words: split the story into
+  as many scenes as it needs (5 to 14) rather than leaving anything out.
+- When the story is written in Bangla, narration_bn uses its sentences as written, and narration_en
+  translates them; when it is in English, the other way round.
+- "perspectives" is [] (the story's lesson is told in the scenes); "sources" is [].
+
+""" + SCENE_RULES
+
+GIVEN_LENGTH = 400        # characters: a request this long is a story to tell, not a topic to look up
+
+CHOOSE_PROMPT = """Someone asked for an illustrated story video. Decide what it should tell, and answer
+with JSON only:
+{"tell": "given" when the LATEST request asks to tell a story the person wrote themselves - in an
+         EARLIER message or in the attached DOCUMENTS ("make a video of the story above", "use exactly
+         what I gave", "this story") - or "research" when it asks for a story about a topic,
+ "earlier": the number of the EARLIER message that holds that story, or 0 when it is in the DOCUMENTS
+            or there is none}"""
 
 STYLE = ("soft painterly illustration for a children's storybook, warm gentle light, calm balanced "
          "composition, wide establishing shot, muted harmonious colours, no text, no lettering, "
@@ -89,16 +123,52 @@ class VideoError(Exception):
 
 # --- the storyboard -------------------------------------------------------------------------------
 
-def story_request(model, request, material, facts, pictures=()):
-    """The chat request that writes the storyboard. `pictures` are (bytes, mime) given as context."""
-    text = (f"REQUEST:\n{request}\n\nMATERIAL (given by the person):\n{material or '(none)'}\n\n"
-            f"SOURCES (from a web search):\n{facts or '(none found)'}")
+def choose_request(model, latest, earlier, documents):
+    """The chat request that decides whether a short request points at a story given before."""
+    lines = "\n\n".join(f"EARLIER {n}:\n{text[:3000]}" for n, text in enumerate(earlier, 1))
+    text = (f"{lines or 'EARLIER: (none)'}\n\nDOCUMENTS:\n{documents[:3000] if documents else '(none)'}"
+            f"\n\nLATEST REQUEST:\n{latest}")
+    return {"model": model, "stream": False, "temperature": 0, "max_tokens": 200,
+            "chat_template_kwargs": {"enable_thinking": False},
+            "messages": [{"role": "system", "content": CHOOSE_PROMPT}, {"role": "user", "content": text}]}
+
+
+def given_story(answer, earlier, documents):
+    """The story the person gave, as chosen; None when the request is a topic to look up."""
+    match = re.search(r"\{.*\}", re.sub(r"<think>.*?</think>", "", answer or "", flags=re.S), re.S)
+    try:
+        choice = json.loads(match.group(0)) if match else {}
+    except ValueError:
+        return None
+    if choice.get("tell") != "given":
+        return None
+    n = int(choice.get("earlier") or 0) if str(choice.get("earlier") or "0").isdigit() else 0
+    if 0 < n <= len(earlier):
+        return earlier[n - 1]
+    return documents or None
+
+
+def is_bangla(text):
+    letters = [c for c in text or "" if c.isalpha()]
+    return bool(letters) and sum("ঀ" <= c <= "৿" for c in letters) / len(letters) > 0.3
+
+
+def story_request(model, request, material, facts, pictures=(), given=None):
+    """The chat request that writes the storyboard. `pictures` are (bytes, mime) given as context;
+    `given` is a story the person wrote, told as it is instead of looked up."""
+    if given:
+        text = f"THE STORY (written by the person; tell this one):\n{given}\n\nWHAT THEY ASKED:\n{request}"
+        if material and material.strip() != given.strip():
+            text += f"\n\nMATERIAL (given by the person):\n{material}"
+    else:
+        text = (f"REQUEST:\n{request}\n\nMATERIAL (given by the person):\n{material or '(none)'}\n\n"
+                f"SOURCES (from a web search):\n{facts or '(none found)'}")
     content = [{"type": "text", "text": text}] + [
         {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{base64.b64encode(data).decode()}"}}
         for data, mime in pictures]
-    return {"model": model, "stream": False, "temperature": 0.4, "max_tokens": 6000,
+    return {"model": model, "stream": False, "temperature": 0.2 if given else 0.4, "max_tokens": 8000,
             "chat_template_kwargs": {"enable_thinking": False},
-            "messages": [{"role": "system", "content": STORY_PROMPT},
+            "messages": [{"role": "system", "content": GIVEN_PROMPT if given else STORY_PROMPT},
                          {"role": "user", "content": content if pictures else text}]}
 
 

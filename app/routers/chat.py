@@ -2174,8 +2174,16 @@ async def make_video(payload: VideoIn, principal: Principal = Depends(authentica
         raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "Video stories are not set up on this server")
     if not access.can_generate_images(principal):
         raise HTTPException(status.HTTP_403_FORBIDDEN, "You do not have access to image generation")
+    # What the person wrote before in this conversation: "the story above" points at one of these.
+    # Sent alone, such a request was searched for as it stood, and made a video of a news item.
+    earlier = []
     if payload.conversation_id is not None:
-        await _owned(session, payload.conversation_id, user)
+        conversation = await _owned(session, payload.conversation_id, user)
+        rows = (await session.execute(select(ConversationMessage.content).where(
+            ConversationMessage.conversation_id == conversation.id, ConversationMessage.role == "user")
+            .order_by(ConversationMessage.id.desc()).limit(6))).scalars().all()
+        earlier = list(dict.fromkeys(text[:12000] for text in reversed(rows)
+                                     if text and text.strip() != payload.prompt.strip()))[-5:]
     languages = [lang for lang in ("en", "bn") if lang in payload.languages] or ["en"]
     found = await _load_files(session, user, payload.file_ids)
     pictures = [(f.data, f.mime_type) for f in found.values() if f.kind != "document" and (f.mime_type or "").startswith("image/")]
@@ -2211,13 +2219,25 @@ async def make_video(payload: VideoIn, principal: Principal = Depends(authentica
                     task.cancel()
 
         try:
-            yield _event("progress", stage="Finding the facts", fraction=0.02)
-            facts, sources = await _video_facts(payload.prompt)
+            # A story the person wrote is told as it is - in this request, in an earlier message they
+            # point back to, or in a document - and nothing is looked up. Only a topic is searched for.
+            given = payload.prompt if len(payload.prompt) >= video_story.GIVEN_LENGTH else None
+            if given is None and (material or any(len(e) >= video_story.GIVEN_LENGTH for e in earlier)):
+                yield _event("progress", stage="Finding the story you gave", fraction=0.02)
+                given = video_story.given_story(await _ask_helper(principal, video_story.choose_request(
+                    story_model, payload.prompt, earlier, material)), earlier, material)
+            if given:
+                facts, sources = "", []
+            else:
+                yield _event("progress", stage="Finding the facts", fraction=0.02)
+                facts, sources = await _video_facts(payload.prompt)
             yield _event("progress", stage="Writing the story", fraction=0.06)
             answer = await _ask_helper(principal, video_story.story_request(
-                story_model, payload.prompt, material, facts, pictures))
+                story_model, payload.prompt, material, facts, pictures, given=given))
             story = video_story.parse_story(answer)
-            if "bn" in languages:
+            # A story given in Bangla keeps its own words; one given in English is told in Bangla for
+            # children, as a looked-up one is
+            if "bn" in languages and not (given and video_story.is_bangla(given)):
                 yield _event("progress", stage="Making the Bangla easy for children", fraction=0.08)
                 story = video_story.apply_bangla(
                     await _ask_helper(principal, video_story.bangla_request(bangla_model, story)), story)
@@ -2285,8 +2305,8 @@ async def make_video(payload: VideoIn, principal: Principal = Depends(authentica
 
             used = [sources[n - 1] for n in story["sources"] if 0 < n <= len(sources)] or sources[:5]
             video = {"title": story["title_en"], "title_bn": story["title_bn"], "videos": videos,
-                     "scenes": len(scenes), "perspectives": story["perspectives"], "sources": used,
-                     "asked": payload.prompt}
+                     "scenes": len(scenes), "perspectives": [] if given else story["perspectives"],
+                     "sources": [] if given else used, "asked": payload.prompt, "from_story": bool(given)}
             message_id = None
             if payload.conversation_id is not None:
                 # The pictures and the lines are kept, so the video can be made again with the person's
