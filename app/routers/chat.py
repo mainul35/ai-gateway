@@ -2142,7 +2142,7 @@ async def generate_image(payload: ImageIn, principal: Principal = Depends(authen
 # --- video stories ------------------------------------------------------------------------------
 
 class VideoIn(BaseModel):
-    prompt: str = Field(min_length=1, max_length=4000)
+    prompt: str = Field(min_length=1, max_length=video_story.STORY_CHARS)     # a whole story, given to tell
     conversation_id: int | None = None
     file_ids: list[int] = Field(default_factory=list, max_length=6)     # pictures and documents as material
     languages: list[str] = Field(default_factory=lambda: ["en", "bn"])
@@ -2182,7 +2182,7 @@ async def make_video(payload: VideoIn, principal: Principal = Depends(authentica
         rows = (await session.execute(select(ConversationMessage.content).where(
             ConversationMessage.conversation_id == conversation.id, ConversationMessage.role == "user")
             .order_by(ConversationMessage.id.desc()).limit(6))).scalars().all()
-        earlier = list(dict.fromkeys(text[:12000] for text in reversed(rows)
+        earlier = list(dict.fromkeys(text[:video_story.STORY_CHARS] for text in reversed(rows)
                                      if text and text.strip() != payload.prompt.strip()))[-5:]
     languages = [lang for lang in ("en", "bn") if lang in payload.languages] or ["en"]
     found = await _load_files(session, user, payload.file_ids)
@@ -2366,7 +2366,7 @@ async def make_video(payload: VideoIn, principal: Principal = Depends(authentica
 class VoiceIn(BaseModel):
     # One per scene, in order: a recording (base64, as the browser recorded it), or null to keep the
     # one saved last time for that scene
-    recordings: list[str | None] = Field(max_length=video_story.MAX_SCENES)
+    recordings: list[str | None] = Field(max_length=video_story.GIVEN_MAX_SCENES)
 
 
 @router.post("/video/{message_id}/voice")
