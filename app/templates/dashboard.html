@@ -651,7 +651,8 @@ function startLive(){
 }
 function stopLive(){
   clearInterval(liveTimer); liveTimer = null;
-  document.getElementById('livePaused').textContent = '· paused while the tab is hidden';
+  // The server goes on measuring (app/live_metrics.py), and the page fetches what it missed on return
+  document.getElementById('livePaused').textContent = '· catching up when the tab is shown again';
 }
 document.addEventListener('visibilitychange', () => {
   if(document.hidden) stopLive();
