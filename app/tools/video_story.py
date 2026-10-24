@@ -31,7 +31,7 @@ from app import settings
 log = logging.getLogger("tools.video_story")
 
 WIDTH, HEIGHT, FPS = 1280, 720, 25
-SCENE_MIN, SCENE_MAX = 8.0, 14.0      # seconds a scene stays: slow enough for a child to take it in
+SCENE_MIN = 8.0                       # seconds a scene stays at least: slow enough for a child to take it in
 FADE = 1.5                            # seconds two scenes overlap
 LEAD_IN = 0.6                         # silence before a scene's narration starts
 MIN_SCENES, MAX_SCENES = 5, 16
@@ -135,6 +135,65 @@ AVOID = {"a face is visible": "absolutely no faces, no portraits, paintings or s
          "there are people in a scene meant to have none": NO_PEOPLE}
 
 
+# The storyboard's Bangla read like a translation for adults - উপত্যকা, সংগ্রহ করত, প্রতিষ্ঠান - and
+# its long sentences ran together when spoken. A second pass rewrites it for children, on its own.
+BANGLA_PROMPT = """You tell true stories to young children in Bangladesh (6 to 10 years old), the way a
+parent tells a story at bedtime. For each scene you get the English narration, and a first Bangla
+draft that is too formal. Tell each scene again in Bangla, from the English, for children; use the
+draft only to see how names are spelled in Bangla. It is read aloud by a computer voice.
+
+How to write it:
+- Everyday spoken Bangla as families in Bangladesh speak it (cholito), warm and simple.
+- Words a young child knows. Where the draft uses a bookish word, use the plain one; for example
+  নামক -> নামের, পণ্ডিতগণ -> জ্ঞানী মানুষেরা, গ্রন্থ -> বই, সংগ্রহ করা -> জোগাড় করা,
+  প্রতিষ্ঠান -> জায়গা, পরিণত হলো -> হয়ে উঠল, ইতিহাসবিদ -> ইতিহাস জানা মানুষেরা, জল -> পানি.
+  These are only swaps for words that are there: never bring in a word or a place from this list.
+- Two or three sentences a scene, each about 6 to 12 words, flowing the way people talk (আর, তখন,
+  তাই) - not one long sentence, and not a row of tiny choppy ones.
+- A name or a word a child may not know (a place, a person, an Islamic term, a word like অনুবাদ)
+  gets a few easy words of explanation the first time it comes.
+- Islamic words as Bangladeshi Muslim families say them: আল্লাহ, নবী, সাহাবি, নামাজ, মসজিদ. After a
+  prophet's name write the blessing out in full (আলাইহিস সালাম; for our Prophet: সাল্লাল্লাহু
+  আলাইহি ওয়া সাল্লাম), never as (আ.) or (সা.).
+- For the voice: numbers and years in words, no English words, no abbreviations, no brackets or
+  quotation marks. A comma where a reader would take a breath.
+
+What not to do:
+- Say what the English says and nothing more: no new places, reasons, results, feelings or
+  conclusions. Explaining a word is the only thing you may add.
+
+The title: short and easy; a foreign name in it is followed by what it means.
+
+Answer with JSON only: {"title_bn": "...", "narration_bn": ["one string for each scene, in order"]}"""
+
+
+def bangla_request(model, story):
+    """The chat request that rewrites the storyboard's Bangla for children."""
+    lines = "\n".join(f"{i}. EN: {s['narration_en']}\n   BN: {s['narration_bn']}"
+                       for i, s in enumerate(story["scenes"], 1))
+    text = f"TITLE: {story['title_en']} / {story['title_bn']}\n\nSCENES:\n{lines}"
+    return {"model": model, "stream": False, "temperature": 0.3, "max_tokens": 5000,
+            "chat_template_kwargs": {"enable_thinking": False},
+            "messages": [{"role": "system", "content": BANGLA_PROMPT}, {"role": "user", "content": text}]}
+
+
+def apply_bangla(answer, story):
+    """The story with its Bangla rewritten, when the answer has a line for every scene; else unchanged."""
+    match = re.search(r"\{.*\}", re.sub(r"<think>.*?</think>", "", answer or "", flags=re.S), re.S)
+    try:
+        rewritten = json.loads(match.group(0)) if match else {}
+    except ValueError:
+        rewritten = {}
+    lines = [str(line).strip() for line in rewritten.get("narration_bn") or []]
+    if len(lines) != len(story["scenes"]) or not all(lines):
+        log.info("the Bangla rewrite was not usable; keeping the first draft")
+        return story
+    for scene, line in zip(story["scenes"], lines):
+        scene["narration_bn"] = line
+    story["title_bn"] = str(rewritten.get("title_bn") or "").strip() or story["title_bn"]
+    return story
+
+
 def picture_prompt(scene, plain=False, why=""):
     """What the image model is asked for. `plain` is the last resort: the place alone, nobody in it.
     `why` is what was wrong with the last picture of this scene."""
@@ -196,7 +255,9 @@ async def narrate(lang, texts, folder):
     process = await asyncio.create_subprocess_exec(
         _python(), _worker(), stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE)
-    out, err = await process.communicate(json.dumps({"lang": lang, "items": items, "speed": 0.92}).encode())
+    # Bangla a little slower: at its own pace the voice runs words together
+    speed = 0.85 if lang == "bn" else 0.92
+    out, err = await process.communicate(json.dumps({"lang": lang, "items": items, "speed": speed}).encode())
     if process.returncode != 0:
         log.warning("narration in %s failed: %s", lang, err.decode(errors="replace")[-800:])
         raise VideoError(f"The {'Bangla' if lang == 'bn' else 'English'} narration could not be made")
@@ -225,8 +286,9 @@ def ffmpeg():
 
 
 def scene_lengths(narration_seconds):
-    """How long each scene stays: its narration and a breath either side, between SCENE_MIN and MAX."""
-    return [min(SCENE_MAX, max(SCENE_MIN, LEAD_IN + seconds + 1.4 + FADE)) for seconds in narration_seconds]
+    """How long each scene stays: its narration and a breath either side, at least SCENE_MIN. No upper
+    limit: a cap of 14 s let a long Bangla line run on over the next scene's narration."""
+    return [max(SCENE_MIN, LEAD_IN + seconds + 1.4 + FADE) for seconds in narration_seconds]
 
 
 FONTS = {"bn": "NotoSansBengali.ttf", "en": "DejaVuSans.ttf"}
@@ -324,10 +386,12 @@ async def assemble(pictures, narration, texts, title, lang, folder):
 
     # The narration, each line where its scene begins
     audio_inputs, delays = [], []
+    # The Bangla voice is bright and a little harsh: its highs softened
+    tone = "highshelf=f=3200:g=-5," if lang == "bn" else ""
     for i, ((wav, _), start) in enumerate(zip(narration, starts)):
         audio_inputs += ["-i", wav]
         ms = int((start + LEAD_IN) * 1000)
-        delays.append(f"[{i + 1}:a]adelay={ms}|{ms},aformat=channel_layouts=stereo[a{i}]")
+        delays.append(f"[{i + 1}:a]{tone}adelay={ms}|{ms},aformat=channel_layouts=stereo[a{i}]")
     mix = ";".join(delays) + ";" + "".join(f"[a{i}]" for i in range(len(narration))) + \
         f"amix=inputs={len(narration)}:normalize=0,apad=whole_dur={total:.3f}[aout]"
 

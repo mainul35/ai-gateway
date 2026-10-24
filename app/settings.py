@@ -69,6 +69,10 @@ DEFAULTS = {
     # subtitles are (Noto Sans Bengali for Bangla)
     "video.story.model": "qwen3.6-256k",
     "video.check.model": "qwen3.6-256k",
+    # The Bangla told again for children: Gemma 4 wrote it plainest and closest to the English of the
+    # three tried (2026-10-24); Qwen 3.6 kept bookish words, and with thinking on invented sentences.
+    # Not there, the storyboard's own Bangla is used.
+    "video.bangla.model": "gemma-4-31b-it-ud-q8_k_xl",
     "video.tts.python": "~/tts-venv/bin/python",
     "video.fonts.dir": "~/fonts",
     "video.check.attempts": "3",
