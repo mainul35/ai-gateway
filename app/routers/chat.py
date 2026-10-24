@@ -2357,12 +2357,27 @@ async def make_video(payload: VideoIn, principal: Principal = Depends(authentica
 
     slot = await limits.take_gpu_slot(principal)
     if payload.conversation_id is not None:
-        job = jobs.start(user.id, payload.conversation_id, "video", payload.prompt[:120], limits.holding(slot, stream()))
+        job = jobs.start(user.id, payload.conversation_id, "video", payload.prompt[:120],
+                         limits.holding(slot, _one_video_at_a_time(stream())))
         return StreamingResponse(jobs.follow(job), media_type="text/event-stream",
                                  headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no",
                                           "X-Job-Id": str(job.id)})
-    return StreamingResponse(limits.holding(slot, stream()), media_type="text/event-stream",
+    return StreamingResponse(limits.holding(slot, _one_video_at_a_time(stream())), media_type="text/event-stream",
                              headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+
+# A video takes both GPUs in turn - its language models, then the image model - so two at once
+# fight over them: a second request started Gemma while the first was drawing, Gemma could not
+# load, and the second video failed as "the story's pictures could not be planned" (2026-10-25)
+_video_turn = asyncio.Lock()
+
+
+async def _one_video_at_a_time(work):
+    if _video_turn.locked():
+        yield _event("progress", stage="Waiting for the video already being made", fraction=0.0)
+    async with _video_turn:
+        async for chunk in work:
+            yield chunk
 
 
 class VoiceIn(BaseModel):
