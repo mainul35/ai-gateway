@@ -103,6 +103,11 @@ DEFAULTS = {
     "images.edit.text_encoder": "qwen_2.5_vl_7b_fp8_scaled.safetensors",
     "images.edit.vae": "qwen_image_vae.safetensors",
     "images.edit.lora": "Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors",
+    # The pictures of a video story: Qwen-Image follows a scene's description - who, how many, seen
+    # from behind - where Flux turned faces to the viewer and added people. It shares the editing
+    # model's text encoder and VAE. Without the file, stories are drawn by Flux.
+    "images.story.model": "qwen_image_2512_fp8_e4m3fn.safetensors",
+    "images.story.lora": "Qwen-Image-2512-Lightning-8steps-V1.0-bf16.safetensors",
 }
 
 # Generated once per process when no master key is configured, so a fresh install still works
@@ -326,6 +331,15 @@ def edit_vae():
 def edit_lora():
     """Lightning LoRA: 4 steps instead of 40. Empty runs the full model."""
     return get("images.edit.lora", "IMAGES_EDIT_LORA")
+
+
+def story_image_model():
+    return get("images.story.model", "IMAGES_STORY_MODEL")
+
+
+def story_image_lora():
+    """Lightning LoRA: 8 steps instead of 50. Empty runs the full model."""
+    return get("images.story.lora", "IMAGES_STORY_LORA")
 
 
 def max_upload_bytes():

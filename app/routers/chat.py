@@ -2261,7 +2261,7 @@ async def make_video(payload: VideoIn, principal: Principal = Depends(authentica
                                  fraction=0.1 + 0.55 * (n + 1) / max(1, len(pending)))
                     png = None
                     async for item in relay(images.generate(video_story.picture_prompt(scenes[i], plain, wrong.get(i, "")),
-                                                            video_story.SIZE, on_progress=progress)):
+                                                            video_story.SIZE, on_progress=progress, story=True)):
                         if isinstance(item, bytes):
                             yield item
                         else:
