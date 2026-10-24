@@ -47,9 +47,17 @@ class EngineProfile:
     # "35B": what Auto knows the model's size by (app/tools/chooser.py). Without it the size is read
     # from the name, and "qwen3.6-1m" names its window, not a model of a million parameters
     parameter_size: str | None = None
+    # Multi-token prediction: "auto" uses it when the model file carries the layers for it
+    # (gguf_meta.mtp_layers) and drops it if the engine will not start with it; "on" / "off" decide.
+    # Flags for it written into extra_args by hand are left alone and win.
+    mtp: str = "auto"
 
-    def command(self, binary):
-        """The llama-server command line this profile describes."""
+    def has_mtp_flags(self):
+        return "--spec-type" in self.extra_args or "-st" in self.extra_args
+
+    def command(self, binary, mtp=False):
+        """The llama-server command line this profile describes; `mtp` adds the multi-token
+        prediction draft (unless extra_args already say how to draft)."""
         args = [binary, "--model", self.model_path, "--host", "127.0.0.1", "--port", str(self.port),
                 "--ctx-size", str(self.ctx_size), "--alias", self.name]
         if self.n_gpu_layers is not None:
@@ -83,7 +91,13 @@ class EngineProfile:
             args += ["--chat-template-kwargs", self.chat_template_kwargs]
         if self.mmproj:
             args += ["--mmproj", self.mmproj]
+        if mtp and not self.has_mtp_flags():
+            # Two tokens ahead: each further guess is less often right, and two measured fastest
+            args += MTP_ARGS
         return args + list(self.extra_args)
+
+
+MTP_ARGS = ["--spec-type", "draft-mtp", "--spec-draft-n-max", "2"]
 
 
 def engines_file():

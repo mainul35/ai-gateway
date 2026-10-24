@@ -14,6 +14,7 @@ import httpx
 
 from app import settings
 from app.settings import PROJECT_ROOT
+from app.engine import gguf_meta
 from app.engine.profiles import load_profiles
 from utils.ollama_client import ollama_host
 from utils.system_info import detect_gpus
@@ -28,6 +29,19 @@ SMALL_OLLAMA_MODEL = 4 * 1024**3  # below this an Ollama model never makes a lla
 
 LOG_DIR = os.path.join(PROJECT_ROOT, "logs")
 LOG_CAP = 20 * 1024 * 1024       # per engine; the one before is kept as .1
+
+# (build, model file) pairs that would not start with MTP: started without it from then on, until the
+# gateway restarts or either file changes (the key carries their modification times)
+_mtp_refused = set()
+
+
+def _mtp_key(profile, binary):
+    def stamp(path):
+        try:
+            return int(os.path.getmtime(path))
+        except OSError:
+            return 0
+    return (binary, stamp(binary), profile.model_path, stamp(profile.model_path))
 
 
 def engine_log(name):
@@ -80,6 +94,7 @@ class RunningModel:
             "idle_seconds": int(self.idle_seconds),
             "in_flight": self.in_flight,
             "ttl_seconds": self.profile.ttl_seconds,
+            "mtp": getattr(self, "mtp", False),
         }
 
 
@@ -341,7 +356,28 @@ class Supervisor:
         binary = profile.binary or self.binary()
         if profile.binary and not (os.path.isfile(binary) and os.access(binary, os.X_OK)):
             return None, f"llama-server not found at {binary} (profile {profile.name})"
-        command = profile.command(binary)
+        mtp = self.mtp_for(profile, binary)
+        model, problem = await self._launch(profile, binary, mtp)
+        if model is None and mtp and profile.mtp == "auto":
+            # The file has the layers but this engine would not start with them (a build without the
+            # draft for this architecture, or too little memory for the draft's cache): without it,
+            # and not tried again with this build and file until either changes
+            log.warning("%s did not start with MTP (%s); starting it without", profile.name, problem)
+            _mtp_refused.add(_mtp_key(profile, binary))
+            model, problem = await self._launch(profile, binary, False)
+        return model, problem
+
+    @staticmethod
+    def mtp_for(profile, binary):
+        """Whether this profile's engine runs with multi-token prediction: see EngineProfile.mtp."""
+        if profile.mtp == "off" or profile.has_mtp_flags():
+            return False                 # off, or drafting already set by hand in extra_args
+        if profile.mtp == "on":
+            return True
+        return gguf_meta.mtp_layers(profile.model_path) > 0 and _mtp_key(profile, binary) not in _mtp_refused
+
+    async def _launch(self, profile, binary, mtp):
+        command = profile.command(binary, mtp=mtp)
         env = dict(os.environ)
         library_path = settings.get("engine.library.path", "ENGINE_LIBRARY_PATH")
         if library_path and not profile.binary:
@@ -363,6 +399,7 @@ class Supervisor:
                 process.terminate()
             return None, problem
 
+        model.mtp = mtp
         self._running[profile.name] = model
         return model, None
 
