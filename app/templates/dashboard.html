@@ -525,13 +525,18 @@ function timeX(at, end){ return (1 - Math.min(LIVE_WINDOW, Math.max(0, end - at)
 function liveChart(id, series){
   const end = Date.now() / 1000, y = v => CHART_H - Math.max(0, Math.min(100, v || 0)) / 100 * (CHART_H - 2) - 1;
   const shown = liveHistory.filter(s => end - s.at <= LIVE_WINDOW);
-  // A gap - nobody was looking, so nothing was measured - breaks the line rather than bridging it
+  // A gap - nobody was looking, so nothing was measured - is drawn flat at the bottom: the card was
+  // idle or unseen, and a line that simply stops in mid-chart reads as a dead stream
   const gap = i => i && shown[i].at - shown[i - 1].at > 15;
-  const broken = shown.some((_, i) => gap(i));
+  const y0 = y(0);
   const lines = shown.length < 2 ? '' : series.map((s, k) => {
-    const d = shown.map((p, i) => `${i && !gap(i) ? 'L' : 'M'}${timeX(p.at, end).toFixed(1)},${y(s.of(p)).toFixed(1)}`).join('');
-    const area = series.length === 1 && !broken
-      ? `<path d="${d}L${timeX(shown[shown.length - 1].at, end)},${CHART_H}L${timeX(shown[0].at, end)},${CHART_H}Z" fill="${s.color}" opacity=".12"/>` : '';
+    const d = shown.map((p, i) => {
+      const x = timeX(p.at, end).toFixed(1), py = y(s.of(p)).toFixed(1);
+      if(!i) return `M0,${y0}L${x},${y0}L${x},${py}`;
+      return gap(i) ? `L${timeX(shown[i - 1].at, end).toFixed(1)},${y0}L${x},${y0}L${x},${py}` : `L${x},${py}`;
+    }).join('');
+    const area = series.length === 1
+      ? `<path d="${d}L${timeX(shown[shown.length - 1].at, end)},${CHART_H}L0,${CHART_H}Z" fill="${s.color}" opacity=".12"/>` : '';
     return `${area}<path d="${d}" fill="none" stroke="${s.color}" stroke-width="2" vector-effect="non-scaling-stroke"
                          stroke-linejoin="round" stroke-linecap="round"/>`;
   }).join('');

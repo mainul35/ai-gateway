@@ -1,9 +1,11 @@
 """CPU, memory and every GPU as they are now, for the dashboard's live panel, with a short history.
 
-Measured only when asked: the dashboard asks every few seconds while it is open and visible, and
-nothing samples otherwise - a machine that sleeps when idle should not be kept busy measuring itself.
-Each answer is one sample; the samples of the last few minutes are kept, so a dashboard opened now
-starts with a history instead of an empty graph.
+Measured while someone is watching: a dashboard asking starts a sampler that measures every
+SAMPLE_SECONDS on its own, and goes on for KEEP_SAMPLING after the last ask. A page stops asking while
+its tab is hidden - which the browser also says of a minimised or covered window - and the sampler
+fills that gap, so the page comes back to whole charts. Nobody watching for half an hour, and it
+stops: a machine that sleeps when idle should not be kept busy measuring itself. (It is no work the
+idle check sees: well under 1 % of a core, and no requests.)
 """
 import subprocess
 import threading
@@ -12,11 +14,15 @@ from collections import deque
 
 import psutil
 
-HISTORY = 240           # samples kept: twelve minutes at the dashboard's 3 s
-MIN_GAP = 2.0           # seconds; a second tab polling as well does not take twice the samples
+HISTORY = 240           # samples kept: twelve minutes at SAMPLE_SECONDS
+SAMPLE_SECONDS = 3.0
+MIN_GAP = 2.0           # seconds; an ask just after a sample is answered with that sample
+KEEP_SAMPLING = 30 * 60  # seconds the sampler runs on after the last ask
 
 _history = deque(maxlen=HISTORY)
 _lock = threading.Lock()
+_last_asked = 0.0
+_sampler: threading.Thread | None = None
 psutil.cpu_percent(interval=None)    # the first call only starts the count
 
 
@@ -74,11 +80,32 @@ def _sample():
             "gpus": _gpus()}
 
 
+def _take():
+    """A sample, unless one was taken under MIN_GAP ago; the newest either way. Holds the lock."""
+    if not _history or time.time() - _history[-1]["at"] >= MIN_GAP:
+        _history.append(_sample())
+    return _history[-1]
+
+
+def _sample_while_watched():
+    global _sampler
+    while True:
+        with _lock:
+            if time.monotonic() - _last_asked > KEEP_SAMPLING:
+                _sampler = None
+                return
+            _take()
+        time.sleep(SAMPLE_SECONDS)
+
+
 def current(with_history=False):
-    """The newest sample - a fresh one unless one was taken under MIN_GAP ago - and, when asked,
-    every sample kept. Blocking (nvidia-smi): call it from a thread."""
+    """The newest sample and, when asked, every sample kept; (re)starts the sampler, which goes on
+    for KEEP_SAMPLING. Blocking (nvidia-smi): call it from a thread."""
+    global _last_asked, _sampler
     with _lock:
-        if not _history or time.time() - _history[-1]["at"] >= MIN_GAP:
-            _history.append(_sample())
-        latest = _history[-1]
+        _last_asked = time.monotonic()
+        if _sampler is None:
+            _sampler = threading.Thread(target=_sample_while_watched, name="live-metrics", daemon=True)
+            _sampler.start()
+        latest = _take()
         return {"now": latest, **({"history": list(_history)} if with_history else {})}
