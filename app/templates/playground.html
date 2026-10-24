@@ -1404,7 +1404,8 @@ async function attachToRunningJob(conversationId){
 
   const box = addMessage('assistant', '', currentModel());
   const body = box.querySelector('.body');
-  setStatus(box, {chat: 'Still writing the answer', agent: 'Still working on the task'}[job.kind]
+  setStatus(box, {chat: 'Still writing the answer', agent: 'Still working on the task',
+                  video: 'Still making the video'}[job.kind]
                  || 'Still working on the picture');
   let answer = '';
   try{
@@ -3767,7 +3768,7 @@ async function sendVideo(text, again){
                                again, false);
   const box = answerBox(again ? again.messageId : asked?._messageId, 'Video story');
   setStatus(box, 'Finding the facts');
-  let result = null;
+  let result = null, saved = null;
   controller = new AbortController();
   busy(true);
   try{
@@ -3783,6 +3784,7 @@ async function sendVideo(text, again){
         setStatus(box, event.fraction != null ? `${event.stage} · ${Math.round(event.fraction * 100)}%` : event.stage,
                   event.fraction);
       }else if(event.type === 'storyboard'){
+        saved = event.message_id;
         setStatus(box, `"${event.title}": ${event.scenes} scenes to draw`);
       }else if(event.type === 'video'){
         result = event;
@@ -3796,6 +3798,12 @@ async function sendVideo(text, again){
     busy(false);
   }
   setStatus(box, null);
+  // Stopped partway, it is saved as far as it got: shown as paused, with Continue
+  if(!result && saved && currentId){
+    loadConversations();
+    openConversation(currentId);
+    return;
+  }
   if(!result){
     box.querySelector('.body').textContent =
       'No video came back. If it was still being made, it is saved in this conversation when it is '
@@ -3810,9 +3818,62 @@ async function sendVideo(text, again){
   loadConversations();
 }
 
+/* A video story that stopped partway - an error, a restart, the server asleep, Stop - is saved as
+   far as it got (POST /chat/video/{message}/continue carries it on). While its job still runs, the
+   progress is shown by attachToRunningJob, and this only says so. */
+async function renderVideoPaused(box, video, messageId){
+  const body = box.querySelector('.body');
+  const pictures = video.story?.pictures || [];
+  const ready = pictures.filter(Boolean).length;
+  const made = Object.keys(video.videos || {}).length;
+  body.innerHTML = `<div class="video-story">
+      <div class="video-title"><b>${escapeHtml(video.title || 'Video story')}</b>
+        ${video.title_bn ? `<span class="muted"> · ${escapeHtml(video.title_bn)}</span>` : ''}</div>
+      <p class="video-paused-state">Paused: ${ready} of ${pictures.length} pictures ready${
+        made ? `, ${made} of ${(video.languages || []).length || 2} videos made` : ''}.</p>
+      ${video.paused ? `<p class="muted">${escapeHtml(video.paused)}</p>` : ''}
+      <button type="button" class="voice-open video-continue">Continue making this video</button>
+      <div class="muted video-continue-status"></div>
+    </div>`;
+  const button = body.querySelector('.video-continue');
+  const status = body.querySelector('.video-continue-status');
+  try{
+    const {job} = await api(`/chat/conversations/${currentId}/job`);
+    if(job && job.kind === 'video'){
+      button.hidden = true;
+      body.querySelector('.video-paused-state').textContent = 'Being made right now; its progress is shown below.';
+    }
+  }catch(e){}
+  button.addEventListener('click', async () => {
+    button.disabled = true;
+    status.textContent = 'Carrying on from where it stopped';
+    let result = null;
+    try{
+      const response = await fetch(`/chat/video/${messageId}/continue`, {method: 'POST'});
+      if(!response.ok){
+        const err = await response.json().catch(() => ({}));
+        throw new Error((typeof err.detail === 'string' && err.detail) || `HTTP ${response.status}`);
+      }
+      await readEvents(response, chunk => {
+        const event = chunk.gateway;
+        if(event?.type === 'progress'){
+          status.textContent = event.fraction != null ? `${event.stage} · ${Math.round(event.fraction * 100)}%` : event.stage;
+        }else if(event?.type === 'video') result = event;
+      });
+    }catch(e){
+      status.textContent = 'It stopped again: ' + errorText(e) + '. What it made is kept.';
+      button.disabled = false;
+      return;
+    }
+    if(result) renderVideo(box, result, messageId);
+    else if(currentId) openConversation(currentId);
+  });
+}
+
 // The video in each language it was made in, one player shown at a time, then what it rests on.
 // `showLang` opens on that language (the Bangla, after it was read in the person's own voice).
 function renderVideo(box, video, messageId, showLang){
+  if(video.state && video.state !== 'done') return renderVideoPaused(box, video, messageId || video.message_id);
   const body = box.querySelector('.body');
   const langs = Object.keys(video.videos || {});
   const names = {en: 'English', bn: 'বাংলা'};
