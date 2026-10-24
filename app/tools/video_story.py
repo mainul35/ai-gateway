@@ -18,6 +18,7 @@ screen, drawn with libraqm so the Bangla script is shaped right.
 """
 import asyncio
 import base64
+import io
 import json
 import logging
 import os
@@ -25,6 +26,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+import wave
 
 from app import settings
 
@@ -343,7 +345,40 @@ async def _run(args, what):
         raise VideoError(f"The video could not be put together ({what})")
 
 
-async def assemble(pictures, narration, texts, title, lang, folder):
+def as_jpeg(path):
+    """A scene's picture, small enough to keep with the conversation."""
+    from PIL import Image
+    out = io.BytesIO()
+    with Image.open(path) as image:
+        image.convert("RGB").save(out, "JPEG", quality=90)
+    return out.getvalue()
+
+
+async def clean_recording(raw, folder, n):
+    """(m4a bytes, seconds) of one scene as the person read it: the silence before and after cut,
+    low rumble taken out, and the loudness brought to the same level for every scene."""
+    binary = ffmpeg()
+    if not binary:
+        raise VideoError("No ffmpeg on this server to put the video together")
+    source, wav, m4a = (os.path.join(folder, f"read-{n:02d}.{ext}") for ext in ("in", "wav", "m4a"))
+    with open(source, "wb") as f:
+        f.write(raw)
+    # A quarter of a second of the quiet kept at each end: cut at -45 dB with nothing kept, the soft
+    # last sound of a line went with the silence
+    trim = "silenceremove=start_periods=1:start_duration=0.05:start_threshold=-55dB:start_silence=0.25"
+    await _run([binary, "-y", "-i", source, "-af",
+                f"highpass=f=70,{trim},areverse,{trim},areverse,loudnorm=I=-18:TP=-2:LRA=9",
+                "-ar", "24000", "-ac", "1", wav], f"cleaning up the recording of scene {n + 1}")
+    with wave.open(wav, "rb") as w:
+        seconds = w.getnframes() / w.getframerate()
+    if seconds < 0.5:
+        raise VideoError(f"The recording of scene {n + 1} is silent; read it again")
+    await _run([binary, "-y", "-i", wav, "-c:a", "aac", "-b:a", "96k", m4a], f"saving the recording of scene {n + 1}")
+    with open(m4a, "rb") as f:
+        return f.read(), round(seconds, 2)
+
+
+async def assemble(pictures, narration, texts, title, lang, folder, recorded=False):
     """The video for one language (`texts` its narration, `title` shown over the first scene): each picture held for its scene with a slow zoom or pan, scenes
     cross-faded, the narration placed at each scene's start, the words faded in over each line as it is spoken. MP4 bytes."""
     binary = ffmpeg()
@@ -387,7 +422,7 @@ async def assemble(pictures, narration, texts, title, lang, folder):
     # The narration, each line where its scene begins
     audio_inputs, delays = [], []
     # The Bangla voice is bright and a little harsh: its highs softened
-    tone = "highshelf=f=3200:g=-5," if lang == "bn" else ""
+    tone = "highshelf=f=3200:g=-5," if lang == "bn" and not recorded else ""
     for i, ((wav, _), start) in enumerate(zip(narration, starts)):
         audio_inputs += ["-i", wav]
         ms = int((start + LEAD_IN) * 1000)
