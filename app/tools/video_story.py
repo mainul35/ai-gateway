@@ -83,9 +83,10 @@ and families. Its SCENES are fixed: do not change, shorten or reorder them. For 
   moment. Say who is in it and how many (one man, not "people"), what they are doing (swinging an
   axe at a tree trunk, carrying logs, talking with his employer), where, and the objects that matter,
   and the shot that shows it best (a medium shot from behind as he swings the axe; a close view of a
-  blunt axe on a stump). Describe each character the same way in every scene they are in - first
-  decide their look (the woodcutter: a strong young man in a brown tunic and a white cap) and repeat
-  it word for word - so the same person appears throughout. A spoken line shows the speaker and the
+  blunt axe on a stump). Describe every person in full, the same way, in every scene they are in -
+  first decide each one's look (the woodcutter: a strong young man in a brown tunic and a white cap;
+  his employer: an older bearded man in a grey robe) and repeat it word for word every time, never
+  just "the employer" - so the same person appears throughout. A spoken line shows the speaker and the
   listener in their place, from behind. A lesson or advice shows a calm object or place that belongs
   to it. One moment in one picture - never a split screen or several moments side by side; a scene
   that tells of several, shows the one that sums it up. Never a face. Never text.
@@ -212,9 +213,18 @@ STYLE = ("soft painterly illustration for a children's storybook, warm gentle li
          "composition, the action clearly visible, muted harmonious colours, no text, no lettering, "
          "no portraits, paintings, statues or silhouettes of people anywhere in the scene")
 NO_PEOPLE = "no people, no human figures, no faces, an empty peaceful scene"
-FROM_BEHIND = ("only the people the scene describes, seen from behind or turned away so that no face "
-               "is ever visible, modestly dressed in long loose clothing; a woman, only if the scene "
-               "has one, fully covered")
+# "Turned away" let Qwen-Image draw faces in profile, and naming a woman, even "only if the scene has
+# one", made the woodcutter's employer a veiled woman: a woman is named only when the scene has one
+FROM_BEHIND = ("only the people the scene describes, each in a back view - the back of the head towards "
+               "the viewer, the face completely hidden, no profile - modestly dressed in long loose "
+               "clothing with long sleeves")
+COVERED = "any woman fully covered in a long loose robe and a headscarf"
+# For the editing model (Qwen-Image-Edit), on a picture whose only fault is a face: on the woodcutter's
+# scenes it turned every head away and kept the moment, and all six passed the check after it
+TURN_AWAY = ("Turn every person so that their head faces completely away from the viewer: only the back "
+             "of the head and hair or cap can be seen, no face, no cheek, no beard, no profile. Keep their "
+             "clothes, pose, the objects and everything else in the picture exactly as it is.")
+WOMAN = re.compile(r"\b(wom[ae]n|girls?|mother|wife|daughter|sister|lady|ladies|queen|grandmother)\b", re.I)
 
 CHECK_PROMPT = """You check one picture for a children's video against strict rules. Look carefully.
 The picture was drawn for this scene: {scene}
@@ -386,6 +396,8 @@ def picture_prompt(scene, plain=False, why=""):
     """What the image model is asked for. `plain` is the last resort: the place alone, nobody in it.
     `why` is what was wrong with the last picture of this scene."""
     who = NO_PEOPLE if plain or scene["people"] == "none" else FROM_BEHIND
+    if who == FROM_BEHIND and WOMAN.search(scene["picture"]):
+        who += "; " + COVERED
     avoid = AVOID.get(why)
     return f"{scene['picture']}. {who}. {avoid + '. ' if avoid else ''}{STYLE}"
 

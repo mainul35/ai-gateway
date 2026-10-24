@@ -62,6 +62,58 @@ async def edit_engine():
     return "qwen"
 
 
+async def story_engine():
+    """ "qwen" when ComfyUI has the Qwen-Image model for story pictures (and the editing model's text
+    encoder and VAE it shares), otherwise "flux"."""
+    wanted = {"UNETLoader": ("unet_name", settings.story_image_model()),
+              "CLIPLoader": ("clip_name", settings.edit_text_encoder()),
+              "VAELoader": ("vae_name", settings.edit_vae())}
+    if not all(name for _, name in wanted.values()):
+        return "flux"
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            for node, (field, name) in wanted.items():
+                info = (await client.get(f"{settings.comfyui_url()}/object_info/{node}")).json()
+                if name not in info[node]["input"]["required"][field][0]:
+                    return "flux"
+    except (httpx.HTTPError, ValueError, KeyError, IndexError):
+        return "flux"
+    return "qwen"
+
+
+# Qwen-Image's own sizes, about 1.3 megapixels; "wide" is 16:9
+QWEN_SIZES = {"square": (1328, 1328), "portrait": (928, 1664), "landscape": (1472, 1140), "wide": (1664, 928)}
+
+
+def _qwen_image_workflow(prompt, size, seed):
+    """ComfyUI's own Qwen-Image template, flattened, with the Lightning LoRA when it is set."""
+    width, height = QWEN_SIZES.get(size, QWEN_SIZES["square"])
+    lora = settings.story_image_lora()
+    nodes = {
+        "unet": {"class_type": "UNETLoader", "inputs": {"unet_name": settings.story_image_model(),
+                                                         "weight_dtype": "default"}},
+        "shift": {"class_type": "ModelSamplingAuraFlow", "inputs": {"model": ["unet", 0], "shift": 3.1}},
+        "clip": {"class_type": "CLIPLoader", "inputs": {"clip_name": settings.edit_text_encoder(),
+                                                         "type": "qwen_image", "device": "default"}},
+        "vae": {"class_type": "VAELoader", "inputs": {"vae_name": settings.edit_vae()}},
+        "positive": {"class_type": "CLIPTextEncode", "inputs": {"text": prompt, "clip": ["clip", 0]}},
+        "negative": {"class_type": "CLIPTextEncode", "inputs": {"text": "", "clip": ["clip", 0]}},
+        "latent": {"class_type": "EmptySD3LatentImage", "inputs": {"width": width, "height": height, "batch_size": 1}},
+        "decode": {"class_type": "VAEDecode", "inputs": {"samples": ["sampler", 0], "vae": ["vae", 0]}},
+        "save": {"class_type": "PreviewImage", "inputs": {"images": ["decode", 0]}},
+    }
+    if lora:
+        nodes["lora"] = {"class_type": "LoraLoaderModelOnly",
+                         "inputs": {"model": ["shift", 0], "lora_name": lora, "strength_model": 1.0}}
+    steps, cfg = (8, 1.0) if lora else (50, 4.0)
+    nodes["sampler"] = {"class_type": "KSampler", "inputs": {
+        "model": ["lora" if lora else "shift", 0], "positive": ["positive", 0], "negative": ["negative", 0],
+        "latent_image": ["latent", 0], "seed": seed, "steps": steps, "cfg": cfg,
+        "sampler_name": "euler", "scheduler": "simple", "denoise": 1.0,
+    }}
+    return nodes
+
+
 def _qwen_edit_workflow(prompt, seed, source_names):
     """ComfyUI's own Qwen-Image-Edit-2511 template, flattened: the first image is the one edited."""
     lora = settings.edit_lora()
@@ -186,8 +238,11 @@ async def _run_job(client, base, client_id, workflow, report, loading_stage):
     return view.content
 
 
-async def generate(prompt, size="square", sources=(), strength=0.75, on_progress=None, text=None):
+async def generate(prompt, size="square", sources=(), strength=0.75, on_progress=None, text=None, story=False):
     """Runs the job and returns (png_bytes, seed).
+
+    story: a picture for a video story, drawn by Qwen-Image when it is there (story_engine), which
+    keeps to the scene's description far better than Flux.
 
     sources is a list of (bytes, mime_type) for an edit: the picture to change first, then up to two
     references. text is wording that must appear in the picture; Flux spells it wrong far more often
@@ -216,6 +271,7 @@ async def generate(prompt, size="square", sources=(), strength=0.75, on_progress
                 raise ImageError(f"Could not reach the image server ({e.__class__.__name__})") from e
 
             engine = await edit_engine()
+            drawing = await story_engine() if story and not source_names else "flux"
             await report("Freeing GPU memory from the language models")
             await _free_vram_for_images()
 
@@ -223,6 +279,9 @@ async def generate(prompt, size="square", sources=(), strength=0.75, on_progress
                 if source_names and engine == "qwen":
                     workflow = _qwen_edit_workflow(prompt, seed, source_names)
                     loading = "Loading the image editing model"
+                elif drawing == "qwen":
+                    workflow = _qwen_image_workflow(prompt, size, seed)
+                    loading = "Loading the story image model"
                 else:
                     workflow = _workflow(prompt, width, height, seed,
                                          source_names[0] if source_names else None, strength)
