@@ -148,7 +148,8 @@ a.cite{font-size:.75em;vertical-align:super;text-decoration:none;padding:0 .1rem
 /* One + button, with the ways of attaching something listed under it rather than spread along
    the toolbar, which is where they would keep arriving as more kinds of file are supported. */
 .attach-wrap{position:relative;display:inline-flex}
-.attach-menu{position:absolute;bottom:calc(100% + .45rem);left:0;z-index:40;min-width:14rem;
+.attach-menu{position:absolute;bottom:calc(100% + .45rem);left:0;z-index:40;min-width:min(14rem,calc(100vw - 1rem));
+             max-width:calc(100vw - 1rem);
              background:var(--card);border:1px solid var(--border);border-radius:10px;padding:.3rem;
              box-shadow:0 .6rem 1.6rem rgba(0,0,0,.45);display:flex;flex-direction:column;gap:.1rem}
 .attach-menu button{display:flex;align-items:center;gap:.6rem;width:100%;text-align:left;
@@ -640,6 +641,9 @@ let currentId = null;    // saved conversation being continued, if any
 let currentUid = null;   // ...and the random id its address shows
 let savedSystem = '';    // system prompt stored with the current conversation
 let controller = null;
+// The gateway job behind the answer being streamed (X-Job-Id): it outlives the page, so Stop has to
+// cancel it there - closing the stream only stops watching it
+let currentJob = null;
 let caps = {web_search: false, vision: false, image_generation: false, maps: false,
             image_sizes: [], max_upload_mb: 10};
 let tools = {web_search: false, vision: false, image_generation: false, maps: false,
@@ -1067,8 +1071,22 @@ function openAttachMenu(open){
   }
   attachMenu.hidden = !open;
   attachButton.setAttribute('aria-expanded', String(open));
-  if(open) attachMenu.querySelector('[data-pick]:not(:disabled)')?.focus();
+  if(open){
+    placeAttachMenu();
+    attachMenu.querySelector('[data-pick]:not(:disabled)')?.focus();
+  }
 }
+
+// The menu opens from the button's left edge, and the button can end up at the right end of a
+// wrapped row of chips - on a phone the menu then ran off the screen. Pulled left by the overflow,
+// never past the screen's left edge.
+function placeAttachMenu(){
+  attachMenu.style.left = '0px';
+  const margin = 8, box = attachMenu.getBoundingClientRect();
+  const over = box.right - (document.documentElement.clientWidth - margin);
+  if(over > 0) attachMenu.style.left = `-${Math.min(over, box.left - margin)}px`;
+}
+window.addEventListener('resize', () => { if(!attachMenu.hidden) placeAttachMenu(); });
 
 attachButton.addEventListener('click', e => {
   e.stopPropagation();
@@ -1331,7 +1349,8 @@ async function attachToRunningJob(conversationId){
 
   const box = addMessage('assistant', '', currentModel());
   const body = box.querySelector('.body');
-  setStatus(box, job.kind === 'chat' ? 'Still writing the answer' : 'Still working on the picture');
+  setStatus(box, {chat: 'Still writing the answer', agent: 'Still working on the task'}[job.kind]
+                 || 'Still working on the picture');
   let answer = '';
   try{
     const response = await fetch(`/chat/jobs/${job.id}/stream`);
@@ -1342,6 +1361,8 @@ async function attachToRunningJob(conversationId){
         if(event.type === 'progress' || event.type === 'status'){
           setStatus(box, event.stage || event.text,
                     event.fraction != null ? event.fraction : undefined);
+        }else if(event.type === 'call'){
+          setStatus(box, `Using ${event.tool}`);      // an agent's step, while it works
         }
         return;
       }
@@ -2958,6 +2979,7 @@ async function readEvents(response, onData){
 async function postStream(path, payload){
   const response = await fetch(path, {method: 'POST', signal: controller.signal,
                                       headers: JSON_HEADERS, body: JSON.stringify(payload)});
+  currentJob = response.headers.get('X-Job-Id');
   if(response.status === 401){ location.href = '/login'; throw new Error('signed out'); }
   if(!response.ok){
     const err = await response.json().catch(() => ({}));
@@ -3624,7 +3646,11 @@ async function sendImage(text, decision, again){
 // Wrapped, not passed straight in: a click handler is called with the event, and send now
 // takes an argument - the button would have handed it a MouseEvent to re-ask
 document.getElementById('send').addEventListener('click', () => send());
-document.getElementById('stop').addEventListener('click', () => { deciding?.abort(); controller?.abort(); });
+document.getElementById('stop').addEventListener('click', () => {
+  if(currentJob) fetch(`/chat/jobs/${currentJob}/cancel`, {method: 'POST'}).catch(() => {});
+  currentJob = null;
+  deciding?.abort(); controller?.abort();
+});
 function fitComposer(){
   promptBox.style.height = 'auto';
   promptBox.style.height = promptBox.scrollHeight + 'px';
