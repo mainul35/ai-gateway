@@ -2183,6 +2183,7 @@ async def make_video(payload: VideoIn, principal: Principal = Depends(authentica
     user_id = user.id
     story_model = settings.get("video.story.model", "VIDEO_STORY_MODEL")
     check_model = settings.get("video.check.model", "VIDEO_CHECK_MODEL")
+    bangla_model = settings.get("video.bangla.model", "VIDEO_BANGLA_MODEL") or story_model
     attempts = max(1, int(settings.get("video.check.attempts", "VIDEO_CHECK_ATTEMPTS") or 3))
 
     async def stream():
@@ -2216,6 +2217,10 @@ async def make_video(payload: VideoIn, principal: Principal = Depends(authentica
             answer = await _ask_helper(principal, video_story.story_request(
                 story_model, payload.prompt, material, facts, pictures))
             story = video_story.parse_story(answer)
+            if "bn" in languages:
+                yield _event("progress", stage="Making the Bangla easy for children", fraction=0.08)
+                story = video_story.apply_bangla(
+                    await _ask_helper(principal, video_story.bangla_request(bangla_model, story)), story)
             scenes = story["scenes"]
             yield _event("storyboard", title=story["title_en"], scenes=len(scenes))
 

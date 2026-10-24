@@ -23,6 +23,10 @@ import numpy as np
 import soundfile as sf
 
 PAUSE_SECONDS = 0.35            # between the sentences of one line
+CLAUSE_SECONDS = 0.15           # at a comma, in Bangla
+# MMS's sampling noise: its defaults (0.667, 0.8) make a rough voice and uneven timing that runs words
+# together. Lower is steadier and clearer.
+NOISE, NOISE_DURATION = 0.45, 0.5
 
 
 def english(items, speed):
@@ -38,23 +42,31 @@ def english(items, speed):
     return durations
 
 
-def bangla(items, speed):
+def bangla(items, speed, noise=NOISE, noise_duration=NOISE_DURATION):
     import torch
     from transformers import AutoTokenizer, VitsModel
     model = VitsModel.from_pretrained("facebook/mms-tts-ben")
     tokenizer = AutoTokenizer.from_pretrained("facebook/mms-tts-ben")
     model.speaking_rate = speed
+    model.noise_scale = noise
+    model.noise_scale_duration = noise_duration
     rate = model.config.sampling_rate
     pause = np.zeros(int(rate * PAUSE_SECONDS), dtype=np.float32)
+    breath = np.zeros(int(rate * CLAUSE_SECONDS), dtype=np.float32)
+    torch.manual_seed(0)                 # the same line read the same way every time
     durations = []
     for item in items:
         # One sentence at a time: the model reads a long line less clearly than several short ones
         sentences = [s.strip() for s in re.split(r"(?<=[।!?.])\s+", item["text"]) if s.strip()]
         parts = []
         for sentence in sentences:
-            inputs = tokenizer(sentence, return_tensors="pt")
-            with torch.no_grad():
-                parts += [model(**inputs).waveform[0].numpy().astype(np.float32), pause]
+            # A breath at each comma: read in one go, the clauses ran into each other
+            clauses = [c.strip() for c in re.split(r"(?<=[,;])\s+", sentence) if c.strip()]
+            for k, clause in enumerate(clauses):
+                inputs = tokenizer(clause, return_tensors="pt")
+                with torch.no_grad():
+                    parts.append(model(**inputs).waveform[0].numpy().astype(np.float32))
+                parts.append(breath if k < len(clauses) - 1 else pause)
         audio = np.concatenate(parts[:-1]) if parts else np.zeros(rate // 10, dtype=np.float32)
         sf.write(item["out"], audio, rate)
         durations.append(len(audio) / rate)
@@ -65,7 +77,11 @@ def main():
     job = json.load(sys.stdin)
     speed = float(job.get("speed") or 0.92)
     items = job.get("items") or []
-    durations = (bangla if job.get("lang") == "bn" else english)(items, speed)
+    if job.get("lang") == "bn":
+        durations = bangla(items, speed, float(job.get("noise") or NOISE),
+                           float(job.get("noise_duration") or NOISE_DURATION))
+    else:
+        durations = english(items, speed)
     print(json.dumps({"durations": durations}))
 
 
