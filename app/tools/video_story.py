@@ -37,6 +37,10 @@ SCENE_MIN = 8.0                       # seconds a scene stays at least: slow eno
 FADE = 1.5                            # seconds two scenes overlap
 LEAD_IN = 0.6                         # silence before a scene's narration starts
 MIN_SCENES, MAX_SCENES = 5, 16
+# A story the person gives may be long - a 4,000-character limit, meant for a topic, turned one
+# away (2026-10-24) - and is cut into more scenes than a looked-up one, so no caption is a page long
+STORY_CHARS = 20000
+GIVEN_MAX_SCENES = 30
 SIZE = "wide"                          # images.SIZES: 1344 x 768
 
 SCENE_RULES = """Each scene:
@@ -50,6 +54,8 @@ SCENE_RULES = """Each scene:
     are not needed.
     "from_behind" only for ordinary people or companions (sahaba): seen from behind or far away, small
     in the picture, modestly dressed; any woman fully covered; never a face.
+  Angels, jinn and Iblis are never drawn as figures either, and Allah is never depicted in any form:
+  show light, the sky or the place instead.
 
 Answer with JSON only, no other text:
 {"title_en": "...", "title_bn": "...",
@@ -79,9 +85,14 @@ and families. Its SCENES are fixed: do not change, shorten or reorder them. For 
     are not needed (a lesson or advice is shown as a calm place, not as people).
     "from_behind" only for ordinary people or companions (sahaba): seen from behind or far away, small
     in the picture, modestly dressed; any woman fully covered; never a face.
+  Angels, jinn and Iblis are never drawn as figures either, and Allah is never depicted in any form:
+  show light, the sky or the place instead.
 - "translation": the scene translated into {other}, faithfully, sentence by sentence: every sentence,
   nothing added, nothing left out, nothing explained or softened. Keep Islamic words as they are said
-  in {other} (Allah, the Ummah: উম্মাহ, ইসলাম, নবী).
+  in {other} (Allah, the Ummah: উম্মাহ, ইসলাম, নবী). Text in Arabic script (a verse of the Quran,
+  a blessing) is copied unchanged. A transliteration of Arabic in Latin letters ("Wa iz qaala
+  rabbuka ...") is written in Bangla letters when translating into Bangla, as Bangla Islamic books
+  do, and kept as it is when translating into English.
 Also the title in English and in Bangla ("title_en", "title_bn"): the story's own title translated,
 or a short plain one if it has none.
 
@@ -96,7 +107,11 @@ def split_story(text, most=None):
     short and does not end like a sentence; the rest is cut into scenes of whole sentences, a new
     scene at each paragraph, none much over SCENE_WORDS words unless one sentence is longer."""
     most = most or SCENE_WORDS
-    lines = (text or "").replace("\r", "").strip().split("\n")
+    # Left behind by copying from a web page, not part of the story: a line with no letter or digit
+    # in it (a lone quotation mark) and the label "Paragraph Separator" - read word for word, the
+    # voice would say them
+    lines = ["" if not re.search(r"\w", line) or line.strip().lower() == "paragraph separator" else line
+             for line in (text or "").replace("\r", "").strip().split("\n")]
     title = ""
     if lines and len(lines[0].split()) <= 12 and not re.search(r"[.!?।,;:]\s*$", lines[0]):
         title, lines = lines[0].strip(), lines[1:]
@@ -120,7 +135,7 @@ def split_story(text, most=None):
             scenes[-1] += " " + " ".join(current)
         else:
             scenes.append(" ".join(current))
-    if len(scenes) > MAX_SCENES:                     # a long story: longer scenes, never fewer words
+    if len(scenes) > GIVEN_MAX_SCENES:               # a long story: longer scenes, never fewer words
         return split_story(text, int(most * 1.3) + 1)
     if len(scenes) < MIN_SCENES and most > 8:        # a short one: shorter scenes, more pictures
         return split_story(text, max(8, int(most * 0.6)))
@@ -132,7 +147,9 @@ def illustrate_request(model, title, scenes, lang):
     other = "English" if lang == "bn" else "Bangla (Bengali script)"
     text = (f"TITLE: {title or '(none)'}\n\nSCENES:\n"
             + "\n".join(f"{n}. {scene}" for n, scene in enumerate(scenes, 1)))
-    return {"model": model, "stream": False, "temperature": 0.2, "max_tokens": 9000,
+    # Room for the translation, as long as the story, and a picture for every scene
+    room = min(32000, 4000 + 2 * sum(len(scene) for scene in scenes))
+    return {"model": model, "stream": False, "temperature": 0.2, "max_tokens": room,
             "chat_template_kwargs": {"enable_thinking": False},
             "messages": [{"role": "system", "content": ILLUSTRATE_PROMPT.replace("{other}", other)},
                          {"role": "user", "content": text}]}
@@ -392,20 +409,80 @@ def is_available():
     return os.path.isfile(_python()) and bool(ffmpeg())
 
 
+# Arabic in a story: shown on screen as written, never read by a voice that cannot say it. The
+# blessings after a name are said in full - "(AS)" read out as letters, and Arabic script skipped,
+# lost them - and anything else in Arabic, a verse of the Quran above all, is not recited by a
+# machine: the scene is held long enough to read it.
+ARABIC = "؀-ۿݐ-ݿࢠ-ࣿﭐ-﷿ﹰ-﻿"
+ARABIC_RUN = re.compile(f"[{ARABIC}]+(?:\\s+[{ARABIC}]+)*")
+BLESSINGS = [  # (abbreviations, the Arabic without its vowel marks, said in English, said in Bangla)
+    (r"\((?:AS|A\.S\.?|as|a\.s\.?)\)|\(আ\.?\)", {"عليه السلام"}, "alayhis salam", "আলাইহিস সালাম"),
+    (r"\((?:SAW|SAWS|S\.A\.W\.?|PBUH|pbuh|saw)\)|\(সা\.?\)", {"صلى الله عليه وسلم", "ﷺ"},
+     "sallallahu alayhi wa sallam", "সাল্লাল্লাহু আলাইহি ওয়া সাল্লাম"),
+    (r"\((?:SWT|S\.W\.T\.?|swt)\)", {"سبحانه وتعالى", "سبحنه وتعلى"}, "subhanahu wa ta'ala", "সুবহানাহু ওয়া তায়ালা"),
+    (r"\((?:RA|R\.A\.?)\)|\(রা\.?\)", {"رضي الله عنه"}, "radiyallahu anhu", "রাদিয়াল্লাহু আনহু"),
+]
+READ_SECONDS = 0.6        # a word of Arabic shown and not spoken is held this long, for reading
+
+
+def _bare_arabic(text):
+    """Arabic without its vowel and Quranic marks, for recognising a blessing however it is written."""
+    text = re.sub("[ً-ٰٟۖ-ۭـ]", "", text).replace("ٱ", "ا")
+    return " ".join(text.split())
+
+
+def spoken(text, lang):
+    """(what the voice says, the words of Arabic it leaves for the eye) for one line of a story."""
+    for abbreviation, _, en, bn in BLESSINGS:
+        text = re.sub(abbreviation, f" {bn if lang == 'bn' else en} ", text)
+    unspoken = 0
+
+    def say(match):
+        nonlocal unspoken
+        bare = _bare_arabic(match.group(0))
+        for _, arabic, en, bn in BLESSINGS:
+            if bare in arabic:
+                return f" {bn if lang == 'bn' else en} "
+        unspoken += len(match.group(0).split())
+        return " "
+
+    text = ARABIC_RUN.sub(say, text)
+    text = re.sub(r"\(\s*\)", " ", text)
+    text = re.sub(r"\s+([,.;:!?।)])", r"\1", re.sub(r"\(\s+", "(", " ".join(text.split())))
+    return text.strip(), unspoken
+
+
 async def narrate(lang, texts, folder):
-    """[(wav path, seconds)] for each text, spoken in English ("en") or Bangla ("bn")."""
-    items = [{"text": t, "out": os.path.join(folder, f"{lang}-{i:02d}.wav")} for i, t in enumerate(texts)]
-    process = await asyncio.create_subprocess_exec(
-        _python(), _worker(), stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE)
-    # Bangla a little slower: at its own pace the voice runs words together
-    speed = 0.85 if lang == "bn" else 0.92
-    out, err = await process.communicate(json.dumps({"lang": lang, "items": items, "speed": speed}).encode())
-    if process.returncode != 0:
-        log.warning("narration in %s failed: %s", lang, err.decode(errors="replace")[-800:])
-        raise VideoError(f"The {'Bangla' if lang == 'bn' else 'English'} narration could not be made")
-    durations = json.loads(out.decode().strip().splitlines()[-1])["durations"]
-    return [(item["out"], seconds) for item, seconds in zip(items, durations)]
+    """[(wav path, seconds)] for each text, spoken in English ("en") or Bangla ("bn"). A line all in
+    Arabic is silence, held for reading; a line with some Arabic in it is held that much longer."""
+    said = [spoken(t, lang) for t in texts]
+    items, results = [], [None] * len(texts)
+    for i, (words, unspoken) in enumerate(said):
+        out = os.path.join(folder, f"{lang}-{i:02d}.wav")
+        if re.search(r"\w", words):
+            items.append({"text": words, "out": out, "i": i})
+        else:
+            with wave.open(out, "wb") as w:              # a breath of silence; the scene is held
+                w.setnchannels(1)
+                w.setsampwidth(2)
+                w.setframerate(24000)
+                w.writeframes(b"\0\0" * 2400)
+            results[i] = (out, max(3.0, READ_SECONDS * unspoken))
+    if items:
+        process = await asyncio.create_subprocess_exec(
+            _python(), _worker(), stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE)
+        # Bangla a little slower: at its own pace the voice runs words together
+        speed = 0.85 if lang == "bn" else 0.92
+        job = {"lang": lang, "speed": speed, "items": [{"text": it["text"], "out": it["out"]} for it in items]}
+        out, err = await process.communicate(json.dumps(job).encode())
+        if process.returncode != 0:
+            log.warning("narration in %s failed: %s", lang, err.decode(errors="replace")[-800:])
+            raise VideoError(f"The {'Bangla' if lang == 'bn' else 'English'} narration could not be made")
+        durations = json.loads(out.decode().strip().splitlines()[-1])["durations"]
+        for item, seconds in zip(items, durations):
+            results[item["i"]] = (item["out"], seconds + READ_SECONDS * said[item["i"]][1])
+    return results
 
 
 # --- the video ------------------------------------------------------------------------------------
@@ -434,7 +511,10 @@ def scene_lengths(narration_seconds):
     return [max(SCENE_MIN, LEAD_IN + seconds + 1.4 + FADE) for seconds in narration_seconds]
 
 
-FONTS = {"bn": "NotoSansBengali.ttf", "en": "DejaVuSans.ttf"}
+# The first font found in video.fonts.dir is used; Arabic needs one with the Quran's own letters and
+# marks (alef wasla, the small high signs, ﷺ), which DejaVu Sans does not have
+FONTS = {"bn": ["NotoSansBengali.ttf"], "en": ["DejaVuSans.ttf"],
+         "ar": ["Amiri-Regular.ttf", "NotoNaskhArabic-Regular.ttf", "DejaVuSans.ttf"]}
 
 
 def _font(lang, size):
@@ -443,37 +523,61 @@ def _font(lang, size):
     for "অনেক দিন" (2026-10-24)."""
     from PIL import ImageFont
     folder = os.path.expanduser(settings.get("video.fonts.dir", "VIDEO_FONTS_DIR") or "")
-    path = os.path.join(folder, FONTS.get(lang, FONTS["en"]))
-    if not os.path.isfile(path):
-        path = os.path.join(folder, FONTS["en"])
+    path = next((os.path.join(folder, name) for name in FONTS.get(lang, []) + FONTS["en"]
+                 if os.path.isfile(os.path.join(folder, name))), os.path.join(folder, FONTS["en"][0]))
     engine = ImageFont.Layout.RAQM if hasattr(ImageFont, "Layout") else None
     return ImageFont.truetype(path, size, layout_engine=engine)
 
 
+def _pieces(text):
+    """[(piece, is Arabic)]: a line cut where it changes between Arabic and the rest, each piece to be
+    set in its own font and direction."""
+    out, at = [], 0
+    for match in ARABIC_RUN.finditer(text):
+        if match.start() > at:
+            out.append((text[at:match.start()], False))
+        out.append((match.group(0), True))
+        at = match.end()
+    if at < len(text):
+        out.append((text[at:], False))
+    return out
+
+
 def caption(text, path, lang, title=False):
     """A transparent frame-sized PNG with the words on it: the title in the middle, a line of
-    narration at the bottom - white, outlined in dark, wrapped to fit."""
+    narration at the bottom - white, outlined in dark, wrapped to fit. Arabic in it is set in an
+    Arabic font, right to left."""
     from PIL import Image, ImageDraw
     # A long line of a story read word for word is set a little smaller, to cover less of the picture
-    font = _font(lang, 54 if title else 34 if len(text) <= 160 else 29)
+    size = 54 if title else 34 if len(text) <= 160 else 29
+    fonts = {False: _font(lang, size), True: _font("ar", int(size * 1.15))}
     image = Image.new("RGBA", (WIDTH, HEIGHT), (0, 0, 0, 0))
     draw = ImageDraw.Draw(image)
+
+    def measure(line):
+        return sum(draw.textlength(piece, font=fonts[ar], direction="rtl" if ar else None)
+                   for piece, ar in _pieces(line))
+
     lines, line = [], ""
     for word in text.split():
         trial = f"{line} {word}".strip()
-        if line and draw.textlength(trial, font=font) > WIDTH - 200:
+        if line and measure(trial) > WIDTH - 200:
             lines.append(line)
             line = word
         else:
             line = trial
     lines += [line] if line else []
-    height = int((font.size * 1.45) * len(lines))
+    step = int(size * (1.7 if ARABIC_RUN.search(text) else 1.45))
+    height = step * len(lines)
     y = (HEIGHT - height) // 2 if title else HEIGHT - 40 - height
     for one in lines:
-        width = draw.textlength(one, font=font)
-        draw.text(((WIDTH - width) / 2, y), one, font=font, fill=(255, 255, 255, 255),
-                  stroke_width=3 if title else 2, stroke_fill=(20, 20, 20, 230))
-        y += int(font.size * 1.45)
+        x = (WIDTH - measure(one)) / 2
+        for piece, ar in _pieces(one):
+            # On a shared baseline, so the two scripts sit on one line
+            draw.text((x, y + size), piece, font=fonts[ar], anchor="ls", direction="rtl" if ar else None,
+                      fill=(255, 255, 255, 255), stroke_width=3 if title else 2, stroke_fill=(20, 20, 20, 230))
+            x += draw.textlength(piece, font=fonts[ar], direction="rtl" if ar else None)
+        y += step
     image.save(path)
     return path
 
