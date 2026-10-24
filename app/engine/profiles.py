@@ -157,9 +157,17 @@ def local_profiles():
 
 
 def add_local_profile(entry):
-    """Adds (or replaces, by name) a profile in engines.local.yaml - no longer removed, if it was."""
-    _write_local([m for m in local_profiles() if m.get("name") != entry["name"]] + [entry],
-                 removed=[n for n in _read(local_engines_file()).get("removed") or () if n != entry["name"]])
+    """Adds a profile to engines.local.yaml, or replaces one by name where it stands - no longer
+    removed, if it was. In place, because a profile's port is its place in the file: moving a changed
+    one to the end shifted the next one's port under its running engine, which then went unnoticed as
+    a stray holding 44 GB (2026-10-24)."""
+    models = local_profiles()
+    at = next((i for i, m in enumerate(models) if m.get("name") == entry["name"]), None)
+    if at is None:
+        models.append(entry)
+    else:
+        models[at] = entry
+    _write_local(models, removed=[n for n in _read(local_engines_file()).get("removed") or () if n != entry["name"]])
 
 
 def remove_profile(name):

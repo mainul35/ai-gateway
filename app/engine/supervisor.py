@@ -128,7 +128,7 @@ class Supervisor:
         (2026-10-19). An engine is known by its own command line - one of our profiles' names after
         --alias and its port after --port - so Ollama's runner, also a llama-server, is never touched.
         """
-        ours = {(p.name, str(p.port)) for p in load_profiles().values()}
+        ours = set(load_profiles())
         tracked = {model.process.pid for model in self._running.values() if getattr(model, "process", None)}
         strays = []
         for pid in filter(str.isdigit, os.listdir("/proc") if os.path.isdir("/proc") else []):
@@ -140,7 +140,9 @@ class Supervisor:
             if not args or not os.path.basename(args[0]).startswith("llama-server") or int(pid) in tracked:
                 continue
             named = dict(zip(args, args[1:]))
-            if (named.get("--alias"), named.get("--port")) in ours:
+            # By its name alone: a port can have moved since it was started (profiles are numbered in
+            # order), and Ollama's runner never carries one of our profiles' names
+            if named.get("--alias") in ours:
                 strays.append((int(pid), named["--alias"]))
         for pid, name in strays:
             log.warning("stopping %s (pid %s): left running by a gateway that did not stop it", name, pid)
@@ -359,12 +361,15 @@ class Supervisor:
         mtp = self.mtp_for(profile, binary)
         model, problem = await self._launch(profile, binary, mtp)
         if model is None and mtp and profile.mtp == "auto":
-            # The file has the layers but this engine would not start with them (a build without the
-            # draft for this architecture, or too little memory for the draft's cache): without it,
-            # and not tried again with this build and file until either changes
-            log.warning("%s did not start with MTP (%s); starting it without", profile.name, problem)
-            _mtp_refused.add(_mtp_key(profile, binary))
+            # The file has the layers but the engine would not start with them: tried without. Only
+            # when it then starts is MTP the reason (a build without the draft for this architecture,
+            # or no room for the draft's cache), and not tried again with this build and file until
+            # either changes. When it fails without as well, something else is wrong - a GPU held by
+            # another process (2026-10-24) - and MTP is not blamed for it.
+            log.warning("%s did not start with MTP (%s); trying without", profile.name, problem)
             model, problem = await self._launch(profile, binary, False)
+            if model is not None:
+                _mtp_refused.add(_mtp_key(profile, binary))
         return model, problem
 
     @staticmethod
