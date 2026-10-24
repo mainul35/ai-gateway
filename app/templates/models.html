@@ -404,17 +404,29 @@ function modelCard(m){
   const button = m.can_delete
     ? `<button class="btn btn-danger btn-sm" data-delete="${escapeHtml(m.name)}" data-backend="${escapeHtml(m.backend)}">Delete</button>`
     : `<span class="muted" style="font-size:.8rem" title="${escapeHtml(m.delete_note)}">kept elsewhere</span>`;
-  return `<div style="border:1px solid var(--border);border-radius:10px;padding:.8rem 1rem;margin-bottom:.7rem">
-    <div style="display:flex;gap:.6rem;align-items:baseline;flex-wrap:wrap">
-      <code style="font-size:.95rem">${escapeHtml(m.name)}</code>
+  // One line of what it is, one of how it has done; the description and the notes fold away, with
+  // the worst note's colour on the toggle so a warning is not hidden by it
+  const short = usage.requests
+    ? `${usage.requests} req · ${usage.failures} failed` + (usage.avg_latency_ms >= 100 ? ` · ${(usage.avg_latency_ms / 1000).toFixed(1)}s avg` : '')
+    : 'unused';
+  const worst = ['stop', 'warn'].find(level => (m.notes || []).some(n => n.level === level));
+  const flagged = (m.notes || []).filter(n => n.level === 'stop' || n.level === 'warn').length;
+  return `<div style="border:1px solid var(--border);border-radius:10px;padding:.55rem .9rem;margin-bottom:.5rem">
+    <div style="display:flex;gap:.5rem;align-items:center;flex-wrap:wrap">
+      <code style="font-size:.92rem">${escapeHtml(m.name)}</code>
       <span class="pill ${m.reachable ? 'on' : 'err'}">${m.reachable ? m.backend : 'unreachable'}</span>
       ${(m.capabilities || []).map(c => `<span class="pill off">${escapeHtml(c)}</span>`).join('')}
       <span class="spacer" style="flex:1"></span>${button}
     </div>
-    ${facts ? `<p class="muted" style="margin:.3rem 0 0;font-size:.82rem">${escapeHtml(facts)}</p>` : ''}
-    <p style="margin:.4rem 0 0;font-size:.9rem">${escapeHtml(m.description)}</p>
-    <p class="muted" style="margin:.35rem 0 0;font-size:.82rem">${escapeHtml(health)}</p>
-    ${notes}
+    <details class="model-more" style="margin-top:.25rem">
+      <summary class="muted" style="font-size:.82rem;cursor:pointer">
+        ${escapeHtml([facts, short].filter(Boolean).join(' · '))}
+        ${flagged ? `<span class="pill ${worst === 'stop' ? 'err' : 'off'}" style="margin-left:.4rem">${flagged} note${flagged === 1 ? '' : 's'}</span>` : ''}
+      </summary>
+      <p style="margin:.4rem 0 0;font-size:.88rem">${escapeHtml(m.description)}</p>
+      <p class="muted" style="margin:.35rem 0 0;font-size:.82rem">${escapeHtml(health)}</p>
+      ${notes}
+    </details>
   </div>`;
 }
 
