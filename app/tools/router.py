@@ -141,6 +141,8 @@ REASONING - it needs careful step-by-step thought before an answer is possible: 
             puzzles, planning, weighing options, working something out from given facts.
 LONG      - it comes with, or is about, a long piece of text to read through: summarise this,
             what does this document say, go through this transcript.
+TRANSLATION - putting text from one language into another, or saying what words mean in another
+            language.
 GENERAL   - everything else: ordinary questions, explanations, writing, conversation.
 
 Examples:
@@ -150,10 +152,18 @@ Examples:
 "If a train leaves at 3pm going 60mph, when does it arrive 200 miles away?" -> REASONING
 "Should I use Postgres or MongoDB for this, and why?" -> REASONING
 "Summarise the attached meeting notes" -> LONG
+"Translate this paragraph into Bangla" -> TRANSLATION
+"What does 'shukriya' mean in English?" -> TRANSLATION
 "What is the capital of Bangladesh?" -> GENERAL
 "Write me a short poem about rain" -> GENERAL
 
-Answer with one of: CODE, VISION, REASONING, LONG, GENERAL."""
+Answer with one of: CODE, VISION, REASONING, LONG, TRANSLATION, GENERAL."""
+
+# Asking for words in another language. "in English" alone is not one - "explain it in English" is
+# asked of every answer - so the language has to come with translate, mean or say.
+TRANSLATION_WORDS = re.compile(
+    r"\b(translat\w*|interpret (this|it|these)|what does .{1,60} mean in|how (do|would) (you|i) say .{1,80} in)\b",
+    re.I | re.S)
 
 CODE_WORDS = re.compile(
     r"\b(code|function|class|method|variable|compile|build|error|exception|stack ?trace|bug|debug|"
@@ -525,6 +535,8 @@ def category_by_keywords(message, has_images=False):
     text = (message or "").strip()
     if has_images:
         return "vision"
+    if TRANSLATION_WORDS.search(text):
+        return "translation"
     if CODE_WORDS.search(text):
         return "code"
     if LONG_WORDS.search(text) or len(text) > 4000:
