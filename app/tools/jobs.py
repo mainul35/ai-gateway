@@ -142,3 +142,14 @@ def running_for(user_id, conversation_id):
 def get(user_id, job_id):
     job = _jobs.get(job_id)
     return job if job is not None and job.user_id == user_id else None
+
+
+def cancel(user_id, job_id):
+    """Stops one of this person's jobs - the Stop button, now that leaving the page no longer does.
+    Its source is cancelled where it stands, which closes the model's request and frees the engine.
+    True when there was a running job to stop."""
+    job = get(user_id, job_id)
+    if job is None or job.done or job.task is None:
+        return False
+    job.task.cancel()
+    return True

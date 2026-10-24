@@ -781,7 +781,8 @@ async def complete(payload: CompleteIn, principal: Principal = Depends(authentic
     asked = (latest_user.content if latest_user else "") or "New message"
     job = jobs.start(user.id, payload.conversation_id, "chat", asked[:120], stream(), on_finish=save)
     return StreamingResponse(jobs.follow(job), media_type="text/event-stream",
-                             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+                             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no",
+                                      "X-Job-Id": str(job.id)})
 
 
 @router.get("/conversations/{conversation_id}/job")
@@ -792,6 +793,12 @@ async def running_job(conversation_id: int, principal: Principal = Depends(authe
     await _owned(session, conversation_id, user)
     job = jobs.running_for(user.id, conversation_id)
     return {"job": job.json() if job else None}
+
+
+@router.post("/jobs/{job_id}/cancel")
+async def cancel_job(job_id: int, principal: Principal = Depends(authenticate)):
+    """The Stop button: a job outlives the page that started it, so closing the stream stops nothing."""
+    return {"cancelled": jobs.cancel(_require_user(principal).id, job_id)}
 
 
 @router.get("/jobs/{job_id}/stream")
@@ -2282,5 +2289,14 @@ async def run_agent(payload: AgentIn, principal: Principal = Depends(authenticat
                 # The same check as after a chat turn, for whatever the agent did not note itself
                 asyncio.create_task(_refresh_memory(principal, user_id, payload.conversation_id))
 
-    return StreamingResponse(stream(), media_type="text/event-stream",
-                             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+    if payload.conversation_id is None:
+        # Nothing to come back to, so there is nothing to keep
+        return StreamingResponse(stream(), media_type="text/event-stream",
+                                 headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+    # A job, like a chat answer: a task given to the agent goes on when its page is left - walking
+    # over to the dashboard used to cancel it - and the conversation picks it up again when reopened
+    asked = next((m.content for m in reversed(payload.messages) if m.role == "user"), "") or "Agent task"
+    job = jobs.start(user_id, payload.conversation_id, "agent", asked[:120], stream())
+    return StreamingResponse(jobs.follow(job), media_type="text/event-stream",
+                             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no",
+                                      "X-Job-Id": str(job.id)})
