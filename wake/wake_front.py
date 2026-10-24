@@ -219,7 +219,7 @@ def is_navigation(request):
 # GETs the web pages repeat on a timer, whether or not anyone is looking at them: the dashboard's
 # stats, the tasks page's project list and event feed, a folder waiting for remote work. Keep in
 # step with POLLED in app/activity.py, which leaves the same requests out of the idle check.
-POLLED = re.compile(r"^/(admin/system|admin/usage|v1/models|coding/projects|coding/tasks/\d+/events"
+POLLED = re.compile(r"^/(admin/system|admin/usage|admin/usage/hourly|admin/metrics|v1/models|coding/projects|coding/tasks/\d+/events"
                     r"|coding/remote/\d+/next)$")
 
 

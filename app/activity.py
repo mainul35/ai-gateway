@@ -27,7 +27,7 @@ from app.tools import jobs
 _IGNORED = re.compile(r"^/(health|internal/activity|coding/remote/\d+/next)$")
 # GETs the web pages repeat on a timer (wake/wake_front.py has the same list). From a browser they
 # are a tab refreshing itself, not someone working, so an open dashboard does not keep the machine up.
-POLLED = re.compile(r"^/(admin/system|admin/usage|v1/models|coding/projects|coding/tasks/\d+/events)$")
+POLLED = re.compile(r"^/(admin/system|admin/usage|admin/usage/hourly|admin/metrics|v1/models|coding/projects|coding/tasks/\d+/events)$")
 
 
 def _is_background_poll(scope):

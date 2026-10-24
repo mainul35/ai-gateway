@@ -16,6 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app import access, activity, backends, catalogue, fitting, knowledge, power, settings, usage as usage_log
+from app import live_metrics as live
 from app.tools import jobs, mcp_client, mcp_config
 from app.auth import Principal, generate_key, hash_key, require_admin, require_manager
 from app import config_writer
@@ -296,6 +297,37 @@ async def usage_summary(days: int = 7, _: Principal = Depends(require_manager),
             for name, model, requests, prompt, completion, failed, last in result.all()
         ],
     }
+
+
+@router.get("/usage/hourly")
+async def usage_hourly(hours: int = 24, _: Principal = Depends(require_manager),
+                       session: AsyncSession = Depends(get_session)):
+    """Requests, failures and tokens per hour, oldest first, every hour present even when empty."""
+    hours = max(1, min(hours, 24 * 14))
+    now = utcnow().replace(minute=0, second=0, microsecond=0)
+    since = now - timedelta(hours=hours - 1)
+    # In UTC whatever the database's own time zone, so the hours match the ones counted out below
+    hour = func.date_trunc("hour", func.timezone("UTC", UsageRecord.created_at))
+    result = await session.execute(
+        select(hour, func.count(UsageRecord.id),
+               func.count(UsageRecord.id).filter(UsageRecord.status_code >= 400),
+               func.sum(UsageRecord.prompt_tokens), func.sum(UsageRecord.completion_tokens))
+        .where(UsageRecord.created_at >= since).group_by(hour))
+    found = {when.replace(tzinfo=now.tzinfo) if when.tzinfo is None else when: row
+             for when, *row in result.all()}
+    buckets = []
+    for i in range(hours):
+        when = since + timedelta(hours=i)
+        requests, failed, prompt, completion = found.get(when, (0, 0, 0, 0))
+        buckets.append({"hour": when.isoformat(), "requests": requests, "failed": int(failed or 0),
+                        "prompt_tokens": int(prompt or 0), "completion_tokens": int(completion or 0)})
+    return {"hours": buckets}
+
+
+@router.get("/metrics")
+async def live_metrics(history: bool = False, _: Principal = Depends(require_admin)):
+    """CPU, RAM and each GPU now, for the dashboard's live panel (app/live_metrics.py)."""
+    return await asyncio.to_thread(live.current, history)
 
 
 # --- the model list, and deleting from it ------------------------------------------------------

@@ -18,6 +18,35 @@
 .agent-guide .apps pre{margin:.35rem 0 0}
 .agent-guide .step{margin:1rem 0 .35rem}
 .agent-guide .step-n{display:inline-flex;align-items:center;justify-content:center;width:1.45rem;height:1.45rem;border-radius:50%;background:var(--primary);color:#fff;font-size:.8rem;font-weight:700;margin-right:.45rem;vertical-align:.1em}
+/* Live panel and activity charts. One series per chart, in the accent blue; status colours only for
+   a meter near its limit, and always with words beside them */
+.viz{--series:#3987e5;--series-track:rgba(57,135,229,.22);--warn:#fab219;--warn-track:rgba(250,178,25,.22);
+  --crit:#d03b3b;--crit-track:rgba(208,59,59,.25);--grid:rgba(148,163,184,.18)}
+.live-head{display:flex;justify-content:space-between;align-items:baseline;flex-wrap:wrap;gap:.5rem;margin-bottom:.8rem}
+.live-head h2{margin:0}
+.live-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:.9rem}
+.tile{background:var(--bg);border:1px solid var(--border);border-radius:10px;padding:.8rem .95rem .6rem;position:relative;min-width:0}
+.tile-head{display:flex;justify-content:space-between;gap:.5rem;font-size:.8rem;color:var(--muted)}
+.tile-head strong{color:var(--text);font-weight:600}
+.tile-value{font-size:2rem;font-weight:700;line-height:1.15;margin:.15rem 0 .1rem;display:flex;align-items:baseline;gap:.5rem}
+.tile-value small{font-size:.75rem;font-weight:600}
+.tile .hot-warn{color:var(--warn)} .tile .hot-crit{color:var(--crit)}
+.tile-line{font-size:.78rem;color:var(--muted);display:flex;justify-content:space-between;gap:.5rem;margin-top:.35rem}
+.meter{height:6px;border-radius:3px;background:var(--series-track);overflow:hidden;margin-top:.25rem}
+.meter span{display:block;height:100%;border-radius:3px;background:var(--series);transition:width .6s ease}
+.meter.warn{background:var(--warn-track)} .meter.warn span{background:var(--warn)}
+.meter.crit{background:var(--crit-track)} .meter.crit span{background:var(--crit)}
+.spark{display:block;width:100%;height:48px;margin-top:.55rem;overflow:visible}
+.chart{display:block;width:100%;height:auto;overflow:visible}
+.charts{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:1.4rem}
+.chart-box{position:relative;min-width:0}
+.chart-title{display:flex;justify-content:space-between;align-items:baseline;gap:.5rem;font-size:.85rem;margin-bottom:.4rem}
+.legend{display:flex;gap:.8rem;font-size:.75rem;color:var(--muted)}
+.legend i{display:inline-block;width:.65rem;height:.65rem;border-radius:2px;margin-right:.3rem;vertical-align:-.05rem}
+.viz-tip{position:absolute;pointer-events:none;z-index:5;background:#0b1220;border:1px solid var(--border);border-radius:6px;
+  padding:.3rem .5rem;font-size:.75rem;line-height:1.35;white-space:nowrap;color:var(--text);transform:translate(-50%,-100%)}
+.viz-tip .muted{font-size:.72rem}
+.live-paused{font-size:.75rem;color:var(--muted)}
 </style>
 <h1>Dashboard</h1>
 <p class="sub">Status of the gateway, its models and its backends.</p>
@@ -32,14 +61,19 @@
   <div class="card"><div class="stat" id="statTokens">&mdash;</div><div class="stat-label">Tokens (24h)</div></div>
 </div>
 
-<div class="grid">
-  <div class="card">
-    <h2>Backends</h2>
-    <div id="backends" class="muted">Loading&hellip;</div>
+<div class="card viz" style="margin-bottom:1.5rem">
+  <div class="live-head">
+    <h2>Live <span class="live-paused" id="livePaused"></span></h2>
+    <div id="backends" class="muted" style="font-size:.85rem">Loading&hellip;</div>
   </div>
-  <div class="card">
-    <h2>Hardware</h2>
-    <div id="hardware" class="muted">Loading&hellip;</div>
+  <div class="live-grid" id="live"><span class="muted">Measuring&hellip;</span></div>
+</div>
+
+<div class="card viz" style="margin-bottom:1.5rem">
+  <h2>Activity, last 24 hours</h2>
+  <div class="charts">
+    <div class="chart-box" id="chartRequests"></div>
+    <div class="chart-box" id="chartTokens"></div>
   </div>
 </div>
 
@@ -380,19 +414,10 @@ async function loadAdmin(){
 
     const ollama = system.ollama;
     document.getElementById('backends').innerHTML = `
-      <p style="margin:.2rem 0">Ollama <span class="pill ${ollama.status === 'running' ? 'on' : 'err'}">${escapeHtml(ollama.status)}</span>
-        ${ollama.version ? 'v' + escapeHtml(ollama.version) : ''}</p>
-      <p style="margin:.6rem 0 .2rem">llama.cpp <span class="pill ${system.engine.available ? 'on' : 'off'}">
-        ${system.engine.available ? 'available' : 'not installed'}</span></p>`;
-
-    document.getElementById('hardware').innerHTML = (system.gpus.length
-        ? system.gpus.map(g => `<p style="margin:.2rem 0">${escapeHtml(g.name)}<br>
-            <span class="muted" style="font-size:.85rem">${g.vram_free == null
-              ? `${formatBytes(g.vram_total)} (configured size, not measured)`
-              : `${formatBytes(g.vram_free)} free of ${formatBytes(g.vram_total)}`}</span></p>`).join('')
-        : '<p class="muted" style="margin:.2rem 0">No GPU detected</p>')
-      + `<p style="margin:.6rem 0 .2rem">RAM<br><span class="muted" style="font-size:.85rem">
-         ${formatBytes(system.available_ram)} free of ${formatBytes(system.total_ram)}</span></p>`;
+      Ollama <span class="pill ${ollama.status === 'running' ? 'on' : 'err'}">${escapeHtml(ollama.status)}</span>
+        ${ollama.version ? 'v' + escapeHtml(ollama.version) : ''}
+      &nbsp;&middot;&nbsp; llama.cpp <span class="pill ${system.engine.available ? 'on' : 'off'}">
+        ${system.engine.available ? 'available' : 'not installed'}</span>`;
 
     const engine = system.engine;
     const running = new Map(engine.running.map(r => [r.name, r]));
@@ -461,6 +486,217 @@ document.addEventListener('click', async e => {
   finally{ engineActions.delete(name); loadAdmin(); }
 });
 
+// --- live hardware -------------------------------------------------------------------------------
+// Asked every LIVE_MS while the tab is visible, never while it is hidden: the server measures only
+// when asked (app/live_metrics.py), so a dashboard left in a background tab costs it nothing.
+const LIVE_MS = 3000, LIVE_KEEP = 240;
+let liveHistory = [], liveTimer = null;
+
+const pct = (part, whole) => whole ? Math.max(0, Math.min(100, part / whole * 100)) : 0;
+function level(p){ return p >= 95 ? 'crit' : p >= 80 ? 'warn' : ''; }
+const LEVEL_WORDS = {warn: 'high', crit: 'near full'};
+
+function meter(p){
+  const l = level(p);
+  return `<div class="meter ${l}" role="meter" aria-valuenow="${Math.round(p)}" aria-valuemin="0" aria-valuemax="100">
+    <span style="width:${p.toFixed(1)}%"></span></div>`;
+}
+
+// A sparkline of one series, 0-100 %: a 2px line over a faint area, its hover read by liveHover
+function spark(id, values){
+  if(values.length < 2) return `<svg class="spark" data-spark="${id}"></svg>`;
+  const w = 300, h = 48, n = values.length;
+  const x = i => i / (n - 1) * w, y = v => h - Math.max(0, Math.min(100, v)) / 100 * (h - 2) - 1;
+  const line = values.map((v, i) => `${i ? 'L' : 'M'}${x(i).toFixed(1)},${y(v).toFixed(1)}`).join('');
+  return `<svg class="spark" data-spark="${id}" viewBox="0 0 ${w} ${h}" preserveAspectRatio="none" aria-hidden="true">
+    <line x1="0" x2="${w}" y1="${y(50)}" y2="${y(50)}" stroke="var(--grid)" stroke-width="1" vector-effect="non-scaling-stroke"/>
+    <path d="${line}L${w},${h}L0,${h}Z" fill="var(--series)" opacity=".12"/>
+    <path d="${line}" fill="none" stroke="var(--series)" stroke-width="2" vector-effect="non-scaling-stroke"
+          stroke-linejoin="round" stroke-linecap="round"/>
+    <line class="cross" x1="0" x2="0" y1="0" y2="${h}" stroke="var(--muted)" stroke-width="1"
+          vector-effect="non-scaling-stroke" visibility="hidden"/>
+  </svg>`;
+}
+
+// What each tile plots, and how one sample reads in its tooltip
+const SERIES = {
+  cpu: {of: s => s.cpu, say: s => `${Math.round(s.cpu)}% CPU`},
+  ram: {of: s => pct(s.ram_used, s.ram_total), say: s => `${formatBytes(s.ram_used)} of ${formatBytes(s.ram_total)}`},
+};
+
+function tile(id, title, detail, value, p, lines, history){
+  const l = level(p);
+  return `<div class="tile" data-tile="${id}">
+    <div class="tile-head"><strong>${escapeHtml(title)}</strong><span>${detail}</span></div>
+    <div class="tile-value">${value}${l ? `<small class="hot-${l}">${l === 'crit' ? '&#9650;&#9650;' : '&#9650;'} ${LEVEL_WORDS[l]}</small>` : ''}</div>
+    ${meter(p)}
+    ${lines.join('')}
+    ${spark(id, history)}
+  </div>`;
+}
+
+function renderLive(){
+  const now = liveHistory[liveHistory.length - 1];
+  if(!now) return;
+  const tiles = [];
+  const cpuHot = now.cpu_temp ? `${Math.round(now.cpu_temp)}&deg;C` : '';
+  tiles.push(tile('cpu', 'CPU', [cpuHot, `${now.cpu_count} threads`].filter(Boolean).join(' &middot; '),
+    `${Math.round(now.cpu)}%`, now.cpu,
+    [`<div class="tile-line"><span>load ${now.load1.toFixed(2)}</span><span>last ${Math.round(liveHistory.length * LIVE_MS / 60000) || 1} min</span></div>`],
+    liveHistory.map(SERIES.cpu.of)));
+  for(const g of now.gpus || []){
+    const id = 'gpu' + g.index;
+    SERIES[id] = {of: s => ((s.gpus || [])[g.index] || {}).util || 0,
+                  say: s => { const x = (s.gpus || [])[g.index] || {};
+                              return `${Math.round(x.util || 0)}% busy · ${formatBytes(x.mem_used || 0)} VRAM`; }};
+    const vram = pct(g.mem_used, g.mem_total);
+    const detail = [g.temp != null ? `${Math.round(g.temp)}&deg;C` : '',
+                    g.power != null ? `${Math.round(g.power)} W${g.power_limit ? ' / ' + Math.round(g.power_limit) + ' W' : ''}` : '']
+                   .filter(Boolean).join(' &middot; ');
+    tiles.push(tile(id, `GPU ${g.index}`, detail, `${Math.round(g.util || 0)}%`, g.util || 0,
+      [`<div class="tile-line"><span>${escapeHtml(g.name.replace('NVIDIA GeForce ', ''))}</span><span>busy</span></div>`,
+       `<div class="tile-line"><span>VRAM ${(g.mem_used / 1024**3).toFixed(1)} / ${Math.round(g.mem_total / 1024**3)} GB</span><span>${Math.round(vram)}%</span></div>`,
+       meter(vram),
+       level(vram) ? `<div class="tile-line"><span></span><span class="hot-${level(vram)}">${level(vram) === 'crit' ? '&#9650;&#9650;' : '&#9650;'} VRAM ${LEVEL_WORDS[level(vram)]}</span></div>` : ''],
+      liveHistory.map(SERIES[id].of)));
+  }
+  const ram = pct(now.ram_used, now.ram_total);
+  tiles.push(tile('ram', 'RAM', now.swap_used > 256 * 1024**2 ? `swap ${formatBytes(now.swap_used)}` : '',
+    `${Math.round(ram)}%`, ram,
+    [`<div class="tile-line"><span>${formatBytes(now.ram_used)} of ${formatBytes(now.ram_total)}</span><span>in use</span></div>`],
+    liveHistory.map(SERIES.ram.of)));
+  document.getElementById('live').innerHTML = tiles.join('');
+}
+
+async function pollLive(first){
+  try{
+    const answer = await api('/admin/metrics' + (first ? '?history=1' : ''));
+    if(answer.history) liveHistory = answer.history;
+    else if(!liveHistory.length || answer.now.at !== liveHistory[liveHistory.length - 1].at) liveHistory.push(answer.now);
+    liveHistory = liveHistory.slice(-LIVE_KEEP);
+    renderLive();
+  }catch(e){ /* the next poll tries again; the 15 s refresh reports a gateway that is down */ }
+}
+
+function startLive(){
+  if(liveTimer || document.hidden) return;
+  document.getElementById('livePaused').textContent = '';
+  pollLive(!liveHistory.length);
+  liveTimer = setInterval(() => pollLive(false), LIVE_MS);
+}
+function stopLive(){
+  clearInterval(liveTimer); liveTimer = null;
+  document.getElementById('livePaused').textContent = '· paused while the tab is hidden';
+}
+document.addEventListener('visibilitychange', () => {
+  if(document.hidden) stopLive();
+  else{ liveHistory = []; startLive(); }     // the gap is the server's to fill, from its own history
+});
+
+// Hover on a sparkline: a crosshair at the nearest sample and a tooltip with its value and age
+function liveHover(e){
+  const svg = e.target.closest && e.target.closest('svg[data-spark]');
+  const box = document.getElementById('live');
+  box.querySelectorAll('.viz-tip').forEach(t => t.remove());
+  box.querySelectorAll('.cross').forEach(c => c.setAttribute('visibility', 'hidden'));
+  if(!svg || liveHistory.length < 2) return;
+  const series = SERIES[svg.dataset.spark];
+  const rect = svg.getBoundingClientRect();
+  const i = Math.round(Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width)) * (liveHistory.length - 1));
+  const sample = liveHistory[i];
+  const cross = svg.querySelector('.cross');
+  const xv = i / (liveHistory.length - 1) * 300;
+  cross.setAttribute('x1', xv); cross.setAttribute('x2', xv); cross.setAttribute('visibility', 'visible');
+  const ago = Math.round(Date.now() / 1000 - sample.at);
+  const tip = document.createElement('div');
+  tip.className = 'viz-tip';
+  tip.innerHTML = `${escapeHtml(series.say(sample))}<div class="muted">${ago < 5 ? 'now' : ago < 120 ? ago + ' s ago' : Math.round(ago / 60) + ' min ago'}</div>`;
+  const outer = box.getBoundingClientRect();
+  tip.style.left = (e.clientX - outer.left) + 'px';
+  tip.style.top = (rect.top - outer.top - 4) + 'px';
+  box.appendChild(tip);
+}
+
+// --- activity, per hour ----------------------------------------------------------------------------
+
+function niceMax(v){
+  if(v <= 0) return 1;
+  const step = Math.pow(10, Math.floor(Math.log10(v)));
+  return [1, 2, 2.5, 5, 10].map(m => m * step).find(m => m >= v);
+}
+function compact(n){ return n >= 1e6 ? (n / 1e6).toFixed(n >= 1e7 ? 0 : 1) + 'M' : n >= 1e3 ? (n / 1e3).toFixed(n >= 1e4 ? 0 : 1) + 'k' : String(n); }
+const hourLabel = iso => new Date(iso).toLocaleTimeString([], {hour: 'numeric'});
+
+// Columns per hour, one axis, bars with a 2px gap and rounded tops; `parts` stacks from the baseline.
+// Each column's whole height is its hover target.
+function columns(target, title, legend, hours, parts, say){
+  // Drawn at the box's own width, not scaled, so the axis text stays its real size
+  const box = document.getElementById(target);
+  const w = Math.max(240, Math.round(box.clientWidth || 600)), h = 150, left = 34, bottom = 18, top = 6;
+  const totals = hours.map(b => parts.reduce((sum, p) => sum + p.of(b), 0));
+  const max = niceMax(Math.max(...totals));
+  const plot = w - left, slot = plot / hours.length, bar = Math.max(2, slot - 2);
+  const y = v => top + (h - bottom - top) * (1 - v / max);
+  let marks = '';
+  hours.forEach((b, i) => {
+    let base = 0;
+    const x = left + i * slot + 1;
+    parts.forEach((p, k) => {
+      const v = p.of(b);
+      if(!v) return;
+      const y0 = y(base), y1 = y(base + v), last = k === parts.length - 1 || !parts.slice(k + 1).some(q => q.of(b));
+      const r = last ? Math.min(4, bar / 2, y0 - y1) : 0;
+      marks += `<path d="M${x},${y0}V${y1 + r}${r ? `Q${x},${y1} ${x + r},${y1}H${x + bar - r}Q${x + bar},${y1} ${x + bar},${y1 + r}` : `H${x + bar}`}V${y0}Z"
+                      fill="${p.color}"/>`;
+      base += v;
+    });
+    marks += `<rect x="${left + i * slot}" y="${top}" width="${slot}" height="${h - bottom - top}" fill="transparent" data-i="${i}"/>`;
+  });
+  const grid = [max, max / 2].map(v => `<line x1="${left}" x2="${w}" y1="${y(v)}" y2="${y(v)}" stroke="var(--grid)"/>
+    <text x="${left - 6}" y="${y(v) + 4}" text-anchor="end" font-size="11" fill="var(--muted)">${compact(v)}</text>`).join('');
+  const ticks = hours.map((b, i) => i % 6 === 0 || i === hours.length - 1
+    ? `<text x="${left + i * slot + slot / 2}" y="${h - 3}" text-anchor="middle" font-size="11" fill="var(--muted)">${i === hours.length - 1 ? 'now' : hourLabel(b.hour)}</text>` : '').join('');
+  box.innerHTML = `<div class="chart-title"><strong>${escapeHtml(title)}</strong>
+      <span class="legend">${legend.map(([name, color]) => `<span><i style="background:${color}"></i>${escapeHtml(name)}</span>`).join('')}</span></div>
+    <svg class="chart" viewBox="0 0 ${w} ${h}" role="img" aria-label="${escapeHtml(title)}">
+      <line x1="${left}" x2="${w}" y1="${h - bottom}" y2="${h - bottom}" stroke="var(--border)"/>${grid}${marks}${ticks}</svg>`;
+  const svg = box.querySelector('svg');
+  svg.addEventListener('mousemove', e => {
+    box.querySelectorAll('.viz-tip').forEach(t => t.remove());
+    const hit = e.target.dataset && e.target.dataset.i;
+    if(hit === undefined) return;
+    const b = hours[+hit], rect = e.target.getBoundingClientRect(), outer = box.getBoundingClientRect();
+    const tip = document.createElement('div');
+    tip.className = 'viz-tip';
+    tip.innerHTML = `${say(b)}<div class="muted">${hourLabel(b.hour)} &ndash; ${hourLabel(new Date(new Date(b.hour).getTime() + 3600e3).toISOString())}</div>`;
+    tip.style.left = (rect.left + rect.width / 2 - outer.left) + 'px';
+    tip.style.top = (svg.getBoundingClientRect().top - outer.top + 20) + 'px';
+    box.appendChild(tip);
+  });
+  svg.addEventListener('mouseleave', () => box.querySelectorAll('.viz-tip').forEach(t => t.remove()));
+}
+
+let activityHours = null;
+async function loadActivity(){
+  try{
+    activityHours = (await api('/admin/usage/hourly?hours=24')).hours;
+    drawActivity();
+  }catch(e){ document.getElementById('chartRequests').textContent = 'Could not load activity: ' + e.message; }
+}
+let activityResize = null;
+window.addEventListener('resize', () => { clearTimeout(activityResize); activityResize = setTimeout(drawActivity, 150); });
+
+function drawActivity(){
+  const hours = activityHours;
+  if(!hours) return;
+  columns('chartRequests', 'Requests per hour', [['answered', 'var(--series)'], ['failed', 'var(--crit)']], hours,
+    [{of: b => b.failed, color: 'var(--crit)'}, {of: b => b.requests - b.failed, color: 'var(--series)'}],
+    b => `${b.requests} request${b.requests === 1 ? '' : 's'}${b.failed ? ` · ${b.failed} failed` : ''}`);
+  columns('chartTokens', 'Tokens per hour', [], hours,
+    [{of: b => b.prompt_tokens + b.completion_tokens, color: 'var(--series)'}],
+    b => `${(b.prompt_tokens + b.completion_tokens).toLocaleString()} tokens<div class="muted">${b.prompt_tokens.toLocaleString()} in · ${b.completion_tokens.toLocaleString()} out</div>`);
+}
+
 async function loadMyModels(){
   const target = document.getElementById('models');
   try{
@@ -500,6 +736,12 @@ loadMyKeys();
 loadMyModels();
 loadMyUsage();
 loadProjects();
-if(isAdmin){ loadAdmin(); setInterval(loadAdmin, 15000); }
+if(isAdmin){
+  loadAdmin(); setInterval(loadAdmin, 15000);
+  loadActivity(); setInterval(() => { if(!document.hidden) loadActivity(); }, 60000);
+  startLive();
+  document.getElementById('live').addEventListener('mousemove', liveHover);
+  document.getElementById('live').addEventListener('mouseleave', liveHover);
+}
 </script>
 {% endblock %}
