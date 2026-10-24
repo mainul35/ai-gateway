@@ -63,15 +63,19 @@ Answer with JSON only, no other text:
  "sources": [numbers of the SOURCES used]}"""
 
 STYLE = ("soft painterly illustration for a children's storybook, warm gentle light, calm balanced "
-         "composition, wide establishing shot, muted harmonious colours, no text, no lettering")
+         "composition, wide establishing shot, muted harmonious colours, no text, no lettering, "
+         "no portraits, paintings, statues or silhouettes of people anywhere in the scene")
 NO_PEOPLE = "no people, no human figures, no faces, an empty peaceful scene"
 FROM_BEHIND = ("any people small in the distance and seen only from behind, modestly dressed in long "
                "loose clothing, women fully covered with long veils, faces never visible")
 
 CHECK_PROMPT = """You check one picture for a children's video against strict rules. Look carefully.
 Answer with JSON only:
-{"faces": true if ANY human face is visible - front, side or partly, even small or stylised,
- "people": the number of human figures in the picture,
+{"faces": true if ANY human face is visible - front, side or partly, even small or stylised - and that
+   includes faces or heads in a painting, portrait, framed picture, statue, carving or silhouette
+   that is part of the scene,
+ "people": the number of human figures in the picture, counting people shown in paintings, framed
+   pictures, statues or silhouettes,
  "immodest": true if any person shows uncovered arms, legs, hair of a woman, or tight clothing,
  "text": true if there is any writing or lettering in the picture,
  "frightening": true if anything violent, bloody or scary is shown}"""
@@ -122,10 +126,21 @@ def parse_story(text):
             "sources": [int(s) for s in story.get("sources") or [] if str(s).isdigit()]}
 
 
-def picture_prompt(scene, plain=False):
-    """What the image model is asked for. `plain` is the last resort: the place alone, nobody in it."""
+# Said to the image model when it draws a scene again, so it does not make the same mistake: in the
+# first real video (2026-10-24) a bookshelf scene came back with writing on the pages four times over
+AVOID = {"a face is visible": "absolutely no faces, no portraits, paintings or statues of people",
+         "a figure is not modestly dressed": "everyone fully covered in long loose robes",
+         "something frightening is shown": "peaceful and safe, nothing dark or threatening",
+         "there is writing in it": "no writing anywhere: books closed, pages blank, no signs, no inscriptions",
+         "there are people in a scene meant to have none": NO_PEOPLE}
+
+
+def picture_prompt(scene, plain=False, why=""):
+    """What the image model is asked for. `plain` is the last resort: the place alone, nobody in it.
+    `why` is what was wrong with the last picture of this scene."""
     who = NO_PEOPLE if plain or scene["people"] == "none" else FROM_BEHIND
-    return f"{scene['picture']}. {who}. {STYLE}"
+    avoid = AVOID.get(why)
+    return f"{scene['picture']}. {who}. {avoid + '. ' if avoid else ''}{STYLE}"
 
 
 # --- the picture check ----------------------------------------------------------------------------

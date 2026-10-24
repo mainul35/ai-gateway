@@ -2222,6 +2222,7 @@ async def make_video(payload: VideoIn, principal: Principal = Depends(authentica
             # Every scene drawn, then every picture checked: two swaps of the GPU, not one per scene
             paths = [None] * len(scenes)
             pending = list(range(len(scenes)))
+            wrong = {}                                          # scene -> what was wrong with its picture
             for attempt in range(attempts + 1):
                 for n, i in enumerate(pending):
                     plain = attempt >= attempts - 1 and attempt > 0     # the last tries: nobody in it
@@ -2229,7 +2230,7 @@ async def make_video(payload: VideoIn, principal: Principal = Depends(authentica
                                  + (" again" if attempt else ""),
                                  fraction=0.1 + 0.55 * (n + 1) / max(1, len(pending)))
                     png = None
-                    async for item in relay(images.generate(video_story.picture_prompt(scenes[i], plain),
+                    async for item in relay(images.generate(video_story.picture_prompt(scenes[i], plain, wrong.get(i, "")),
                                                             video_story.SIZE, on_progress=progress)):
                         if isinstance(item, bytes):
                             yield item
@@ -2247,6 +2248,7 @@ async def make_video(payload: VideoIn, principal: Principal = Depends(authentica
                             await _ask_helper(principal, video_story.check_request(check_model, f.read())), scenes[i])
                     if not ok:
                         log.info("video scene %d redrawn: %s", i + 1, why)
+                        wrong[i] = why
                         failed.append(i)
                 pending = failed
                 if not pending:
