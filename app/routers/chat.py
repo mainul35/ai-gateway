@@ -2253,15 +2253,27 @@ async def make_video(payload: VideoIn, principal: Principal = Depends(authentica
             paths = [None] * len(scenes)
             pending = list(range(len(scenes)))
             wrong = {}                                          # scene -> what was wrong with its picture
+            turned = set()                                      # scenes whose people were turned away
             for attempt in range(attempts + 1):
                 for n, i in enumerate(pending):
                     plain = attempt >= attempts - 1 and attempt > 0     # the last tries: nobody in it
-                    yield _event("progress", stage=f"Drawing scene {i + 1} of {len(scenes)}"
-                                 + (" again" if attempt else ""),
+                    # A picture whose only fault is a face keeps its moment: the editing model turns the
+                    # people away (two people talking face each other, however the scene is asked for);
+                    # if a face is still there after that, the scene is drawn again
+                    turn = wrong.get(i) == "a face is visible" and i not in turned
+                    yield _event("progress", stage=(f"Turning the people away in scene {i + 1}" if turn else
+                                                    f"Drawing scene {i + 1} of {len(scenes)}" + (" again" if attempt else "")),
                                  fraction=0.1 + 0.55 * (n + 1) / max(1, len(pending)))
                     png = None
-                    async for item in relay(images.generate(video_story.picture_prompt(scenes[i], plain, wrong.get(i, "")),
-                                                            video_story.SIZE, on_progress=progress, story=True)):
+                    if turn:
+                        turned.add(i)
+                        with open(paths[i], "rb") as f:
+                            work = images.generate(video_story.TURN_AWAY, video_story.SIZE,
+                                                   sources=[(f.read(), "image/png")], on_progress=progress)
+                    else:
+                        work = images.generate(video_story.picture_prompt(scenes[i], plain, wrong.get(i, "")),
+                                               video_story.SIZE, on_progress=progress, story=True)
+                    async for item in relay(work):
                         if isinstance(item, bytes):
                             yield item
                         else:
