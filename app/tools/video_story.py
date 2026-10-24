@@ -66,27 +66,104 @@ that it is not known. Keep a warm, gentle, interesting voice - no cliffhangers, 
 
 Write 8 to 14 scenes. """ + SCENE_RULES
 
-# A story the person wrote is told as it is. Searched for and mixed with what the web said, the first
-# one given (2026-10-24) came back as a summary of the sources instead of the story.
-GIVEN_PROMPT = """You turn a story the person wrote into a calm illustrated video for children and families,
-told in scenes.
+# A story the person wrote is read word for word: the scenes are cut from it here, at its sentences,
+# and no model writes its narration. Asked to keep the wording, the story model still rewrote it
+# ("the Ummah" became "the community"); the person counts any change as a breach of the text.
+ILLUSTRATE_PROMPT = """You illustrate a story that is read aloud word for word in a calm video for children
+and families. Its SCENES are fixed: do not change, shorten or reorder them. For each scene give:
+- "picture": what to draw, in English, as a calm wide illustration of what that scene tells: places,
+  nature, sky, light, buildings, objects, animals. Never a face. Never text.
+- "people": "none" or "from_behind".
+    "none" when the scene is about a prophet (any prophet, peace be upon them) - a prophet is NEVER
+    drawn in any form; show the place, the light, the path, the sky instead - and whenever people
+    are not needed (a lesson or advice is shown as a calm place, not as people).
+    "from_behind" only for ordinary people or companions (sahaba): seen from behind or far away, small
+    in the picture, modestly dressed; any woman fully covered; never a face.
+- "translation": the scene translated into {other}, faithfully, sentence by sentence: every sentence,
+  nothing added, nothing left out, nothing explained or softened. Keep Islamic words as they are said
+  in {other} (Allah, the Ummah: উম্মাহ, ইসলাম, নবী).
+Also the title in English and in Bangla ("title_en", "title_bn"): the story's own title translated,
+or a short plain one if it has none.
 
-Tell THE STORY exactly as given: it is the only source, and the person wants it told as they wrote it,
-not summarised.
-- Every sentence of the story is told, in its order, in the scenes - its events, names, places,
-  numbers, quotations, its details (when, how, why: "during the night", "he hid a glass of water",
-  "because it was dark no one would notice") and its closing lesson or advice, in full.
-- Use the story's own sentences. Change words only to make a hard word easy for a child or a long
-  sentence two shorter ones; never change what happens or what is said.
-- Add nothing from outside it: no facts, background, dates, explanations, morals or conclusions it
-  does not have.
-- For this story a scene's narration may be up to three sentences and 45 words: split the story into
-  as many scenes as it needs (5 to 14) rather than leaving anything out.
-- When the story is written in Bangla, narration_bn uses its sentences as written, and narration_en
-  translates them; when it is in English, the other way round.
-- "perspectives" is [] (the story's lesson is told in the scenes); "sources" is [].
+Answer with JSON only, one entry for each scene, in order:
+{"title_en": "...", "title_bn": "...", "scenes": [{"picture": "...", "people": "none", "translation": "..."}]}"""
 
-""" + SCENE_RULES
+SCENE_WORDS = 45          # a scene's narration is whole sentences, up to about this many words
+
+
+def split_story(text, most=None):
+    """(title, [scene texts]) of a story as written: its first line is its title when that line is
+    short and does not end like a sentence; the rest is cut into scenes of whole sentences, a new
+    scene at each paragraph, none much over SCENE_WORDS words unless one sentence is longer."""
+    most = most or SCENE_WORDS
+    lines = (text or "").replace("\r", "").strip().split("\n")
+    title = ""
+    if lines and len(lines[0].split()) <= 12 and not re.search(r"[.!?।,;:]\s*$", lines[0]):
+        title, lines = lines[0].strip(), lines[1:]
+    paragraphs = [" ".join(p.split()) for p in re.split(r"\n\s*\n", "\n".join(lines)) if p.strip()]
+    scenes, current = [], []
+
+    def words(parts):
+        return sum(len(p.split()) for p in parts)
+
+    for paragraph in paragraphs:
+        for sentence in re.split(r"(?<=[.!?।])\s+|(?<=[.!?।][\"'”’)])\s+", paragraph):
+            if current and words(current + [sentence]) > most:
+                scenes.append(" ".join(current))
+                current = []
+            current.append(sentence)
+        if words(current) >= 8:                      # a paragraph's end is a scene's end
+            scenes.append(" ".join(current))
+            current = []
+    if current:
+        if scenes and words(current) < 8:
+            scenes[-1] += " " + " ".join(current)
+        else:
+            scenes.append(" ".join(current))
+    if len(scenes) > MAX_SCENES:                     # a long story: longer scenes, never fewer words
+        return split_story(text, int(most * 1.3) + 1)
+    if len(scenes) < MIN_SCENES and most > 8:        # a short one: shorter scenes, more pictures
+        return split_story(text, max(8, int(most * 0.6)))
+    return title, scenes
+
+
+def illustrate_request(model, title, scenes, lang):
+    """The chat request for each fixed scene's picture and its translation into the other language."""
+    other = "English" if lang == "bn" else "Bangla (Bengali script)"
+    text = (f"TITLE: {title or '(none)'}\n\nSCENES:\n"
+            + "\n".join(f"{n}. {scene}" for n, scene in enumerate(scenes, 1)))
+    return {"model": model, "stream": False, "temperature": 0.2, "max_tokens": 9000,
+            "chat_template_kwargs": {"enable_thinking": False},
+            "messages": [{"role": "system", "content": ILLUSTRATE_PROMPT.replace("{other}", other)},
+                         {"role": "user", "content": text}]}
+
+
+def parse_illustrated(answer, title, scenes, lang):
+    """The storyboard of a given story: its own words for its language, the translation for the other,
+    a picture for every scene. Every scene must be there, or nothing is made."""
+    match = re.search(r"\{.*\}", re.sub(r"<think>.*?</think>", "", answer or "", flags=re.S), re.S)
+    try:
+        drawn = json.loads(match.group(0)) if match else {}
+    except ValueError:
+        drawn = {}
+    entries = [e for e in drawn.get("scenes") or [] if isinstance(e, dict)]
+    if len(entries) != len(scenes) or not all(str(e.get("picture") or "").strip() for e in entries):
+        raise VideoError("The story's pictures could not be planned; try again")
+    other = "en" if lang == "bn" else "bn"
+    told = []
+    for scene, entry in zip(scenes, entries):
+        translation = str(entry.get("translation") or "").strip()
+        if not translation:
+            raise VideoError("The story could not be translated; try again")
+        told.append({f"narration_{lang}": scene, f"narration_{other}": translation,
+                     "picture": str(entry["picture"]).strip(),
+                     "people": "from_behind" if entry.get("people") == "from_behind" else "none"})
+    title_en = str(drawn.get("title_en") or "").strip()
+    title_bn = str(drawn.get("title_bn") or "").strip()
+    if title:                                        # the story's own title, as written, in its language
+        title_en, title_bn = (title, title_bn or title) if lang == "en" else (title_en or title, title)
+    return {"title_en": title_en or "A story", "title_bn": title_bn or title_en or "", "scenes": told,
+            "perspectives": [], "sources": []}
 
 GIVEN_LENGTH = 400        # characters: a request this long is a story to tell, not a topic to look up
 
@@ -153,22 +230,16 @@ def is_bangla(text):
     return bool(letters) and sum("ঀ" <= c <= "৿" for c in letters) / len(letters) > 0.3
 
 
-def story_request(model, request, material, facts, pictures=(), given=None):
-    """The chat request that writes the storyboard. `pictures` are (bytes, mime) given as context;
-    `given` is a story the person wrote, told as it is instead of looked up."""
-    if given:
-        text = f"THE STORY (written by the person; tell this one):\n{given}\n\nWHAT THEY ASKED:\n{request}"
-        if material and material.strip() != given.strip():
-            text += f"\n\nMATERIAL (given by the person):\n{material}"
-    else:
-        text = (f"REQUEST:\n{request}\n\nMATERIAL (given by the person):\n{material or '(none)'}\n\n"
-                f"SOURCES (from a web search):\n{facts or '(none found)'}")
+def story_request(model, request, material, facts, pictures=()):
+    """The chat request that writes the storyboard. `pictures` are (bytes, mime) given as context."""
+    text = (f"REQUEST:\n{request}\n\nMATERIAL (given by the person):\n{material or '(none)'}\n\n"
+            f"SOURCES (from a web search):\n{facts or '(none found)'}")
     content = [{"type": "text", "text": text}] + [
         {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{base64.b64encode(data).decode()}"}}
         for data, mime in pictures]
-    return {"model": model, "stream": False, "temperature": 0.2 if given else 0.4, "max_tokens": 8000,
+    return {"model": model, "stream": False, "temperature": 0.4, "max_tokens": 6000,
             "chat_template_kwargs": {"enable_thinking": False},
-            "messages": [{"role": "system", "content": GIVEN_PROMPT if given else STORY_PROMPT},
+            "messages": [{"role": "system", "content": STORY_PROMPT},
                          {"role": "user", "content": content if pictures else text}]}
 
 
@@ -383,7 +454,8 @@ def caption(text, path, lang, title=False):
     """A transparent frame-sized PNG with the words on it: the title in the middle, a line of
     narration at the bottom - white, outlined in dark, wrapped to fit."""
     from PIL import Image, ImageDraw
-    font = _font(lang, 54 if title else 34)
+    # A long line of a story read word for word is set a little smaller, to cover less of the picture
+    font = _font(lang, 54 if title else 34 if len(text) <= 160 else 29)
     image = Image.new("RGBA", (WIDTH, HEIGHT), (0, 0, 0, 0))
     draw = ImageDraw.Draw(image)
     lines, line = [], ""

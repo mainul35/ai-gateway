@@ -2226,18 +2226,23 @@ async def make_video(payload: VideoIn, principal: Principal = Depends(authentica
                 yield _event("progress", stage="Finding the story you gave", fraction=0.02)
                 given = video_story.given_story(await _ask_helper(principal, video_story.choose_request(
                     story_model, payload.prompt, earlier, material)), earlier, material)
+            sources = []
             if given:
-                facts, sources = "", []
+                # Read word for word: the scenes are its own sentences; the model only plans the
+                # pictures and translates into the other language. The Bangla model: on the Pond of
+                # Milk, Gemma's translation was faithful and natural where Qwen's was clumsy.
+                yield _event("progress", stage="Planning the pictures for your story", fraction=0.06)
+                lang = "bn" if video_story.is_bangla(given) else "en"
+                title, parts = video_story.split_story(given)
+                story = video_story.parse_illustrated(await _ask_helper(principal, video_story.illustrate_request(
+                    bangla_model, title, parts, lang)), title, parts, lang)
             else:
                 yield _event("progress", stage="Finding the facts", fraction=0.02)
                 facts, sources = await _video_facts(payload.prompt)
-            yield _event("progress", stage="Writing the story", fraction=0.06)
-            answer = await _ask_helper(principal, video_story.story_request(
-                story_model, payload.prompt, material, facts, pictures, given=given))
-            story = video_story.parse_story(answer)
-            # A story given in Bangla keeps its own words; one given in English is told in Bangla for
-            # children, as a looked-up one is
-            if "bn" in languages and not (given and video_story.is_bangla(given)):
+                yield _event("progress", stage="Writing the story", fraction=0.06)
+                story = video_story.parse_story(await _ask_helper(principal, video_story.story_request(
+                    story_model, payload.prompt, material, facts, pictures)))
+            if "bn" in languages and not given:
                 yield _event("progress", stage="Making the Bangla easy for children", fraction=0.08)
                 story = video_story.apply_bangla(
                     await _ask_helper(principal, video_story.bangla_request(bangla_model, story)), story)
@@ -2278,12 +2283,20 @@ async def make_video(payload: VideoIn, principal: Principal = Depends(authentica
                 pending = failed
                 if not pending:
                     break
-            # A scene whose picture never passed is left out rather than shown
             kept = [i for i in range(len(scenes)) if i not in pending]
-            if len(kept) < video_story.MIN_SCENES:
-                raise video_story.VideoError("Too few pictures passed the content check to make a video")
-            scenes = [scenes[i] for i in kept]
-            paths = [paths[i] for i in kept]
+            if given:
+                # Every word of a given story is read: a scene whose picture never passed shows the
+                # nearest picture that did, rather than being left out
+                if not kept:
+                    raise video_story.VideoError("No picture passed the content check to make a video")
+                for i in pending:
+                    paths[i] = paths[min(kept, key=lambda k: (abs(k - i), k > i))]
+            else:
+                # A scene whose picture never passed is left out rather than shown
+                if len(kept) < video_story.MIN_SCENES:
+                    raise video_story.VideoError("Too few pictures passed the content check to make a video")
+                scenes = [scenes[i] for i in kept]
+                paths = [paths[i] for i in kept]
 
             videos = {}
             for k, lang in enumerate(languages):
