@@ -148,6 +148,23 @@ a.cite{font-size:.75em;vertical-align:super;text-decoration:none;padding:0 .1rem
 .video-story .video-langs button[aria-pressed="true"]{color:#fff;background:var(--primary);border-color:var(--primary)}
 .video-story .video-notes{margin-top:.6rem;font-size:.88rem}
 .video-story .video-notes ul,.video-story .video-notes ol{margin:.25rem 0 0;padding-left:1.3rem}
+.video-story .voice-open,.voice-panel button{background:none;border:1px solid var(--border);border-radius:8px;
+  color:var(--text);padding:.35rem .8rem;cursor:pointer;margin-top:.5rem}
+.voice-panel{margin-top:.6rem;border-top:1px solid var(--border);padding-top:.4rem}
+.voice-scene{display:flex;gap:.7rem;align-items:flex-start;padding:.6rem 0;border-bottom:1px solid var(--border)}
+.voice-scene img{width:160px;aspect-ratio:16/9;object-fit:cover;border-radius:6px;flex:none}
+.voice-text{flex:1;min-width:0}
+.voice-text p{font-size:1.15rem;line-height:1.7;margin:.2rem 0 .4rem}
+.voice-controls{display:flex;flex-wrap:wrap;gap:.5rem;align-items:center}
+.voice-controls audio{height:36px;max-width:100%}
+.voice-panel button.recording{background:#c0392b;border-color:#c0392b;color:#fff}
+.voice-panel .voice-make{background:var(--primary);border-color:var(--primary);color:#fff}
+.voice-panel .voice-make:disabled{opacity:.5;cursor:default}
+.voice-actions{display:flex;flex-wrap:wrap;gap:.5rem;align-items:center;padding-top:.3rem}
+@media (max-width:640px){
+  .voice-scene{flex-direction:column}
+  .voice-scene img{width:100%}
+}
 .verdict-why{margin-top:.4rem;padding:.5rem .6rem;border:1px solid var(--border);border-radius:10px;font-size:.85rem}
 .verdict-why .why-choices{display:flex;flex-wrap:wrap;gap:.3rem;margin:.35rem 0}
 .verdict-why .why-choices button{background:none;border:1px solid var(--border);border-radius:999px;color:var(--muted);
@@ -1317,7 +1334,7 @@ function fillTranscript(messages){
       else if(extra.map) renderMap(box, extra.map);
       else if(extra.media) renderMedia(box, extra.media);
       else if(extra.generated) renderGenerated(box, extra.generated, m.stats);
-      else if(extra.video) renderVideo(box, extra.video);
+      else if(extra.video) renderVideo(box, extra.video, m.id);
       else if(extra.subtitles) renderSubtitles(box, extra.subtitles, m.content, m.stats);
       else renderAssistant(box, m.content, m.reasoning, withModel, extra.sources, m.html);
       // The same question under every answer a model wrote, with the verdict already given: maps,
@@ -3790,18 +3807,25 @@ async function sendVideo(text, again){
   loadConversations();
 }
 
-// The video in each language it was made in, one player shown at a time, then what it rests on
-function renderVideo(box, video){
+// The video in each language it was made in, one player shown at a time, then what it rests on.
+// `showLang` opens on that language (the Bangla, after it was read in the person's own voice).
+function renderVideo(box, video, messageId, showLang){
   const body = box.querySelector('.body');
   const langs = Object.keys(video.videos || {});
   const names = {en: 'English', bn: 'বাংলা'};
+  const first = langs.includes(showLang) ? showLang : langs[0];
+  messageId = messageId || video.message_id;
+  const canRead = !!(video.story && messageId && video.videos?.bn);
   body.innerHTML = `<div class="video-story">
       <div class="video-title"><b>${escapeHtml(video.title || 'Video story')}</b>
         ${video.title_bn ? `<span class="muted"> · ${escapeHtml(video.title_bn)}</span>` : ''}</div>
-      ${langs.length > 1 ? `<div class="video-langs">${langs.map((l, i) =>
-        `<button type="button" data-lang="${l}" aria-pressed="${i === 0}">${names[l] || l}</button>`).join('')}</div>` : ''}
-      ${langs.map((l, i) => `<video controls preload="metadata" playsinline data-lang="${l}" ${i ? 'hidden' : ''}
+      ${langs.length > 1 ? `<div class="video-langs">${langs.map(l =>
+        `<button type="button" data-lang="${l}" aria-pressed="${l === first}">${names[l] || l}${
+          video.videos[l].voice === 'recorded' ? ' · your voice' : ''}</button>`).join('')}</div>` : ''}
+      ${langs.map(l => `<video controls preload="metadata" playsinline data-lang="${l}" ${l === first ? '' : 'hidden'}
         src="${escapeHtml(video.videos[l].url)}"></video>`).join('')}
+      ${canRead ? `<button type="button" class="voice-open">${video.videos.bn.voice === 'recorded'
+          ? 'Read the Bangla again' : 'Read the Bangla in your own voice'}</button>` : ''}
       ${(video.perspectives || []).length ? `<div class="video-notes"><b>Other views told in the story</b><ul>${
         video.perspectives.map(p => `<li>${escapeHtml(p)}</li>`).join('')}</ul></div>` : ''}
       ${(video.sources || []).length ? `<div class="video-notes"><b>Sources</b><ol>${
@@ -3815,6 +3839,121 @@ function renderVideo(box, video){
       v.hidden = !shown;
     });
   }));
+  body.querySelector('.voice-open')?.addEventListener('click', event => {
+    event.target.hidden = true;
+    openVoicePanel(box, video, messageId);
+  });
+}
+
+/* The Bangla read by the person: each scene's picture and line, a recording of it, and the video
+   made again from the recordings (POST /chat/video/{message}/voice). A scene read before keeps its
+   recording, so only the ones read again are sent. */
+async function openVoicePanel(box, video, messageId){
+  const story = video.story;
+  const saved = story.voice_bn || [];
+  const fresh = story.bn.map(() => null);          // Blobs recorded now
+  const panel = document.createElement('div');
+  panel.className = 'voice-panel';
+  panel.innerHTML = `<p class="muted">Read each line slowly and calmly, close to the phone, in a quiet room.
+      Listen back, and read it again if you want. A line read before is kept.</p>
+    ${story.bn.map((line, i) => `<div class="voice-scene" data-i="${i}">
+      <img src="/chat/files/${story.pictures[i]}" alt="Scene ${i + 1}" loading="lazy">
+      <div class="voice-text"><span class="muted">Scene ${i + 1} of ${story.bn.length}</span>
+        <p lang="bn">${escapeHtml(line)}</p>
+        <div class="voice-controls"><button type="button" class="voice-record">Record</button>
+          <audio controls preload="none" ${saved[i] ? `src="/chat/files/${saved[i].file_id}"` : 'hidden'}></audio>
+          <span class="voice-state muted">${saved[i] ? 'read before' : 'not read yet'}</span></div></div>
+    </div>`).join('')}
+    <div class="voice-actions"><button type="button" class="voice-make" disabled>Make the Bangla video</button>
+      <button type="button" class="voice-cancel">Close</button><span class="voice-status muted"></span></div>`;
+  box.querySelector('.video-story').appendChild(panel);
+  const make = panel.querySelector('.voice-make');
+  const statusLine = panel.querySelector('.voice-status');
+  const ready = () => { make.disabled = !story.bn.every((_, i) => fresh[i] || saved[i]); };
+  ready();
+
+  let microphone = null, recorder = null, recordingAt = null, limit = null;
+  const release = () => { microphone?.getTracks().forEach(t => t.stop()); microphone = null; };
+  const stop = () => { clearTimeout(limit); if(recorder?.state === 'recording') recorder.stop(); };
+
+  panel.querySelectorAll('.voice-record').forEach(button => button.addEventListener('click', async () => {
+    const scene = button.closest('.voice-scene');
+    const i = Number(scene.dataset.i);
+    if(recordingAt === i){ stop(); return; }
+    if(recordingAt !== null) return;                 // one scene at a time
+    try{
+      microphone = microphone || await navigator.mediaDevices.getUserMedia(
+        {audio: {echoCancellation: true, noiseSuppression: true, autoGainControl: true}});
+    }catch(e){
+      statusLine.textContent = 'The microphone could not be used: ' + (e.message || e.name);
+      return;
+    }
+    // Chrome and Firefox record Opus in WebM, Safari AAC in MP4; the server takes either
+    const type = ['audio/webm;codecs=opus', 'audio/webm', 'audio/mp4'].find(t => MediaRecorder.isTypeSupported(t));
+    recorder = new MediaRecorder(microphone, type ? {mimeType: type} : {});
+    const pieces = [];
+    recorder.ondataavailable = e => { if(e.data.size) pieces.push(e.data); };
+    recorder.onstop = () => {
+      fresh[i] = new Blob(pieces, {type: recorder.mimeType || type || 'audio/webm'});
+      const audio = scene.querySelector('audio');
+      audio.src = URL.createObjectURL(fresh[i]);
+      audio.hidden = false;
+      scene.querySelector('.voice-state').textContent = 'read now';
+      button.textContent = 'Read again';
+      button.classList.remove('recording');
+      recordingAt = null;
+      ready();
+    };
+    recorder.start();
+    recordingAt = i;
+    button.textContent = 'Stop';
+    button.classList.add('recording');
+    scene.querySelector('.voice-state').textContent = 'recording…';
+    limit = setTimeout(stop, 120000);                // two minutes is far more than one line needs
+  }));
+
+  panel.querySelector('.voice-cancel').addEventListener('click', () => {
+    stop();
+    release();
+    panel.remove();
+    const open = box.querySelector('.voice-open');
+    if(open) open.hidden = false;
+  });
+
+  make.addEventListener('click', async () => {
+    stop();
+    release();
+    make.disabled = true;
+    statusLine.textContent = 'Sending the recordings';
+    const asText = blob => new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(reader.result);
+      reader.onerror = () => reject(reader.error);
+      reader.readAsDataURL(blob);
+    });
+    let result = null;
+    try{
+      const recordings = await Promise.all(fresh.map(b => b ? asText(b) : null));
+      const response = await fetch(`/chat/video/${messageId}/voice`, {method: 'POST', headers: JSON_HEADERS,
+                                                                    body: JSON.stringify({recordings})});
+      if(!response.ok){
+        const err = await response.json().catch(() => ({}));
+        throw new Error((typeof err.detail === 'string' && err.detail) || `HTTP ${response.status}`);
+      }
+      await readEvents(response, chunk => {
+        if(chunk.error) throw new Error(chunk.error.message);
+        const event = chunk.gateway;
+        if(event?.type === 'progress') statusLine.textContent = event.stage;
+        else if(event?.type === 'video') result = event;
+      });
+    }catch(e){
+      statusLine.textContent = 'That did not work: ' + errorText(e);
+      ready();
+      return;
+    }
+    if(result) renderVideo(box, result, messageId, 'bn');
+    else statusLine.textContent = 'It is still being made; open the conversation again in a minute to see it.';
+  });
 }
 
 async function sendImage(text, decision, again){

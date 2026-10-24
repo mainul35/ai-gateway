@@ -2287,20 +2287,34 @@ async def make_video(payload: VideoIn, principal: Principal = Depends(authentica
             video = {"title": story["title_en"], "title_bn": story["title_bn"], "videos": videos,
                      "scenes": len(scenes), "perspectives": story["perspectives"], "sources": used,
                      "asked": payload.prompt}
+            message_id = None
             if payload.conversation_id is not None:
+                # The pictures and the lines are kept, so the video can be made again with the person's
+                # own voice reading them (POST /chat/video/{message}/voice)
+                async with session_factory()() as db:
+                    scene_files = [ChatFile(user_id=user_id, kind="video-scene", mime_type="image/jpeg",
+                                            name=f"scene {n + 1}.jpg", data=video_story.as_jpeg(path))
+                                   for n, path in enumerate(paths)]
+                    db.add_all(scene_files)
+                    await db.commit()
+                    video["story"] = {"pictures": [p.id for p in scene_files],
+                                      "en": [s["narration_en"] for s in scenes],
+                                      "bn": [s["narration_bn"] for s in scenes]}
                 async with session_factory()() as db:
                     conversation = await db.get(Conversation, payload.conversation_id)
                     if conversation is not None and conversation.user_id == user_id:
                         filed = {"video": video}
                         if payload.answers_to is not None:
                             filed["answers_to"] = payload.answers_to
-                        db.add(ConversationMessage(conversation_id=payload.conversation_id, role="assistant",
-                                                   content=f"(video story: {story['title_en']})", model=story_model,
-                                                   stats=json.dumps({"total": round(time.monotonic() - started, 1)}),
-                                                   attachments=json.dumps(filed)))
+                        message = ConversationMessage(conversation_id=payload.conversation_id, role="assistant",
+                                                      content=f"(video story: {story['title_en']})", model=story_model,
+                                                      stats=json.dumps({"total": round(time.monotonic() - started, 1)}),
+                                                      attachments=json.dumps(filed))
+                        db.add(message)
                         conversation.updated_at = utcnow()
                         await db.commit()
-            yield _event("video", **video, seconds=round(time.monotonic() - started, 1))
+                        message_id = message.id
+            yield _event("video", **video, message_id=message_id, seconds=round(time.monotonic() - started, 1))
         except (video_story.VideoError, images.ImageError) as e:
             yield _error(str(e))
         finally:
@@ -2314,6 +2328,126 @@ async def make_video(payload: VideoIn, principal: Principal = Depends(authentica
                                           "X-Job-Id": str(job.id)})
     return StreamingResponse(limits.holding(slot, stream()), media_type="text/event-stream",
                              headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+
+class VoiceIn(BaseModel):
+    # One per scene, in order: a recording (base64, as the browser recorded it), or null to keep the
+    # one saved last time for that scene
+    recordings: list[str | None] = Field(max_length=video_story.MAX_SCENES)
+
+
+@router.post("/video/{message_id}/voice")
+async def video_voice(message_id: int, payload: VoiceIn, principal: Principal = Depends(authenticate),
+                      session: AsyncSession = Depends(get_session)):
+    """The Bangla video made again with the person's own voice: each scene's line as they read it.
+    The recordings are kept, so one scene can be read again later without the others."""
+    user = _require_user(principal)
+    message = (await session.execute(
+        select(ConversationMessage).join(Conversation).where(
+            ConversationMessage.id == message_id, Conversation.user_id == user.id))).scalar_one_or_none()
+    if message is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Video story not found")
+    filed = json.loads(message.attachments or "{}")
+    video = filed.get("video") or {}
+    story = video.get("story")
+    if not story:
+        raise HTTPException(status.HTTP_409_CONFLICT,
+                            "This video was made before stories were kept; make it again to read it yourself")
+    count = len(story["pictures"])
+    saved = story.get("voice_bn") or [None] * count
+    if len(payload.recordings) != count:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, f"This story has {count} scenes")
+    if any(len(r or "") > 6_000_000 for r in payload.recordings):
+        raise HTTPException(status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, "A recording is too long; keep each scene under two minutes")
+    missing = [n + 1 for n, (new, old) in enumerate(zip(payload.recordings, saved)) if not new and not old]
+    if missing:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY,
+                            "Read every scene first; not yet read: " + ", ".join(map(str, missing)))
+    wanted = list(story["pictures"]) + [old["file_id"] for old in saved if old]
+    found = await _load_files(session, user, wanted)
+    if any(i not in found for i in wanted):
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Some of this story's pictures or recordings are gone")
+    user_id = user.id
+
+    async def stream():
+        folder = video_story.workspace()
+        replaced, created = [], []           # dropped once the new video is saved / if it is not
+        try:
+            paths, narration, voice = [], [], []
+            for n, picture in enumerate(story["pictures"]):
+                paths.append(os.path.join(folder, f"scene-{n:02d}.jpg"))
+                with open(paths[-1], "wb") as f:
+                    f.write(found[picture].data)
+            for n, (new, old) in enumerate(zip(payload.recordings, saved)):
+                if new:
+                    yield _event("progress", stage=f"Cleaning up the recording of scene {n + 1}",
+                                 fraction=0.05 + 0.5 * n / count)
+                    try:
+                        raw = base64.b64decode(new.split(",", 1)[-1], validate=False)
+                    except ValueError:
+                        raise video_story.VideoError(f"The recording of scene {n + 1} could not be read")
+                    data, seconds = await video_story.clean_recording(raw, folder, n)
+                    async with session_factory()() as db:
+                        kept = ChatFile(user_id=user_id, kind="voice", mime_type="audio/mp4",
+                                        name=f"scene {n + 1}.m4a", data=data)
+                        db.add(kept)
+                        await db.commit()
+                    created.append(kept.id)
+                    if old:
+                        replaced.append(old["file_id"])
+                    voice.append({"file_id": kept.id, "seconds": seconds})
+                else:
+                    data = found[old["file_id"]].data
+                    voice.append(old)
+                path = os.path.join(folder, f"voice-{n:02d}.m4a")
+                with open(path, "wb") as f:
+                    f.write(data)
+                narration.append((path, voice[-1]["seconds"]))
+            yield _event("progress", stage="Putting the Bangla video together with your voice", fraction=0.6)
+            data, seconds = await video_story.assemble(paths, narration, story["bn"], video.get("title_bn") or "",
+                                                       "bn", folder, recorded=True)
+            async with session_factory()() as db:
+                stored = ChatFile(user_id=user_id, kind="video", mime_type="video/mp4",
+                                  name=f"{video.get('title', 'Video story')[:80]} (Bangla, your voice).mp4",
+                                  prompt=video.get("title_bn"), data=data)
+                db.add(stored)
+                await db.commit()
+            created.append(stored.id)
+            previous = (video.get("videos") or {}).get("bn")
+            video.setdefault("videos", {})["bn"] = {"file_id": stored.id, "url": f"/chat/files/{stored.id}",
+                                                    "seconds": seconds, "voice": "recorded"}
+            story["voice_bn"] = voice
+            video["story"] = story
+            filed["video"] = video
+            async with session_factory()() as db:
+                row = await db.get(ConversationMessage, message_id)
+                row.attachments = json.dumps(filed)
+                await db.commit()
+            created = []
+            for file_id in replaced + ([previous["file_id"]] if previous else []):
+                await _drop_file(user_id, file_id)
+            yield _event("video", **video, message_id=message_id)
+        except video_story.VideoError as e:
+            yield _error(str(e))
+        finally:
+            for file_id in created:          # the story still points at what it had
+                await _drop_file(user_id, file_id)
+            shutil.rmtree(folder, ignore_errors=True)
+
+    # A job, like the video itself: leaving the page does not stop it
+    job = jobs.start(user.id, message.conversation_id, "video", "reading the story in your voice", stream())
+    return StreamingResponse(jobs.follow(job), media_type="text/event-stream",
+                             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no",
+                                      "X-Job-Id": str(job.id)})
+
+
+async def _drop_file(user_id, file_id):
+    """Removes a file the person no longer has any use for: a recording or a video replaced."""
+    async with session_factory()() as db:
+        row = await db.get(ChatFile, file_id)
+        if row is not None and row.user_id == user_id:
+            await db.delete(row)
+            await db.commit()
 
 
 # --- the agent ----------------------------------------------------------------------------------
