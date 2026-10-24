@@ -92,6 +92,9 @@ dialog.aside::backdrop{background:rgba(0,0,0,.55)}
    every paragraph margin. Two lines of intended gap read as three, and no amount of adjusting the
    margin fixes it, because the extra line is not a margin. */
 .msg .body.md{background:none;padding:0;margin:0;white-space:normal}
+/* A formula on its own line scrolls sideways on a phone rather than pushing the page wider */
+.md .math[data-display="1"]{display:block;overflow-x:auto;overflow-y:hidden;margin:.6rem 0;padding:.1rem 0}
+.md .katex{font-size:1.08em}
 /* The conversation's name stays in view while its messages scroll under it */
 .topbar{flex:none;border-bottom:1px solid var(--border);padding:.55rem 0;background:var(--bg)}
 .chatTitle{font-size:.9rem;font-weight:600;color:var(--text);display:block;
@@ -1865,6 +1868,7 @@ async function answerAside(dialog){
     if(html){
       answer.classList.add('md');
       answer.innerHTML = html;
+      renderMath(answer);
     }else answer.textContent = text || '(no answer)';
   }catch(e){
     answer.textContent = e.name === 'AbortError' ? (text ? text + '\n\n(stopped)' : '(stopped)')
@@ -2004,6 +2008,7 @@ function renderAssistant(box, content, reasoning, stats, sources, html){
     body.classList.add('md');
     body.innerHTML = html;
     linkCitations(body, sources);
+    renderMath(body);
   }else{
     body.classList.remove('md');
     fillWithCitations(body, text, sources);
@@ -2021,11 +2026,46 @@ async function renderedHtml(text){
   }catch(e){ return null; }
 }
 
+// Formulas: the gateway marks them (class "math") and leaves them as written; KaTeX draws them. It is
+// fetched from this server the first time an answer has one, never before.
+let katexLoading = null;
+function loadKatex(){
+  if(window.katex) return Promise.resolve();
+  if(!katexLoading){
+    katexLoading = new Promise((resolve, reject) => {
+      const css = document.createElement('link');
+      css.rel = 'stylesheet';
+      css.href = '/static/katex/katex.min.css';
+      document.head.appendChild(css);
+      const script = document.createElement('script');
+      script.src = '/static/katex/katex.min.js';
+      script.onload = resolve;
+      script.onerror = reject;
+      document.head.appendChild(script);
+    }).catch(e => { katexLoading = null; throw e; });
+  }
+  return katexLoading;
+}
+
+async function renderMath(root){
+  const spans = [...root.querySelectorAll('.math:not([data-drawn])')];
+  if(!spans.length) return;
+  try{ await loadKatex(); }catch(e){ return; }         // the formulas stay readable as written
+  for(const span of spans){
+    try{
+      // throwOnError false: a formula KaTeX cannot read is shown as written, in red, not lost
+      katex.render(span.textContent, span, {displayMode: span.dataset.display === '1', throwOnError: false,
+                                            maxSize: 20, maxExpand: 500});
+      span.dataset.drawn = '1';
+    }catch(e){}
+  }
+}
+
 // Turns [1], [2] inside rendered HTML into links, without rebuilding the HTML itself
 function linkCitations(root, sources){
   if(!sources?.length) return;
   const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
-    acceptNode: node => node.parentElement.closest('a, code, pre')
+    acceptNode: node => node.parentElement.closest('a, code, pre, .math')
       ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT});
   const targets = [];
   while(walker.nextNode()) if(/\[\d{1,2}\]/.test(walker.currentNode.nodeValue)) targets.push(walker.currentNode);
