@@ -2392,7 +2392,10 @@ async def video_voice(message_id: int, payload: VoiceIn, principal: Principal = 
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, f"This story has {count} scenes")
     if any(len(r or "") > 6_000_000 for r in payload.recordings):
         raise HTTPException(status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, "A recording is too long; keep each scene under two minutes")
-    missing = [n + 1 for n, (new, old) in enumerate(zip(payload.recordings, saved)) if not new and not old]
+    # A scene that is all Arabic - a verse - is recited by the qari, not read by the person
+    reads = [video_story.needs_reading(line) for line in story["bn"]]
+    missing = [n + 1 for n, (new, old) in enumerate(zip(payload.recordings, saved))
+               if reads[n] and not new and not old]
     if missing:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY,
                             "Read every scene first; not yet read: " + ", ".join(map(str, missing)))
@@ -2412,6 +2415,14 @@ async def video_voice(message_id: int, payload: VoiceIn, principal: Principal = 
                 with open(paths[-1], "wb") as f:
                     f.write(found[picture].data)
             for n, (new, old) in enumerate(zip(payload.recordings, saved)):
+                line = story["bn"][n]
+                if not reads[n]:
+                    if old:                           # read before the qari took these scenes
+                        replaced.append(old["file_id"])
+                    voice.append(None)
+                    narration.append(await video_story.with_recitation(line, "bn", None, 0, folder, f"bn-{n:02d}")
+                                     or video_story.held_silence(line, "bn", os.path.join(folder, f"held-{n:02d}.wav")))
+                    continue
                 if new:
                     yield _event("progress", stage=f"Cleaning up the recording of scene {n + 1}",
                                  fraction=0.05 + 0.5 * n / count)
@@ -2435,7 +2446,10 @@ async def video_voice(message_id: int, payload: VoiceIn, principal: Principal = 
                 path = os.path.join(folder, f"voice-{n:02d}.m4a")
                 with open(path, "wb") as f:
                     f.write(data)
-                narration.append((path, voice[-1]["seconds"]))
+                # A verse in a line the person read keeps its recitation, in the order it is written
+                narration.append(await video_story.with_recitation(line, "bn", path, voice[-1]["seconds"],
+                                                                   folder, f"bn-{n:02d}")
+                                 or (path, voice[-1]["seconds"]))
             yield _event("progress", stage="Putting the Bangla video together with your voice", fraction=0.6)
             data, seconds = await video_story.assemble(paths, narration, story["bn"], video.get("title_bn") or "",
                                                        "bn", folder, recorded=True)
