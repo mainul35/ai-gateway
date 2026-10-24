@@ -3833,6 +3833,7 @@ function renderVideo(box, video, messageId, showLang){
         video.perspectives.map(p => `<li>${escapeHtml(p)}</li>`).join('')}</ul></div>` : ''}
       ${(video.sources || []).length ? `<div class="video-notes"><b>Sources</b><ol>${
         video.sources.map(s => `<li><a href="${escapeHtml(s.url)}" target="_blank" rel="noopener">${escapeHtml(s.title || s.url)}</a></li>`).join('')}</ol></div>` : ''}
+      ${video.from_story ? '<div class="video-notes muted">Told from the story you gave; nothing was looked up.</div>' : ''}
     </div>`;
   body.querySelectorAll('.video-langs button').forEach(button => button.addEventListener('click', () => {
     body.querySelectorAll('.video-langs button').forEach(b => b.setAttribute('aria-pressed', String(b === button)));
