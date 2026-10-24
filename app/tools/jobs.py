@@ -99,6 +99,13 @@ def start(user_id, conversation_id, kind, label, source, on_finish=None):
     return job
 
 
+# An SSE comment, which every reader skips: sent while a job is quiet, because Cloudflare closes a
+# connection that carries nothing for 100 s - a video's planning step ran for minutes without an
+# event, and the page showed "network error" while the job went on
+KEEP_ALIVE = b": keep-alive\n\n"
+KEEP_ALIVE_SECONDS = 20
+
+
 async def follow(job, start_at=0):
     """Every event from `start_at`, then each new one until the job ends."""
     index = start_at
@@ -112,7 +119,10 @@ async def follow(job, start_at=0):
         # Checked again after clearing: an event appended in between would otherwise wait for the next
         if index < len(job.events) or job.done:
             continue
-        await job._more.wait()
+        try:
+            await asyncio.wait_for(job._more.wait(), KEEP_ALIVE_SECONDS)
+        except asyncio.TimeoutError:
+            yield KEEP_ALIVE
 
 
 def running_of_kind(kind):

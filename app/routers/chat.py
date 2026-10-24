@@ -2188,44 +2188,119 @@ async def make_video(payload: VideoIn, principal: Principal = Depends(authentica
     found = await _load_files(session, user, payload.file_ids)
     pictures = [(f.data, f.mime_type) for f in found.values() if f.kind != "document" and (f.mime_type or "").startswith("image/")]
     material = "\n\n".join(f"{f.name}:\n{(f.prompt or '')[:6000]}" for f in found.values() if f.kind == "document")
-    user_id = user.id
+    ctx = {"prompt": payload.prompt, "languages": languages, "material": material, "pictures": pictures,
+           "earlier": earlier, "conversation_id": payload.conversation_id, "answers_to": payload.answers_to}
+    slot = await limits.take_gpu_slot(principal)
+    work = limits.holding(slot, _one_video_at_a_time(_video_pipeline(principal, user.id, ctx)))
+    if payload.conversation_id is not None:
+        job = jobs.start(user.id, payload.conversation_id, "video", payload.prompt[:120], work)
+        return StreamingResponse(jobs.follow(job), media_type="text/event-stream",
+                                 headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no",
+                                          "X-Job-Id": str(job.id)})
+    return StreamingResponse(work, media_type="text/event-stream",
+                             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+
+@router.post("/video/{message_id}/continue")
+async def continue_video(message_id: int, principal: Principal = Depends(authenticate),
+                         session: AsyncSession = Depends(get_session)):
+    """Carries on with a video story that stopped partway - an error, a restart, the server going to
+    sleep, Stop - from what it had saved: the plan, every picture that passed, every video made."""
+    user = _require_user(principal)
+    if not images.is_available() or not video_story.is_available():
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "Video stories are not set up on this server")
+    message = (await session.execute(
+        select(ConversationMessage).join(Conversation).where(
+            ConversationMessage.id == message_id, Conversation.user_id == user.id))).scalar_one_or_none()
+    video = (json.loads(message.attachments or "{}") if message else {}).get("video")
+    if not video:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Video story not found")
+    if video.get("state", "done") == "done":
+        raise HTTPException(status.HTTP_409_CONFLICT, "This video is already finished")
+    running = jobs.running_for(user.id, message.conversation_id)
+    if running is not None and running.kind == "video":
+        raise HTTPException(status.HTTP_409_CONFLICT, "This video is still being made")
+    ctx = {"prompt": video.get("asked", ""), "languages": video.get("languages") or ["en", "bn"],
+           "conversation_id": message.conversation_id, "message_id": message.id, "video": video}
+    slot = await limits.take_gpu_slot(principal)
+    job = jobs.start(user.id, message.conversation_id, "video", "continuing: " + video.get("title", "")[:100],
+                     limits.holding(slot, _one_video_at_a_time(_video_pipeline(principal, user.id, ctx))))
+    return StreamingResponse(jobs.follow(job), media_type="text/event-stream",
+                             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no",
+                                      "X-Job-Id": str(job.id)})
+
+
+async def _save_video(message_id, video, stats=None):
+    """The video story's state, written to its message as it goes."""
+    if message_id is None:
+        return
+    async with session_factory()() as db:
+        row = await db.get(ConversationMessage, message_id)
+        if row is None:
+            return
+        filed = json.loads(row.attachments or "{}")
+        filed["video"] = video
+        row.attachments = json.dumps(filed)
+        if stats is not None:
+            row.stats = json.dumps(stats)
+        await db.commit()
+
+
+async def _store_file(user_id, kind, mime, name, data, prompt=None):
+    async with session_factory()() as db:
+        stored = ChatFile(user_id=user_id, kind=kind, mime_type=mime, name=name, prompt=prompt, data=data)
+        db.add(stored)
+        await db.commit()
+        return stored.id
+
+
+async def _video_pipeline(principal, user_id, ctx):
+    """Makes a video story, or carries one on (ctx["video"], saved before): the plan, every scene's
+    picture drawn and checked, the narration, a video for each language. Each step is saved to the
+    conversation as it is done, so a video that stops partway - for any reason, a restart or sleep
+    included - is "paused" with what it has, and continue_video carries it on from there, never
+    planning or drawing again what it already has. Losing an hour of drawing to a narration that
+    failed after the last picture (2026-10-25) is what this is for."""
+    started = time.monotonic()
     story_model = settings.get("video.story.model", "VIDEO_STORY_MODEL")
     check_model = settings.get("video.check.model", "VIDEO_CHECK_MODEL")
     bangla_model = settings.get("video.bangla.model", "VIDEO_BANGLA_MODEL") or story_model
     attempts = max(1, int(settings.get("video.check.attempts", "VIDEO_CHECK_ATTEMPTS") or 3))
+    languages = ctx["languages"]
+    message_id = ctx.get("message_id")
+    video = ctx.get("video")
+    folder = video_story.workspace()
+    events = asyncio.Queue()
 
-    async def stream():
-        started = time.monotonic()
-        folder = video_story.workspace()
-        events = asyncio.Queue()
+    async def progress(stage, fraction=None):
+        await events.put(_event("progress", stage=stage, fraction=fraction))
 
-        async def progress(stage, fraction=None):
-            await events.put(_event("progress", stage=stage, fraction=fraction))
-
-        async def relay(work):
-            """Runs `work`, passing on its progress as it comes; returns its result."""
-            task = asyncio.create_task(work)
-            try:
-                while not task.done() or not events.empty():
-                    getter = asyncio.create_task(events.get())
-                    done, _ = await asyncio.wait({getter, task}, return_when=asyncio.FIRST_COMPLETED)
-                    if getter in done:
-                        yield getter.result()
-                    else:
-                        getter.cancel()
-                yield task.result()
-            finally:
-                if not task.done():
-                    task.cancel()
-
+    async def relay(work):
+        """Runs `work`, passing on its progress as it comes; returns its result."""
+        task = asyncio.create_task(work)
         try:
+            while not task.done() or not events.empty():
+                getter = asyncio.create_task(events.get())
+                done, _ = await asyncio.wait({getter, task}, return_when=asyncio.FIRST_COMPLETED)
+                if getter in done:
+                    yield getter.result()
+                else:
+                    getter.cancel()
+            yield task.result()
+        finally:
+            if not task.done():
+                task.cancel()
+
+    try:
+        if video is None:
             # A story the person wrote is told as it is - in this request, in an earlier message they
             # point back to, or in a document - and nothing is looked up. Only a topic is searched for.
-            given = payload.prompt if len(payload.prompt) >= video_story.GIVEN_LENGTH else None
+            prompt, material, earlier = ctx["prompt"], ctx["material"], ctx["earlier"]
+            given = prompt if len(prompt) >= video_story.GIVEN_LENGTH else None
             if given is None and (material or any(len(e) >= video_story.GIVEN_LENGTH for e in earlier)):
                 yield _event("progress", stage="Finding the story you gave", fraction=0.02)
                 given = video_story.given_story(await _ask_helper(principal, video_story.choose_request(
-                    story_model, payload.prompt, earlier, material)), earlier, material)
+                    story_model, prompt, earlier, material)), earlier, material)
             sources = []
             if given:
                 # Read word for word: the scenes are its own sentences; the model only plans the
@@ -2238,29 +2313,67 @@ async def make_video(payload: VideoIn, principal: Principal = Depends(authentica
                     bangla_model, title, parts, lang)), title, parts, lang)
             else:
                 yield _event("progress", stage="Finding the facts", fraction=0.02)
-                facts, sources = await _video_facts(payload.prompt)
+                facts, sources = await _video_facts(prompt)
                 yield _event("progress", stage="Writing the story", fraction=0.06)
                 story = video_story.parse_story(await _ask_helper(principal, video_story.story_request(
-                    story_model, payload.prompt, material, facts, pictures)))
+                    story_model, prompt, material, facts, ctx["pictures"])))
             if "bn" in languages and not given:
                 yield _event("progress", stage="Making the Bangla easy for children", fraction=0.08)
                 story = video_story.apply_bangla(
                     await _ask_helper(principal, video_story.bangla_request(bangla_model, story)), story)
             scenes = story["scenes"]
-            yield _event("storyboard", title=story["title_en"], scenes=len(scenes))
+            used = [sources[n - 1] for n in story["sources"] if 0 < n <= len(sources)] or sources[:5]
+            video = {"title": story["title_en"], "title_bn": story["title_bn"], "videos": {},
+                     "scenes": len(scenes), "perspectives": [] if given else story["perspectives"],
+                     "sources": [] if given else used, "asked": prompt, "from_story": bool(given),
+                     "languages": languages, "state": "making",
+                     "story": {"pictures": [None] * len(scenes), "en": [s["narration_en"] for s in scenes],
+                               "bn": [s["narration_bn"] for s in scenes],
+                               "drawn": [s["picture"] for s in scenes],     # what each was drawn from
+                               "people": [s["people"] for s in scenes]},
+                     "drawing": {"attempt": 0, "wrong": {}}}
+            if ctx.get("conversation_id") is not None:
+                async with session_factory()() as db:
+                    conversation = await db.get(Conversation, ctx["conversation_id"])
+                    if conversation is not None and conversation.user_id == user_id:
+                        filed = {"video": video}
+                        if ctx.get("answers_to") is not None:
+                            filed["answers_to"] = ctx["answers_to"]
+                        message = ConversationMessage(conversation_id=conversation.id, role="assistant",
+                                                      content=f"(video story: {video['title']})", model=story_model,
+                                                      attachments=json.dumps(filed))
+                        db.add(message)
+                        conversation.updated_at = utcnow()
+                        await db.commit()
+                        message_id = message.id
+        else:
+            video["state"] = "making"
+            video.pop("paused", None)
+            await _save_video(message_id, video)
+            yield _event("progress", stage="Carrying on from where it stopped", fraction=0.05)
+        yield _event("storyboard", title=video["title"], scenes=len(video["story"]["drawn"]),
+                     message_id=message_id)
 
-            # Every scene drawn, then every picture checked: two swaps of the GPU, not one per scene
-            paths = [None] * len(scenes)
-            pending = list(range(len(scenes)))
-            wrong = {}                                          # scene -> what was wrong with its picture
+        told = video["story"]
+        scenes = [{"narration_en": en, "narration_bn": bn, "picture": drawn, "people": people}
+                  for en, bn, drawn, people in zip(told["en"], told["bn"], told["drawn"],
+                                                   told.get("people") or ["from_behind"] * len(told["en"]))]
+        drawing = video.setdefault("drawing", {"attempt": 0, "wrong": {}})
+        # Every scene drawn, then every picture checked: two swaps of the GPU, not one per scene. A
+        # picture that passes is kept at once.
+        if "done" not in drawing:
+            paths = {}
+            wrong = {int(k): why for k, why in drawing.get("wrong", {}).items()}
             turned = set()                                      # scenes whose people were turned away
-            for attempt in range(attempts + 1):
+            pending = [i for i, picture in enumerate(told["pictures"]) if picture is None]
+            for attempt in range(drawing.get("attempt", 0), attempts + 1):
+                drawing["attempt"] = attempt
                 for n, i in enumerate(pending):
                     plain = attempt >= attempts - 1 and attempt > 0     # the last tries: nobody in it
                     # A picture whose only fault is a face keeps its moment: the editing model turns the
                     # people away (two people talking face each other, however the scene is asked for);
                     # if a face is still there after that, the scene is drawn again
-                    turn = wrong.get(i) == "a face is visible" and i not in turned
+                    turn = wrong.get(i) == "a face is visible" and i not in turned and i in paths
                     yield _event("progress", stage=(f"Turning the people away in scene {i + 1}" if turn else
                                                     f"Drawing scene {i + 1} of {len(scenes)}" + (" again" if attempt else "")),
                                  fraction=0.1 + 0.55 * (n + 1) / max(1, len(pending)))
@@ -2289,93 +2402,87 @@ async def make_video(payload: VideoIn, principal: Principal = Depends(authentica
                         ok, why = video_story.verdict(
                             await _ask_helper(principal, video_story.check_request(check_model, f.read(), scenes[i])),
                             scenes[i], must_match=attempt < attempts - 1)
-                    if not ok:
+                    if ok:
+                        told["pictures"][i] = await _store_file(user_id, "video-scene", "image/jpeg",
+                                                                f"scene {i + 1}.jpg", video_story.as_jpeg(paths[i]))
+                        wrong.pop(i, None)
+                    else:
                         log.info("video scene %d redrawn: %s", i + 1, why)
                         wrong[i] = why
                         failed.append(i)
+                drawing["wrong"] = {str(i): why for i, why in wrong.items()}
+                drawing["attempt"] = attempt + 1
+                await _save_video(message_id, video)
                 pending = failed
                 if not pending:
                     break
-            kept = [i for i in range(len(scenes)) if i not in pending]
-            if given:
+            kept = [i for i, picture in enumerate(told["pictures"]) if picture is not None]
+            if video.get("from_story"):
                 # Every word of a given story is read: a scene whose picture never passed shows the
                 # nearest picture that did, rather than being left out
                 if not kept:
                     raise video_story.VideoError("No picture passed the content check to make a video")
-                for i in pending:
-                    paths[i] = paths[min(kept, key=lambda k: (abs(k - i), k > i))]
+                for i in range(len(told["pictures"])):
+                    if told["pictures"][i] is None:
+                        told["pictures"][i] = told["pictures"][min(kept, key=lambda k: (abs(k - i), k > i))]
             else:
                 # A scene whose picture never passed is left out rather than shown
                 if len(kept) < video_story.MIN_SCENES:
                     raise video_story.VideoError("Too few pictures passed the content check to make a video")
-                scenes = [scenes[i] for i in kept]
-                paths = [paths[i] for i in kept]
+                for key in ("pictures", "en", "bn", "drawn", "people"):
+                    if key in told:
+                        told[key] = [told[key][i] for i in kept]
+                video["scenes"] = len(kept)
+            drawing["done"] = True
+            await _save_video(message_id, video)
 
-            videos = {}
-            for k, lang in enumerate(languages):
-                word = "Bangla" if lang == "bn" else "English"
-                yield _event("progress", stage=f"Narrating in {word}", fraction=0.78 + 0.1 * k / len(languages))
-                texts = [s["narration_bn" if lang == "bn" else "narration_en"] for s in scenes]
-                narration = await video_story.narrate(lang, texts, folder)
-                yield _event("progress", stage=f"Putting the {word} video together",
-                             fraction=0.83 + 0.15 * k / len(languages))
-                title = story["title_bn"] if lang == "bn" else story["title_en"]
-                data, seconds = await video_story.assemble(paths, narration, texts, title, lang, folder)
-                async with session_factory()() as db:
-                    stored = ChatFile(user_id=user_id, kind="video", mime_type="video/mp4",
-                                      name=f"{story['title_en'][:80]} ({word}).mp4", prompt=title, data=data)
-                    db.add(stored)
-                    await db.commit()
-                    await db.refresh(stored)
-                videos[lang] = {"file_id": stored.id, "url": f"/chat/files/{stored.id}", "seconds": seconds}
+        # The pictures as kept, for every language's video
+        async with session_factory()() as db:
+            files = {f.id: f.data for f in (await db.execute(select(ChatFile).where(
+                ChatFile.id.in_(set(told["pictures"])), ChatFile.user_id == user_id))).scalars()}
+        if any(picture not in files for picture in told["pictures"]):
+            raise video_story.VideoError("Some of this story's pictures are gone; make it again")
+        paths = []
+        for n, picture in enumerate(told["pictures"]):
+            paths.append(os.path.join(folder, f"kept-{n:02d}.jpg"))
+            with open(paths[-1], "wb") as f:
+                f.write(files[picture])
 
-            used = [sources[n - 1] for n in story["sources"] if 0 < n <= len(sources)] or sources[:5]
-            video = {"title": story["title_en"], "title_bn": story["title_bn"], "videos": videos,
-                     "scenes": len(scenes), "perspectives": [] if given else story["perspectives"],
-                     "sources": [] if given else used, "asked": payload.prompt, "from_story": bool(given)}
-            message_id = None
-            if payload.conversation_id is not None:
-                # The pictures and the lines are kept, so the video can be made again with the person's
-                # own voice reading them (POST /chat/video/{message}/voice)
-                async with session_factory()() as db:
-                    scene_files = [ChatFile(user_id=user_id, kind="video-scene", mime_type="image/jpeg",
-                                            name=f"scene {n + 1}.jpg", data=video_story.as_jpeg(path))
-                                   for n, path in enumerate(paths)]
-                    db.add_all(scene_files)
-                    await db.commit()
-                    video["story"] = {"pictures": [p.id for p in scene_files],
-                                      "en": [s["narration_en"] for s in scenes],
-                                      "bn": [s["narration_bn"] for s in scenes],
-                                      "drawn": [s["picture"] for s in scenes]}     # what each was drawn from
-                async with session_factory()() as db:
-                    conversation = await db.get(Conversation, payload.conversation_id)
-                    if conversation is not None and conversation.user_id == user_id:
-                        filed = {"video": video}
-                        if payload.answers_to is not None:
-                            filed["answers_to"] = payload.answers_to
-                        message = ConversationMessage(conversation_id=payload.conversation_id, role="assistant",
-                                                      content=f"(video story: {story['title_en']})", model=story_model,
-                                                      stats=json.dumps({"total": round(time.monotonic() - started, 1)}),
-                                                      attachments=json.dumps(filed))
-                        db.add(message)
-                        conversation.updated_at = utcnow()
-                        await db.commit()
-                        message_id = message.id
-            yield _event("video", **video, message_id=message_id, seconds=round(time.monotonic() - started, 1))
-        except (video_story.VideoError, images.ImageError) as e:
-            yield _error(str(e))
-        finally:
-            shutil.rmtree(folder, ignore_errors=True)
+        videos = video.setdefault("videos", {})
+        for k, lang in enumerate(languages):
+            if lang in videos:
+                continue                                         # made before it stopped
+            word = "Bangla" if lang == "bn" else "English"
+            yield _event("progress", stage=f"Narrating in {word}", fraction=0.78 + 0.1 * k / len(languages))
+            texts = told[lang]
+            narration = await video_story.narrate(lang, texts, folder)
+            yield _event("progress", stage=f"Putting the {word} video together",
+                         fraction=0.83 + 0.15 * k / len(languages))
+            title = video["title_bn"] if lang == "bn" else video["title"]
+            data, seconds = await video_story.assemble(paths, narration, texts, title, lang, folder)
+            stored = await _store_file(user_id, "video", "video/mp4", f"{video['title'][:80]} ({word}).mp4", data,
+                                       prompt=title)
+            videos[lang] = {"file_id": stored, "url": f"/chat/files/{stored}", "seconds": seconds}
+            await _save_video(message_id, video)
 
-    slot = await limits.take_gpu_slot(principal)
-    if payload.conversation_id is not None:
-        job = jobs.start(user.id, payload.conversation_id, "video", payload.prompt[:120],
-                         limits.holding(slot, _one_video_at_a_time(stream())))
-        return StreamingResponse(jobs.follow(job), media_type="text/event-stream",
-                                 headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no",
-                                          "X-Job-Id": str(job.id)})
-    return StreamingResponse(limits.holding(slot, _one_video_at_a_time(stream())), media_type="text/event-stream",
-                             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+        video["state"] = "done"
+        video.pop("drawing", None)
+        await _save_video(message_id, video, stats={"total": round(time.monotonic() - started, 1)})
+        yield _event("video", **video, message_id=message_id, seconds=round(time.monotonic() - started, 1))
+    except Exception as e:
+        # Paused with what it has; the person can carry on (continue_video). A restart or sleep
+        # gives no chance to say so - the message stays "making", which the page reads the same way.
+        expected = isinstance(e, (video_story.VideoError, images.ImageError))
+        if not expected:
+            log.exception("video story stopped")
+        if video is not None:
+            video["state"] = "paused"
+            video["paused"] = str(e) if expected else "Something went wrong while it was being made"
+            await _save_video(message_id, video)
+        yield _error((str(e) if expected else "The video stopped partway") +
+                     ("; it is saved, and can be carried on from where it stopped" if message_id else ""))
+    finally:
+        shutil.rmtree(folder, ignore_errors=True)
 
 
 # A video takes both GPUs in turn - its language models, then the image model - so two at once

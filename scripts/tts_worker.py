@@ -34,8 +34,12 @@ def english(items, speed):
     pipeline = KPipeline(lang_code="a", repo_id="hexgrad/Kokoro-82M")
     durations = []
     for item in items:
-        pieces = [np.asarray(audio, dtype=np.float32)
-                  for _, _, audio in pipeline(item["text"], voice="am_michael", speed=speed)]
+        try:
+            pieces = [np.asarray(audio, dtype=np.float32)
+                      for _, _, audio in pipeline(item["text"], voice="am_michael", speed=speed)]
+        except Exception as e:            # one line the voice cannot say is silence, not a lost video
+            print(f"line not spoken: {e}: {item['text'][:80]!r}", file=sys.stderr)
+            pieces = []
         audio = np.concatenate(pieces) if pieces else np.zeros(2400, dtype=np.float32)
         sf.write(item["out"], audio, 24000)
         durations.append(len(audio) / 24000)
@@ -64,8 +68,17 @@ def bangla(items, speed, noise=NOISE, noise_duration=NOISE_DURATION):
             clauses = [c.strip() for c in re.split(r"(?<=[,;])\s+", sentence) if c.strip()]
             for k, clause in enumerate(clauses):
                 inputs = tokenizer(clause, return_tensors="pt")
-                with torch.no_grad():
-                    parts.append(model(**inputs).waveform[0].numpy().astype(np.float32))
+                # Text with nothing in Bangla it can read - Latin letters ("Wa iz qaala rabbuka"), a lone
+                # bracket, "..." - comes out as no tokens at all, and the model fails on it ("narrow():
+                # length must be non-negative"): that ended a 28-scene video after its last picture
+                if inputs["input_ids"].shape[-1] < 2:
+                    continue
+                try:
+                    with torch.no_grad():
+                        parts.append(model(**inputs).waveform[0].numpy().astype(np.float32))
+                except Exception as e:
+                    print(f"clause not spoken: {e}: {clause[:80]!r}", file=sys.stderr)
+                    continue
                 parts.append(breath if k < len(clauses) - 1 else pause)
         audio = np.concatenate(parts[:-1]) if parts else np.zeros(rate // 10, dtype=np.float32)
         sf.write(item["out"], audio, rate)
