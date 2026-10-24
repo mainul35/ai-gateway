@@ -226,3 +226,60 @@ def test_rejected_key_never_wakes_again(setup):
                       headers={"Authorization": f"Bearer {OTHER_KEY}"}).status_code == 401
     status = httpx.get(f"{base}/__wake/status").json()
     assert status["up"] is True
+
+
+RESTARTING_BOX = textwrap.dedent('''
+    import sys
+    import uvicorn
+    from fastapi import FastAPI
+    app = FastAPI()
+    @app.get("/health")
+    async def health(): return {"status": "ok"}
+    uvicorn.run(app, host="127.0.0.1", port=int(sys.argv[1]), log_level="warning")
+''')
+
+
+def test_gateway_restart_is_not_ten_seconds_asleep(tmp_path):
+    """A deploy restarts the gateway in a few seconds. The wake front sees the refused connection
+    and takes the machine for asleep; it has to notice it is back within a couple of seconds, not
+    after DOWN_RECHECK_SECONDS - nothing that does not wake (/health, a dashboard's polls) would
+    otherwise look again, and the deploy's own public check was answered 503 six times out of six."""
+    box_port, front_port = free_port(), free_port()
+    script = tmp_path / "box.py"
+    script.write_text(RESTARTING_BOX)
+
+    def start_box():
+        process = subprocess.Popen([sys.executable, str(script), str(box_port)],
+                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        for _ in range(50):
+            try:
+                httpx.get(f"http://127.0.0.1:{box_port}/health", timeout=1)
+                return process
+            except httpx.HTTPError:
+                time.sleep(0.2)
+        raise RuntimeError("the box did not start")
+
+    box = start_box()
+    env = dict(os.environ, WAKE_UPSTREAM=f"http://127.0.0.1:{box_port}", WAKE_MAC=MAC,
+               WAKE_BROADCAST="127.0.0.1", WAKE_WOL_PORT=str(free_port(socket.SOCK_DGRAM)),
+               WAKE_SESSION_SECRET=SECRET)
+    front = subprocess.Popen([sys.executable, "-m", "uvicorn", "wake_front:app", "--port", str(front_port),
+                              "--log-level", "warning"], cwd=HERE, env=env,
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    base = f"http://127.0.0.1:{front_port}"
+    try:
+        for _ in range(50):
+            try:
+                httpx.get(f"{base}/__wake/health", timeout=1)
+                break
+            except httpx.HTTPError:
+                time.sleep(0.2)
+        assert httpx.get(f"{base}/health").status_code == 200          # up
+        box.terminate(); box.wait()
+        assert httpx.get(f"{base}/health").status_code == 503          # restarting: taken for asleep
+        box = start_box()
+        time.sleep(2.5)
+        assert httpx.get(f"{base}/health").status_code == 200          # back, seen within seconds
+    finally:
+        front.terminate(); front.wait()
+        box.terminate(); box.wait()
