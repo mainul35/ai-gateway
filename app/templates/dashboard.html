@@ -36,7 +36,19 @@
 .meter span{display:block;height:100%;border-radius:3px;background:var(--series);transition:width .6s ease}
 .meter.warn{background:var(--warn-track)} .meter.warn span{background:var(--warn)}
 .meter.crit{background:var(--crit-track)} .meter.crit span{background:var(--crit)}
-.spark{display:block;width:100%;height:48px;margin-top:.55rem;overflow:visible}
+.spark{display:block;width:100%;height:90px;overflow:visible}
+.tile.wide{grid-column:span 2}
+@media (max-width:760px){.tile.wide{grid-column:auto}}
+.live-chart{display:flex;gap:.4rem;margin-top:.6rem}
+.live-y{display:flex;flex-direction:column;justify-content:space-between;font-size:.68rem;color:var(--muted);text-align:right;height:90px;line-height:1}
+.live-plot{flex:1;min-width:0}
+.live-x{display:flex;justify-content:space-between;font-size:.68rem;color:var(--muted);margin-top:.2rem}
+.gpu-top{display:flex;justify-content:space-between;align-items:flex-start;gap:.5rem;flex-wrap:wrap}
+.gpu-rows{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:.4rem 1rem;margin-top:.5rem}
+.gpu-row{min-width:0}
+.swatch{display:inline-block;width:.6rem;height:.6rem;border-radius:2px;margin-right:.35rem}
+.ring-box{display:flex;justify-content:center;margin:.4rem 0 .2rem}
+.ring{width:132px;height:132px}
 .chart{display:block;width:100%;height:auto;overflow:visible}
 .charts{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:1.4rem}
 .chart-box{position:relative;min-width:0}
@@ -488,83 +500,130 @@ document.addEventListener('click', async e => {
 
 // --- live hardware -------------------------------------------------------------------------------
 // Asked every LIVE_MS while the tab is visible, never while it is hidden: the server measures only
-// when asked (app/live_metrics.py), so a dashboard left in a background tab costs it nothing.
-const LIVE_MS = 3000, LIVE_KEEP = 240;
+// when asked (app/live_metrics.py), so a dashboard left in a background tab costs it nothing. The
+// charts show the last LIVE_WINDOW seconds; the server keeps a little more, so they open full.
+const LIVE_MS = 3000, LIVE_WINDOW = 600;
+// One colour per GPU, in the categorical order (dark steps), so a card keeps its colour in every view
+const GPU_COLORS = ['#3987e5', '#d95926', '#199e70', '#c98500'];
 let liveHistory = [], liveTimer = null;
 
 const pct = (part, whole) => whole ? Math.max(0, Math.min(100, part / whole * 100)) : 0;
 function level(p){ return p >= 95 ? 'crit' : p >= 80 ? 'warn' : ''; }
 const LEVEL_WORDS = {warn: 'high', crit: 'near full'};
+const hot = (p, what) => level(p)
+  ? `<span class="hot-${level(p)}">${level(p) === 'crit' ? '&#9650;&#9650;' : '&#9650;'} ${what}${LEVEL_WORDS[level(p)]}</span>` : '';
 
 function meter(p){
-  const l = level(p);
-  return `<div class="meter ${l}" role="meter" aria-valuenow="${Math.round(p)}" aria-valuemin="0" aria-valuemax="100">
+  return `<div class="meter ${level(p)}" role="meter" aria-valuenow="${Math.round(p)}" aria-valuemin="0" aria-valuemax="100">
     <span style="width:${p.toFixed(1)}%"></span></div>`;
 }
 
-// A sparkline of one series, 0-100 %: a 2px line over a faint area, its hover read by liveHover
-function spark(id, values){
-  if(values.length < 2) return `<svg class="spark" data-spark="${id}"></svg>`;
-  const w = 300, h = 48, n = values.length;
-  const x = i => i / (n - 1) * w, y = v => h - Math.max(0, Math.min(100, v)) / 100 * (h - 2) - 1;
-  const line = values.map((v, i) => `${i ? 'L' : 'M'}${x(i).toFixed(1)},${y(v).toFixed(1)}`).join('');
-  return `<svg class="spark" data-spark="${id}" viewBox="0 0 ${w} ${h}" preserveAspectRatio="none" aria-hidden="true">
-    <line x1="0" x2="${w}" y1="${y(50)}" y2="${y(50)}" stroke="var(--grid)" stroke-width="1" vector-effect="non-scaling-stroke"/>
-    <path d="${line}L${w},${h}L0,${h}Z" fill="var(--series)" opacity=".12"/>
-    <path d="${line}" fill="none" stroke="var(--series)" stroke-width="2" vector-effect="non-scaling-stroke"
-          stroke-linejoin="round" stroke-linecap="round"/>
-    <line class="cross" x1="0" x2="0" y1="0" y2="${h}" stroke="var(--muted)" stroke-width="1"
-          vector-effect="non-scaling-stroke" visibility="hidden"/>
-  </svg>`;
+// Lines over the last LIVE_WINDOW seconds, 0-100 %, on one time axis: [{of: sample => %, color}].
+// The labels are HTML beside the SVG, so they keep their size however wide the chart is drawn.
+const CHART_W = 600, CHART_H = 90;
+function timeX(at, end){ return (1 - Math.min(LIVE_WINDOW, Math.max(0, end - at)) / LIVE_WINDOW) * CHART_W; }
+function liveChart(id, series){
+  const end = Date.now() / 1000, y = v => CHART_H - Math.max(0, Math.min(100, v || 0)) / 100 * (CHART_H - 2) - 1;
+  const shown = liveHistory.filter(s => end - s.at <= LIVE_WINDOW);
+  // A gap - nobody was looking, so nothing was measured - breaks the line rather than bridging it
+  const gap = i => i && shown[i].at - shown[i - 1].at > 15;
+  const broken = shown.some((_, i) => gap(i));
+  const lines = shown.length < 2 ? '' : series.map((s, k) => {
+    const d = shown.map((p, i) => `${i && !gap(i) ? 'L' : 'M'}${timeX(p.at, end).toFixed(1)},${y(s.of(p)).toFixed(1)}`).join('');
+    const area = series.length === 1 && !broken
+      ? `<path d="${d}L${timeX(shown[shown.length - 1].at, end)},${CHART_H}L${timeX(shown[0].at, end)},${CHART_H}Z" fill="${s.color}" opacity=".12"/>` : '';
+    return `${area}<path d="${d}" fill="none" stroke="${s.color}" stroke-width="2" vector-effect="non-scaling-stroke"
+                         stroke-linejoin="round" stroke-linecap="round"/>`;
+  }).join('');
+  const grid = [100, 50].map(v => `<line x1="0" x2="${CHART_W}" y1="${y(v)}" y2="${y(v)}" stroke="var(--grid)"
+                                          stroke-width="1" vector-effect="non-scaling-stroke"/>`).join('');
+  return `<div class="live-chart">
+    <div class="live-y"><span>100%</span><span>50%</span><span>0</span></div>
+    <div class="live-plot">
+      <svg class="spark" data-chart="${id}" viewBox="0 0 ${CHART_W} ${CHART_H}" preserveAspectRatio="none" aria-hidden="true">
+        ${grid}<line x1="0" x2="${CHART_W}" y1="${CHART_H - .5}" y2="${CHART_H - .5}" stroke="var(--border)" stroke-width="1" vector-effect="non-scaling-stroke"/>
+        ${lines}
+        <line class="cross" x1="0" x2="0" y1="0" y2="${CHART_H}" stroke="var(--muted)" stroke-width="1"
+              vector-effect="non-scaling-stroke" visibility="hidden"/>
+      </svg>
+      <div class="live-x"><span>10 min ago</span><span>5 min</span><span>now</span></div>
+    </div>
+  </div>`;
 }
 
-// What each tile plots, and how one sample reads in its tooltip
-const SERIES = {
-  cpu: {of: s => s.cpu, say: s => `${Math.round(s.cpu)}% CPU`},
-  ram: {of: s => pct(s.ram_used, s.ram_total), say: s => `${formatBytes(s.ram_used)} of ${formatBytes(s.ram_total)}`},
+// What each chart's hover says about one sample
+const SAYS = {
+  cpu: s => `${Math.round(s.cpu)}% CPU · load ${s.load1.toFixed(2)}`,
+  gpus: s => (s.gpus || []).map(g => `<span style="color:${GPU_COLORS[g.index % GPU_COLORS.length]}">&#9632;</span> GPU ${g.index}: `
+                                     + `${Math.round(g.util || 0)}% · ${(g.mem_used / 1024**3).toFixed(1)} GB`).join('<br>'),
 };
 
-function tile(id, title, detail, value, p, lines, history){
-  const l = level(p);
-  return `<div class="tile" data-tile="${id}">
-    <div class="tile-head"><strong>${escapeHtml(title)}</strong><span>${detail}</span></div>
-    <div class="tile-value">${value}${l ? `<small class="hot-${l}">${l === 'crit' ? '&#9650;&#9650;' : '&#9650;'} ${LEVEL_WORDS[l]}</small>` : ''}</div>
-    ${meter(p)}
-    ${lines.join('')}
-    ${spark(id, history)}
-  </div>`;
+// RAM as a ring: the share in use, in the meter's colours, the number in the middle
+function ring(p){
+  const r = 42, c = 2 * Math.PI * r, l = level(p);
+  const color = l === 'crit' ? 'var(--crit)' : l === 'warn' ? 'var(--warn)' : 'var(--series)';
+  const track = l === 'crit' ? 'var(--crit-track)' : l === 'warn' ? 'var(--warn-track)' : 'var(--series-track)';
+  return `<svg class="ring" viewBox="0 0 100 100" role="img" aria-label="RAM ${Math.round(p)}% in use">
+    <circle cx="50" cy="50" r="${r}" fill="none" stroke="${track}" stroke-width="9"/>
+    <circle cx="50" cy="50" r="${r}" fill="none" stroke="${color}" stroke-width="9" stroke-linecap="round"
+            stroke-dasharray="${(c * p / 100).toFixed(1)} ${c.toFixed(1)}" transform="rotate(-90 50 50)"
+            style="transition:stroke-dasharray .6s ease"/>
+    <text x="50" y="50" text-anchor="middle" dominant-baseline="central" font-size="21" font-weight="700" fill="var(--text)">${Math.round(p)}%</text>
+  </svg>`;
 }
 
 function renderLive(){
   const now = liveHistory[liveHistory.length - 1];
   if(!now) return;
+  const gpus = now.gpus || [];
   const tiles = [];
-  const cpuHot = now.cpu_temp ? `${Math.round(now.cpu_temp)}&deg;C` : '';
-  tiles.push(tile('cpu', 'CPU', [cpuHot, `${now.cpu_count} threads`].filter(Boolean).join(' &middot; '),
-    `${Math.round(now.cpu)}%`, now.cpu,
-    [`<div class="tile-line"><span>load ${now.load1.toFixed(2)}</span><span>last ${Math.round(liveHistory.length * LIVE_MS / 60000) || 1} min</span></div>`],
-    liveHistory.map(SERIES.cpu.of)));
-  for(const g of now.gpus || []){
-    const id = 'gpu' + g.index;
-    SERIES[id] = {of: s => ((s.gpus || [])[g.index] || {}).util || 0,
-                  say: s => { const x = (s.gpus || [])[g.index] || {};
-                              return `${Math.round(x.util || 0)}% busy · ${formatBytes(x.mem_used || 0)} VRAM`; }};
-    const vram = pct(g.mem_used, g.mem_total);
-    const detail = [g.temp != null ? `${Math.round(g.temp)}&deg;C` : '',
-                    g.power != null ? `${Math.round(g.power)} W${g.power_limit ? ' / ' + Math.round(g.power_limit) + ' W' : ''}` : '']
-                   .filter(Boolean).join(' &middot; ');
-    tiles.push(tile(id, `GPU ${g.index}`, detail, `${Math.round(g.util || 0)}%`, g.util || 0,
-      [`<div class="tile-line"><span>${escapeHtml(g.name.replace('NVIDIA GeForce ', ''))}</span><span>busy</span></div>`,
-       `<div class="tile-line"><span>VRAM ${(g.mem_used / 1024**3).toFixed(1)} / ${Math.round(g.mem_total / 1024**3)} GB</span><span>${Math.round(vram)}%</span></div>`,
-       meter(vram),
-       level(vram) ? `<div class="tile-line"><span></span><span class="hot-${level(vram)}">${level(vram) === 'crit' ? '&#9650;&#9650;' : '&#9650;'} VRAM ${LEVEL_WORDS[level(vram)]}</span></div>` : ''],
-      liveHistory.map(SERIES[id].of)));
+
+  tiles.push(`<div class="tile">
+    <div class="tile-head"><strong>CPU</strong><span>${[now.cpu_temp ? `${Math.round(now.cpu_temp)}&deg;C` : '', `${now.cpu_count} threads`].filter(Boolean).join(' &middot; ')}</span></div>
+    <div class="tile-value">${Math.round(now.cpu)}%${hot(now.cpu, '')}</div>
+    ${meter(now.cpu)}
+    <div class="tile-line"><span>load ${now.load1.toFixed(2)}</span><span>busy</span></div>
+    ${liveChart('cpu', [{of: s => s.cpu, color: 'var(--series)'}])}
+  </div>`);
+
+  if(gpus.length){
+    const used = gpus.reduce((a, g) => a + g.mem_used, 0), total = gpus.reduce((a, g) => a + g.mem_total, 0);
+    const busy = gpus.reduce((a, g) => a + (g.util || 0), 0) / gpus.length;
+    const names = [...new Set(gpus.map(g => g.name.replace('NVIDIA GeForce ', '')))];
+    const rows = gpus.map(g => {
+      const vram = pct(g.mem_used, g.mem_total);
+      return `<div class="gpu-row">
+        <div class="tile-line"><span><i class="swatch" style="background:${GPU_COLORS[g.index % GPU_COLORS.length]}"></i><strong>GPU ${g.index}</strong>
+          &nbsp;${Math.round(g.util || 0)}% busy</span>
+          <span>${[g.temp != null ? `${Math.round(g.temp)}&deg;C` : '', g.power != null ? `${Math.round(g.power)}${g.power_limit ? ' / ' + Math.round(g.power_limit) : ''} W` : ''].filter(Boolean).join(' &middot; ')}</span></div>
+        <div class="tile-line"><span>VRAM ${(g.mem_used / 1024**3).toFixed(1)} / ${Math.round(g.mem_total / 1024**3)} GB</span><span>${Math.round(vram)}%</span></div>
+        ${meter(vram)}
+        ${level(vram) ? `<div class="tile-line"><span></span>${hot(vram, 'VRAM ')}</div>` : ''}
+      </div>`;
+    }).join('');
+    tiles.push(`<div class="tile wide">
+      <div class="tile-head"><strong>GPUs</strong><span>${gpus.length} &times; ${escapeHtml(names.join(', '))} &middot; ${Math.round(total / 1024**3)} GB VRAM</span></div>
+      <div class="gpu-top">
+        <div>
+          <div class="tile-value">${Math.round(busy)}%<small class="muted">busy on average</small></div>
+          <div class="tile-line"><span>VRAM ${(used / 1024**3).toFixed(1)} of ${Math.round(total / 1024**3)} GB in use</span></div>
+        </div>
+        <div class="legend">${gpus.map(g => `<span><i style="background:${GPU_COLORS[g.index % GPU_COLORS.length]}"></i>GPU ${g.index}</span>`).join('')}</div>
+      </div>
+      ${liveChart('gpus', gpus.map(g => ({of: s => ((s.gpus || [])[g.index] || {}).util, color: GPU_COLORS[g.index % GPU_COLORS.length]})))}
+      <div class="gpu-rows">${rows}</div>
+    </div>`);
   }
+
   const ram = pct(now.ram_used, now.ram_total);
-  tiles.push(tile('ram', 'RAM', now.swap_used > 256 * 1024**2 ? `swap ${formatBytes(now.swap_used)}` : '',
-    `${Math.round(ram)}%`, ram,
-    [`<div class="tile-line"><span>${formatBytes(now.ram_used)} of ${formatBytes(now.ram_total)}</span><span>in use</span></div>`],
-    liveHistory.map(SERIES.ram.of)));
+  tiles.push(`<div class="tile">
+    <div class="tile-head"><strong>RAM</strong><span>${formatBytes(now.ram_total)}</span></div>
+    <div class="ring-box">${ring(ram)}</div>
+    <div class="tile-line" style="justify-content:center">${hot(ram, 'RAM ')}</div>
+    <div class="tile-line"><span>in use</span><span>${formatBytes(now.ram_used)}</span></div>
+    <div class="tile-line"><span>free</span><span>${formatBytes(Math.max(0, now.ram_total - now.ram_used))}</span></div>
+    ${now.swap_used > 256 * 1024**2 ? `<div class="tile-line"><span>swap</span><span>${formatBytes(now.swap_used)}</span></div>` : ''}
+  </div>`);
   document.getElementById('live').innerHTML = tiles.join('');
 }
 
@@ -573,7 +632,8 @@ async function pollLive(first){
     const answer = await api('/admin/metrics' + (first ? '?history=1' : ''));
     if(answer.history) liveHistory = answer.history;
     else if(!liveHistory.length || answer.now.at !== liveHistory[liveHistory.length - 1].at) liveHistory.push(answer.now);
-    liveHistory = liveHistory.slice(-LIVE_KEEP);
+    const end = liveHistory.length ? liveHistory[liveHistory.length - 1].at : 0;
+    liveHistory = liveHistory.filter(s => end - s.at <= LIVE_WINDOW + 30);
     renderLive();
   }catch(e){ /* the next poll tries again; the 15 s refresh reports a gateway that is down */ }
 }
@@ -593,26 +653,24 @@ document.addEventListener('visibilitychange', () => {
   else{ liveHistory = []; startLive(); }     // the gap is the server's to fill, from its own history
 });
 
-// Hover on a sparkline: a crosshair at the nearest sample and a tooltip with its value and age
+// Hover on a chart: a crosshair at the nearest sample and a tooltip with its readings and age
 function liveHover(e){
-  const svg = e.target.closest && e.target.closest('svg[data-spark]');
+  const svg = e.target.closest && e.target.closest('svg[data-chart]');
   const box = document.getElementById('live');
   box.querySelectorAll('.viz-tip').forEach(t => t.remove());
   box.querySelectorAll('.cross').forEach(c => c.setAttribute('visibility', 'hidden'));
   if(!svg || liveHistory.length < 2) return;
-  const series = SERIES[svg.dataset.spark];
-  const rect = svg.getBoundingClientRect();
-  const i = Math.round(Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width)) * (liveHistory.length - 1));
-  const sample = liveHistory[i];
-  const cross = svg.querySelector('.cross');
-  const xv = i / (liveHistory.length - 1) * 300;
+  const rect = svg.getBoundingClientRect(), end = Date.now() / 1000;
+  const at = end - (1 - Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width))) * LIVE_WINDOW;
+  const sample = liveHistory.reduce((best, s) => Math.abs(s.at - at) < Math.abs(best.at - at) ? s : best);
+  const cross = svg.querySelector('.cross'), xv = timeX(sample.at, end);
   cross.setAttribute('x1', xv); cross.setAttribute('x2', xv); cross.setAttribute('visibility', 'visible');
-  const ago = Math.round(Date.now() / 1000 - sample.at);
+  const ago = Math.round(end - sample.at);
   const tip = document.createElement('div');
   tip.className = 'viz-tip';
-  tip.innerHTML = `${escapeHtml(series.say(sample))}<div class="muted">${ago < 5 ? 'now' : ago < 120 ? ago + ' s ago' : Math.round(ago / 60) + ' min ago'}</div>`;
+  tip.innerHTML = `${SAYS[svg.dataset.chart](sample)}<div class="muted">${ago < 5 ? 'now' : ago < 120 ? ago + ' s ago' : Math.round(ago / 60) + ' min ago'}</div>`;
   const outer = box.getBoundingClientRect();
-  tip.style.left = (e.clientX - outer.left) + 'px';
+  tip.style.left = (rect.left + xv / CHART_W * rect.width - outer.left) + 'px';
   tip.style.top = (rect.top - outer.top - 4) + 'px';
   box.appendChild(tip);
 }
