@@ -191,17 +191,36 @@ def pick(models, category, needs_vision=False, prefer=None):
     keeps the job, because changing model mid-conversation costs a reload of its weights and throws
     away the warm cache, and is not worth it for a tie.
     """
-    scored = []
-    for model in models:
-        points = score(model, category, needs_vision)
-        if points is not None:
-            scored.append((points, model))
-    if not scored:
+    chosen, considered = _select(models, category, needs_vision, prefer)
+    if chosen is None:
         return None
+    log.debug("category %s -> %s from %d candidates", category, chosen.get("name"), considered)
+    return {"model": chosen["name"], "why": why(chosen, category),
+            "considered": considered, "category": category,
+            "passed_over": _passed_over(models, category, needs_vision, prefer, chosen)}
+
+
+def _select(models, category, needs_vision, prefer):
+    """(the winner, how many could do the work): best score, a near-tie to the smaller model or to
+    the one the conversation is already using."""
+    scored = [(points, model) for model in models
+              for points in [score(model, category, needs_vision)] if points is not None]
+    if not scored:
+        return None, 0
     best_points = max(points for points, _ in scored)
     shortlist = [model for points, model in scored if points >= best_points - 0.25]
     shortlist.sort(key=_parameters)        # a near-tie goes to the smaller model, which is quicker
-    chosen = next((m for m in shortlist if m.get("name") == prefer), shortlist[0])
-    log.debug("category %s -> %s from %d candidates", category, chosen.get("name"), len(scored))
-    return {"model": chosen["name"], "why": why(chosen, category),
-            "considered": len(scored), "category": category}
+    return next((m for m in shortlist if m.get("name") == prefer), shortlist[0]), len(scored)
+
+
+def _passed_over(models, category, needs_vision, prefer, chosen):
+    """The model that would have won but for its own recent failures, when it is not the one chosen -
+    so a reply can say "gemma failed; answered by nemotron" instead of looking mislabelled. Chosen the
+    same way with every model's record wiped; None when the winner won on merit."""
+    best, _ = _select([{**m, "health": {}} for m in models], category, needs_vision, prefer)
+    if best is None or best.get("name") == chosen.get("name"):
+        return None
+    health = next((m.get("health") or {} for m in models if m.get("name") == best.get("name")), {})
+    if not health.get("failures"):
+        return None
+    return {"model": best["name"], "failures": health["failures"], "requests": health.get("requests") or 0}

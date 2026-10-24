@@ -1960,7 +1960,7 @@ async def _with_model(principal, session, decision, category, category_by, paylo
                                      prefer=payload.current_model or None)
         if picked:
             decision.update(model=picked["model"], model_why=picked["why"],
-                            considered=picked["considered"])
+                            considered=picked["considered"], passed_over=picked.get("passed_over"))
     return decision
 
 
