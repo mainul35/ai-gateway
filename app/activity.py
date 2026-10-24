@@ -24,7 +24,9 @@ from app.coding import runner as coding_runner
 from app.engine.supervisor import supervisor
 from app.tools import jobs
 
-_IGNORED = re.compile(r"^/(health|internal/activity|coding/remote/\d+/next)$")
+# A page following a download holds its progress stream open for hours: the download is a job, and
+# counts as one; the stream watching it is nobody working, and must not look like a request in flight
+_IGNORED = re.compile(r"^/(health|internal/activity|coding/remote/\d+/next|admin/models/install/\d+/watch)$")
 # GETs the web pages repeat on a timer (wake/wake_front.py has the same list). From a browser they
 # are a tab refreshing itself, not someone working, so an open dashboard does not keep the machine up.
 POLLED = re.compile(r"^/(admin/system|admin/usage|admin/usage/hourly|admin/metrics|v1/models|coding/projects|coding/tasks/\d+/events)$")
