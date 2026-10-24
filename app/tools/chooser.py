@@ -20,7 +20,10 @@ log = logging.getLogger("tools.chooser")
 # What a message is asking for. The router names one of these; the scoring below turns it into a model.
 # "light" is small talk - thanks, a joke, a quick rewrite - and is the one kind given to the smallest
 # model; "general" is a real question that needs knowledge, which a 1.7B answers badly.
-CATEGORIES = ("code", "vision", "reasoning", "long", "general", "light")
+CATEGORIES = ("code", "vision", "reasoning", "long", "translation", "general", "light")
+# What a "No" can be counted against: the kinds above, and "image" - a picture drawn, which is the image
+# model's work. Feedback is kept per task so a model judged bad at translating is not judged bad at all.
+FEEDBACK_TASKS = CATEGORIES + ("image",)
 
 CODE_NAME = re.compile(r"coder|code|starcoder|deepseek-?c", re.I)
 # A model whose name says it is for one narrow thing is a poor default for everything else
@@ -85,24 +88,29 @@ def helper_names():
     return sorted(n for n in (settings.router_model(), settings.get("knowledge.embedding.model")) if n)
 
 
-ENOUGH_VOTES = 3       # verdicts before they count; fewer is one person's bad day
+PRIOR_VOTES = 2        # every model starts as if marked 70% good this many times
+ELSEWHERE = 0.5        # verdicts on other kinds of work count for half
 
 
 def judged(feedback, category):
     """What this person said about the model's answers, as points: from -1.4 to +0.6.
 
-    The playground asks "Helpful?"; the "Accurate?" question it asked before 2026-10-19 is gone, but
-    the verdicts given to it still count, as the same kind of vote. For this kind of question when
-    there are enough verdicts on it, otherwise over all questions. Centred on 70% good, so a model
-    has to be marked good most of the time to gain, and one marked bad half the time loses more than
-    any small-model bonus is worth.
+    The playground asks "Helpful?", and a "No" says what went wrong - which is the task the vote
+    counts against (the "Accurate?" question asked before 2026-10-19 still counts as the same kind
+    of vote). Centred on 70% good, so a model has to be marked good most of the time to gain.
+
+    Every vote moves it, from the first: each model starts at PRIOR_VOTES of 70% good, so one "No"
+    lowers it a little (-0.47), three in a row clearly (-0.84), and a "Yes" lifts it back. Verdicts on
+    this kind of work decide it; with none, the model's verdicts on everything else count for half -
+    a model judged bad at translating is not therefore bad at code.
     """
-    for counts in ((feedback or {}).get(category), (feedback or {}).get("all")):
+    for counts, weight in (((feedback or {}).get(category), 1.0), ((feedback or {}).get("all"), ELSEWHERE)):
         counts = counts or {}
         good = counts.get("helpful", 0) + counts.get("accurate", 0)
         votes = good + counts.get("unhelpful", 0) + counts.get("inaccurate", 0)
-        if votes >= ENOUGH_VOTES:
-            return (good / votes - 0.7) * 2
+        if votes:
+            share = (good + 0.7 * PRIOR_VOTES) / (votes + PRIOR_VOTES)
+            return (share - 0.7) * 2 * weight
     return 0.0
 
 

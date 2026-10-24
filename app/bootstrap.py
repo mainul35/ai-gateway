@@ -15,6 +15,7 @@ log = logging.getLogger("gateway")
 # Columns added after the first release, as (table, column, type); create_all does not alter
 # existing tables
 _ADDED_COLUMNS = (
+    ("answer_feedback", "reason", "TEXT"),
     ("conversations", "uid", "VARCHAR(36)"),
     ("users", "password_hash", "VARCHAR(256)"),
     # Existing accounts keep the access they effectively had before access control existed

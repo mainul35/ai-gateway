@@ -144,7 +144,7 @@ async def get_conversation(conversation_id: str, principal: Principal = Depends(
     user = _require_user(principal)
     conversation = await _owned(session, conversation_id, user, with_messages=True)
     ids = [m.id for m in conversation.messages if m.role == "assistant"]
-    judged = {f.message_id: {"helpful": f.helpful} for f in (await session.execute(
+    judged = {f.message_id: {"helpful": f.helpful, "category": f.category, "reason": f.reason} for f in (await session.execute(
         select(AnswerFeedback).where(AnswerFeedback.user_id == user.id,
                                      AnswerFeedback.message_id.in_(ids)))).scalars()} if ids else {}
     return {**_conversation_json(conversation, len(conversation.messages)),
@@ -156,18 +156,36 @@ class FeedbackIn(BaseModel):
     conversation_id: int | None = None
     starts_with: str = Field(default="", max_length=400)
     helpful: bool | None = None
+    # The task the verdict counts against (chooser.FEEDBACK_TASKS): the kind of question the router
+    # read, or what the person said went wrong - "the translation was wrong" counts against translating
     category: str | None = Field(default=None, max_length=32)
+    reason: str | None = Field(default=None, max_length=500)
+    file_id: int | None = None      # a picture drawn, found by its file: its text is only its prompt
 
 
 @router.post("/feedback")
 async def give_feedback(payload: FeedbackIn, principal: Principal = Depends(authenticate),
                         session: AsyncSession = Depends(get_session)):
-    """Helpful? for one answer, from the person who asked. Asking again replaces the verdict."""
+    """Helpful? for one answer, from the person who asked. Asking again replaces the verdict.
+
+    A "No" can say what went wrong, which is what Auto learns from: the model is ranked lower for that
+    task - drawing, reading a picture, translating, code - and only a little for anything else."""
     user = _require_user(principal)
+    if payload.category and payload.category not in chooser.FEEDBACK_TASKS:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, f"Unknown kind of work: {payload.category}")
     if payload.message_id is not None:
         message = await session.get(ConversationMessage, payload.message_id)
         if message is not None:
             await _owned(session, message.conversation_id, user)
+    elif payload.conversation_id is not None and payload.file_id is not None:
+        await _owned(session, payload.conversation_id, user)
+        message = (await session.execute(
+            select(ConversationMessage).where(ConversationMessage.conversation_id == payload.conversation_id,
+                                              ConversationMessage.role == "assistant",
+                                              # its own picture, not one edited from it (source_file_id)
+                                              ConversationMessage.attachments.startswith(
+                                                  f'{{"generated": {{"file_id": {payload.file_id},', autoescape=True))
+            .order_by(ConversationMessage.id.desc()).limit(1))).scalar_one_or_none()
     elif payload.conversation_id is not None and payload.starts_with:
         await _owned(session, payload.conversation_id, user)
         message = (await session.execute(
@@ -187,8 +205,10 @@ async def give_feedback(payload: FeedbackIn, principal: Principal = Depends(auth
     entry.helpful, entry.updated_at = payload.helpful, utcnow()
     if payload.category:
         entry.category = payload.category
+    # What went wrong belongs to a "No"; a "Yes", or taking the verdict back, clears it
+    entry.reason = (payload.reason or "").strip() or None if payload.helpful is False else None
     await session.commit()
-    return {"message_id": message.id, "helpful": entry.helpful}
+    return {"message_id": message.id, "helpful": entry.helpful, "category": entry.category, "model": entry.model}
 
 
 @router.patch("/conversations/{conversation_id}")
@@ -1094,11 +1114,12 @@ WANTS_DENOISE = re.compile(r"\b(noise|noisy|grain|grainy|denoise|speckl\w*|iso|c
 
 
 async def _save_result(db, user_id, conversation_id, png, name, prompt, extra=None, stats=None,
-                       answers_to=None):
+                       answers_to=None, model=None):
     """Stores the picture and, when it belongs to a conversation, the message that shows it.
 
     Written by the server rather than the browser so that a dropped connection cannot lose it: the
-    work is done and paid for, and reopening the conversation has to show it.
+    work is done and paid for, and reopening the conversation has to show it. `model` is the image
+    model that drew it, so a "No" under the picture counts against that model's drawing.
     """
     stored = ChatFile(user_id=user_id, kind="generated", mime_type="image/png",
                       name=name, prompt=prompt, data=png)
@@ -1113,7 +1134,7 @@ async def _save_result(db, user_id, conversation_id, png, name, prompt, extra=No
         conversation = await db.get(Conversation, conversation_id)
         if conversation is not None and conversation.user_id == user_id:
             db.add(ConversationMessage(conversation_id=conversation_id, role="assistant",
-                                       content=f"({prompt.lower()})",
+                                       content=f"({prompt.lower()})", model=model,
                                        stats=json.dumps(stats) if stats else None,
                                        attachments=json.dumps(filed)))
             conversation.updated_at = utcnow()
@@ -2084,7 +2105,8 @@ async def generate_image(payload: ImageIn, principal: Principal = Depends(authen
                                          "asked": payload.prompt,
                                          "source_file_id": payload.source_file_id,
                                          "made_by": made_by},
-                                        {"total": seconds}, answers_to=payload.answers_to)
+                                        {"total": seconds}, answers_to=payload.answers_to,
+                                        model=settings.image_model_name())
             yield _event("image", file=_file_json(stored), seed=seed, saved=True, seconds=seconds)
 
     # One picture or transcription at a time per person (app/limits.py); the slot is given back

@@ -278,6 +278,8 @@ class AnswerFeedback(Base):
     category: Mapped[str | None] = mapped_column(String(32), nullable=True)
     helpful: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     accurate: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    # A "No" says what went wrong in the person's own words, beside the task it is counted against
+    reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 

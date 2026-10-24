@@ -138,6 +138,13 @@ a.cite{font-size:.75em;vertical-align:super;text-decoration:none;padding:0 .1rem
 .verdict button:hover{color:var(--text)}
 .verdict button[aria-pressed="true"]{color:#fff;background:var(--primary);border-color:var(--primary)}
 .verdict button[aria-pressed="true"][data-value="false"]{background:var(--danger);border-color:var(--danger)}
+.verdict-why{margin-top:.4rem;padding:.5rem .6rem;border:1px solid var(--border);border-radius:10px;font-size:.85rem}
+.verdict-why .why-choices{display:flex;flex-wrap:wrap;gap:.3rem;margin:.35rem 0}
+.verdict-why .why-choices button{background:none;border:1px solid var(--border);border-radius:999px;color:var(--muted);
+  padding:.15rem .6rem;font-size:.8rem;cursor:pointer}
+.verdict-why .why-choices button[aria-pressed="true"]{color:#fff;background:var(--danger);border-color:var(--danger)}
+.verdict-why .why-note{display:flex;gap:.4rem;align-items:center}
+.verdict-why .why-note input{flex:1;min-width:0}
 .verdict .thanks{font-style:italic}
 .status{font-size:.85rem;color:var(--muted);display:flex;align-items:center;gap:.5rem}
 .spinner{width:.8rem;height:.8rem;border:2px solid var(--border);border-top-color:var(--primary);border-radius:50%;
@@ -1266,6 +1273,7 @@ function fillTranscript(messages){
   // shown, and the arrows on it reach the ones before. Anything written before answers knew
   // which question they belonged to has no filing, so it stands on its own exactly as it did.
   const answered = [];
+  let lastHadPicture = false;
   for(const m of messages){
     const extra = m.attachments || {};
     const attached = (extra.images || []).map(i => ({id: i.file_id, document: !!i.document, name: i.name || ''}));
@@ -1276,6 +1284,7 @@ function fillTranscript(messages){
       // was sent in the first place
       const forTools = extra.mode === 'image' || extra.mode === 'photo';
       const box = addUserMessage(m.content, imageIds.map(fileUrl), attached, !forTools);
+      lastHadPicture = attached.some(f => !f.document);
       box._messageId = m.id;
       box.dataset.message = m.id;
       history.push({role: 'user', content: m.content, images: box._images});
@@ -1290,6 +1299,13 @@ function fillTranscript(messages){
       else if(extra.generated) renderGenerated(box, extra.generated, m.stats);
       else if(extra.subtitles) renderSubtitles(box, extra.subtitles, m.content, m.stats);
       else renderAssistant(box, m.content, m.reasoning, withModel, extra.sources, m.html);
+      // The same question under every answer a model wrote, with the verdict already given: maps,
+      // picture search, subtitles and photo work are the tools' answers, not a model's to be ranked on
+      if(m.id && m.model && !extra.map && !extra.media && !extra.subtitles){
+        addVerdict(box, {messageId: m.id, kind: extra.generated ? 'image' : extra.agent ? 'agent' : 'chat',
+                         category: m.feedback?.category || null, hadPicture: lastHadPicture,
+                         searched: !!(extra.sources && extra.sources.length)}, m.feedback);
+      }
       box._text = m.content;
       const earlier = turn ? answered.find(a => a.turn === turn) : null;
       if(earlier){
@@ -1848,6 +1864,7 @@ const ACTION_LABELS = {chat: 'answered directly', search: 'searched the web',
 
 const CATEGORY_LABELS = {code: 'a coding question', vision: 'a question about the picture',
                          reasoning: 'something to work out', long: 'a long read',
+                         translation: 'a translation',
                          general: 'a question that needs knowledge', light: 'small talk'};
 
 function noteDecision(box, decision){
@@ -2528,7 +2545,8 @@ async function sendAgent(text, again){
   }
   renderAssistant(box, answer.text, null, {model, total: answer.seconds}, null, answer.html);
   box.insertBefore(trace, box.querySelector('.body'));   // the trace stays above the answer
-  if(currentId) addVerdict(box, {conversationId: currentId, startsWith: (answer.text || '').trim().slice(0, 200)});
+  if(currentId) addVerdict(box, {conversationId: currentId, startsWith: (answer.text || '').trim().slice(0, 200),
+                                 kind: 'agent'});
   recordAnswer(box, answer.text, again ? again.replaceAt : null);
   // The server writes the turn down itself, the way the other long jobs do
   revealFrom(box);
@@ -2766,48 +2784,120 @@ function wantsAFile(question){
   return WANTS_A_FILE.test(question || '');
 }
 
-/* Helpful? under an answer. The verdict is saved against the answer (by id, or - for one
-   that has only just streamed, which the server saved without telling the page its id - by where it
-   is and how it begins). Pressing a chosen answer again takes it back. */
+/* The question under an answer, asked about the work it did: "Did the code work?" under code,
+   "Was the translation accurate?" under a translation. The verdict is saved against the answer (by
+   id; for one that has only just streamed, which the server saved without telling the page its id,
+   by how it begins; for a picture drawn, by its file). Pressing a chosen answer again takes it back.
+
+   A "No" asks what went wrong, and that is what Auto learns: the model is ranked lower for that
+   task - drawing, reading pictures, translating, code - and only a little for anything else
+   (chooser.judged). where = {kind: chat|agent|image, category, hadPicture, searched, + the locator}. */
+const VERDICT_QUESTIONS = {
+  image: 'Does the picture match what you asked for?', vision: 'Did it read the picture correctly?',
+  translation: 'Was the translation accurate?', long: 'Did it summarise or organise this well?',
+  code: 'Did the code work?', reasoning: 'Was the reasoning right?',
+  search: 'Did it find what you were looking for?', agent: 'Did it get the task done?',
+  light: 'Was this what you wanted?', general: 'Did this answer your question?'};
+// What went wrong, as the task it counts against; `when` says which answers it can be about
+const VERDICT_PROBLEMS = [
+  {task: 'image', label: "The picture didn't match the request", when: w => w.kind === 'image'},
+  {task: 'vision', label: 'It misread the picture', when: w => w.kind !== 'image' && w.hadPicture},
+  {task: 'translation', label: 'The translation was wrong', when: w => w.kind !== 'image'},
+  {task: 'code', label: "The code was wrong or didn't run", when: w => w.kind !== 'image'},
+  {task: 'reasoning', label: 'Wrong facts or reasoning', when: w => w.kind !== 'image'},
+  {task: 'long', label: 'It missed or mangled important parts', when: w => w.kind !== 'image'},
+  {task: 'general', label: "It didn't answer the question", when: w => w.kind !== 'image'},
+  {task: 'other', label: 'Something else', when: () => true}];
+const TASK_WORDS = {image: 'drawing pictures', vision: 'reading pictures', translation: 'translation',
+                    long: 'summarising and long reads', code: 'code', reasoning: 'reasoning',
+                    general: 'general questions', light: 'small talk'};
+
+function verdictTask(where){
+  if(where.kind === 'image') return 'image';
+  if(where.kind === 'agent') return 'agent';
+  if(where.searched && (!where.category || where.category === 'general')) return 'search';
+  return where.category || 'general';
+}
+
 function addVerdict(box, where, saved){
   const row = document.createElement('div');
   row.className = 'verdict';
-  row.title = "Your answers teach your own Auto which model to pick for questions like this - nobody else's";
-  const state = {helpful: saved?.helpful ?? null};
-  const ask = (field, label) => `<span class="ask">${label}
-      <button type="button" data-field="${field}" data-value="true">Yes</button>
-      <button type="button" data-field="${field}" data-value="false">No</button></span>`;
-  row.innerHTML = ask('helpful', 'Helpful?') + '<span class="thanks"></span>';
-  const show = () => row.querySelectorAll('button').forEach(b =>
-    b.setAttribute('aria-pressed', String(state[b.dataset.field] === (b.dataset.value === 'true'))));
+  row.title = "Your answers teach your own Auto which model to pick for work like this - nobody else's";
+  const task = verdictTask(where);
+  // What a plain Yes or No counts against: the router's reading, or the picture for one drawn
+  const base = where.kind === 'image' ? 'image' : (where.category || null);
+  const state = {helpful: saved?.helpful ?? null, problem: saved?.category || null, reason: saved?.reason || ''};
+  row.innerHTML = `<span class="ask">${escapeHtml(VERDICT_QUESTIONS[task] || VERDICT_QUESTIONS.general)}
+      <button type="button" data-value="true">Yes</button>
+      <button type="button" data-value="false">No</button></span><span class="thanks"></span>`;
+  const problems = VERDICT_PROBLEMS.filter(p => p.when(where));
+  const panel = document.createElement('div');
+  panel.className = 'verdict-why';
+  panel.hidden = true;
+  panel.innerHTML = `<div class="muted">What went wrong?</div>
+    <div class="why-choices">${problems.map(p =>
+      `<button type="button" data-problem="${p.task}">${escapeHtml(p.label)}</button>`).join('')}</div>
+    <div class="why-note"><input type="text" maxlength="500" placeholder="Anything to add? (optional)">
+      <button type="button" class="btn btn-sm" data-save>Save</button></div>`;
+  const note = panel.querySelector('input');
+  note.value = state.reason;
+  // The answer's own task, when it is one of the choices, is the likeliest thing that went wrong
+  if(!state.problem || !problems.some(p => p.task === state.problem)){
+    state.problem = problems.some(p => p.task === task) ? task : null;
+  }
+  const show = () => {
+    row.querySelectorAll('.ask button').forEach(b =>
+      b.setAttribute('aria-pressed', String(state.helpful === (b.dataset.value === 'true'))));
+    panel.querySelectorAll('[data-problem]').forEach(b =>
+      b.setAttribute('aria-pressed', String(b.dataset.problem === state.problem)));
+    panel.hidden = state.helpful !== false;
+  };
   show();
-  row.addEventListener('click', async e => {
-    const button = e.target.closest('button');
-    if(!button) return;
-    const value = button.dataset.value === 'true';
-    const before = {...state};
-    state[button.dataset.field] = state[button.dataset.field] === value ? null : value;
-    show();
-    const body = {helpful: state.helpful, category: where.category || null,
+
+  const save = async withProblem => {
+    const category = state.helpful === false && withProblem && state.problem && state.problem !== 'other'
+      ? state.problem : base;
+    const body = {helpful: state.helpful, category,
+                  reason: state.helpful === false ? note.value.trim() || null : null,
                   ...(where.messageId ? {message_id: where.messageId}
-                                      : {conversation_id: where.conversationId, starts_with: where.startsWith})};
+                     : where.fileId ? {conversation_id: where.conversationId, file_id: where.fileId}
+                     : {conversation_id: where.conversationId, starts_with: where.startsWith})};
     // A just-finished answer is written down by the server a moment after the last word arrives
     for(let attempt = 0; ; attempt++){
       try{
         const result = await api('/chat/feedback', {method: 'POST', headers: JSON_HEADERS, body: JSON.stringify(body)});
         where.messageId = result.message_id;
-        row.querySelector('.thanks').textContent = state.helpful !== null ? 'Thanks' : '';
-        return;
+        const words = TASK_WORDS[result.category];
+        row.querySelector('.thanks').textContent = state.helpful === null ? ''
+          : state.helpful === false && withProblem && result.model && words
+            ? `Noted: ${result.model} will rank lower for ${words}.` : 'Thanks';
+        return true;
       }catch(err){
         if(attempt < 3 && /not saved/i.test(errorText(err))){ await new Promise(r => setTimeout(r, 1500)); continue; }
-        Object.assign(state, before);
-        show();
         showError('Could not save that: ' + errorText(err));
-        return;
+        return false;
       }
     }
+  };
+
+  row.addEventListener('click', async e => {
+    const button = e.target.closest('.ask button');
+    if(!button) return;
+    const value = button.dataset.value === 'true';
+    const before = {...state};
+    state.helpful = state.helpful === value ? null : value;
+    show();
+    if(!await save(false)){ Object.assign(state, before); show(); }
+    if(state.helpful === false) panel.querySelector('[aria-pressed="true"]')?.focus();
   });
+  panel.addEventListener('click', async e => {
+    const choice = e.target.closest('[data-problem]');
+    if(choice){ state.problem = choice.dataset.problem; show(); return; }
+    if(e.target.closest('[data-save]')) await save(true);
+  });
+  note.addEventListener('keydown', e => { if(e.key === 'Enter'){ e.preventDefault(); save(true); } });
   box.appendChild(row);
+  box.appendChild(panel);
 }
 
 function appendStats(box, stats){
@@ -3219,6 +3309,7 @@ async function routeTurn(text, asking){
 }
 
 async function sendChat(text, decision, again){
+  const hadPicture = turnPictures().length > 0;    // what the answer's question asks about
   const model = decision.model || currentModel(turnPictures().length > 0);
   if(turnPictures().length && !canSee(model)){
     showError(choosing()
@@ -3334,7 +3425,8 @@ async function sendChat(text, decision, again){
     return;
   }
   renderAssistant(box, answer, thinking, stats, sources, await renderedHtml(answer));
-  if(currentId) addVerdict(box, {conversationId: currentId, startsWith: answer.slice(0, 200), category: decision.category});
+  if(currentId) addVerdict(box, {conversationId: currentId, startsWith: answer.slice(0, 200), kind: 'chat',
+                                 category: decision.category, hadPicture, searched: decision.action === 'search'});
 
   recordAnswer(box, answer, again ? again.replaceAt : null);
   // The server writes the answer down itself as the job finishes, so that walking away mid-answer
@@ -3646,6 +3738,7 @@ async function sendImage(text, decision, again){
                      strength: source && !qwenEdits() ? strength : null};
   const stats = {total: +((performance.now() - started) / 1000).toFixed(1)};
   renderGenerated(box, generated, stats);
+  if(currentId) addVerdict(box, {conversationId: currentId, fileId: generated.file_id, kind: 'image'});
   box.querySelector('.generated img')?.addEventListener('load', () => revealFrom(box), {once: true});
   revealFrom(box);
   recordAnswer(box, `(${source ? 'edited the image' : 'generated an image'}: ${drawn || text})`,
