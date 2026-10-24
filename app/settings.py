@@ -76,6 +76,10 @@ DEFAULTS = {
     "video.tts.python": "~/tts-venv/bin/python",
     "video.fonts.dir": "~/fonts",
     "video.check.attempts": "3",
+    # A verse quoted in a story is recited by a qari, never by the narration voice: the Tanzil text
+    # to find its sura and ayah, and everyayah.com's recordings, both kept here once fetched
+    "video.quran.dir": "~/quran",
+    "video.quran.reciter": "Alafasy_128kbps",
     # Photographs: noise removed without inventing detail, and blur added by distance
     "photo.denoise.model": "scunet_color_real_psnr.pth",
     "photo.upscale.model": "RealESRGAN_x2plus.pth",
