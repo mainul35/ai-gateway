@@ -80,13 +80,16 @@ models:
   #                741k tokens  579 t/s prompt (21 min), 15.5 t/s           23.1 GB VRAM, 23+ GB RAM free
   # The 1M profile is slower at every length (its bigger cache leaves less of the model on the GPU)
   # and YaRN stretching costs a little quality on short work: use it only for what needs > 256k.
+  # On llama-b11836 with MTP since 2026-10-24 (two 3090s): the file carries the MTP layer, so the engine
+  # drafts two tokens ahead (mtp: auto) - 88-92 % of the drafts kept, the same output, writing 1.7-1.9x
+  # faster than Ollama's build without it (600 tokens of code back, writing / reading, 31 GB):
+  #     1.6k tokens  207 t/s (was 124)      51k tokens  163 t/s (was 90)      102k tokens  136 t/s (was 70)
+  #   reading 2.7-3.3k t/s either way. b11836 reads qwen35moe, which b11025 did not.
   - name: qwen3.6-256k
     parameter_size: 36B
     model_path: /home/mainul35/models/Qwen3.6-35B-A3B-MTP-UD-Q4_K_XL.gguf
     mmproj: /home/mainul35/models/Qwen3.6-35B-A3B-mmproj-F16.gguf
-    binary: /usr/local/lib/ollama/llama-server
-    env: {LD_LIBRARY_PATH: "/usr/local/lib/ollama:/usr/local/lib/ollama/cuda_v13",
-          GGML_BACKEND_PATH: /usr/local/lib/ollama/cuda_v13/libggml-cuda.so}
+    binary: /home/mainul35/llama.cpp/llama-b11836/llama-server
     ctx_size: 262144
     cache_reuse: 256
     # One request at a time, each with the whole window. With several slots llama-server shares ONE
@@ -111,6 +114,9 @@ models:
     binary: /usr/local/lib/ollama/llama-server
     env: {LD_LIBRARY_PATH: "/usr/local/lib/ollama:/usr/local/lib/ollama/cuda_v13",
           GGML_BACKEND_PATH: /usr/local/lib/ollama/cuda_v13/libggml-cuda.so}
+    # Not measured with MTP at a million: its draft cache beside this window is untested, and a window
+    # that does not fit fails mid-answer rather than at start, where the fallback could catch it
+    mtp: "off"
     ctx_size: 1048576
     cache_reuse: 256
     # One request at a time, each with the whole window (see qwen3.6-256k). With several slots llama-server shares ONE

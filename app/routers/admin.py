@@ -16,12 +16,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app import access, activity, backends, catalogue, fitting, knowledge, power, settings, usage as usage_log
-from app import live_metrics as live
+from app import live_metrics as live, proven
 from app.tools import jobs, mcp_client, mcp_config
 from app.auth import Principal, generate_key, hash_key, require_admin, require_manager
 from app import config_writer
 from app.engine.supervisor import supervisor
-from app.engine import builds as engine_builds, profiles as engine_profiles
+from app.engine import builds as engine_builds, gguf_meta, profiles as engine_profiles
 from utils import hf_client, hf_download
 from utils.ollama_client import (StreamCancellation, check_ollama_status, ollama_host,
                                  stream_create_model, stream_pull_model)
@@ -513,6 +513,7 @@ async def list_models_for_admin(_: Principal = Depends(require_admin),
     # A llama.cpp profile that is not started is still usable: it is started on the first request.
     # Only a missing binary means nothing in that group can run at all.
     loaded = {model["name"] for model in engines.get("running") or [] if model.get("running")}
+    running = {model["name"]: model for model in engines.get("running") or [] if model.get("running")}
     engines_available = engines.get("available", False)
     ollama_up = check_ollama_status().get("status") == "running"
 
@@ -554,8 +555,32 @@ async def list_models_for_admin(_: Principal = Depends(require_admin),
             "can_delete": can_delete,
             "delete_note": why_not,
             "notes": _notes(name, backend, stats, used_for, granted.get(name, []), reachable),
+            "mtp": _mtp_state(name, backend, running.get(name)),
         })
-    return {"window_days": HEALTH_DAYS, "models": listed}
+    evidence = await asyncio.to_thread(proven.summary, set(models), await proven.feedback_by_task(session))
+    return {"window_days": HEALTH_DAYS, "models": listed, **evidence}
+
+
+def _mtp_state(name, backend, running):
+    """Multi-token prediction for one model: {"state": on|off|unable|n/a, "why"} - from the engine when
+    it is running, otherwise what the next start will do (supervisor.mtp_for)."""
+    if backend.kind != "llamacpp":
+        return {"state": "n/a", "why": "Ollama does not draft ahead"}
+    profile = engine_profiles.load_profiles().get(backend.upstream_model)
+    if profile is None:
+        return {"state": "n/a", "why": ""}
+    layers = gguf_meta.mtp_layers(profile.model_path)
+    if running is not None:
+        on = bool(running.get("mtp")) or profile.has_mtp_flags()
+    else:
+        on = profile.has_mtp_flags() or supervisor.mtp_for(profile, profile.binary or supervisor.binary())
+    if on:
+        return {"state": "on", "why": "drafts two tokens ahead with the model's own MTP layer, then checks them"}
+    if profile.mtp == "off":
+        return {"state": "off", "why": "switched off in its profile (mtp: off)"}
+    if not layers:
+        return {"state": "unable", "why": "this model file has no MTP layers"}
+    return {"state": "off", "why": "the engine would not start with it, so it runs without"}
 
 
 class ModelDelete(BaseModel):
