@@ -47,8 +47,9 @@ SIZE = "wide"                          # images.SIZES: 1344 x 768
 SCENE_RULES = """Each scene:
 - "narration_en": one or two short sentences in English, at most 32 words, easy for a child.
 - "narration_bn": the same in natural Bangla (Bengali script).
-- "picture": what to draw, in English, as a calm wide illustration: places, nature, sky, light,
-  buildings, objects, animals. Never a face. Never text.
+- "picture": what to draw, in English: exactly what the scene tells - who is in it and how many,
+  what is happening, where, the objects that matter, and the shot that shows it best - or a place,
+  nature, light or an object that belongs to it. Never a face. Never text.
 - "people": "none" or "from_behind".
     "none" when the scene is about a prophet (any prophet, peace be upon them) - a prophet is NEVER
     drawn in any form; show the place, the light, the path, the sky instead - and whenever people
@@ -78,8 +79,16 @@ Write 8 to 14 scenes. """ + SCENE_RULES
 # ("the Ummah" became "the community"); the person counts any change as a breach of the text.
 ILLUSTRATE_PROMPT = """You illustrate a story that is read aloud word for word in a calm video for children
 and families. Its SCENES are fixed: do not change, shorten or reorder them. For each scene give:
-- "picture": what to draw, in English, as a calm wide illustration of what that scene tells: places,
-  nature, sky, light, buildings, objects, animals. Never a face. Never text.
+- "picture": what to draw, in English: exactly what that scene tells, so a viewer recognises the
+  moment. Say who is in it and how many (one man, not "people"), what they are doing (swinging an
+  axe at a tree trunk, carrying logs, talking with his employer), where, and the objects that matter,
+  and the shot that shows it best (a medium shot from behind as he swings the axe; a close view of a
+  blunt axe on a stump). Describe each character the same way in every scene they are in - first
+  decide their look (the woodcutter: a strong young man in a brown tunic and a white cap) and repeat
+  it word for word - so the same person appears throughout. A spoken line shows the speaker and the
+  listener in their place, from behind. A lesson or advice shows a calm object or place that belongs
+  to it. One moment in one picture - never a split screen or several moments side by side; a scene
+  that tells of several, shows the one that sums it up. Never a face. Never text.
 - "people": "none" or "from_behind".
     "none" when the scene is about a prophet (any prophet, peace be upon them) - a prophet is NEVER
     drawn in any form; show the place, the light, the path, the sky instead - and whenever people
@@ -193,14 +202,20 @@ with JSON only:
  "earlier": the number of the EARLIER message that holds that story, or 0 when it is in the DOCUMENTS
             or there is none}"""
 
+# The scene's own description decides the shot and who is in it. "Small in the distance, women fully
+# covered with long veils, wide establishing shot" was added to every scene with people, and the
+# woodcutter's story (2026-10-25) came out as groups of veiled figures standing about in a forest,
+# never a man cutting a tree.
 STYLE = ("soft painterly illustration for a children's storybook, warm gentle light, calm balanced "
-         "composition, wide establishing shot, muted harmonious colours, no text, no lettering, "
+         "composition, the action clearly visible, muted harmonious colours, no text, no lettering, "
          "no portraits, paintings, statues or silhouettes of people anywhere in the scene")
 NO_PEOPLE = "no people, no human figures, no faces, an empty peaceful scene"
-FROM_BEHIND = ("any people small in the distance and seen only from behind, modestly dressed in long "
-               "loose clothing, women fully covered with long veils, faces never visible")
+FROM_BEHIND = ("only the people the scene describes, seen from behind or turned away so that no face "
+               "is ever visible, modestly dressed in long loose clothing; a woman, only if the scene "
+               "has one, fully covered")
 
 CHECK_PROMPT = """You check one picture for a children's video against strict rules. Look carefully.
+The picture was drawn for this scene: {scene}
 Answer with JSON only:
 {"faces": true if ANY human face is visible - front, side or partly, even small or stylised - and that
    includes faces or heads in a painting, portrait, framed picture, statue, carving or silhouette
@@ -209,7 +224,9 @@ Answer with JSON only:
    pictures, statues or silhouettes,
  "immodest": true if any person shows uncovered arms, legs, hair of a woman, or tight clothing,
  "text": true if there is any writing or lettering in the picture,
- "frightening": true if anything violent, bloody or scary is shown}"""
+ "frightening": true if anything violent, bloody or scary is shown,
+ "matches": true if the picture shows what the scene describes - its main subject, what is happening
+   and where - false if it shows something else (other people, another action, another place)}"""
 
 
 class VideoError(Exception):
@@ -293,7 +310,9 @@ AVOID = {"a face is visible": "absolutely no faces, no portraits, paintings or s
          "a figure is not modestly dressed": "everyone fully covered in long loose robes",
          "something frightening is shown": "peaceful and safe, nothing dark or threatening",
          "there is writing in it": "no writing anywhere: books closed, pages blank, no signs, no inscriptions",
-         "there are people in a scene meant to have none": NO_PEOPLE}
+         "there are people in a scene meant to have none": NO_PEOPLE,
+         "the picture does not show the scene": "show exactly the subject and the action described, "
+                                                "clearly, in the foreground"}
 
 
 # The storyboard's Bangla read like a translation for adults - উপত্যকা, সংগ্রহ করত, প্রতিষ্ঠান - and
@@ -365,17 +384,20 @@ def picture_prompt(scene, plain=False, why=""):
 
 # --- the picture check ----------------------------------------------------------------------------
 
-def check_request(model, png):
+def check_request(model, png, scene=None):
+    described = scene["picture"] if scene else "(no description)"
     return {"model": model, "stream": False, "temperature": 0, "max_tokens": 300,
             "chat_template_kwargs": {"enable_thinking": False},
             "messages": [{"role": "user", "content": [
-                {"type": "text", "text": CHECK_PROMPT},
+                {"type": "text", "text": CHECK_PROMPT.replace("{scene}", described)},
                 {"type": "image_url", "image_url": {"url": "data:image/png;base64," + base64.b64encode(png).decode()}}]}]}
 
 
-def verdict(answer, scene):
+def verdict(answer, scene, must_match=True):
     """(passes, why not): a picture with a face, an immodest figure, writing, anything frightening -
-    or anyone at all in a scene meant to have nobody - does not pass. No answer is not a pass."""
+    or anyone at all in a scene meant to have nobody - does not pass. No answer is not a pass. One
+    that does not show its scene is drawn again while there are tries left (`must_match`); the last
+    try is kept rather than leave the scene without a picture."""
     match = re.search(r"\{.*\}", re.sub(r"<think>.*?</think>", "", answer or "", flags=re.S), re.S)
     if not match:
         return False, "the picture could not be checked"
@@ -393,6 +415,8 @@ def verdict(answer, scene):
         return False, "there is writing in it"
     if scene["people"] == "none" and int(seen.get("people") or 0) > 0:
         return False, "there are people in a scene meant to have none"
+    if must_match and seen.get("matches") is False:
+        return False, "the picture does not show the scene"
     return True, ""
 
 
