@@ -67,6 +67,11 @@ SESSION_COOKIE = _env("WAKE_SESSION_COOKIE", "gateway_session")
 SESSION_MAX_AGE = 60 * 60 * 24 * 7
 MASTER_KEY_SHA256 = (_env("WAKE_MASTER_KEY_SHA256") or "").lower()
 DOWN_RECHECK_SECONDS = 10
+# A gateway that answered a moment ago and now refuses connections is restarting (a deploy), not
+# asleep: for RESTART_WINDOW seconds it is looked at again every RESTART_RECHECK_SECONDS, so the
+# few seconds a restart takes are not ten seconds of "asleep" to everyone asking
+RESTART_RECHECK_SECONDS = 2
+RESTART_WINDOW = 120
 
 # app/auth.py: "sk-" + secrets.token_urlsafe(32)
 KEY_SHAPE = re.compile(r"^sk-[A-Za-z0-9_-]{43}$")
@@ -78,6 +83,7 @@ STREAMED_PATHS = ("/v1/chat/completions", "/v1/completions")
 class State:
     up: bool | None = None         # None until the first request finds out
     checked_at = 0.0
+    down_since: float | None = None  # when a gateway that was up stopped answering
     waking: asyncio.Task | None = None
     wake_reason = ""
     wake_started = 0.0
@@ -128,6 +134,8 @@ async def gateway_is_up():
     except httpx.HTTPError:
         up = False
     state.up, state.checked_at = up, time.monotonic()
+    if up:
+        state.down_since = None
     return up
 
 
@@ -495,8 +503,10 @@ async def gateway(request: Request, rest: str):
     kind, h = credential(request)
 
     waking = state.waking is not None and not state.waking.done()
-    if state.up is False and not waking and time.monotonic() - state.checked_at > DOWN_RECHECK_SECONDS:
-        await gateway_is_up()      # switched on by hand, or woken some other way
+    restarting = state.down_since is not None and time.monotonic() - state.down_since < RESTART_WINDOW
+    recheck = RESTART_RECHECK_SECONDS if restarting else DOWN_RECHECK_SECONDS
+    if state.up is False and not waking and time.monotonic() - state.checked_at > recheck:
+        await gateway_is_up()      # restarted, switched on by hand, or woken some other way
     keepable = request.method == "GET" and bool(KEPT_PATHS.match(path))
     model_list = models_key(request, h) if request.method == "GET" and path == "/v1/models" else None
     if state.up is not False:
@@ -514,6 +524,8 @@ async def gateway(request: Request, rest: str):
             return out
         except (httpx.ConnectError, httpx.ConnectTimeout, httpx.RemoteProtocolError) as e:
             log.info("gateway unreachable (%s): treating it as asleep", type(e).__name__)
+            if state.up:
+                state.down_since = time.monotonic()
             state.up, state.checked_at = False, time.monotonic()
 
     # --- the gateway is asleep from here on ---
