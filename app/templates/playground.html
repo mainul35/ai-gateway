@@ -3045,7 +3045,7 @@ function renderGenerated(box, generated, stats){
     <img src="${fileUrl(generated.file_id)}" alt="${escapeHtml(generated.prompt)}" data-zoom="${fileUrl(generated.file_id)}">
     <div class="caption"></div>
     <div class="actions">
-      <button class="btn btn-sm btn-secondary" data-edit="${generated.file_id}">Edit this image</button>
+      <button class="btn btn-sm btn-secondary" data-edit-image="${generated.file_id}">Edit this image</button>
       <a class="btn btn-sm btn-secondary" style="text-decoration:none" href="${fileUrl(generated.file_id)}"
          download="image-${generated.seed || generated.file_id}.png">Download</a>
     </div>`;
@@ -3061,12 +3061,15 @@ chat.addEventListener('click', e => {
   if(caption) caption.classList.toggle('open');
 });
 
-// "Edit this image" puts a generated image into the composer as the one to change
+// "Edit this image" puts a generated image into the composer as the one to change. Its own attribute:
+// sharing data-edit with a message's Edit button, editing a message also put "image 0" - a broken
+// picture - into the composer and switched image generation on.
 chat.addEventListener('click', e => {
-  const edit = e.target.closest('[data-edit]');
+  const edit = e.target.closest('[data-edit-image]');
   if(!edit || controller) return;
   if(!caps.image_generation){ showError('Image generation is turned off on this server.'); return; }
-  const id = Number(edit.dataset.edit);
+  const id = Number(edit.dataset.editImage);
+  if(!id) return;
   pending = [{id, url: fileUrl(id), name: 'image', kind: 'generated'}];
   if(!tools.image_generation) setTool('image_generation', true);
   renderPending();
