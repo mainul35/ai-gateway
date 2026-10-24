@@ -29,6 +29,7 @@ import tempfile
 import wave
 
 from app import settings
+from app.tools import quran
 
 log = logging.getLogger("tools.video_story")
 
@@ -482,6 +483,36 @@ async def narrate(lang, texts, folder):
         durations = json.loads(out.decode().strip().splitlines()[-1])["durations"]
         for item, seconds in zip(items, durations):
             results[item["i"]] = (item["out"], seconds + READ_SECONDS * said[item["i"]][1])
+
+    # A verse of the Quran in a line is recited by a qari (app/tools/quran.py): after the words
+    # spoken, or before them when the line opens with it; the scene lasts as long as both
+    for i, text in enumerate(texts):
+        runs = [m for m in ARABIC_RUN.finditer(text) if len(m.group(0).split()) >= quran.MIN_WORDS]
+        ayat, recited_words = [], 0
+        for run in runs:
+            found = await asyncio.to_thread(quran.find, run.group(0))
+            recited_words += len(run.group(0).split()) if found else 0
+            ayat += [a for a in found if a not in ayat]
+        if not ayat:
+            continue
+        recited = os.path.join(folder, f"{lang}-{i:02d}-quran.wav")
+        seconds = await quran.recite(ayat, recited, ffmpeg())
+        if seconds is None:
+            continue
+        path, held = results[i]
+        speech = re.search(r"\w", said[i][0]) is not None
+        hold = max(0.0, READ_SECONDS * (said[i][1] - recited_words))  # Arabic shown and not recited
+        if not speech:
+            results[i] = (recited, seconds + hold)
+            continue
+        first, second = (recited, path) if runs[0].start() < len(text) // 4 else (path, recited)
+        joined = os.path.join(folder, f"{lang}-{i:02d}-with-quran.wav")
+        same = "aformat=sample_rates=24000:channel_layouts=mono"
+        await _run([ffmpeg(), "-y", "-i", first, "-i", second, "-filter_complex",
+                    f"[0:a]{same},apad=pad_dur=0.6[a0];[1:a]{same}[a1];[a0][a1]concat=n=2:v=0:a=1[a]",
+                    "-map", "[a]", joined], f"adding the recitation to scene {i + 1}")
+        with wave.open(joined, "rb") as w:
+            results[i] = (joined, w.getnframes() / w.getframerate() + hold)
     return results
 
 
