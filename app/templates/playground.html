@@ -1874,6 +1874,16 @@ function noteDecision(box, decision){
                  + `${decision.model_why ? ' (' + decision.model_why + ')' : ''}`
                  + `${decision.considered ? ' out of ' + decision.considered + ' models' : ''}.`;
     who.appendChild(picked);
+    // The model that should have answered and did not: said out loud, or the label looks wrong
+    const skipped = decision.passed_over;
+    if(skipped && skipped.model !== decision.model){
+      const note = document.createElement('div');
+      note.className = 'muted';
+      note.style.cssText = 'font-weight:400;font-size:.8rem;margin-top:.15rem';
+      note.textContent = `${skipped.model} failed ${skipped.failures} of its last ${skipped.requests} `
+                       + `request${skipped.requests === 1 ? '' : 's'}, so ${decision.model} answered instead.`;
+      who.appendChild(note);
+    }
   }
 }
 
