@@ -7,11 +7,13 @@ import base64
 import io
 import json
 import logging
+import os
 import re
+import shutil
 import time
 from datetime import timedelta
 
-from fastapi import APIRouter, Depends, File, HTTPException, Response, UploadFile, status
+from fastapi import APIRouter, Depends, File, HTTPException, Request, Response, UploadFile, status
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select
@@ -27,7 +29,7 @@ from app.routers.openai_v1 import PROXY_PATHS, forward
 from app.tools import (agent, chooser, documents, image_prompt, images, jobs, map_plan,
                         map_web, maps, markdown, mcp_client, media, memory as memory_tool,
                         photo, places, portrait, router as intent_router, self_tools, subtitles,
-                        turn_facts, understand, web_search)
+                        turn_facts, understand, video_story, web_search)
 
 log = logging.getLogger("playground")
 
@@ -346,6 +348,8 @@ async def capabilities(principal: Principal = Depends(authenticate)):
         "media_search": web_search.is_available() and media.is_available(),
         "vision": settings.feature_enabled("vision"),
         "image_generation": images.is_available() and access.can_generate_images(principal),
+        # A narrated, illustrated story video: pictures, narration and ffmpeg all needed
+        "video": images.is_available() and video_story.is_available() and access.can_generate_images(principal),
         "image_sizes": list(images.SIZES),
         # "qwen" follows edit instructions and takes up to 3 images; "flux" re-renders one image
         "edit_engine": await images.edit_engine() if images.is_available() else None,
@@ -502,15 +506,30 @@ async def upload_file(file: UploadFile = File(...), principal: Principal = Depen
 
 
 @router.get("/files/{file_id}")
-async def get_file(file_id: int, principal: Principal = Depends(authenticate),
+async def get_file(file_id: int, request: Request, principal: Principal = Depends(authenticate),
                    session: AsyncSession = Depends(get_session)):
     user = _require_user(principal)
     stored = (await session.execute(
         select(ChatFile).where(ChatFile.id == file_id, ChatFile.user_id == user.id))).scalar_one_or_none()
     if stored is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "File not found")
-    return Response(stored.data, media_type=stored.mime_type,
-                    headers={"Cache-Control": "private, max-age=86400", "X-Content-Type-Options": "nosniff"})
+    headers = {"Cache-Control": "private, max-age=86400", "X-Content-Type-Options": "nosniff",
+               "Accept-Ranges": "bytes"}
+    # A video is played in pieces: Safari will not play one at all without byte ranges, and seeking
+    # anywhere needs them
+    wanted = re.match(r"bytes=(\d*)-(\d*)$", request.headers.get("range") or "")
+    size = len(stored.data)
+    if wanted and size and (wanted.group(1) or wanted.group(2)):
+        if wanted.group(1):
+            start = int(wanted.group(1))
+            end = min(int(wanted.group(2)) if wanted.group(2) else size - 1, size - 1)
+        else:
+            start, end = max(0, size - int(wanted.group(2))), size - 1
+        if start > end or start >= size:
+            return Response(status_code=416, headers={"Content-Range": f"bytes */{size}"})
+        return Response(stored.data[start:end + 1], status_code=206, media_type=stored.mime_type,
+                        headers={**headers, "Content-Range": f"bytes {start}-{end}/{size}"})
+    return Response(stored.data, media_type=stored.mime_type, headers=headers)
 
 
 async def _load_files(session, user, file_ids):
@@ -2116,6 +2135,176 @@ async def generate_image(payload: ImageIn, principal: Principal = Depends(authen
         job = jobs.start(user.id, payload.conversation_id, "image", (payload.prompt or "")[:120], limits.holding(slot, stream()))
         return StreamingResponse(jobs.follow(job), media_type="text/event-stream",
                                  headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+    return StreamingResponse(limits.holding(slot, stream()), media_type="text/event-stream",
+                             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+
+# --- video stories ------------------------------------------------------------------------------
+
+class VideoIn(BaseModel):
+    prompt: str = Field(min_length=1, max_length=4000)
+    conversation_id: int | None = None
+    file_ids: list[int] = Field(default_factory=list, max_length=6)     # pictures and documents as material
+    languages: list[str] = Field(default_factory=lambda: ["en", "bn"])
+    answers_to: int | None = None
+
+
+async def _video_facts(prompt):
+    """(text for the storyboard, [{title, url}]) from a web search; nothing when search is off or empty."""
+    if not web_search.is_available():
+        return "", []
+    try:
+        results = (await web_search.search([prompt]))[:8]
+    except Exception as e:       # a story can still be told from the material given
+        log.info("video story search failed: %s", e)
+        return "", []
+    text = "\n\n".join(f"[{i}] {r.get('title', '')}\nURL: {r.get('url', '')}\n{(r.get('content') or r.get('snippet') or '')[:1500]}"
+                       for i, r in enumerate(results, 1))
+    return text, [{"title": r.get("title", ""), "url": r.get("url", "")} for r in results]
+
+
+@router.post("/video")
+async def make_video(payload: VideoIn, principal: Principal = Depends(authenticate),
+                     session: AsyncSession = Depends(get_session)):
+    """A factual story as a narrated, illustrated video, in English and Bangla (app/tools/video_story.py).
+    Streams progress - the facts, the story, each scene drawn and checked, the narration - then the
+    videos, saved to the conversation."""
+    user = _require_user(principal)
+    if not images.is_available() or not video_story.is_available():
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "Video stories are not set up on this server")
+    if not access.can_generate_images(principal):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "You do not have access to image generation")
+    if payload.conversation_id is not None:
+        await _owned(session, payload.conversation_id, user)
+    languages = [lang for lang in ("en", "bn") if lang in payload.languages] or ["en"]
+    found = await _load_files(session, user, payload.file_ids)
+    pictures = [(f.data, f.mime_type) for f in found.values() if f.kind != "document" and (f.mime_type or "").startswith("image/")]
+    material = "\n\n".join(f"{f.name}:\n{(f.prompt or '')[:6000]}" for f in found.values() if f.kind == "document")
+    user_id = user.id
+    story_model = settings.get("video.story.model", "VIDEO_STORY_MODEL")
+    check_model = settings.get("video.check.model", "VIDEO_CHECK_MODEL")
+    attempts = max(1, int(settings.get("video.check.attempts", "VIDEO_CHECK_ATTEMPTS") or 3))
+
+    async def stream():
+        started = time.monotonic()
+        folder = video_story.workspace()
+        events = asyncio.Queue()
+
+        async def progress(stage, fraction=None):
+            await events.put(_event("progress", stage=stage, fraction=fraction))
+
+        async def relay(work):
+            """Runs `work`, passing on its progress as it comes; returns its result."""
+            task = asyncio.create_task(work)
+            try:
+                while not task.done() or not events.empty():
+                    getter = asyncio.create_task(events.get())
+                    done, _ = await asyncio.wait({getter, task}, return_when=asyncio.FIRST_COMPLETED)
+                    if getter in done:
+                        yield getter.result()
+                    else:
+                        getter.cancel()
+                yield task.result()
+            finally:
+                if not task.done():
+                    task.cancel()
+
+        try:
+            yield _event("progress", stage="Finding the facts", fraction=0.02)
+            facts, sources = await _video_facts(payload.prompt)
+            yield _event("progress", stage="Writing the story", fraction=0.06)
+            answer = await _ask_helper(principal, video_story.story_request(
+                story_model, payload.prompt, material, facts, pictures))
+            story = video_story.parse_story(answer)
+            scenes = story["scenes"]
+            yield _event("storyboard", title=story["title_en"], scenes=len(scenes))
+
+            # Every scene drawn, then every picture checked: two swaps of the GPU, not one per scene
+            paths = [None] * len(scenes)
+            pending = list(range(len(scenes)))
+            for attempt in range(attempts + 1):
+                for n, i in enumerate(pending):
+                    plain = attempt >= attempts - 1 and attempt > 0     # the last tries: nobody in it
+                    yield _event("progress", stage=f"Drawing scene {i + 1} of {len(scenes)}"
+                                 + (" again" if attempt else ""),
+                                 fraction=0.1 + 0.55 * (n + 1) / max(1, len(pending)))
+                    png = None
+                    async for item in relay(images.generate(video_story.picture_prompt(scenes[i], plain),
+                                                            video_story.SIZE, on_progress=progress)):
+                        if isinstance(item, bytes):
+                            yield item
+                        else:
+                            png, _seed = item
+                    paths[i] = os.path.join(folder, f"scene-{i:02d}.png")
+                    with open(paths[i], "wb") as f:
+                        f.write(png)
+                failed = []
+                for n, i in enumerate(pending):
+                    yield _event("progress", stage=f"Checking scene {i + 1} against the rules",
+                                 fraction=0.65 + 0.1 * (n + 1) / max(1, len(pending)))
+                    with open(paths[i], "rb") as f:
+                        ok, why = video_story.verdict(
+                            await _ask_helper(principal, video_story.check_request(check_model, f.read())), scenes[i])
+                    if not ok:
+                        log.info("video scene %d redrawn: %s", i + 1, why)
+                        failed.append(i)
+                pending = failed
+                if not pending:
+                    break
+            # A scene whose picture never passed is left out rather than shown
+            kept = [i for i in range(len(scenes)) if i not in pending]
+            if len(kept) < video_story.MIN_SCENES:
+                raise video_story.VideoError("Too few pictures passed the content check to make a video")
+            scenes = [scenes[i] for i in kept]
+            paths = [paths[i] for i in kept]
+
+            videos = {}
+            for k, lang in enumerate(languages):
+                word = "Bangla" if lang == "bn" else "English"
+                yield _event("progress", stage=f"Narrating in {word}", fraction=0.78 + 0.1 * k / len(languages))
+                texts = [s["narration_bn" if lang == "bn" else "narration_en"] for s in scenes]
+                narration = await video_story.narrate(lang, texts, folder)
+                yield _event("progress", stage=f"Putting the {word} video together",
+                             fraction=0.83 + 0.15 * k / len(languages))
+                title = story["title_bn"] if lang == "bn" else story["title_en"]
+                data, seconds = await video_story.assemble(paths, narration, texts, title, lang, folder)
+                async with session_factory()() as db:
+                    stored = ChatFile(user_id=user_id, kind="video", mime_type="video/mp4",
+                                      name=f"{story['title_en'][:80]} ({word}).mp4", prompt=title, data=data)
+                    db.add(stored)
+                    await db.commit()
+                    await db.refresh(stored)
+                videos[lang] = {"file_id": stored.id, "url": f"/chat/files/{stored.id}", "seconds": seconds}
+
+            used = [sources[n - 1] for n in story["sources"] if 0 < n <= len(sources)] or sources[:5]
+            video = {"title": story["title_en"], "title_bn": story["title_bn"], "videos": videos,
+                     "scenes": len(scenes), "perspectives": story["perspectives"], "sources": used,
+                     "asked": payload.prompt}
+            if payload.conversation_id is not None:
+                async with session_factory()() as db:
+                    conversation = await db.get(Conversation, payload.conversation_id)
+                    if conversation is not None and conversation.user_id == user_id:
+                        filed = {"video": video}
+                        if payload.answers_to is not None:
+                            filed["answers_to"] = payload.answers_to
+                        db.add(ConversationMessage(conversation_id=payload.conversation_id, role="assistant",
+                                                   content=f"(video story: {story['title_en']})", model=story_model,
+                                                   stats=json.dumps({"total": round(time.monotonic() - started, 1)}),
+                                                   attachments=json.dumps(filed)))
+                        conversation.updated_at = utcnow()
+                        await db.commit()
+            yield _event("video", **video, seconds=round(time.monotonic() - started, 1))
+        except (video_story.VideoError, images.ImageError) as e:
+            yield _error(str(e))
+        finally:
+            shutil.rmtree(folder, ignore_errors=True)
+
+    slot = await limits.take_gpu_slot(principal)
+    if payload.conversation_id is not None:
+        job = jobs.start(user.id, payload.conversation_id, "video", payload.prompt[:120], limits.holding(slot, stream()))
+        return StreamingResponse(jobs.follow(job), media_type="text/event-stream",
+                                 headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no",
+                                          "X-Job-Id": str(job.id)})
     return StreamingResponse(limits.holding(slot, stream()), media_type="text/event-stream",
                              headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 

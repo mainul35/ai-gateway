@@ -63,6 +63,15 @@ DEFAULTS = {
     # Lettering drawn by Flux is usually misspelled; the editing model puts it right afterwards
     "images.fix.text": "true",
     "images.text.attempts": "2",
+    # Video stories (app/tools/video_story.py): the model that writes the storyboard and the one that
+    # checks every picture against the content rules (it must see images); the Python that narrates
+    # (scripts/tts_worker.py, a 3.12 environment with Kokoro and MMS-TTS) and where fonts for the
+    # subtitles are (Noto Sans Bengali for Bangla)
+    "video.story.model": "qwen3.6-256k",
+    "video.check.model": "qwen3.6-256k",
+    "video.tts.python": "~/tts-venv/bin/python",
+    "video.fonts.dir": "~/fonts",
+    "video.check.attempts": "3",
     # Photographs: noise removed without inventing detail, and blur added by distance
     "photo.denoise.model": "scunet_color_real_psnr.pth",
     "photo.upscale.model": "RealESRGAN_x2plus.pth",

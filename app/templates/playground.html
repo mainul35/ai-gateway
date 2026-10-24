@@ -138,6 +138,13 @@ a.cite{font-size:.75em;vertical-align:super;text-decoration:none;padding:0 .1rem
 .verdict button:hover{color:var(--text)}
 .verdict button[aria-pressed="true"]{color:#fff;background:var(--primary);border-color:var(--primary)}
 .verdict button[aria-pressed="true"][data-value="false"]{background:var(--danger);border-color:var(--danger)}
+.video-story video{width:100%;max-width:960px;border-radius:10px;background:#000;display:block;margin-top:.4rem}
+.video-story .video-langs{display:flex;gap:.3rem;margin-top:.4rem}
+.video-story .video-langs button{background:none;border:1px solid var(--border);border-radius:999px;color:var(--muted);
+  padding:.15rem .7rem;cursor:pointer}
+.video-story .video-langs button[aria-pressed="true"]{color:#fff;background:var(--primary);border-color:var(--primary)}
+.video-story .video-notes{margin-top:.6rem;font-size:.88rem}
+.video-story .video-notes ul,.video-story .video-notes ol{margin:.25rem 0 0;padding-left:1.3rem}
 .verdict-why{margin-top:.4rem;padding:.5rem .6rem;border:1px solid var(--border);border-radius:10px;font-size:.85rem}
 .verdict-why .why-choices{display:flex;flex-wrap:wrap;gap:.3rem;margin:.35rem 0}
 .verdict-why .why-choices button{background:none;border:1px solid var(--border);border-radius:999px;color:var(--muted);
@@ -507,6 +514,8 @@ a.paper{color:var(--text);text-decoration:none}
                     title="Find places, routes, and what is along the way, on OpenStreetMap"><span class="dot"></span>Maps</button>
             <button class="chip" id="toolImage" data-tool="image_generation" aria-pressed="false" hidden
                     title="Create a new image, or edit an attached one, instead of chatting"><span class="dot"></span>Image generation</button>
+            <button class="chip" id="toolVideo" data-tool="video" aria-pressed="false" hidden
+                    title="Tell a true story as a calm, narrated, illustrated video in English and Bangla"><span class="dot"></span>Video story</button>
             <button class="chip" id="toolAgent" data-tool="agent" aria-pressed="false" hidden
                     title="Let the model use the tool servers: call one, read what came back, call another, then answer"><span class="dot"></span>Agent</button>
             <span class="attach-wrap">
@@ -654,7 +663,7 @@ let currentJob = null;
 let caps = {web_search: false, vision: false, image_generation: false, maps: false,
             image_sizes: [], max_upload_mb: 10};
 let tools = {web_search: false, vision: false, image_generation: false, maps: false,
-             agent: false};
+             agent: false, video: false};
 let pending = [];        // images attached to the next message: [{id, url, name, kind}]
 
 function showError(message){
@@ -766,6 +775,7 @@ async function loadCapabilities(){
   document.getElementById('toolImage').hidden = !caps.image_generation;
   document.getElementById('toolMaps').hidden = !caps.maps;
   document.getElementById('toolAgent').hidden = !caps.agent;
+  document.getElementById('toolVideo').hidden = !caps.video;
   document.getElementById('imageSize').innerHTML = caps.image_sizes.map(s =>
     `<option value="${s}">${s[0].toUpperCase() + s.slice(1)}</option>`).join('');
   syncTools();
@@ -781,7 +791,9 @@ document.querySelectorAll('.chip[data-tool]').forEach(chip =>
   chip.addEventListener('click', () => setTool(chip.dataset.tool, !tools[chip.dataset.tool])));
 
 function imageMode(){ return tools.image_generation && caps.image_generation; }
-function canAttach(){ return (tools.vision && caps.vision) || imageMode(); }
+function videoMode(){ return tools.video && caps.video; }
+// Pictures can go with a video request too: what they show is material for the story
+function canAttach(){ return (tools.vision && caps.vision) || imageMode() || videoMode(); }
 // Qwen-Image-Edit follows instructions and can use extra reference images; the Flux fallback re-renders one
 const qwenEdits = () => caps.edit_engine === 'qwen';
 const editLimit = () => qwenEdits() ? (caps.max_edit_images || 3) : 1;
@@ -808,6 +820,11 @@ function syncTools(){
   // model picker's tooltip, which is where the one warning worth keeping now lives: sending a
   // picture to a model that cannot see one still fails loudly at send time either way.
   const model = currentModel();
+  if(videoMode()){
+    promptBox.placeholder = 'What true story should the video tell?';
+    modelSelect.title = '';
+    return;
+  }
   if(imageMode()){
     promptBox.placeholder = pending.length ? 'How should the picture change?'
                                            : 'Describe a picture to create…';
@@ -1297,12 +1314,14 @@ function fillTranscript(messages){
       else if(extra.map) renderMap(box, extra.map);
       else if(extra.media) renderMedia(box, extra.media);
       else if(extra.generated) renderGenerated(box, extra.generated, m.stats);
+      else if(extra.video) renderVideo(box, extra.video);
       else if(extra.subtitles) renderSubtitles(box, extra.subtitles, m.content, m.stats);
       else renderAssistant(box, m.content, m.reasoning, withModel, extra.sources, m.html);
       // The same question under every answer a model wrote, with the verdict already given: maps,
       // picture search, subtitles and photo work are the tools' answers, not a model's to be ranked on
       if(m.id && m.model && !extra.map && !extra.media && !extra.subtitles){
-        addVerdict(box, {messageId: m.id, kind: extra.generated ? 'image' : extra.agent ? 'agent' : 'chat',
+        addVerdict(box, {messageId: m.id, kind: extra.generated ? 'image' : extra.video ? 'video'
+                                                : extra.agent ? 'agent' : 'chat',
                          category: m.feedback?.category || null, hadPicture: lastHadPicture,
                          searched: !!(extra.sources && extra.sources.length)}, m.feedback);
       }
@@ -2797,6 +2816,7 @@ const VERDICT_QUESTIONS = {
   translation: 'Was the translation accurate?', long: 'Did it summarise or organise this well?',
   code: 'Did the code work?', reasoning: 'Was the reasoning right?',
   search: 'Did it find what you were looking for?', agent: 'Did it get the task done?',
+  video: 'Was the story true and suitable?',
   light: 'Was this what you wanted?', general: 'Did this answer your question?'};
 // What went wrong, as the task it counts against; `when` says which answers it can be about
 const VERDICT_PROBLEMS = [
@@ -2815,6 +2835,7 @@ const TASK_WORDS = {image: 'drawing pictures', vision: 'reading pictures', trans
 function verdictTask(where){
   if(where.kind === 'image') return 'image';
   if(where.kind === 'agent') return 'agent';
+  if(where.kind === 'video') return 'video';
   if(where.searched && (!where.category || where.category === 'general')) return 'search';
   return where.category || 'general';
 }
@@ -3296,6 +3317,8 @@ async function routeTurn(text, asking){
   const subs = !turnPictures().length ? subtitleRequest(text) : null;
   if(subs) return sendSubtitles(text, subs, asking);
 
+  // A video story is a choice, like the agent: switched on, it takes the turn
+  if(videoMode()) return sendVideo(text, asking);
   const decision = await decideAction(text, turnPictures().length > 0);
   if(decision.action === 'stopped') return;
   // The agent is a choice, not a guess: switched on, it takes the turn
@@ -3661,6 +3684,97 @@ async function sendPhoto(text, decision, again){
   // The server saved this one, so that a dropped connection cannot lose it
   recordAnswer(box, `(${done.toLowerCase()})`, again ? again.replaceAt : null);
   loadConversations();
+}
+
+/* A video story: the facts found, a storyboard written from them, every scene drawn and checked
+   against the content rules, narration in English and Bangla, and a video for each. Minutes of work,
+   so it runs as a job: the page can be left and the conversation shows it when it is done. */
+async function sendVideo(text, again){
+  if(!text){ showError('Say what the story should be about.'); return; }
+  showError('');
+  const material = turnFiles.filter(p => !p.uploading);
+  try{
+    await ensureConversation(text, currentModel());
+  }catch(e){
+    showError('Could not save the conversation: ' + errorText(e));
+    return;
+  }
+  turnFiles = [];
+  if(!again){ history.push({role: 'user', content: text, images: []}); }
+  const asked = await askedNow(text, material.filter(f => !f.document).map(f => f.url),
+                               material.map(f => ({id: f.id, name: f.name})),
+                               {mode: 'image', images: material.map(f => ({file_id: f.id, document: !!f.document}))},
+                               again, false);
+  const box = answerBox(again ? again.messageId : asked?._messageId, 'Video story');
+  setStatus(box, 'Finding the facts');
+  let result = null;
+  controller = new AbortController();
+  busy(true);
+  try{
+    const response = await postStream('/chat/video', {prompt: text, conversation_id: currentId,
+                                                      answers_to: box.dataset.turn ? Number(box.dataset.turn) : null,
+                                                      file_ids: material.slice(0, 6).map(f => f.id),
+                                                      languages: ['en', 'bn']});
+    await readEvents(response, chunk => {
+      const event = chunk.gateway;
+      if(chunk.error){ showError(chunk.error.message || 'The video could not be made'); return; }
+      if(!event) return;
+      if(event.type === 'progress'){
+        setStatus(box, event.fraction != null ? `${event.stage} · ${Math.round(event.fraction * 100)}%` : event.stage,
+                  event.fraction);
+      }else if(event.type === 'storyboard'){
+        setStatus(box, `"${event.title}": ${event.scenes} scenes to draw`);
+      }else if(event.type === 'video'){
+        result = event;
+      }
+      followAlong();
+    });
+  }catch(e){
+    if(e.name !== 'AbortError') showError(errorText(e));
+  }finally{
+    controller = null;
+    busy(false);
+  }
+  setStatus(box, null);
+  if(!result){
+    box.querySelector('.body').textContent =
+      'No video came back. If it was still being made, it is saved in this conversation when it is '
+      + 'done: open the conversation again from the list to see.';
+    loadConversations();
+    return;
+  }
+  renderVideo(box, result);
+  recordAnswer(box, `(video story: ${result.title})`, again ? again.replaceAt : null);
+  if(currentId) addVerdict(box, {conversationId: currentId, startsWith: `(video story: ${result.title}`.slice(0, 200),
+                                 kind: 'video', category: 'general'});
+  loadConversations();
+}
+
+// The video in each language it was made in, one player shown at a time, then what it rests on
+function renderVideo(box, video){
+  const body = box.querySelector('.body');
+  const langs = Object.keys(video.videos || {});
+  const names = {en: 'English', bn: 'বাংলা'};
+  body.innerHTML = `<div class="video-story">
+      <div class="video-title"><b>${escapeHtml(video.title || 'Video story')}</b>
+        ${video.title_bn ? `<span class="muted"> · ${escapeHtml(video.title_bn)}</span>` : ''}</div>
+      ${langs.length > 1 ? `<div class="video-langs">${langs.map((l, i) =>
+        `<button type="button" data-lang="${l}" aria-pressed="${i === 0}">${names[l] || l}</button>`).join('')}</div>` : ''}
+      ${langs.map((l, i) => `<video controls preload="metadata" playsinline data-lang="${l}" ${i ? 'hidden' : ''}
+        src="${escapeHtml(video.videos[l].url)}"></video>`).join('')}
+      ${(video.perspectives || []).length ? `<div class="video-notes"><b>Other views told in the story</b><ul>${
+        video.perspectives.map(p => `<li>${escapeHtml(p)}</li>`).join('')}</ul></div>` : ''}
+      ${(video.sources || []).length ? `<div class="video-notes"><b>Sources</b><ol>${
+        video.sources.map(s => `<li><a href="${escapeHtml(s.url)}" target="_blank" rel="noopener">${escapeHtml(s.title || s.url)}</a></li>`).join('')}</ol></div>` : ''}
+    </div>`;
+  body.querySelectorAll('.video-langs button').forEach(button => button.addEventListener('click', () => {
+    body.querySelectorAll('.video-langs button').forEach(b => b.setAttribute('aria-pressed', String(b === button)));
+    body.querySelectorAll('video').forEach(v => {
+      const shown = v.dataset.lang === button.dataset.lang;
+      if(!shown) v.pause();
+      v.hidden = !shown;
+    });
+  }));
 }
 
 async function sendImage(text, decision, again){
