@@ -463,12 +463,7 @@ async def narrate(lang, texts, folder):
         if re.search(r"\w", words):
             items.append({"text": words, "out": out, "i": i})
         else:
-            with wave.open(out, "wb") as w:              # a breath of silence; the scene is held
-                w.setnchannels(1)
-                w.setsampwidth(2)
-                w.setframerate(24000)
-                w.writeframes(b"\0\0" * 2400)
-            results[i] = (out, max(3.0, READ_SECONDS * unspoken))
+            results[i] = held_silence(texts[i], lang, out)
     if items:
         process = await asyncio.create_subprocess_exec(
             _python(), _worker(), stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
@@ -484,36 +479,58 @@ async def narrate(lang, texts, folder):
         for item, seconds in zip(items, durations):
             results[item["i"]] = (item["out"], seconds + READ_SECONDS * said[item["i"]][1])
 
-    # A verse of the Quran in a line is recited by a qari (app/tools/quran.py): after the words
-    # spoken, or before them when the line opens with it; the scene lasts as long as both
     for i, text in enumerate(texts):
-        runs = [m for m in ARABIC_RUN.finditer(text) if len(m.group(0).split()) >= quran.MIN_WORDS]
-        ayat, recited_words = [], 0
-        for run in runs:
-            found = await asyncio.to_thread(quran.find, run.group(0))
-            recited_words += len(run.group(0).split()) if found else 0
-            ayat += [a for a in found if a not in ayat]
-        if not ayat:
-            continue
-        recited = os.path.join(folder, f"{lang}-{i:02d}-quran.wav")
-        seconds = await quran.recite(ayat, recited, ffmpeg())
-        if seconds is None:
-            continue
-        path, held = results[i]
-        speech = re.search(r"\w", said[i][0]) is not None
-        hold = max(0.0, READ_SECONDS * (said[i][1] - recited_words))  # Arabic shown and not recited
-        if not speech:
-            results[i] = (recited, seconds + hold)
-            continue
-        first, second = (recited, path) if runs[0].start() < len(text) // 4 else (path, recited)
-        joined = os.path.join(folder, f"{lang}-{i:02d}-with-quran.wav")
-        same = "aformat=sample_rates=24000:channel_layouts=mono"
-        await _run([ffmpeg(), "-y", "-i", first, "-i", second, "-filter_complex",
-                    f"[0:a]{same},apad=pad_dur=0.6[a0];[1:a]{same}[a1];[a0][a1]concat=n=2:v=0:a=1[a]",
-                    "-map", "[a]", joined], f"adding the recitation to scene {i + 1}")
-        with wave.open(joined, "rb") as w:
-            results[i] = (joined, w.getnframes() / w.getframerate() + hold)
+        path, seconds = results[i]
+        results[i] = await with_recitation(text, lang, path if re.search(r"\w", said[i][0]) else None,
+                                           seconds, folder, f"{lang}-{i:02d}") or results[i]
     return results
+
+
+def held_silence(text, lang, out):
+    """(a breath of silence, seconds the scene is held) for a line all in Arabic with no recitation:
+    long enough to read it."""
+    with wave.open(out, "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(24000)
+        w.writeframes(b"\0\0" * 2400)
+    return out, max(3.0, READ_SECONDS * spoken(text, lang)[1])
+
+
+def needs_reading(text):
+    """Whether a line has anything for a person to read aloud: a line that is all Arabic is recited
+    by the qari or held in silence, never read by the person (the page asks the same, the same way)."""
+    return re.search(r"\w", ARABIC_RUN.sub(" ", text)) is not None
+
+
+async def with_recitation(text, lang, voice, seconds, folder, name):
+    """(audio, seconds) for a line with a verse of the Quran in it: the verse recited by a qari
+    (app/tools/quran.py) after `voice` - the line's words, spoken or read by the person, or None when
+    there are none - or before it when the line opens with the verse; the scene lasts as long as both.
+    None when the line has no verse, or its recitation could not be had."""
+    runs = [m for m in ARABIC_RUN.finditer(text) if len(m.group(0).split()) >= quran.MIN_WORDS]
+    ayat, recited_words = [], 0
+    for run in runs:
+        found = await asyncio.to_thread(quran.find, run.group(0))
+        recited_words += len(run.group(0).split()) if found else 0
+        ayat += [a for a in found if a not in ayat]
+    if not ayat:
+        return None
+    recited = os.path.join(folder, f"{name}-quran.wav")
+    recitation = await quran.recite(ayat, recited, ffmpeg())
+    if recitation is None:
+        return None
+    hold = max(0.0, READ_SECONDS * (spoken(text, lang)[1] - recited_words))   # Arabic shown, not recited
+    if voice is None:
+        return recited, recitation + hold
+    first, second = (recited, voice) if runs[0].start() < len(text) // 4 else (voice, recited)
+    joined = os.path.join(folder, f"{name}-with-quran.wav")
+    same = "aformat=sample_rates=24000:channel_layouts=mono"
+    await _run([ffmpeg(), "-y", "-i", first, "-i", second, "-filter_complex",
+                f"[0:a]{same},apad=pad_dur=0.6[a0];[1:a]{same}[a1];[a0][a1]concat=n=2:v=0:a=1[a]",
+                "-map", "[a]", joined], "adding the recitation")
+    with wave.open(joined, "rb") as w:
+        return joined, w.getnframes() / w.getframerate() + hold
 
 
 # --- the video ------------------------------------------------------------------------------------

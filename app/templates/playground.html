@@ -3856,24 +3856,29 @@ async function openVoicePanel(box, video, messageId){
   const story = video.story;
   const saved = story.voice_bn || [];
   const fresh = story.bn.map(() => null);          // Blobs recorded now
+  // A line all in Arabic - a verse - is recited by the qari, not read (needs_reading on the server)
+  const ARABIC = /[؀-ۿݐ-ݿࢠ-ࣿﭐ-﷿ﹰ-﻿]/g;
+  const reads = story.bn.map(line => /[\p{L}\p{N}_]/u.test(line.replace(ARABIC, ' ')));
   const panel = document.createElement('div');
   panel.className = 'voice-panel';
   panel.innerHTML = `<p class="muted">Read each line slowly and calmly, close to the phone, in a quiet room.
-      Listen back, and read it again if you want. A line read before is kept.</p>
+      Listen back, and read it again if you want. A line read before is kept. A verse of the Quran is
+      recited by the qari, before or after your reading.</p>
     ${story.bn.map((line, i) => `<div class="voice-scene" data-i="${i}">
       <img src="/chat/files/${story.pictures[i]}" alt="Scene ${i + 1}" loading="lazy">
       <div class="voice-text"><span class="muted">Scene ${i + 1} of ${story.bn.length}</span>
-        <p lang="bn">${escapeHtml(line)}</p>
-        <div class="voice-controls"><button type="button" class="voice-record">Record</button>
+        <p lang="bn" dir="auto">${escapeHtml(line)}</p>
+        ${reads[i] ? `<div class="voice-controls"><button type="button" class="voice-record">Record</button>
           <audio controls preload="none" ${saved[i] ? `src="/chat/files/${saved[i].file_id}"` : 'hidden'}></audio>
-          <span class="voice-state muted">${saved[i] ? 'read before' : 'not read yet'}</span></div></div>
+          <span class="voice-state muted">${saved[i] ? 'read before' : 'not read yet'}</span></div>`
+        : '<div class="voice-controls"><span class="muted">Recited by the qari; nothing to read</span></div>'}</div>
     </div>`).join('')}
     <div class="voice-actions"><button type="button" class="voice-make" disabled>Make the Bangla video</button>
       <button type="button" class="voice-cancel">Close</button><span class="voice-status muted"></span></div>`;
   box.querySelector('.video-story').appendChild(panel);
   const make = panel.querySelector('.voice-make');
   const statusLine = panel.querySelector('.voice-status');
-  const ready = () => { make.disabled = !story.bn.every((_, i) => fresh[i] || saved[i]); };
+  const ready = () => { make.disabled = !story.bn.every((_, i) => !reads[i] || fresh[i] || saved[i]); };
   ready();
 
   let microphone = null, recorder = null, recordingAt = null, limit = null;
