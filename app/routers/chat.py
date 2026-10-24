@@ -2275,7 +2275,8 @@ async def make_video(payload: VideoIn, principal: Principal = Depends(authentica
                                  fraction=0.65 + 0.1 * (n + 1) / max(1, len(pending)))
                     with open(paths[i], "rb") as f:
                         ok, why = video_story.verdict(
-                            await _ask_helper(principal, video_story.check_request(check_model, f.read())), scenes[i])
+                            await _ask_helper(principal, video_story.check_request(check_model, f.read(), scenes[i])),
+                            scenes[i], must_match=attempt < attempts - 1)
                     if not ok:
                         log.info("video scene %d redrawn: %s", i + 1, why)
                         wrong[i] = why
@@ -2332,7 +2333,8 @@ async def make_video(payload: VideoIn, principal: Principal = Depends(authentica
                     await db.commit()
                     video["story"] = {"pictures": [p.id for p in scene_files],
                                       "en": [s["narration_en"] for s in scenes],
-                                      "bn": [s["narration_bn"] for s in scenes]}
+                                      "bn": [s["narration_bn"] for s in scenes],
+                                      "drawn": [s["picture"] for s in scenes]}     # what each was drawn from
                 async with session_factory()() as db:
                     conversation = await db.get(Conversation, payload.conversation_id)
                     if conversation is not None and conversation.user_id == user_id:
