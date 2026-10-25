@@ -16,6 +16,7 @@ header - every key and every tensor's shape and type - is fetched from Hugging F
 before a sparse run of zeros as long as the real file, and each build loads that on the CPU, image
 reader too. What the header can be wrong about, the build says, before 80 GB are fetched for nothing.
 """
+import glob
 import hashlib
 import json
 import logging
@@ -47,10 +48,16 @@ _load_lock = threading.Lock()
 
 def builds():
     """[{"name", "binary", "env", "default"}]: the configured llama-server, then the others the
-    profiles name (Ollama's), each once."""
+    profiles name (Ollama's), then every other release unpacked beside the configured one
+    (~/llama.cpp/llama-b*), newest first - a release installed for a new architecture counts before
+    any profile names it - each once."""
     found, seen = [], set()
     default = settings.get("engine.llama_server.path", "LLAMA_SERVER_PATH") or ""
     candidates = [(default, {})] + [(p.binary, p.env or {}) for p in load_profiles().values() if p.binary]
+    if default:
+        releases = glob.glob(os.path.join(os.path.dirname(os.path.dirname(default)), "llama-b*", "llama-server"))
+        number = lambda path: int("".join(c for c in os.path.basename(os.path.dirname(path)) if c.isdigit()) or 0)
+        candidates += [(path, {}) for path in sorted(releases, key=number, reverse=True)]
     for binary, env in candidates:
         if not binary or binary in seen or not os.path.isfile(binary):
             continue
