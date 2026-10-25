@@ -384,7 +384,10 @@ the action, the place, the light, the number of people, the shot.
 Write the new description in English, as one paragraph: who is in it and how many, what each is doing
 and how they are placed, where, the objects that matter, the light and the time of day, and the shot.
 Describe each person in full, as the current description does, so they look the same as in the other
-scenes. One moment in one picture. Never a face, never text.
+scenes. The picture is drawn only from your words, so describe a posture by where each part of the
+body is - the head, the hands, the knees, the feet, what touches the ground - and say which way every
+person faces; people doing the same thing together all face the same way. One moment in one picture.
+Never a face, never text.
 These rules come before the request, and the description must keep to them even when the request
 asks otherwise: a prophet (peace be upon them) is never drawn in any form - show the place, the light
 or the path instead; angels, jinn and Iblis are never figures, and Allah is never depicted in any
@@ -475,9 +478,12 @@ FROM_BEHIND = ("only the people the scene describes, each in a back view - the b
 COVERED = "any woman fully covered in a long loose robe and a headscarf"
 # For the editing model (Qwen-Image-Edit), on a picture whose only fault is a face: on the woodcutter's
 # scenes it turned every head away and kept the moment, and all six passed the check after it
-TURN_AWAY = ("Turn every person so that their head faces completely away from the viewer: only the back "
-             "of the head and hair or cap can be seen, no face, no cheek, no beard, no profile. Keep their "
-             "clothes, pose, the objects and everything else in the picture exactly as it is.")
+TURN_AWAY = ("Turn every person so that they face completely away from the viewer, their back and the back "
+             "of the head towards us: only the back of the head and hair or cap can be seen, no face, no "
+             "cheek, no beard, no profile. Keep their clothes, what they are doing, the objects and "
+             "everything else in the picture exactly as it is.")
+# What TURN_AWAY puts right, so a picture with only that fault keeps its moment rather than being drawn again
+TURNABLE = ("a face is visible", "a person faces the viewer")
 WOMAN = re.compile(r"\b(wom[ae]n|girls?|mother|wife|daughter|sister|lady|ladies|queen|grandmother)\b", re.I)
 
 CHECK_PROMPT = """You check one picture for a children's video against strict rules. Look carefully.
@@ -488,11 +494,14 @@ Answer with JSON only:
    that is part of the scene,
  "people": the number of human figures in the picture, counting people shown in paintings, framed
    pictures, statues or silhouettes,
+ "towards": true if ANY person's body faces the viewer - their chest, front or the top of a bowed head
+   towards the viewer - even when the face itself cannot be seen,
  "immodest": true if any person shows uncovered arms, legs, hair of a woman, or tight clothing,
  "text": true if there is any writing or lettering in the picture,
  "frightening": true if anything violent, bloody or scary is shown,
- "matches": true if the picture shows what the scene describes - its main subject, what is happening
-   and where - false if it shows something else (other people, another action, another place)}"""
+ "matches": true if the picture shows what the scene describes - its main subject, what is happening,
+   how each person is placed (their posture, and which way they face) and where - false if it shows
+   something else (other people, another action or posture, another place)}"""
 
 
 class VideoError(Exception):
@@ -579,6 +588,7 @@ def parse_story(text):
 # Said to the image model when it draws a scene again, so it does not make the same mistake: in the
 # first real video (2026-10-24) a bookshelf scene came back with writing on the pages four times over
 AVOID = {"a face is visible": "absolutely no faces, no portraits, paintings or statues of people",
+         "a person faces the viewer": "every person turned completely away from the viewer, their back towards us",
          "a figure is not modestly dressed": "everyone fully covered in long loose robes",
          "something frightening is shown": "peaceful and safe, nothing dark or threatening",
          "there is writing in it": "no writing anywhere: books closed, pages blank, no signs, no inscriptions",
@@ -681,6 +691,8 @@ def verdict(answer, scene, must_match=True):
         return False, "the picture could not be checked"
     if seen.get("faces"):
         return False, "a face is visible"
+    if scene["people"] != "none" and seen.get("towards"):
+        return False, "a person faces the viewer"
     if seen.get("immodest"):
         return False, "a figure is not modestly dressed"
     if seen.get("frightening"):
