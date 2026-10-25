@@ -730,17 +730,34 @@ async def assemble(pictures, narration, texts, title, lang, folder, recorded=Fal
     total = starts[-1] + lengths[-1]
 
     clips = []
-    for i, (png_path, length) in enumerate(zip(pictures, lengths)):
+    for i, (png_path, length, text) in enumerate(zip(pictures, lengths, texts)):
         frames = int(round(length * FPS))
         # Slow and gentle: in for one scene, out for the next, drifting a little sideways - never more
         # than 8 % over the whole scene, so nothing rushes past a child's eye
         zoom = ("min(1.0+0.08*on/{f},1.08)" if i % 2 == 0 else "max(1.08-0.08*on/{f},1.0)").format(f=frames)
         x = "(iw-iw/zoom)*" + ("on/{f}" if i % 4 < 2 else "(1-on/{f})").format(f=frames)
+        # The words go into the scene's own clip: its line while it is spoken, and the title over the
+        # first. Laid over the whole video at the end - every caption an input as long as the video -
+        # ffmpeg held frames for all of them at once and used 89 GB on a 28-scene story, until the
+        # kernel killed it (2026-10-25)
+        words = [(caption(text, os.path.join(folder, f"line-{lang}-{i:02d}.png"), lang),
+                  LEAD_IN - 0.2, length - FADE)]
+        if i == 0:
+            words.append((caption(title, os.path.join(folder, f"title-{lang}.png"), lang, title=True),
+                          0.4, min(4.5, length - 1.0)))
+        inputs = ["-loop", "1", "-t", f"{length:.3f}", "-i", png_path]
+        layers = [f"[0:v]scale={WIDTH * 2}:{HEIGHT * 2}:force_original_aspect_ratio=increase,crop={WIDTH * 2}:{HEIGHT * 2},"
+                  f"zoompan=z='{zoom}':x='{x}':y='(ih-ih/zoom)/2':d={frames}:s={WIDTH}x{HEIGHT}:fps={FPS},"
+                  f"format=yuv420p[s0]"]
+        for k, (png, begin, until) in enumerate(words, 1):
+            inputs += ["-loop", "1", "-t", f"{length:.3f}", "-i", png]
+            layers.append(f"[{k}:v]format=rgba,fade=t=in:st={begin:.2f}:d=0.4:alpha=1,"
+                          f"fade=t=out:st={max(begin, until - 0.4):.2f}:d=0.4:alpha=1[w{k}]")
+            layers.append(f"[s{k - 1}][w{k}]overlay=0:0:enable='between(t,{begin:.2f},{until:.2f})'[s{k}]")
         clip = os.path.join(folder, f"clip-{i:02d}.mp4")
-        await _run([binary, "-y", "-loop", "1", "-i", png_path, "-t", f"{length:.3f}", "-vf",
-                    f"scale={WIDTH * 2}:{HEIGHT * 2}:force_original_aspect_ratio=increase,crop={WIDTH * 2}:{HEIGHT * 2},"
-                    f"zoompan=z='{zoom}':x='{x}':y='(ih-ih/zoom)/2':d={frames}:s={WIDTH}x{HEIGHT}:fps={FPS},"
-                    f"format=yuv420p", "-r", str(FPS), "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", clip],
+        await _run([binary, "-y", *inputs, "-filter_complex", ";".join(layers), "-map", f"[s{len(words)}]",
+                    "-t", f"{length:.3f}", "-r", str(FPS), "-pix_fmt", "yuv420p",
+                    "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", clip],
                    f"scene {i + 1}")
         clips.append(clip)
 
@@ -768,26 +785,11 @@ async def assemble(pictures, narration, texts, title, lang, folder, recorded=Fal
     mix = ";".join(delays) + ";" + "".join(f"[a{i}]" for i in range(len(narration))) + \
         f"amix=inputs={len(narration)}:normalize=0,apad=whole_dur={total:.3f}[aout]"
 
-    # The words: the title over the first scene, each line of narration while it is spoken
-    shown = [(caption(title, os.path.join(folder, f"title-{lang}.png"), lang, title=True),
-              0.4, min(4.5, lengths[0] - 1.0))]
-    for i, (text, start, length) in enumerate(zip(texts, starts, lengths)):
-        shown.append((caption(text, os.path.join(folder, f"line-{lang}-{i:02d}.png"), lang),
-                      start + LEAD_IN - 0.2, start + length - FADE))
-    caption_inputs, layers, base = [], [], "[0:v]"
-    first = 1 + len(narration)                       # inputs: the video, the narration, then the words
-    for k, (png, begin, until) in enumerate(shown):
-        caption_inputs += ["-loop", "1", "-t", f"{total:.3f}", "-i", png]
-        layers.append(f"[{first + k}:v]format=rgba,fade=t=in:st={begin:.2f}:d=0.4:alpha=1,"
-                      f"fade=t=out:st={max(begin, until - 0.4):.2f}:d=0.4:alpha=1[c{k}]")
-        layers.append(f"{base}[c{k}]overlay=0:0:enable='between(t,{begin:.2f},{until:.2f})'[o{k}]")
-        base = f"[o{k}]"
+    # The words are already in the pictures: the video is copied as it is, with the narration added
     final = os.path.join(folder, f"story-{lang}.mp4")
-    await _run([binary, "-y", "-i", joined, *audio_inputs, *caption_inputs, "-filter_complex",
-                ";".join(layers) + ";" + mix, "-map", base, "-map", "[aout]",
-                "-c:v", "libx264", "-preset", "veryfast", "-crf", "21", "-pix_fmt", "yuv420p",
-                "-c:a", "aac", "-b:a", "128k", "-t", f"{total:.3f}", "-movflags", "+faststart", final],
-               "adding narration and words")
+    await _run([binary, "-y", "-i", joined, *audio_inputs, "-filter_complex", mix, "-map", "0:v", "-map", "[aout]",
+                "-c:v", "copy", "-c:a", "aac", "-b:a", "128k", "-t", f"{total:.3f}", "-movflags", "+faststart", final],
+               "adding the narration")
     with open(final, "rb") as f:
         return f.read(), round(total, 1)
 
