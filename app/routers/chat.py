@@ -2242,6 +2242,9 @@ class SceneEdit(BaseModel):
     retranslate: bool = False      # the scene's other languages translated again from the one edited
     redraw: bool = False
     picture: str | None = Field(default=None, max_length=1500)  # what to draw instead; redraws the scene
+    # A picture already drawn for it and looked at (redraw_picture): put in as it is, nothing drawn
+    picture_file: int | None = None
+    people: str | None = Field(default=None, pattern="^(none|from_behind)$")   # who that picture may show
 
 
 class VideoEditIn(BaseModel):
@@ -2357,7 +2360,15 @@ async def edit_video(message_id: int, payload: VideoEditIn, principal: Principal
                     remake.add(other)
         if change.picture and change.picture.strip():
             story["drawn"][i] = change.picture.strip()
-        if change.redraw or (change.picture and change.picture.strip()):
+        if change.picture_file:
+            drawn = await _load_files(session, user, [change.picture_file])
+            if change.picture_file not in drawn or drawn[change.picture_file].kind != "video-scene":
+                raise HTTPException(status.HTTP_404_NOT_FOUND, f"The new picture for scene {i + 1} is gone; draw it again")
+            story["pictures"][i] = change.picture_file
+            if change.people and isinstance(story.get("people"), list) and i < len(story["people"]):
+                story["people"][i] = change.people
+            remake.update(languages)
+        elif change.redraw or (change.picture and change.picture.strip()):
             story["pictures"][i] = None
             remake.update(languages)
     for lang in payload.add_languages:
@@ -2394,6 +2405,106 @@ async def edit_video(message_id: int, payload: VideoEditIn, principal: Principal
     slot = await limits.take_gpu_slot(principal)
     job = jobs.start(user.id, message.conversation_id, "video", "editing: " + video.get("title", "")[:100],
                      limits.holding(slot, _one_video_at_a_time(_video_pipeline(principal, user.id, ctx))))
+    return StreamingResponse(jobs.follow(job), media_type="text/event-stream",
+                             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no",
+                                      "X-Job-Id": str(job.id)})
+
+
+class RedrawIn(BaseModel):
+    index: int = Field(ge=0)
+    # How the person wants the picture: a whole description or only what should be different
+    request: str = Field(min_length=1, max_length=1500)
+
+
+@router.post("/video/{message_id}/redraw")
+async def redraw_picture(message_id: int, payload: RedrawIn, principal: Principal = Depends(authenticate),
+                         session: AsyncSession = Depends(get_session)):
+    """One scene's picture drawn again, to look at before the video is made again with it. The story
+    model rewrites the scene's description from the person's request (REDRAW_PROMPT: the request
+    followed, the rules kept), the picture is drawn from it and checked like every scene's (a face
+    turned away once), and kept as a file the edit puts in (SceneEdit.picture_file). Nothing in the
+    story changes until then. Events: progress, then "picture" {file_id, ok, why, drawn, people, note}."""
+    user = _require_user(principal)
+    message, video = await _owned_video(session, user, message_id)
+    story = video.get("story") or {}
+    pictures = story.get("pictures") or []
+    i = payload.index
+    if i >= len(pictures):
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, f"This story has {len(pictures)} scenes")
+    running = jobs.running_for(user.id, message.conversation_id)
+    if running is not None and running.kind == "video":
+        raise HTTPException(status.HTTP_409_CONFLICT, "This video is still being made")
+    asked = " ".join(payload.request.split())
+    current = ((story.get("drawn") or [""] * len(pictures))[i]) or ""
+    source = video.get("source") or "en"
+    words = (story.get(source) or story.get("en") or [""] * len(pictures))[i] or ""
+    story_model = settings.get("video.story.model", "VIDEO_STORY_MODEL")
+    check_model = settings.get("video.check.model", "VIDEO_CHECK_MODEL")
+    user_id = user.id
+
+    async def stream():
+        folder = video_story.workspace()
+        queue = asyncio.Queue()
+
+        async def progress(stage, fraction=None):
+            await queue.put(_event("progress", stage=f"Drawing scene {i + 1} · {stage}" +
+                                   (f" {round(fraction * 100)}%" if fraction is not None else ""),
+                                   fraction=round(0.1 + 0.6 * (fraction or 0), 3)))
+
+        async def drawing(work):
+            task = asyncio.create_task(work)
+            try:
+                while not task.done() or not queue.empty():
+                    getter = asyncio.create_task(queue.get())
+                    done, _ = await asyncio.wait({getter, task}, return_when=asyncio.FIRST_COMPLETED)
+                    if getter in done:
+                        yield getter.result()
+                    else:
+                        getter.cancel()
+                yield task.result()
+            finally:
+                if not task.done():
+                    task.cancel()
+
+        try:
+            yield _event("progress", stage="Reading what you asked for", fraction=0.02)
+            drawn, people, note = video_story.parse_redraw(await _ask_helper(
+                principal, video_story.redraw_request(story_model, words, current, asked)))
+            scene = {"picture": drawn, "people": people}
+            png, ok, why, turned = None, False, "", False
+            for attempt in range(2):
+                yield _event("progress", stage=f"Drawing scene {i + 1}" + (" again" if attempt else ""), fraction=0.05)
+                if why == "a face is visible" and not turned:
+                    turned = True
+                    work = images.generate(video_story.TURN_AWAY, video_story.SIZE,
+                                           sources=[(png, "image/png")], on_progress=progress)
+                else:
+                    work = images.generate(video_story.picture_prompt(scene, why=why), video_story.SIZE,
+                                           on_progress=progress, story=True)
+                async for item in drawing(work):
+                    if isinstance(item, bytes):
+                        yield item
+                    else:
+                        png = item[0]
+                yield _event("progress", stage=f"Checking scene {i + 1} against the rules", fraction=0.8)
+                ok, why = video_story.verdict(
+                    await _ask_helper(principal, video_story.check_request(check_model, png, scene)), scene)
+                if ok:
+                    break
+            path = os.path.join(folder, "scene.png")
+            with open(path, "wb") as f:
+                f.write(png)
+            file_id = await _store_file(user_id, "video-scene", "image/jpeg", f"scene {i + 1}.jpg",
+                                        video_story.as_jpeg(path))
+            yield _event("picture", file_id=file_id, ok=ok, why=why, drawn=drawn, people=people, note=note, index=i)
+        except (video_story.VideoError, images.ImageError) as e:
+            yield _error(str(e))
+        finally:
+            shutil.rmtree(folder, ignore_errors=True)
+
+    slot = await limits.take_gpu_slot(principal)
+    job = jobs.start(user.id, message.conversation_id, "picture", f"redrawing scene {i + 1}",
+                     limits.holding(slot, _one_video_at_a_time(stream())))
     return StreamingResponse(jobs.follow(job), media_type="text/event-stream",
                              headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no",
                                       "X-Job-Id": str(job.id)})

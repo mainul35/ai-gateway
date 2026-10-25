@@ -49,6 +49,11 @@ body.videos-studio main{max-width:none;padding:0}
 .editor textarea.changed{border-color:var(--primary)}
 .editor .describe{min-height:7rem;font-size:.9rem}
 .editor .hint{font-size:.78rem;color:var(--muted);margin:.3rem 0 .4rem}
+.editor .actions{display:flex;flex-wrap:wrap;gap:.6rem;margin-top:.8rem}
+.editor .drawState{font-size:.8rem;color:var(--muted);margin-top:.5rem}
+.editor .drawState.bad{color:#fca5a5}
+.editor .newPicture{font-size:.8rem;color:#4ade80;margin-top:.4rem}
+.editor details.from{font-size:.78rem;color:var(--muted);margin-top:.4rem}
 .check{display:flex;gap:.45rem;align-items:center;font-size:.85rem;margin-top:.5rem;cursor:pointer}
 .check input{width:auto;margin:0}
 .stale{font-size:.78rem;color:#f59e0b;margin-top:.25rem}
@@ -110,6 +115,8 @@ const JSON_HEADERS = {'Content-Type': 'application/json'};
 // How long a scene stays on screen, as app/tools/video_story.py scene_lengths: to find where it starts
 const SCENE_MIN = 8, LEAD_IN = 0.6, FADE = 1.5;
 let stories = [], current = null, showing = null, selected = 0, edits = {}, busy = false;
+// Pictures drawn again for a scene and not yet in the video: {scene: {file_id, ok, why, drawn, people, note}}
+let previews = {};
 
 function showError(text){
   const box = document.getElementById('error');
@@ -205,6 +212,7 @@ async function openStory(id){
   try{ current = await api(`/chat/videos/${id}`); }catch(e){ showError(e.message); return; }
   history.replaceState(null, '', `/videos2?id=${id}`);
   edits = {};
+  previews = {};
   selected = 0;
   renderStories();
   const made = Object.keys(current.video.videos || {});
@@ -314,23 +322,33 @@ function renderEditor(){
   const change = edits[i] || {};
   const editable = !current.being_made;
   const made = current.video.videos || {};
+  const preview = previews[i];
+  const shown = preview?.file_id || told.pictures[i];
   editor.hidden = false;
   // The scene's picture and how it should look; under it, one full-width card per language
   editor.innerHTML = `<div class="card scene">
       <div>
-        ${told.pictures[i] ? `<img src="/chat/files/${told.pictures[i]}" alt="Scene ${i + 1}">` : ''}
+        ${shown ? `<img src="/chat/files/${shown}" alt="Scene ${i + 1}">` : ''}
         <div class="where">Scene ${i + 1} of ${told.pictures.length}</div>
+        ${preview?.ok ? `<div class="newPicture">The new picture: it goes into the video when you save and remake.
+          <button type="button" class="btn btn-secondary" id="keepOld" style="margin-top:.3rem">Keep the old picture</button></div>` : ''}
       </div>
       <div>
         <label class="check" style="margin-top:0"><input type="checkbox" id="redraw" ${change.redraw ? 'checked' : ''} ${editable ? '' : 'disabled'}> Draw this picture again</label>
         <div id="describeBox" ${change.redraw ? '' : 'hidden'}>
-          <p class="hint">How should the picture look? Say what is in it and where, the light and the time of day.
-            People are drawn from behind, with no faces; a prophet is never drawn.</p>
-          <textarea class="describe" id="describe" dir="auto" placeholder="For example: a woodcutter seen from behind, walking into a misty pine forest at dawn, his axe on his shoulder">${
-            escapeHtml(change.picture ?? (told.drawn || [])[i] ?? '')}</textarea>
+          <p class="hint">Say how the picture should look: all of it, or only what should be different. The people,
+            the place and the rules of every picture are kept unless you ask otherwise; a face or a prophet is never drawn.</p>
+          <textarea class="describe" id="describe" dir="auto" placeholder="How the picture should look, or what should change">${
+            escapeHtml(change.ask ?? '')}</textarea>
+          ${(told.drawn || [])[i] ? `<details class="from"><summary>What it is drawn from now</summary>${escapeHtml(told.drawn[i])}</details>` : ''}
         </div>
-        ${editable && told.pictures.length > 1 ? `<button type="button" class="btn btn-secondary" id="deleteScene"
-          style="border-color:#7f1d1d;color:#fca5a5;margin-top:.8rem">Delete this scene</button>` : ''}
+        ${editable ? `<div class="actions">
+          <button type="button" class="btn" id="regenerate">🎨 Regenerate the picture</button>
+          ${told.pictures.length > 1 ? `<button type="button" class="btn btn-secondary" id="deleteScene"
+            style="border-color:#7f1d1d;color:#fca5a5">Delete this scene</button>` : ''}</div>` : ''}
+        <div class="drawState ${preview && !preview.ok ? 'bad' : ''}" id="drawState">${
+          preview && !preview.ok ? `This picture did not pass the check (${escapeHtml(preview.why || 'no reason given')}), so it is not used. Regenerate it again.`
+          : preview?.note ? escapeHtml(preview.note) : ''}</div>
       </div>
     </div>
     ${langs.map(l => {
@@ -364,6 +382,12 @@ function renderEditor(){
     keep();
   });
   editor.querySelector('#retranslate')?.addEventListener('change', keep);
+  editor.querySelector('#regenerate')?.addEventListener('click', () => regenerate(i));
+  editor.querySelector('#keepOld')?.addEventListener('click', () => {
+    delete previews[i];
+    renderEditor();
+    keep();
+  });
   editor.querySelector('#deleteScene')?.addEventListener('click', () => {
     if(!confirm(`Delete scene ${i + 1}? Every language's video is made again without it; nothing is drawn.`)) return;
     delete edits[i];
@@ -371,6 +395,55 @@ function renderEditor(){
   });
   editor.querySelectorAll('.record').forEach(button =>
     button.addEventListener('click', () => record(button.closest('[data-card]'), i)));
+}
+
+// The scene's picture drawn again from what the person asked, to look at; the video is made with it
+// only when the changes are saved
+async function regenerate(i){
+  const editor = document.getElementById('editor');
+  const box = editor.querySelector('#redraw');
+  const asked = editor.querySelector('#describe').value.trim();
+  const state = editor.querySelector('#drawState');
+  if(!box.checked || !asked){
+    box.checked = true;
+    editor.querySelector('#describeBox').hidden = false;
+    editor.querySelector('#describe').focus();
+    state.className = 'drawState';
+    state.textContent = 'Say how the picture should look, then regenerate it.';
+    keep();
+    return;
+  }
+  keep();                                   // the request stays in its box when the editor is drawn again
+  showError('');
+  busy = true;
+  updateSave();
+  editor.querySelector('#regenerate').disabled = true;
+  showProgress({stage: 'Starting', fraction: 0});
+  let drawn = null, trouble = '';
+  try{
+    const response = await fetch(`/chat/video/${current.message_id}/redraw`, {method: 'POST', headers: JSON_HEADERS,
+                                                                            body: JSON.stringify({index: i, request: asked})});
+    if(!response.ok){
+      const err = await response.json().catch(() => ({}));
+      throw new Error((typeof err.detail === 'string' && err.detail) || `HTTP ${response.status}`);
+    }
+    await readEvents(response, chunk => {
+      if(chunk.error) throw new Error(chunk.error.message);
+      const event = chunk.gateway;
+      if(event?.type === 'progress') showProgress(event);
+      else if(event?.type === 'picture') drawn = event;
+    });
+  }catch(e){
+    trouble = 'The picture was not drawn: ' + e.message;
+  }
+  busy = false;
+  document.getElementById('progress').hidden = true;
+  if(drawn) previews[i] = drawn;
+  else if(!trouble) trouble = 'The picture was not drawn; try again.';
+  if(selected === i) renderEditor();
+  keep();
+  renderRows();
+  if(trouble) showError(trouble);
 }
 
 // One line read in the person's voice: recorded, listened to, then that language's video made again
@@ -454,6 +527,7 @@ async function useReading(i, lang, blob){
   busy = false;
   document.getElementById('progress').hidden = true;
   edits = {};
+  previews = {};
   showing = lang;
   ({videos: stories} = await api('/chat/videos').catch(() => ({videos: stories})));
   await openStory(current.message_id);
@@ -475,10 +549,14 @@ function keep(){
     if(edited) change.text[area.dataset.lang] = clean(area.value);
   });
   change.retranslate = !!editor.querySelector('#retranslate')?.checked && Object.keys(change.text).length > 0;
+  const preview = previews[i];
   if(editor.querySelector('#redraw')?.checked){
     change.redraw = true;
-    const describe = editor.querySelector('#describe').value.trim();
-    if(describe && describe !== ((told.drawn || [])[i] || '').trim()) change.picture = describe;
+    change.ask = editor.querySelector('#describe').value.trim();      // kept for the page, not sent
+  }
+  if(preview?.ok){
+    // The picture drawn and looked at goes in as it is; nothing is drawn when the video is made again
+    Object.assign(change, {redraw: true, picture_file: preview.file_id, picture: preview.drawn, people: preview.people});
   }
   const had = !!edits[i];
   if(Object.keys(change.text).length || change.redraw) edits[i] = change;
@@ -530,14 +608,19 @@ async function remake(list, add = [], gone = []){
   busy = false;
   document.getElementById('progress').hidden = true;
   edits = {};
+  previews = {};
   ({videos: stories} = await api('/chat/videos').catch(() => ({videos: stories})));
   await openStory(current.message_id);
   if(trouble) showError(trouble);
 }
 
 document.getElementById('editor').addEventListener('input', keep);
-document.getElementById('save').addEventListener('click', () =>
-  remake(Object.entries(edits).map(([i, change]) => ({index: Number(i), ...change}))));
+document.getElementById('save').addEventListener('click', () => {
+  const asked = Object.entries(edits).filter(([i, change]) => change.ask && !previews[i]?.ok).map(([i]) => Number(i) + 1);
+  if(asked.length && !confirm(`Scene ${asked.join(', ')}: the new picture has not been regenerated yet, so it is drawn ` +
+                              'again as it was described before. Save and remake anyway?')) return;
+  remake(Object.entries(edits).map(([i, {ask, ...change}]) => ({index: Number(i), ...change})));
+});
 document.addEventListener('keydown', e => {
   if(e.target.matches('textarea, input, select')) return;
   const count = (story().pictures || []).length;
