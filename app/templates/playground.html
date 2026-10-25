@@ -150,6 +150,7 @@ a.cite{font-size:.75em;vertical-align:super;text-decoration:none;padding:0 .1rem
 .video-story .video-notes ul,.video-story .video-notes ol{margin:.25rem 0 0;padding-left:1.3rem}
 .video-story .voice-open,.voice-panel button{background:none;border:1px solid var(--border);border-radius:8px;
   color:var(--text);padding:.35rem .8rem;cursor:pointer;margin-top:.5rem}
+.video-story .voice-opens{display:flex;flex-wrap:wrap;gap:.5rem}
 .voice-panel{margin-top:.6rem;border-top:1px solid var(--border);padding-top:.4rem}
 .voice-scene{display:flex;gap:.7rem;align-items:flex-start;padding:.6rem 0;border-bottom:1px solid var(--border)}
 .voice-scene img{width:160px;aspect-ratio:16/9;object-fit:cover;border-radius:6px;flex:none}
@@ -3911,7 +3912,9 @@ function renderVideo(box, video, messageId, showLang){
   const names = {en: 'English', bn: 'বাংলা'};
   const first = langs.includes(showLang) ? showLang : langs[0];
   messageId = messageId || video.message_id;
-  const canRead = !!(video.story && messageId && video.videos?.bn);
+  // Either language can be read by the person: the English voice says Arabic names and blessings wrongly
+  const readable = video.story && messageId ? langs.filter(l => video.story[l]) : [];
+  const words = {en: 'English', bn: 'Bangla'};
   body.innerHTML = `<div class="video-story">
       <div class="video-title"><b>${escapeHtml(video.title || 'Video story')}</b>
         ${video.title_bn ? `<span class="muted"> · ${escapeHtml(video.title_bn)}</span>` : ''}</div>
@@ -3920,8 +3923,9 @@ function renderVideo(box, video, messageId, showLang){
           video.videos[l].voice === 'recorded' ? ' · your voice' : ''}</button>`).join('')}</div>` : ''}
       ${langs.map(l => `<video controls preload="metadata" playsinline data-lang="${l}" ${l === first ? '' : 'hidden'}
         src="${escapeHtml(video.videos[l].url)}"></video>`).join('')}
-      ${canRead ? `<button type="button" class="voice-open">${video.videos.bn.voice === 'recorded'
-          ? 'Read the Bangla again' : 'Read the Bangla in your own voice'}</button>` : ''}
+      ${readable.length ? `<div class="voice-opens">${readable.map(l => `<button type="button" class="voice-open"
+          data-lang="${l}">${video.videos[l].voice === 'recorded' ? `Read the ${words[l]} again`
+          : `Read the ${words[l]} in your own voice`}</button>`).join('')}</div>` : ''}
       ${(video.perspectives || []).length ? `<div class="video-notes"><b>Other views told in the story</b><ul>${
         video.perspectives.map(p => `<li>${escapeHtml(p)}</li>`).join('')}</ul></div>` : ''}
       ${(video.sources || []).length ? `<div class="video-notes"><b>Sources</b><ol>${
@@ -3936,42 +3940,45 @@ function renderVideo(box, video, messageId, showLang){
       v.hidden = !shown;
     });
   }));
-  body.querySelector('.voice-open')?.addEventListener('click', event => {
-    event.target.hidden = true;
-    openVoicePanel(box, video, messageId);
-  });
+  body.querySelectorAll('.voice-open').forEach(button => button.addEventListener('click', () => {
+    if(body.querySelector('.voice-panel')) return;      // one language read at a time
+    body.querySelector('.voice-opens').hidden = true;
+    openVoicePanel(box, video, messageId, button.dataset.lang);
+  }));
 }
 
-/* The Bangla read by the person: each scene's picture and line, a recording of it, and the video
-   made again from the recordings (POST /chat/video/{message}/voice). A scene read before keeps its
-   recording, so only the ones read again are sent. */
-async function openVoicePanel(box, video, messageId){
+/* One language read by the person: each scene's picture and line, a recording of it, and that
+   language's video made again from the recordings (POST /chat/video/{message}/voice). A scene read
+   before keeps its recording, so only the ones read again are sent. */
+async function openVoicePanel(box, video, messageId, lang){
   const story = video.story;
-  const saved = story.voice_bn || [];
-  const fresh = story.bn.map(() => null);          // Blobs recorded now
+  const lines = story[lang];
+  const word = lang === 'bn' ? 'Bangla' : 'English';
+  const saved = story[`voice_${lang}`] || [];
+  const fresh = lines.map(() => null);             // Blobs recorded now
   // A line all in Arabic - a verse - is recited by the qari, not read (needs_reading on the server)
   const ARABIC = /[؀-ۿݐ-ݿࢠ-ࣿﭐ-﷿ﹰ-﻿]/g;
-  const reads = story.bn.map(line => /[\p{L}\p{N}_]/u.test(line.replace(ARABIC, ' ')));
+  const reads = lines.map(line => /[\p{L}\p{N}_]/u.test(line.replace(ARABIC, ' ')));
   const panel = document.createElement('div');
   panel.className = 'voice-panel';
   panel.innerHTML = `<p class="muted">Read each line slowly and calmly, close to the phone, in a quiet room.
       Listen back, and read it again if you want. A line read before is kept. A verse of the Quran is
       recited by the qari, before or after your reading.</p>
-    ${story.bn.map((line, i) => `<div class="voice-scene" data-i="${i}">
+    ${lines.map((line, i) => `<div class="voice-scene" data-i="${i}">
       <img src="/chat/files/${story.pictures[i]}" alt="Scene ${i + 1}" loading="lazy">
-      <div class="voice-text"><span class="muted">Scene ${i + 1} of ${story.bn.length}</span>
-        <p lang="bn" dir="auto">${escapeHtml(line)}</p>
+      <div class="voice-text"><span class="muted">Scene ${i + 1} of ${lines.length}</span>
+        <p lang="${lang}" dir="auto">${escapeHtml(line)}</p>
         ${reads[i] ? `<div class="voice-controls"><button type="button" class="voice-record">Record</button>
           <audio controls preload="none" ${saved[i] ? `src="/chat/files/${saved[i].file_id}"` : 'hidden'}></audio>
           <span class="voice-state muted">${saved[i] ? 'read before' : 'not read yet'}</span></div>`
         : '<div class="voice-controls"><span class="muted">Recited by the qari; nothing to read</span></div>'}</div>
     </div>`).join('')}
-    <div class="voice-actions"><button type="button" class="voice-make" disabled>Make the Bangla video</button>
+    <div class="voice-actions"><button type="button" class="voice-make" disabled>Make the ${word} video</button>
       <button type="button" class="voice-cancel">Close</button><span class="voice-status muted"></span></div>`;
   box.querySelector('.video-story').appendChild(panel);
   const make = panel.querySelector('.voice-make');
   const statusLine = panel.querySelector('.voice-status');
-  const ready = () => { make.disabled = !story.bn.every((_, i) => !reads[i] || fresh[i] || saved[i]); };
+  const ready = () => { make.disabled = !lines.every((_, i) => !reads[i] || fresh[i] || saved[i]); };
   ready();
 
   let microphone = null, recorder = null, recordingAt = null, limit = null;
@@ -4018,8 +4025,8 @@ async function openVoicePanel(box, video, messageId){
     stop();
     release();
     panel.remove();
-    const open = box.querySelector('.voice-open');
-    if(open) open.hidden = false;
+    const opens = box.querySelector('.voice-opens');
+    if(opens) opens.hidden = false;
   });
 
   make.addEventListener('click', async () => {
@@ -4037,7 +4044,7 @@ async function openVoicePanel(box, video, messageId){
     try{
       const recordings = await Promise.all(fresh.map(b => b ? asText(b) : null));
       const response = await fetch(`/chat/video/${messageId}/voice`, {method: 'POST', headers: JSON_HEADERS,
-                                                                    body: JSON.stringify({recordings})});
+                                                                    body: JSON.stringify({recordings, lang})});
       if(!response.ok){
         const err = await response.json().catch(() => ({}));
         throw new Error((typeof err.detail === 'string' && err.detail) || `HTTP ${response.status}`);
@@ -4053,7 +4060,7 @@ async function openVoicePanel(box, video, messageId){
       ready();
       return;
     }
-    if(result) renderVideo(box, result, messageId, 'bn');
+    if(result) renderVideo(box, result, messageId, lang);
     else statusLine.textContent = 'It is still being made; open the conversation again in a minute to see it.';
   });
 }
