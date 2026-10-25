@@ -2254,6 +2254,9 @@ async def _store_file(user_id, kind, mime, name, data, prompt=None):
         return stored.id
 
 
+DRAW_BATCH = 7            # scenes drawn before they are checked, and the ones that pass kept
+
+
 async def _video_pipeline(principal, user_id, ctx):
     """Makes a video story, or carries one on (ctx["video"], saved before): the plan, every scene's
     picture drawn and checked, the narration, a video for each language. Each step is saved to the
@@ -2359,8 +2362,10 @@ async def _video_pipeline(principal, user_id, ctx):
                   for en, bn, drawn, people in zip(told["en"], told["bn"], told["drawn"],
                                                    told.get("people") or ["from_behind"] * len(told["en"]))]
         drawing = video.setdefault("drawing", {"attempt": 0, "wrong": {}})
-        # Every scene drawn, then every picture checked: two swaps of the GPU, not one per scene. A
-        # picture that passes is kept at once.
+        # Drawn and checked a batch at a time: the image model and the checking model take turns on
+        # the GPUs, so one batch is two swaps, not one per scene - and every picture that passes is
+        # kept as its batch is checked. Drawing all 28 of a long story before the first check meant
+        # twelve minutes of pictures lost to anything that stopped it in that time.
         if "done" not in drawing:
             paths = {}
             wrong = {int(k): why for k, why in drawing.get("wrong", {}).items()}
@@ -2368,49 +2373,51 @@ async def _video_pipeline(principal, user_id, ctx):
             pending = [i for i, picture in enumerate(told["pictures"]) if picture is None]
             for attempt in range(drawing.get("attempt", 0), attempts + 1):
                 drawing["attempt"] = attempt
-                for n, i in enumerate(pending):
-                    plain = attempt >= attempts - 1 and attempt > 0     # the last tries: nobody in it
-                    # A picture whose only fault is a face keeps its moment: the editing model turns the
-                    # people away (two people talking face each other, however the scene is asked for);
-                    # if a face is still there after that, the scene is drawn again
-                    turn = wrong.get(i) == "a face is visible" and i not in turned and i in paths
-                    yield _event("progress", stage=(f"Turning the people away in scene {i + 1}" if turn else
-                                                    f"Drawing scene {i + 1} of {len(scenes)}" + (" again" if attempt else "")),
-                                 fraction=0.1 + 0.55 * (n + 1) / max(1, len(pending)))
-                    png = None
-                    if turn:
-                        turned.add(i)
-                        with open(paths[i], "rb") as f:
-                            work = images.generate(video_story.TURN_AWAY, video_story.SIZE,
-                                                   sources=[(f.read(), "image/png")], on_progress=progress)
-                    else:
-                        work = images.generate(video_story.picture_prompt(scenes[i], plain, wrong.get(i, "")),
-                                               video_story.SIZE, on_progress=progress, story=True)
-                    async for item in relay(work):
-                        if isinstance(item, bytes):
-                            yield item
-                        else:
-                            png, _seed = item
-                    paths[i] = os.path.join(folder, f"scene-{i:02d}.png")
-                    with open(paths[i], "wb") as f:
-                        f.write(png)
                 failed = []
-                for n, i in enumerate(pending):
-                    yield _event("progress", stage=f"Checking scene {i + 1} against the rules",
-                                 fraction=0.65 + 0.1 * (n + 1) / max(1, len(pending)))
-                    with open(paths[i], "rb") as f:
-                        ok, why = video_story.verdict(
-                            await _ask_helper(principal, video_story.check_request(check_model, f.read(), scenes[i])),
-                            scenes[i], must_match=attempt < attempts - 1)
-                    if ok:
-                        told["pictures"][i] = await _store_file(user_id, "video-scene", "image/jpeg",
-                                                                f"scene {i + 1}.jpg", video_story.as_jpeg(paths[i]))
-                        wrong.pop(i, None)
-                    else:
-                        log.info("video scene %d redrawn: %s", i + 1, why)
-                        wrong[i] = why
-                        failed.append(i)
-                drawing["wrong"] = {str(i): why for i, why in wrong.items()}
+                for first in range(0, len(pending), DRAW_BATCH):
+                    batch = pending[first:first + DRAW_BATCH]
+                    for n, i in enumerate(batch, first):
+                        plain = attempt >= attempts - 1 and attempt > 0     # the last tries: nobody in it
+                        # A picture whose only fault is a face keeps its moment: the editing model turns
+                        # the people away (two people talking face each other, however the scene is
+                        # asked for); if a face is still there after that, the scene is drawn again
+                        turn = wrong.get(i) == "a face is visible" and i not in turned and i in paths
+                        yield _event("progress", stage=(f"Turning the people away in scene {i + 1}" if turn else
+                                                        f"Drawing scene {i + 1} of {len(scenes)}" + (" again" if attempt else "")),
+                                     fraction=0.1 + 0.65 * (n + 1) / max(1, len(pending)))
+                        png = None
+                        if turn:
+                            turned.add(i)
+                            with open(paths[i], "rb") as f:
+                                work = images.generate(video_story.TURN_AWAY, video_story.SIZE,
+                                                       sources=[(f.read(), "image/png")], on_progress=progress)
+                        else:
+                            work = images.generate(video_story.picture_prompt(scenes[i], plain, wrong.get(i, "")),
+                                                   video_story.SIZE, on_progress=progress, story=True)
+                        async for item in relay(work):
+                            if isinstance(item, bytes):
+                                yield item
+                            else:
+                                png, _seed = item
+                        paths[i] = os.path.join(folder, f"scene-{i:02d}.png")
+                        with open(paths[i], "wb") as f:
+                            f.write(png)
+                    for i in batch:
+                        yield _event("progress", stage=f"Checking scene {i + 1} against the rules")
+                        with open(paths[i], "rb") as f:
+                            ok, why = video_story.verdict(
+                                await _ask_helper(principal, video_story.check_request(check_model, f.read(), scenes[i])),
+                                scenes[i], must_match=attempt < attempts - 1)
+                        if ok:
+                            told["pictures"][i] = await _store_file(user_id, "video-scene", "image/jpeg",
+                                                                    f"scene {i + 1}.jpg", video_story.as_jpeg(paths[i]))
+                            wrong.pop(i, None)
+                        else:
+                            log.info("video scene %d redrawn: %s", i + 1, why)
+                            wrong[i] = why
+                            failed.append(i)
+                    drawing["wrong"] = {str(i): why for i, why in wrong.items()}
+                    await _save_video(message_id, video)
                 drawing["attempt"] = attempt + 1
                 await _save_video(message_id, video)
                 pending = failed
