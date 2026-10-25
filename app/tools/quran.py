@@ -9,7 +9,6 @@ Matching is on the letters alone. The same ayah is written with different marks 
 جَاعِلٞ and جَاعِلٌ, a small high sukun or a plain one - so the marks, the tatweel and the forms of
 alef are set aside on both sides before the words are compared.
 """
-import asyncio
 import logging
 import os
 import re
@@ -18,6 +17,7 @@ import wave
 import httpx
 
 from app import settings
+from app.tools import child
 
 log = logging.getLogger("tools.quran")
 
@@ -117,11 +117,9 @@ async def recite(ayat, out, ffmpeg):
     # The ayat one after another, brought to the narration's loudness
     joined = ("".join(f"[{n}:a]" for n in range(len(paths))) + f"concat=n={len(paths)}:v=0:a=1,"
               "loudnorm=I=-18:TP=-2:LRA=11[a]")
-    process = await asyncio.create_subprocess_exec(
-        ffmpeg, "-y", *inputs, "-filter_complex", joined, "-map", "[a]", "-ar", "24000", "-ac", "1", out,
-        stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE)
-    _, err = await process.communicate()
-    if process.returncode != 0:
+    _, err, code = await child.run(ffmpeg, "-y", *inputs, "-filter_complex", joined, "-map", "[a]",
+                                   "-ar", "24000", "-ac", "1", out)
+    if code != 0:
         log.warning("Recitation of %s could not be joined: %s", ayat, err.decode(errors="replace")[-600:])
         return None
     with wave.open(out, "rb") as w:

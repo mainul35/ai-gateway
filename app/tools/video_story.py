@@ -29,7 +29,7 @@ import tempfile
 import wave
 
 from app import settings
-from app.tools import quran
+from app.tools import child, quran
 
 log = logging.getLogger("tools.video_story")
 
@@ -509,14 +509,12 @@ async def narrate(lang, texts, folder):
         else:
             results[i] = held_silence(texts[i], lang, out)
     if items:
-        process = await asyncio.create_subprocess_exec(
-            _python(), _worker(), stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE)
         # Bangla a little slower: at its own pace the voice runs words together
         speed = 0.85 if lang == "bn" else 0.92
         job = {"lang": lang, "speed": speed, "items": [{"text": it["text"], "out": it["out"]} for it in items]}
-        out, err = await process.communicate(json.dumps(job).encode())
-        if process.returncode != 0:
+        out, err, code = await child.run(_python(), _worker(), stdin=json.dumps(job).encode(),
+                                         stdout=asyncio.subprocess.PIPE)
+        if code != 0:
             log.warning("narration in %s failed: %s", lang, err.decode(errors="replace")[-800:])
             raise VideoError(f"The {'Bangla' if lang == 'bn' else 'English'} narration could not be made")
         durations = json.loads(out.decode().strip().splitlines()[-1])["durations"]
@@ -675,10 +673,8 @@ def caption(text, path, lang, title=False):
 
 
 async def _run(args, what):
-    process = await asyncio.create_subprocess_exec(*args, stdout=asyncio.subprocess.DEVNULL,
-                                                   stderr=asyncio.subprocess.PIPE)
-    _, err = await process.communicate()
-    if process.returncode != 0:
+    _, err, code = await child.run(*args)
+    if code != 0:
         log.warning("ffmpeg %s failed: %s", what, err.decode(errors="replace")[-1200:])
         raise VideoError(f"The video could not be put together ({what})")
 
