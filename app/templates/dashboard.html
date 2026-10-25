@@ -58,7 +58,6 @@
 .viz-tip{position:absolute;pointer-events:none;z-index:5;background:#0b1220;border:1px solid var(--border);border-radius:6px;
   padding:.3rem .5rem;font-size:.75rem;line-height:1.35;white-space:nowrap;color:var(--text);transform:translate(-50%,-100%)}
 .viz-tip .muted{font-size:.72rem}
-.live-paused{font-size:.75rem;color:var(--muted)}
 </style>
 <h1>Dashboard</h1>
 <p class="sub">Status of the gateway, its models and its backends.</p>
@@ -75,7 +74,7 @@
 
 <div class="card viz" style="margin-bottom:1.5rem">
   <div class="live-head">
-    <h2>Live <span class="live-paused" id="livePaused"></span></h2>
+    <h2>Live</h2>
     <div id="backends" class="muted" style="font-size:.85rem">Loading&hellip;</div>
   </div>
   <div class="live-grid" id="live"><span class="muted">Measuring&hellip;</span></div>
@@ -499,9 +498,11 @@ document.addEventListener('click', async e => {
 });
 
 // --- live hardware -------------------------------------------------------------------------------
-// Asked every LIVE_MS while the tab is visible, never while it is hidden: the server measures only
-// when asked (app/live_metrics.py), so a dashboard left in a background tab costs it nothing. The
-// charts show the last LIVE_WINDOW seconds; the server keeps a little more, so they open full.
+// Asked every LIVE_MS. While the tab is hidden the browser slows the timer to a heartbeat, but it
+// keeps asking: the server measures only when asked (app/live_metrics.py), and the asks keep its
+// sampler alive, so an unattended dashboard still opens to whole charts, refetching the server's
+// history for the slowed period when the tab is shown again. The charts show the last LIVE_WINDOW
+// seconds; the server keeps a little more, so they open full.
 const LIVE_MS = 3000, LIVE_WINDOW = 600;
 // One colour per GPU, in the categorical order (dark steps), so a card keeps its colour in every view
 const GPU_COLORS = ['#3987e5', '#d95926', '#199e70', '#c98500'];
@@ -644,19 +645,15 @@ async function pollLive(first){
 }
 
 function startLive(){
-  if(liveTimer || document.hidden) return;
-  document.getElementById('livePaused').textContent = '';
+  if(liveTimer) return;
   pollLive(!liveHistory.length);
   liveTimer = setInterval(() => pollLive(false), LIVE_MS);
 }
-function stopLive(){
-  clearInterval(liveTimer); liveTimer = null;
-  // The server goes on measuring (app/live_metrics.py), and the page fetches what it missed on return
-  document.getElementById('livePaused').textContent = '· catching up when the tab is shown again';
-}
+// The timer keeps running while the tab is hidden: the browser slows it to a heartbeat, which is
+// enough to keep the server's sampler measuring. When the tab is shown, refetch the whole history
+// for the slowed period from the server.
 document.addEventListener('visibilitychange', () => {
-  if(document.hidden) stopLive();
-  else{ liveHistory = []; startLive(); }     // the gap is the server's to fill, from its own history
+  if(!document.hidden){ liveHistory = []; pollLive(true); }
 });
 
 // Hover on a chart: a crosshair at the nearest sample and a tooltip with its readings and age
