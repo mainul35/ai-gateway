@@ -31,7 +31,7 @@ import unicodedata
 import wave
 
 from app import settings
-from app.tools import child, quran
+from app.tools import child, quran, voices
 
 log = logging.getLogger("tools.video_story")
 
@@ -196,9 +196,9 @@ def parse_translated_story(answer, count):
 # --- who speaks: the cast and each scene's parts -------------------------------------------------
 
 # The kinds of speaker, and how many distinct voices each has, so that two men in a story never sound
-# alike (app/tools/voices.py makes them). The narrator is one voice; the words of Allah, of a prophet
-# or of an angel are always given to the narrator, never to a character.
-KINDS = {"narrator": 1, "man": 3, "older man": 2, "woman": 3, "older woman": 2, "boy": 2, "girl": 2}
+# alike; app/tools/voices.py counts them and makes the voices. The narrator is one voice, and the words
+# of Allah, of a prophet or of an angel are always given to the narrator, never to a character.
+KINDS = voices.KINDS
 
 CAST_PROMPT = """You prepare a story for a narrated children's video. For each numbered SCENE, say who speaks
 which part of it: the narrator, or a character whose own words are quoted.

@@ -18,6 +18,9 @@ python3 scripts/check_control_chars.py app utils scripts
 step "Every page's JavaScript parses"
 python3 scripts/check_page_scripts.py
 
+step "Video stories' character voices are real"
+python3 scripts/check_voice_table.py
+
 step "No credentials committed"
 python3 scripts/check_secrets.py --all
 
