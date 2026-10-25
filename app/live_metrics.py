@@ -1,11 +1,11 @@
 """CPU, memory and every GPU as they are now, for the dashboard's live panel, with a short history.
 
 Measured while someone is watching: a dashboard asking starts a sampler that measures every
-SAMPLE_SECONDS on its own, and goes on for KEEP_SAMPLING after the last ask. A page stops asking while
-its tab is hidden - which the browser also says of a minimised or covered window - and the sampler
-fills that gap, so the page comes back to whole charts. Nobody watching for half an hour, and it
-stops: a machine that sleeps when idle should not be kept busy measuring itself. (It is no work the
-idle check sees: well under 1 % of a core, and no requests.)
+SAMPLE_SECONDS on its own, and goes on for KEEP_SAMPLING after the last ask. A hidden tab still
+asks, slowly (the browser throttles its timers), so an unattended dashboard keeps its charts whole,
+the page refetching the server's history when the tab is shown. Nobody asking for half an hour, and
+it stops: a machine that sleeps when idle should not be kept busy measuring itself. (It is no work
+the idle check sees: well under 1 % of a core, and no requests.)
 """
 import subprocess
 import threading
@@ -94,7 +94,10 @@ def _sample_while_watched():
             if time.monotonic() - _last_asked > KEEP_SAMPLING:
                 _sampler = None
                 return
-            _take()
+            try:
+                _take()
+            except Exception:
+                pass        # a flaky reading must not kill the thread; the next tick tries again
         time.sleep(SAMPLE_SECONDS)
 
 
@@ -104,7 +107,7 @@ def current(with_history=False):
     global _last_asked, _sampler
     with _lock:
         _last_asked = time.monotonic()
-        if _sampler is None:
+        if _sampler is None or not _sampler.is_alive():    # a dead thread is restarted, not remembered
             _sampler = threading.Thread(target=_sample_while_watched, name="live-metrics", daemon=True)
             _sampler.start()
         latest = _take()
