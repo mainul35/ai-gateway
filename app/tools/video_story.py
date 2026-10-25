@@ -83,13 +83,12 @@ Write 8 to 14 scenes. """ + SCENE_RULES
 ILLUSTRATE_PROMPT = """You illustrate a story that is read aloud word for word in a calm video for children
 and families. Its SCENES are fixed: do not change, shorten or reorder them. For each scene give:
 - "picture": what to draw, in English: exactly what that scene tells, so a viewer recognises the
-  moment. Say who is in it and how many (one man, not "people"), what they are doing (swinging an
-  axe at a tree trunk, carrying logs, talking with his employer), where, and the objects that matter,
-  and the shot that shows it best (a medium shot from behind as he swings the axe; a close view of a
-  blunt axe on a stump). Describe every person in full, the same way, in every scene they are in -
-  first decide each one's look (the woodcutter: a strong young man in a brown tunic and a white cap;
-  his employer: an older bearded man in a grey robe) and repeat it word for word every time, never
-  just "the employer" - so the same person appears throughout. A spoken line shows the speaker and the
+  moment. Say who is in it and how many (one man, not "people"), what each is doing - the action
+  itself, as the scene tells it - where, and the objects that matter, and the shot that shows it best
+  (a medium shot from behind, a wide view of the place, a close view of an object). Describe every
+  person in full, the same way, in every scene they are in - first decide each one's look (age, build,
+  the colour and kind of clothing, a head covering) and repeat it word for word every time, never just
+  their role - so the same person appears throughout. A spoken line shows the speaker and the
   listener in their place, from behind. A lesson or advice shows a calm object or place that belongs
   to it. One moment in one picture - never a split screen or several moments side by side; a scene
   that tells of several, shows the one that sums it up. Never a face. Never text.
@@ -213,7 +212,7 @@ Rules:
   and their kind - one of: man, older man, woman, older woman, boy, girl.
 
 Answer with JSON only:
-{"cast": [{"id": "c1", "name": "the woodcutter", "kind": "man"}],
+{"cast": [{"id": "c1", "name": "...", "kind": "man"}],
  "scenes": [[{"speaker": "narrator", "text": "..."}, {"speaker": "c1", "text": "..."}]]}"""
 
 
