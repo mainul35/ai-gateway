@@ -27,6 +27,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+import unicodedata
 import wave
 
 from app import settings
@@ -111,7 +112,36 @@ or a short plain one if it has none.
 Answer with JSON only, one entry for each scene, in order:
 {"title_en": "...", "title_bn": "...", "scenes": [{"picture": "...", "people": "none", "translation": "..."}]}"""
 
-LANGUAGE_NAMES = {"en": "English", "bn": "Bangla (Bengali script)"}
+# The languages a video story can be told in. For each: its name, the caption fonts (the first found
+# in video.fonts.dir), and its machine voice - Kokoro (a language code and a voice; a male narrator
+# where it has one) or one of Meta's MMS voices. "spaces": False for a script written without spaces
+# between words, wrapped at any letter instead; "arabic": its own script is Arabic, kept and spoken.
+LANGUAGES = {
+    "en": {"name": "English", "fonts": ["DejaVuSans.ttf"], "voice": ["kokoro", "a", "am_michael"], "speed": 0.92},
+    "bn": {"name": "Bangla", "fonts": ["NotoSansBengali.ttf"], "voice": ["mms", "facebook/mms-tts-ben"], "speed": 0.85},
+    "es": {"name": "Spanish", "fonts": ["DejaVuSans.ttf"], "voice": ["kokoro", "e", "em_alex"], "speed": 0.92},
+    "fr": {"name": "French", "fonts": ["DejaVuSans.ttf"], "voice": ["kokoro", "f", "ff_siwis"], "speed": 0.92},
+    "zh": {"name": "Chinese", "fonts": ["NotoSansSC[wght].ttf"], "voice": ["kokoro", "z", "zm_yunjian"],
+           "speed": 0.92, "spaces": False},
+    "ja": {"name": "Japanese", "fonts": ["NotoSansJP[wght].ttf"], "voice": ["kokoro", "j", "jm_kumo"],
+           "speed": 0.92, "spaces": False},
+    "ko": {"name": "Korean", "fonts": ["NotoSansKR[wght].ttf"], "voice": ["mms", "facebook/mms-tts-kor"], "speed": 0.9},
+    "th": {"name": "Thai", "fonts": ["NotoSansThai[wdth,wght].ttf"], "voice": ["mms", "facebook/mms-tts-tha"],
+           "speed": 0.9, "spaces": False},
+    "ar": {"name": "Arabic", "fonts": ["Amiri-Regular.ttf", "NotoNaskhArabic[wght].ttf"],
+           "voice": ["mms", "facebook/mms-tts-ara"], "speed": 0.9, "arabic": True},
+    "ur": {"name": "Urdu", "fonts": ["NotoNastaliqUrdu[wght].ttf", "Amiri-Regular.ttf"],
+           "voice": ["mms", "facebook/mms-tts-urd-script_arabic"], "speed": 0.9, "arabic": True},
+    "hi": {"name": "Hindi", "fonts": ["NotoSansDevanagari[wdth,wght].ttf"], "voice": ["kokoro", "h", "hm_omega"],
+           "speed": 0.92},
+}
+
+
+def language_name(lang):
+    return LANGUAGES.get(lang, {}).get("name", lang)
+
+
+LANGUAGE_NAMES = {code: ("Bangla (Bengali script)" if code == "bn" else info["name"]) for code, info in LANGUAGES.items()}
 
 TRANSLATE_PROMPT = """You translate one line of a story for a children's video into {language}, faithfully,
 sentence by sentence: every sentence, nothing added, nothing left out, nothing explained or softened.
@@ -126,6 +156,40 @@ def translate_request(model, text, lang):
             "chat_template_kwargs": {"enable_thinking": False},
             "messages": [{"role": "system", "content": TRANSLATE_PROMPT.replace("{language}", language)},
                          {"role": "user", "content": text}]}
+
+
+TRANSLATE_STORY_PROMPT = """You translate a story for a children's video into {language}, faithfully: each
+numbered line on its own, sentence by sentence - every sentence, nothing added, nothing left out,
+nothing explained or softened. Keep Islamic words as they are said in {language}. Text in Arabic script
+(a verse of the Quran, a blessing) is copied unchanged. Translate the TITLE too.
+
+Answer with JSON only, a line for each numbered line, in order:
+{"title": "...", "lines": ["...", "..."]}"""
+
+
+def translate_story_request(model, title, lines, lang):
+    """The chat request that tells a whole story again in another language, for a language added."""
+    text = f"TITLE: {title}\n\nLINES:\n" + "\n".join(f"{n}. {line}" for n, line in enumerate(lines, 1))
+    room = min(32000, 2000 + 3 * sum(len(line) for line in lines))
+    return {"model": model, "stream": False, "temperature": 0.2, "max_tokens": room,
+            "chat_template_kwargs": {"enable_thinking": False},
+            "messages": [{"role": "system", "content": TRANSLATE_STORY_PROMPT.replace("{language}", language_name(lang))},
+                         {"role": "user", "content": text}]}
+
+
+def parse_translated_story(answer, count):
+    """(title, lines) of a story told again, with a line for every scene, or a VideoError."""
+    if answer is None:
+        raise VideoError(MODEL_DOWN)
+    match = re.search(r"\{.*\}", re.sub(r"<think>.*?</think>", "", answer, flags=re.S), re.S)
+    try:
+        told = json.loads(match.group(0)) if match else {}
+    except ValueError:
+        told = {}
+    lines = [" ".join(str(line).split()) for line in told.get("lines") or []]
+    if len(lines) != count or not all(lines):
+        raise VideoError("The story could not be translated; try again")
+    return " ".join(str(told.get("title") or "").split()), lines
 
 
 def translation(answer):
@@ -501,18 +565,28 @@ def _bare_arabic(text):
 
 
 def spoken(text, lang):
-    """(what the voice says, the words of Arabic it leaves for the eye) for one line of a story."""
-    for abbreviation, _, en, bn in BLESSINGS:
-        text = re.sub(abbreviation, f" {bn if lang == 'bn' else en} ", text)
+    """(what the voice says, the words of Arabic it leaves for the eye) for one line of a story. In a
+    language written in Arabic script (Arabic, Urdu) the line is the voice's to say - all but a verse
+    of the Quran, which is the qari's."""
+    arabic_script = LANGUAGES.get(lang, {}).get("arabic")
+    if not arabic_script:
+        for abbreviation, _, en, bn in BLESSINGS:
+            text = re.sub(abbreviation, f" {bn if lang == 'bn' else en} ", text)
     unspoken = 0
 
     def say(match):
         nonlocal unspoken
+        words = match.group(0).split()
+        if arabic_script:
+            if len(words) >= quran.MIN_WORDS and quran.find(match.group(0)):
+                unspoken += len(words)
+                return " "
+            return match.group(0)
         bare = _bare_arabic(match.group(0))
         for _, arabic, en, bn in BLESSINGS:
             if bare in arabic:
                 return f" {bn if lang == 'bn' else en} "
-        unspoken += len(match.group(0).split())
+        unspoken += len(words)
         return " "
 
     text = ARABIC_RUN.sub(say, text)
@@ -533,14 +607,15 @@ async def narrate(lang, texts, folder):
         else:
             results[i] = held_silence(texts[i], lang, out)
     if items:
-        # Bangla a little slower: at its own pace the voice runs words together
-        speed = 0.85 if lang == "bn" else 0.92
-        job = {"lang": lang, "speed": speed, "items": [{"text": it["text"], "out": it["out"]} for it in items]}
+        language = LANGUAGES.get(lang) or LANGUAGES["en"]
+        # The language's own pace: Bangla a little slower, or the voice runs words together
+        job = {"lang": lang, "voice": language["voice"], "speed": language["speed"],
+               "items": [{"text": it["text"], "out": it["out"]} for it in items]}
         out, err, code = await child.run(_python(), _worker(), stdin=json.dumps(job).encode(),
                                          stdout=asyncio.subprocess.PIPE)
         if code != 0:
             log.warning("narration in %s failed: %s", lang, err.decode(errors="replace")[-800:])
-            raise VideoError(f"The {'Bangla' if lang == 'bn' else 'English'} narration could not be made")
+            raise VideoError(f"The {language_name(lang)} narration could not be made")
         durations = json.loads(out.decode().strip().splitlines()[-1])["durations"]
         for item, seconds in zip(items, durations):
             results[item["i"]] = (item["out"], seconds + READ_SECONDS * said[item["i"]][1])
@@ -563,10 +638,11 @@ def held_silence(text, lang, out):
     return out, max(3.0, READ_SECONDS * spoken(text, lang)[1])
 
 
-def needs_reading(text):
-    """Whether a line has anything for a person to read aloud: a line that is all Arabic is recited
-    by the qari or held in silence, never read by the person (the page asks the same, the same way)."""
-    return re.search(r"\w", ARABIC_RUN.sub(" ", text)) is not None
+def needs_reading(text, lang="en"):
+    """Whether a line has anything for a person to read aloud: a line that is a verse is recited by
+    the qari, and in a language not written in Arabic script a line all in Arabic is held in silence,
+    never read by the person (the page asks the same)."""
+    return re.search(r"\w", spoken(text, lang)[0]) is not None
 
 
 async def with_recitation(text, lang, voice, seconds, folder, name):
@@ -625,20 +701,21 @@ def scene_lengths(narration_seconds):
     return [max(SCENE_MIN, LEAD_IN + seconds + 1.4 + FADE) for seconds in narration_seconds]
 
 
-# The first font found in video.fonts.dir is used; Arabic needs one with the Quran's own letters and
-# marks (alef wasla, the small high signs, ﷺ), which DejaVu Sans does not have
-FONTS = {"bn": ["NotoSansBengali.ttf"], "en": ["DejaVuSans.ttf"],
-         "ar": ["Amiri-Regular.ttf", "NotoNaskhArabic-Regular.ttf", "DejaVuSans.ttf"]}
+# The first font found in video.fonts.dir is used. Arabic within another language's line needs one
+# with the Quran's own letters and marks (alef wasla, the small high signs, ﷺ), which DejaVu Sans
+# does not have
+QURAN_FONTS = ["Amiri-Regular.ttf", "NotoNaskhArabic[wght].ttf", "DejaVuSans.ttf"]
 
 
 def _font(lang, size):
     """The subtitle font, laid out by libraqm: Bangla's vowel signs go before their letter and its
     conjuncts join only with it. ffmpeg's subtitle filter here has no shaping, and wrote "অনকে দনি"
-    for "অনেক দিন" (2026-10-24)."""
+    for "অনেক দিন" (2026-10-24). `lang` "quran" is the font for Arabic in another language's line."""
     from PIL import ImageFont
     folder = os.path.expanduser(settings.get("video.fonts.dir", "VIDEO_FONTS_DIR") or "")
-    path = next((os.path.join(folder, name) for name in FONTS.get(lang, []) + FONTS["en"]
-                 if os.path.isfile(os.path.join(folder, name))), os.path.join(folder, FONTS["en"][0]))
+    names = QURAN_FONTS if lang == "quran" else (LANGUAGES.get(lang) or LANGUAGES["en"])["fonts"]
+    path = next((os.path.join(folder, name) for name in names + ["DejaVuSans.ttf"]
+                 if os.path.isfile(os.path.join(folder, name))), os.path.join(folder, "DejaVuSans.ttf"))
     engine = ImageFont.Layout.RAQM if hasattr(ImageFont, "Layout") else None
     return ImageFont.truetype(path, size, layout_engine=engine)
 
@@ -664,7 +741,11 @@ def caption(text, path, lang, title=False):
     from PIL import Image, ImageDraw
     # A long line of a story read word for word is set a little smaller, to cover less of the picture
     size = 54 if title else 34 if len(text) <= 160 else 29
-    fonts = {False: _font(lang, size), True: _font("ar", int(size * 1.15))}
+    language = LANGUAGES.get(lang) or LANGUAGES["en"]
+    # Arabic in the line: in the language's own font when it is written in Arabic script (Urdu's
+    # Nastaliq), otherwise in one with the Quran's letters
+    fonts = {False: _font(lang, size),
+             True: _font(lang, size) if language.get("arabic") else _font("quran", int(size * 1.15))}
     image = Image.new("RGBA", (WIDTH, HEIGHT), (0, 0, 0, 0))
     draw = ImageDraw.Draw(image)
 
@@ -672,15 +753,26 @@ def caption(text, path, lang, title=False):
         return sum(draw.textlength(piece, font=fonts[ar], direction="rtl" if ar else None)
                    for piece, ar in _pieces(line))
 
+    # Wrapped at the spaces - or, in Chinese, Japanese and Thai, written without them, at any letter
+    # (a mark that sits on a letter stays with it)
+    if language.get("spaces", True):
+        units, joiner = text.split(), " "
+    else:
+        units, joiner = [], ""
+        for char in text.strip():
+            if units and (unicodedata.category(char) in ("Mn", "Mc") or char in "，。、！？」』）,.!?)"):
+                units[-1] += char
+            else:
+                units.append(char)
     lines, line = [], ""
-    for word in text.split():
-        trial = f"{line} {word}".strip()
+    for unit in units:
+        trial = f"{line}{joiner}{unit}".strip() if joiner else line + unit
         if line and measure(trial) > WIDTH - 200:
-            lines.append(line)
-            line = word
+            lines.append(line.strip())
+            line = unit
         else:
             line = trial
-    lines += [line] if line else []
+    lines += [line.strip()] if line.strip() else []
     step = int(size * (1.7 if ARABIC_RUN.search(text) else 1.45))
     height = step * len(lines)
     y = (HEIGHT - height) // 2 if title else HEIGHT - 40 - height

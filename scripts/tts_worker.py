@@ -2,18 +2,23 @@
 
 Run by app/tools/video_story.py in its own Python (settings video.tts.python, a 3.12 environment:
 Kokoro's English text handling does not run on the gateway's 3.14). Reads one JSON object on stdin,
-{"lang": "en" | "bn", "items": [{"text", "out"}], "speed": 0.92}, writes each WAV, and prints
-{"durations": [seconds, ...]} on stdout. Everything runs on the CPU; the GPUs are left to the models.
+{"lang": "en", "voice": ["kokoro", "a", "am_michael"] | ["mms", "facebook/mms-tts-ben"],
+ "items": [{"text", "out"}], "speed": 0.92}, writes each WAV, and prints {"durations": [seconds, ...]}
+on stdout. Everything runs on the CPU; the GPUs are left to the models. The voice of each language is
+in app/tools/video_story.py (LANGUAGES):
 
-  English  Kokoro-82M (hexgrad), voice am_michael: a calm male narrator
-  Bangla   Meta's MMS-TTS for Bengali (facebook/mms-tts-ben)
+  Kokoro-82M (hexgrad): English, Spanish, French, Chinese, Japanese, Hindi - a calm male narrator
+    where the language has one
+  Meta's MMS-TTS: Bangla, Korean, Thai, Arabic, Urdu; some of them read romanised text (uroman)
 
 The environment on homelabai (~/tts-venv, about 1.5 GB), made with uv:
   uv venv -p 3.12 ~/tts-venv
   uv pip install -p ~/tts-venv/bin/python --index-url https://download.pytorch.org/whl/cpu torch
   uv pip install -p ~/tts-venv/bin/python kokoro soundfile transformers imageio-ffmpeg
   uv pip install -p ~/tts-venv/bin/python <en_core_web_sm-3.8.0 wheel from spaCy's GitHub releases>
-The fonts for the words on screen go in video.fonts.dir (~/fonts): NotoSansBengali.ttf, DejaVuSans.ttf.
+  uv pip install -p ~/tts-venv/bin/python "misaki[ja,zh]" uroman      # Japanese, Chinese; romanising
+The fonts for the words on screen go in video.fonts.dir (~/fonts): the ones each language names in
+LANGUAGES - DejaVu Sans, Noto Sans Bengali, JP, KR, SC, Thai, Devanagari, Noto Nastaliq Urdu, Amiri.
 """
 import json
 import re
@@ -29,14 +34,14 @@ CLAUSE_SECONDS = 0.15           # at a comma, in Bangla
 NOISE, NOISE_DURATION = 0.45, 0.5
 
 
-def english(items, speed):
+def kokoro(items, speed, lang_code="a", voice="am_michael"):
     from kokoro import KPipeline
-    pipeline = KPipeline(lang_code="a", repo_id="hexgrad/Kokoro-82M")
+    pipeline = KPipeline(lang_code=lang_code, repo_id="hexgrad/Kokoro-82M")
     durations = []
     for item in items:
         try:
             pieces = [np.asarray(audio, dtype=np.float32)
-                      for _, _, audio in pipeline(item["text"], voice="am_michael", speed=speed)]
+                      for _, _, audio in pipeline(item["text"], voice=voice, speed=speed)]
         except Exception as e:            # one line the voice cannot say is silence, not a lost video
             print(f"line not spoken: {e}: {item['text'][:80]!r}", file=sys.stderr)
             pieces = []
@@ -46,11 +51,16 @@ def english(items, speed):
     return durations
 
 
-def bangla(items, speed, noise=NOISE, noise_duration=NOISE_DURATION):
+def mms(items, speed, model_id="facebook/mms-tts-ben", noise=NOISE, noise_duration=NOISE_DURATION):
     import torch
     from transformers import AutoTokenizer, VitsModel
-    model = VitsModel.from_pretrained("facebook/mms-tts-ben")
-    tokenizer = AutoTokenizer.from_pretrained("facebook/mms-tts-ben")
+    model = VitsModel.from_pretrained(model_id)
+    tokenizer = AutoTokenizer.from_pretrained(model_id)
+    # Some MMS voices (Korean, Arabic, ...) were trained on romanised text, and read nothing else
+    romanise = None
+    if getattr(tokenizer, "is_uroman", False):
+        import uroman
+        romanise = uroman.Uroman().romanize_string
     model.speaking_rate = speed
     model.noise_scale = noise
     model.noise_scale_duration = noise_duration
@@ -61,13 +71,13 @@ def bangla(items, speed, noise=NOISE, noise_duration=NOISE_DURATION):
     durations = []
     for item in items:
         # One sentence at a time: the model reads a long line less clearly than several short ones
-        sentences = [s.strip() for s in re.split(r"(?<=[।!?.])\s+", item["text"]) if s.strip()]
+        sentences = [s.strip() for s in re.split(r"(?<=[।!?.؟۔])\s+", item["text"]) if s.strip()]
         parts = []
         for sentence in sentences:
             # A breath at each comma: read in one go, the clauses ran into each other
-            clauses = [c.strip() for c in re.split(r"(?<=[,;])\s+", sentence) if c.strip()]
+            clauses = [c.strip() for c in re.split(r"(?<=[,;،])\s+", sentence) if c.strip()]
             for k, clause in enumerate(clauses):
-                inputs = tokenizer(clause, return_tensors="pt")
+                inputs = tokenizer(romanise(clause) if romanise else clause, return_tensors="pt")
                 # Text with nothing in Bangla it can read - Latin letters ("Wa iz qaala rabbuka"), a lone
                 # bracket, "..." - comes out as no tokens at all, and the model fails on it ("narrow():
                 # length must be non-negative"): that ended a 28-scene video after its last picture
@@ -90,11 +100,13 @@ def main():
     job = json.load(sys.stdin)
     speed = float(job.get("speed") or 0.92)
     items = job.get("items") or []
-    if job.get("lang") == "bn":
-        durations = bangla(items, speed, float(job.get("noise") or NOISE),
-                           float(job.get("noise_duration") or NOISE_DURATION))
+    voice = job.get("voice") or (["mms", "facebook/mms-tts-ben"] if job.get("lang") == "bn"
+                                 else ["kokoro", "a", "am_michael"])
+    if voice[0] == "mms":
+        durations = mms(items, speed, voice[1], float(job.get("noise") or NOISE),
+                        float(job.get("noise_duration") or NOISE_DURATION))
     else:
-        durations = english(items, speed)
+        durations = kokoro(items, speed, voice[1], voice[2])
     print(json.dumps({"durations": durations}))
 
 
