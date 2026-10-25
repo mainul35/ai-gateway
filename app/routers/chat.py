@@ -29,7 +29,7 @@ from app.routers.openai_v1 import PROXY_PATHS, forward
 from app.tools import (agent, chooser, documents, image_prompt, images, jobs, map_plan,
                         map_web, maps, markdown, mcp_client, media, memory as memory_tool,
                         photo, places, portrait, router as intent_router, self_tools, subtitles,
-                        turn_facts, understand, video_story, web_search)
+                        turn_facts, understand, video_story, voices, web_search)
 
 log = logging.getLogger("playground")
 
@@ -2272,6 +2272,22 @@ def _set_line(story, lang, i, text):
                      "text": {code: story[code][i] for code in video_story.LANGUAGES if i < len(story.get(code) or [])}}]
 
 
+def _scene_parts_in(story, lang, i):
+    """A scene's parts in one language, as the narrator is given them: {speaker, text} in order. A
+    scene with no parts - or none with words in this language - is the narrator's line alone."""
+    parts = story.get("parts")
+    if parts and i < len(parts) and parts[i]:
+        out = []
+        for p in parts[i]:
+            t = p.get("text")
+            text = (t or {}).get(lang, "") if isinstance(t, dict) else (t or "")
+            if text:
+                out.append({"speaker": p.get("speaker") or "narrator", "text": text})
+        if out:
+            return out
+    return [{"speaker": "narrator", "text": (story.get(lang) or [""])[i]}]
+
+
 def _drop_scene(story, i):
     for key in PER_SCENE:
         if isinstance(story.get(key), list) and i < len(story[key]):
@@ -2540,7 +2556,25 @@ async def get_video(message_id: int, principal: Principal = Depends(authenticate
     conversation = await session.get(Conversation, message.conversation_id)
     running = jobs.running_for(user.id, message.conversation_id)
     return {"message_id": message.id, "conversation": conversation.uid if conversation else None, "video": video,
+            # the voice each of a story's characters is given, in its languages: so the draft page can
+            # say which are voices the model has and which are the language's one voice, turned
+            "voice_plan": _voice_plan(video),
             "being_made": running is not None and running.kind == "video"}
+
+
+def _voice_plan(video):
+    """{lang: {voice slot: {name, turned}}} for a story's languages: which of its characters get a
+    voice the model has, and which the language's own voice, turned a little (app/tools/voices.py)."""
+    story = video.get("story") or {}
+    langs = [l for l in video_story.LANGUAGES if l in story or l in (video.get("languages") or [])]
+    plan = {}
+    for lang in langs:
+        narrator = voices.narrator(lang)
+        plan[lang] = {slot: {"name": voices.spec(lang, slot, narrator)[1] if narrator[0] == "kokoro"
+                             else "the voice",
+                             "turned": voices.shifted(lang, slot, narrator)}
+                      for slot in voices.kinds()}
+    return plan
 
 
 async def _save_video(message_id, video, stats=None):
@@ -2868,6 +2902,8 @@ async def _video_pipeline(principal, user_id, ctx):
         videos = video.setdefault("videos", {})
         voices = told.setdefault("narration", {})
         cache = video_story.clip_cache(message_id)
+        # Who speaks each part, in which voice: a character's id to the voice slot their cast gives them
+        cast_map = {m["id"]: m.get("voice") or "narrator" for m in told.get("cast") or []}
         for k, lang in enumerate(languages):
             if lang in videos:
                 continue                                         # made before it stopped, or not edited
@@ -2880,7 +2916,9 @@ async def _video_pipeline(principal, user_id, ctx):
             yield step(3 + 2 * k, 0.0, f"Narrating in {word}" +
                        (f": {len(missing)} of {len(texts)} lines" if 0 < len(missing) < len(texts) else ""))
             if missing:
-                spoken = await video_story.narrate(lang, [texts[i] for i in missing], folder)
+                # Each scene's parts, in their speakers' voices, joined into the scene's one line
+                spoken = await video_story.narrate_parts(lang, [_scene_parts_in(told, lang, i) for i in missing],
+                                                         cast_map, folder)
                 for i, (wav, seconds) in zip(missing, spoken):
                     audio = await video_story.to_m4a(wav, os.path.join(folder, f"voice-{lang}-{i:02d}.m4a"))
                     entries[i] = {"file_id": await _store_file(user_id, "voice", "audio/mp4",

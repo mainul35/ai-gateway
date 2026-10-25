@@ -30,6 +30,7 @@
 .cast-row{display:grid;grid-template-columns:minmax(8rem,14rem) 10rem 8rem auto;gap:.5rem;align-items:center;margin-top:.5rem}
 @media (max-width:640px){.cast-row{grid-template-columns:1fr 1fr}}
 .cast-row input,.cast-row select{width:100%}
+.cast-voice{margin:0 0 .5rem 1.5rem;font-size:.72rem;opacity:.75}
 .draft-scenes{display:flex;flex-direction:column;gap:.9rem}
 .draft-scene{background:var(--card);border-radius:12px;padding:.8rem 1rem;border:1px solid transparent}
 .draft-scene.changed{border-color:#f59e0b}
@@ -63,6 +64,15 @@
   function voiceSlots(kind){
     if(kind === 'narrator') return ['narrator'];
     return Array.from({length: KINDS[kind] || 1}, (_, n) => `${kind.replace(' ', '-')}-${n + 1}`);
+  }
+
+  // The voice a character is given, in the story's languages: a voice the model has, or the
+  // language's one voice, turned (app/tools/voices.py, sent as voice_plan)
+  function voiceNote(plan, member, langs){
+    return langs.map(l => {
+      const info = (plan[l] || {})[member.voice];
+      return info ? `${(NAMES[l] || l)}: ${info.turned ? 'turned' : info.name}` : '';
+    }).filter(Boolean).join('  ·  ');
   }
 
   window.renderDraft = function(container, current, hooks){
@@ -102,7 +112,8 @@
           <select data-field="voice">${voiceSlots(m.kind).map((slot, n) =>
             `<option value="${slot}" ${slot === m.voice ? 'selected' : ''}>${m.kind === 'narrator' ? 'Narrator voice' : 'Voice ' + (n + 1)}</option>`).join('')}</select>
           ${m.id === 'narrator' ? '<span></span>' : `<button type="button" class="small danger" data-remove-cast="${k}"
-            title="Take this character out; their parts become the narrator's">✕</button>`}</div>`).join('')}
+            title="Take this character out; their parts become the narrator's">✕</button>`}</div>
+          ${(() => { const note = voiceNote(current.voice_plan || {}, m, langs); return note ? `<div class="cast-voice">${esc(note)}</div>` : ''; })()}`).join('')}
         <div style="margin-top:.6rem"><button type="button" class="small" id="addCast">＋ Add a character</button></div>
         <div class="draft-sacred">The words of Allah, of a prophet or of an angel are always read in the narrator's
           voice, never given to a character.</div>`;
