@@ -2535,13 +2535,16 @@ class VoiceIn(BaseModel):
     # One per scene, in order: a recording (base64, as the browser recorded it), or null to keep the
     # one saved last time for that scene
     recordings: list[str | None] = Field(max_length=video_story.GIVEN_MAX_SCENES)
+    # Which language's video: the person reads the English too - its voice says Arabic names and
+    # blessings wrongly
+    lang: str = Field(default="bn", pattern="^(en|bn)$")
 
 
 @router.post("/video/{message_id}/voice")
 async def video_voice(message_id: int, payload: VoiceIn, principal: Principal = Depends(authenticate),
                       session: AsyncSession = Depends(get_session)):
-    """The Bangla video made again with the person's own voice: each scene's line as they read it.
-    The recordings are kept, so one scene can be read again later without the others."""
+    """A language's video made again with the person's own voice: each scene's line as they read it.
+    The recordings are kept, per language, so one scene can be read again later without the others."""
     user = _require_user(principal)
     message = (await session.execute(
         select(ConversationMessage).join(Conversation).where(
@@ -2555,13 +2558,17 @@ async def video_voice(message_id: int, payload: VoiceIn, principal: Principal = 
         raise HTTPException(status.HTTP_409_CONFLICT,
                             "This video was made before stories were kept; make it again to read it yourself")
     count = len(story["pictures"])
-    saved = story.get("voice_bn") or [None] * count
+    lang = payload.lang
+    word = "Bangla" if lang == "bn" else "English"
+    if lang not in story or lang not in (video.get("videos") or {}):
+        raise HTTPException(status.HTTP_409_CONFLICT, f"This story has no {word} video to read")
+    saved = story.get(f"voice_{lang}") or [None] * count
     if len(payload.recordings) != count:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, f"This story has {count} scenes")
     if any(len(r or "") > 6_000_000 for r in payload.recordings):
         raise HTTPException(status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, "A recording is too long; keep each scene under two minutes")
     # A scene that is all Arabic - a verse - is recited by the qari, not read by the person
-    reads = [video_story.needs_reading(line) for line in story["bn"]]
+    reads = [video_story.needs_reading(line) for line in story[lang]]
     missing = [n + 1 for n, (new, old) in enumerate(zip(payload.recordings, saved))
                if reads[n] and not new and not old]
     if missing:
@@ -2583,13 +2590,13 @@ async def video_voice(message_id: int, payload: VoiceIn, principal: Principal = 
                 with open(paths[-1], "wb") as f:
                     f.write(found[picture].data)
             for n, (new, old) in enumerate(zip(payload.recordings, saved)):
-                line = story["bn"][n]
+                line = story[lang][n]
                 if not reads[n]:
                     if old:                           # read before the qari took these scenes
                         replaced.append(old["file_id"])
                     voice.append(None)
-                    narration.append(await video_story.with_recitation(line, "bn", None, 0, folder, f"bn-{n:02d}")
-                                     or video_story.held_silence(line, "bn", os.path.join(folder, f"held-{n:02d}.wav")))
+                    narration.append(await video_story.with_recitation(line, lang, None, 0, folder, f"{lang}-{n:02d}")
+                                     or video_story.held_silence(line, lang, os.path.join(folder, f"held-{n:02d}.wav")))
                     continue
                 if new:
                     yield _event("progress", stage=f"Cleaning up the recording of scene {n + 1}",
@@ -2615,23 +2622,24 @@ async def video_voice(message_id: int, payload: VoiceIn, principal: Principal = 
                 with open(path, "wb") as f:
                     f.write(data)
                 # A verse in a line the person read keeps its recitation, in the order it is written
-                narration.append(await video_story.with_recitation(line, "bn", path, voice[-1]["seconds"],
-                                                                   folder, f"bn-{n:02d}")
+                narration.append(await video_story.with_recitation(line, lang, path, voice[-1]["seconds"],
+                                                                   folder, f"{lang}-{n:02d}")
                                  or (path, voice[-1]["seconds"]))
-            yield _event("progress", stage="Putting the Bangla video together with your voice", fraction=0.6)
-            data, seconds = await video_story.assemble(paths, narration, story["bn"], video.get("title_bn") or "",
-                                                       "bn", folder, recorded=True)
+            yield _event("progress", stage=f"Putting the {word} video together with your voice", fraction=0.6)
+            title = (video.get("title_bn") if lang == "bn" else video.get("title")) or ""
+            data, seconds = await video_story.assemble(paths, narration, story[lang], title, lang, folder,
+                                                       recorded=True)
             async with session_factory()() as db:
                 stored = ChatFile(user_id=user_id, kind="video", mime_type="video/mp4",
-                                  name=f"{video.get('title', 'Video story')[:80]} (Bangla, your voice).mp4",
-                                  prompt=video.get("title_bn"), data=data)
+                                  name=f"{video.get('title', 'Video story')[:80]} ({word}, your voice).mp4",
+                                  prompt=title, data=data)
                 db.add(stored)
                 await db.commit()
             created.append(stored.id)
-            previous = (video.get("videos") or {}).get("bn")
-            video.setdefault("videos", {})["bn"] = {"file_id": stored.id, "url": f"/chat/files/{stored.id}",
+            previous = (video.get("videos") or {}).get(lang)
+            video.setdefault("videos", {})[lang] = {"file_id": stored.id, "url": f"/chat/files/{stored.id}",
                                                     "seconds": seconds, "voice": "recorded"}
-            story["voice_bn"] = voice
+            story[f"voice_{lang}"] = voice
             video["story"] = story
             filed["video"] = video
             async with session_factory()() as db:
