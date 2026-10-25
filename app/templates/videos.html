@@ -1,0 +1,276 @@
+{% extends "base.html" %}
+{% block title %}Videos &middot; Model Gateway{% endblock %}
+{% block content %}
+<style>
+.videos-layout{display:grid;grid-template-columns:minmax(15rem,20rem) 1fr;gap:1.25rem;align-items:start}
+@media (max-width:900px){.videos-layout{grid-template-columns:1fr}}
+.story-row{display:flex;gap:.7rem;align-items:center;width:100%;text-align:left;background:none;cursor:pointer;
+           border:1px solid var(--border);border-radius:10px;padding:.5rem;margin-bottom:.5rem;color:var(--text)}
+.story-row:hover,.story-row.active{border-color:var(--primary)}
+.story-row img{width:84px;aspect-ratio:16/9;object-fit:cover;border-radius:6px;flex:none;background:var(--input)}
+.story-row .what{font-weight:600;display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.story-row .meta{font-size:.78rem;color:var(--muted)}
+.story-row .text{min-width:0}
+.players{display:flex;flex-wrap:wrap;gap:1rem;margin:.6rem 0 1rem}
+.player{flex:1;min-width:16rem;max-width:34rem}
+.player video{width:100%;border-radius:10px;background:#000;display:block}
+.player h3{font-size:.9rem;margin:0 0 .35rem}
+.versions{font-size:.82rem;margin-top:.4rem}
+.versions summary{cursor:pointer;color:var(--muted)}
+.versions li{margin:.25rem 0}
+.versions button,.scene button{background:none;border:1px solid var(--border);border-radius:7px;color:var(--text);
+                                padding:.2rem .6rem;cursor:pointer;font-size:.82rem}
+.scene{display:grid;grid-template-columns:200px 1fr;gap:.9rem;padding:.8rem 0;border-top:1px solid var(--border)}
+@media (max-width:640px){.scene{grid-template-columns:1fr}}
+.scene img{width:100%;aspect-ratio:16/9;object-fit:cover;border-radius:8px;cursor:zoom-in;background:var(--input)}
+.scene .no{font-size:.78rem;color:var(--muted);margin-bottom:.3rem}
+.scene label{display:block;font-size:.8rem;color:var(--muted);margin:.35rem 0 .15rem}
+.scene textarea{width:100%;min-height:3.6rem;resize:vertical;font-size:.95rem;line-height:1.5;font-family:inherit}
+.scene label:has(input[type=checkbox]){display:flex;align-items:center;gap:.45rem;cursor:pointer}
+.scene input[type=checkbox]{width:auto;margin:0;flex:none}
+.scene textarea.changed{border-color:var(--primary)}
+.scene .voice{font-size:.75rem;color:var(--muted);margin-left:.4rem}
+.scene .redraw{margin-top:.5rem}
+.scene .redraw textarea{min-height:3rem;font-size:.85rem}
+.scene .stale{font-size:.78rem;color:#f59e0b;margin-top:.2rem}
+.save-row{position:sticky;bottom:0;background:var(--bg);padding:.8rem 0;border-top:1px solid var(--border);
+          display:flex;flex-wrap:wrap;gap:.75rem;align-items:center;margin-top:.5rem}
+.progress{margin-top:.6rem}
+.progress .line{font-size:.85rem;color:var(--muted)}
+.progress .bar{height:6px;background:var(--input);border-radius:3px;overflow:hidden;margin:.3rem 0 .5rem}
+.progress .bar div{height:100%;background:var(--primary);width:0;transition:width .3s}
+.progress .bar.total{height:4px}
+.progress .bar.total div{background:var(--muted)}
+dialog.zoom{border:none;background:none;padding:0;max-width:96vw}
+dialog.zoom img{max-width:96vw;max-height:90vh;border-radius:8px}
+dialog.zoom::backdrop{background:rgba(0,0,0,.8)}
+</style>
+
+<h1>Videos</h1>
+<p class="sub">Your video stories. Open one to change a sentence, a translation or a picture: only what you
+  change is made again, and the videos it replaces are kept as earlier versions.</p>
+<div id="error" class="note err" hidden></div>
+
+<div class="videos-layout">
+  <div id="list"><p class="muted">Loading…</p></div>
+  <div id="editor" class="card"><p class="muted">Choose a video story.</p></div>
+</div>
+<dialog class="zoom" id="zoom"><img alt=""></dialog>
+
+<script>
+const NAMES = {en: 'English', bn: 'বাংলা (Bangla)'};
+const BY = {machine: 'machine voice', recorded: 'your voice', qari: 'recited by the qari'};
+const JSON_HEADERS = {'Content-Type': 'application/json'};
+let current = null;             // {message_id, conversation, video, being_made}
+
+function showError(text){
+  const box = document.getElementById('error');
+  box.textContent = text || '';
+  box.hidden = !text;
+}
+
+async function api(path, options){
+  const response = await fetch(path, options);
+  if(response.status === 401){ location.href = '/login'; throw new Error('signed out'); }
+  const body = await response.json().catch(() => ({}));
+  if(!response.ok) throw new Error((typeof body.detail === 'string' && body.detail) || `HTTP ${response.status}`);
+  return body;
+}
+
+async function readEvents(response, onData){
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  while(true){
+    const {value, done} = await reader.read();
+    if(done) break;
+    buffer += decoder.decode(value, {stream: true});
+    const lines = buffer.split('\n');
+    buffer = lines.pop();
+    for(const line of lines){
+      if(!line.startsWith('data:')) continue;
+      let chunk;
+      try{ chunk = JSON.parse(line.slice(5).trim()); }catch(e){ continue; }
+      if(chunk.error) throw new Error(chunk.error.message || 'It stopped');
+      onData(chunk);
+    }
+  }
+}
+
+async function loadList(){
+  const {videos} = await api('/chat/videos');
+  const list = document.getElementById('list');
+  if(!videos.length){
+    list.innerHTML = '<p class="muted">No video stories yet. Make one in the Playground with Video story switched on.</p>';
+    return;
+  }
+  list.innerHTML = videos.map(v => `<button type="button" class="story-row" data-id="${v.message_id}">
+      ${v.picture ? `<img src="/chat/files/${v.picture}" alt="" loading="lazy">` : '<img alt="">'}
+      <span class="text"><span class="what">${escapeHtml(v.title || 'Video story')}</span>
+        <span class="meta">${v.scenes || '?'} scenes · ${v.languages.map(l => l.toUpperCase()).join(' + ') || 'no video yet'}
+          ${v.state !== 'done' ? ' · ' + escapeHtml(v.state) : ''}${v.versions ? ` · ${v.versions} earlier version${v.versions > 1 ? 's' : ''}` : ''}</span>
+        <span class="meta">${escapeHtml(v.made.replace('T', ' '))}</span></span></button>`).join('');
+  list.querySelectorAll('.story-row').forEach(row => row.addEventListener('click', () => openStory(Number(row.dataset.id))));
+  const wanted = Number(new URLSearchParams(location.search).get('id'));
+  if(wanted && !current) openStory(wanted);
+}
+
+async function openStory(id){
+  showError('');
+  document.querySelectorAll('.story-row').forEach(r => r.classList.toggle('active', Number(r.dataset.id) === id));
+  history.replaceState(null, '', `/videos?id=${id}`);
+  try{ current = await api(`/chat/videos/${id}`); }catch(e){ showError(e.message); return; }
+  render();
+}
+
+function render(){
+  const {video} = current;
+  const story = video.story || {};
+  const editor = document.getElementById('editor');
+  const langs = video.languages || Object.keys(video.videos || {});
+  const scenes = story.pictures || [];
+  editor.innerHTML = `<h2>${escapeHtml(video.title || 'Video story')}${video.title_bn ? ` · <span class="muted">${escapeHtml(video.title_bn)}</span>` : ''}</h2>
+    <p class="muted" style="margin:.2rem 0">${scenes.length} scenes${current.conversation ?
+      ` · <a href="/playground?c=${encodeURIComponent(current.conversation)}">open its conversation</a> (to read a language in your own voice)` : ''}</p>
+    ${current.being_made ? '<div class="note">This video is being made right now; its scenes can be changed once it is done.</div>' : ''}
+    ${video.state && video.state !== 'done' && !current.being_made ? `<div class="note">It stopped partway${video.paused ? ': ' + escapeHtml(video.paused) : ''}.
+      What it made is kept. <button type="button" class="btn btn-secondary" id="carryOn">Continue from where it stopped</button></div>` : ''}
+    <div class="players">${langs.map(l => {
+      const now = (video.videos || {})[l];
+      const earlier = (video.versions || {})[l] || [];
+      return `<div class="player"><h3>${NAMES[l] || l}${now?.voice ? ` <span class="muted">· ${escapeHtml(now.voice === 'recorded' ? 'your voice' : now.voice)}</span>` : ''}</h3>
+        ${now ? `<video controls preload="metadata" playsinline src="${escapeHtml(now.url)}"></video>` : '<p class="muted">Not made yet.</p>'}
+        ${earlier.length ? `<details class="versions"><summary>${earlier.length} earlier version${earlier.length > 1 ? 's' : ''}</summary><ol>${
+          earlier.map(v => `<li>replaced ${escapeHtml((v.replaced_at || '').replace('T', ' '))} ·
+            <a href="${escapeHtml(v.url)}" target="_blank" rel="noopener">play</a>
+            <button type="button" data-restore="${v.file_id}" data-lang="${l}">Bring back</button></li>`).join('')}</ol></details>` : ''}
+      </div>`;}).join('')}</div>
+    ${!story.pictures ? '<p class="muted">This video was made before its scenes were kept, so it cannot be edited. Make it again to edit it.</p>' :
+      scenes.map((picture, i) => `<div class="scene" data-i="${i}">
+        <div>${picture ? `<img src="/chat/files/${picture}" alt="Scene ${i + 1}" loading="lazy">` : '<p class="muted">No picture yet</p>'}
+          <div class="redraw"><label><input type="checkbox" class="do-redraw"> Draw this picture again</label>
+            <textarea class="describe" hidden placeholder="What to draw (optional; as before if left as it is)">${escapeHtml((story.drawn || [])[i] || '')}</textarea></div></div>
+        <div><div class="no">Scene ${i + 1} of ${scenes.length}</div>
+          ${langs.map(l => {
+            const entry = ((story.narration || {})[l] || [])[i];
+            return `<label>${NAMES[l] || l}${entry ? `<span class="voice">${BY[entry.by] || entry.by}</span>` : ''}</label>
+              <textarea class="line" data-lang="${l}" lang="${l}" dir="auto">${escapeHtml((story[l] || [])[i] || '')}</textarea>
+              ${entry?.by === 'recorded' ? '<div class="stale" hidden>Your reading of this line no longer fits; the machine voice reads it until you read it again.</div>' : ''}`;
+          }).join('')}
+          ${langs.length > 1 ? '<label><input type="checkbox" class="retranslate"> Translate my change into the other language' + (langs.length > 2 ? 's' : '') + '</label>' : ''}
+        </div></div>`).join('')}
+    ${story.pictures ? `<div class="save-row"><button class="btn" id="save" disabled>Save and remake what changed</button>
+      <span class="muted" id="changes">Nothing changed yet.</span></div>
+      <div class="progress" id="progress" hidden><div class="line" id="partLine"></div><div class="bar"><div id="partBar"></div></div>
+        <div class="line" id="wholeLine"></div><div class="bar total"><div id="wholeBar"></div></div></div>` : ''}`;
+  wire();
+}
+
+function changes(){
+  const {video} = current;
+  const story = video.story || {};
+  const out = [];
+  document.querySelectorAll('.scene').forEach(scene => {
+    const i = Number(scene.dataset.i);
+    const change = {index: i, text: {}};
+    scene.querySelectorAll('.line').forEach(area => {
+      const was = (story[area.dataset.lang] || [])[i] || '';
+      const now = area.value.split(/\s+/).join(' ').trim();
+      const edited = now && now !== was.split(/\s+/).join(' ').trim();
+      area.classList.toggle('changed', !!edited);
+      const stale = area.nextElementSibling;
+      if(stale?.classList.contains('stale')) stale.hidden = !edited;
+      if(edited) change.text[area.dataset.lang] = now;
+    });
+    change.retranslate = !!scene.querySelector('.retranslate')?.checked && Object.keys(change.text).length > 0;
+    if(scene.querySelector('.do-redraw').checked){
+      change.redraw = true;
+      const describe = scene.querySelector('.describe').value.trim();
+      if(describe && describe !== ((story.drawn || [])[i] || '').trim()) change.picture = describe;
+    }
+    if(Object.keys(change.text).length || change.redraw) out.push(change);
+  });
+  return out;
+}
+
+function wire(){
+  const editor = document.getElementById('editor');
+  editor.querySelectorAll('.scene img').forEach(img => img.addEventListener('click', () => {
+    const zoom = document.getElementById('zoom');
+    zoom.querySelector('img').src = img.src;
+    zoom.showModal();
+  }));
+  editor.querySelectorAll('.do-redraw').forEach(box => box.addEventListener('change', () => {
+    box.closest('.redraw').querySelector('.describe').hidden = !box.checked;
+  }));
+  const save = document.getElementById('save');
+  const note = document.getElementById('changes');
+  const update = () => {
+    const list = changes();
+    if(save){
+      save.disabled = !list.length || current.being_made;
+      note.textContent = list.length ? `${list.length} scene${list.length > 1 ? 's' : ''} changed` : 'Nothing changed yet.';
+    }
+  };
+  editor.addEventListener('input', update);
+  editor.addEventListener('change', update);
+  save?.addEventListener('click', () => remake(changes()));
+  document.getElementById('carryOn')?.addEventListener('click', () => remake(null));
+  editor.querySelectorAll('[data-restore]').forEach(button => button.addEventListener('click', async () => {
+    try{
+      await api(`/chat/video/${current.message_id}/version`, {method: 'POST', headers: JSON_HEADERS,
+        body: JSON.stringify({lang: button.dataset.lang, file_id: Number(button.dataset.restore)})});
+      await openStory(current.message_id);
+      loadList();
+    }catch(e){ showError(e.message); }
+  }));
+}
+
+function showProgress(event){
+  const box = document.getElementById('progress');
+  box.hidden = false;
+  if(event.step != null){
+    const detail = event.stage && event.stage !== event.step_name ? `: ${event.stage}` : '';
+    document.getElementById('partLine').textContent = `Part ${event.step} of ${event.steps} · ${event.step_name}${detail}`;
+    document.getElementById('partBar').style.width = Math.round((event.part || 0) * 100) + '%';
+  }else{
+    document.getElementById('partLine').textContent = event.stage || '';
+  }
+  const whole = Math.round((event.fraction || 0) * 100);
+  document.getElementById('wholeLine').textContent = `Overall ${whole}%`;
+  document.getElementById('wholeBar').style.width = whole + '%';
+}
+
+// `list` the scenes changed, or null to carry on with a video that stopped partway
+async function remake(list){
+  if(list && !list.length) return;
+  showError('');
+  document.querySelectorAll('#editor textarea, #editor input, #editor button').forEach(el => el.disabled = true);
+  let done = false, trouble = '';
+  try{
+    const response = list
+      ? await fetch(`/chat/video/${current.message_id}/edit`, {method: 'POST', headers: JSON_HEADERS,
+                                                             body: JSON.stringify({scenes: list})})
+      : await fetch(`/chat/video/${current.message_id}/continue`, {method: 'POST'});
+    if(!response.ok){
+      const err = await response.json().catch(() => ({}));
+      throw new Error((typeof err.detail === 'string' && err.detail) || `HTTP ${response.status}`);
+    }
+    await readEvents(response, chunk => {
+      const event = chunk.gateway;
+      if(event?.type === 'progress') showProgress(event);
+      else if(event?.type === 'video') done = true;
+    });
+  }catch(e){
+    trouble = 'It stopped: ' + e.message + '. What was made is kept.';
+  }
+  await openStory(current.message_id);           // shows what is saved now, and clears the old message
+  if(trouble) showError(trouble);
+  loadList();
+  if(done) document.getElementById('editor').scrollIntoView({behavior: 'smooth'});
+}
+
+// After the page's own scripts (escapeHtml is defined after this block, in base.html)
+document.addEventListener('DOMContentLoaded', () => loadList().catch(e => showError(e.message)));
+</script>
+{% endblock %}

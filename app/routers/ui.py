@@ -182,6 +182,11 @@ async def playground_page(request: Request, user: User | None = Depends(current_
     return _require_login(user, "/playground") or _page(request, "playground.html", user)
 
 
+@router.get("/videos")
+async def videos_page(request: Request, user: User | None = Depends(current_user)):
+    return _require_login(user, "/videos") or _page(request, "videos.html", user)
+
+
 @router.get("/tasks")
 async def tasks_page(request: Request, user: User | None = Depends(current_user)):
     if not coding_runner.is_enabled():
