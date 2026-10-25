@@ -6,15 +6,16 @@ against what is actually known - Kokoro's own voice files, listed from the model
 - and against what a story needs: that every character of a kind has a voice, and that no two characters
 of one story come out as the same speaker, in every one of the eleven languages.
 
-Run by ci/checks.sh; exits non-zero, with what is wrong, when the table is.
+Run by ci/checks.sh; exits non-zero, with what is wrong, when the table is. It imports
+app/tools/voices.py and nothing else of the gateway, because the checks run in a Python without the
+gateway's packages, and voices.py has to stand alone for that.
 """
-import re
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from app.tools import video_story, voices                                  # noqa: E402
+from app.tools import voices                                                # noqa: E402
 
 # Kokoro-82M's voice files, from https://huggingface.co/hexgrad/Kokoro-82M/tree/main/voices. The leading
 # letter is the language code KPipeline is built with: a American English, b British, e Spanish, f French,
@@ -61,12 +62,11 @@ def check():
                     bad.append(f"{lang}: the {gender} pool holds {name}, whose name says otherwise")
                 # English reaches into its British voices when its American ones run out; nothing else may
                 # speak a language by another language's code.
-                if code != video_story.LANGUAGES[lang]["voice"][1] and not (lang == "en" and code in ("a", "b")):
+                if code != voices.narrator(lang)[1] and not (lang == "en" and code in ("a", "b")):
                     bad.append(f"{lang}: {code} is not the code this language's narrator speaks")
 
     # Every character of every language has a voice, no two share one, and none is turned too far
-    for lang, language in video_story.LANGUAGES.items():
-        narrator = language["voice"]
+    for lang, narrator in voices.NARRATORS.items():
         filled = voices.plan(lang, narrator)
         missing = [slot for slot in voices.kinds() if slot not in filled]
         if missing:
@@ -87,7 +87,7 @@ def check():
     if bad:
         print("check_voice_table: " + "\n".join(bad))
         return 1
-    print(f"check_voice_table: {len(video_story.LANGUAGES)} languages, {len(voices.kinds())} slots, "
+    print(f"check_voice_table: {len(voices.NARRATORS)} languages, {len(voices.kinds())} slots, "
           f"no two characters of a story share a voice")
     return 0
 
