@@ -211,7 +211,7 @@ async function loadStories(){
 }
 
 async function openStory(id){
-  if(Object.keys(edits).length && current?.message_id !== id &&
+  if(unsaved() && current?.message_id !== id &&
      !confirm('Leave this story? The changes you have not saved will be lost.')){ renderHead(); return; }
   showError('');
   if(current?.message_id !== id) drawing = {};      // a picture still drawing for the story left is not shown here
@@ -219,6 +219,11 @@ async function openStory(id){
   history.replaceState(null, '', `/videos2?id=${id}`);
   edits = {};
   previews = {};
+  // New pictures saved for scenes earlier: shown and waiting to go into the video, as when they were drawn
+  for(const [k, kept] of Object.entries(current.video.story?.pending || {})){
+    previews[k] = {...kept, ok: true, saved: true};
+    edits[k] = {text: {}, redraw: true, picture_file: kept.file_id, picture: kept.drawn, people: kept.people};
+  }
   selected = 0;
   renderStories();
   const made = Object.keys(current.video.videos || {});
@@ -337,8 +342,13 @@ function renderEditor(){
       <div>
         ${shown ? `<img src="/chat/files/${shown}" alt="Scene ${i + 1}">` : ''}
         <div class="where">Scene ${i + 1} of ${told.pictures.length}</div>
-        ${preview?.ok ? `<div class="newPicture">The new picture: it goes into the video when you save and remake.
-          <button type="button" class="btn btn-secondary" id="keepOld" style="margin-top:.3rem">Keep the old picture</button></div>` : ''}
+        ${preview?.ok ? `<div class="newPicture">${preview.saved
+            ? 'The new picture is saved for this scene: it goes into the video when you save and remake.'
+            : 'The new picture: it goes into the video when you save and remake. Save it to keep it if you leave the page.'}
+          <div class="actions" style="margin-top:.4rem">
+            ${preview.saved ? '' : '<button type="button" class="btn" id="savePicture">💾 Save this picture</button>'}
+            <a class="btn btn-secondary" href="/chat/files/${preview.file_id}" download="scene-${i + 1}.jpg">⬇ Download</a>
+            <button type="button" class="btn btn-secondary" id="keepOld">Keep the old picture</button></div></div>` : ''}
       </div>
       <div>
         <label class="check" style="margin-top:0"><input type="checkbox" id="redraw" ${change.redraw ? 'checked' : ''} ${editable ? '' : 'disabled'}> Draw this picture again</label>
@@ -392,11 +402,15 @@ function renderEditor(){
   });
   editor.querySelector('#retranslate')?.addEventListener('change', keep);
   editor.querySelector('#regenerate')?.addEventListener('click', () => regenerate(i));
-  editor.querySelector('#keepOld')?.addEventListener('click', () => {
+  editor.querySelector('#keepOld')?.addEventListener('click', async () => {
+    const saved = previews[i]?.saved;
     delete previews[i];
+    if(edits[i]) edits[i] = {...edits[i], redraw: false};   // the old picture stays: nothing is drawn
     renderEditor();
     keep();
+    if(saved) await savePicture(i, null);
   });
+  editor.querySelector('#savePicture')?.addEventListener('click', () => savePicture(i, previews[i]));
   editor.querySelector('#deleteScene')?.addEventListener('click', () => {
     if(!confirm(`Delete scene ${i + 1}? Every language's video is made again without it; nothing is drawn.`)) return;
     delete edits[i];
@@ -477,6 +491,23 @@ async function regenerate(i){
   if(drawn) previews[i] = drawn;
   else if(!trouble) trouble = 'it stopped before the picture was ready';
   settle(i, trouble);
+}
+
+// A scene's new picture kept with the story on the server (or, with null, let go), so it is still there
+// when the page is opened again
+async function savePicture(i, preview){
+  const story_id = current.message_id;
+  try{
+    await api(`/chat/video/${story_id}/pending-picture`, {method: 'PUT', headers: JSON_HEADERS,
+      body: JSON.stringify(preview ? {index: i, file_id: preview.file_id, drawn: preview.drawn, people: preview.people}
+                                   : {index: i, file_id: null})});
+  }catch(e){
+    showError(`Scene ${i + 1}: ` + (preview ? 'the picture was not saved: ' : 'the saved picture was not let go: ') + e.message);
+    return;
+  }
+  if(current.message_id !== story_id) return;
+  if(preview && previews[i]?.file_id === preview.file_id) previews[i].saved = true;
+  if(selected === i){ keep(); renderEditor(); keep(); }
 }
 
 // A scene's new picture (or why there is none) put in its place, whichever scene is open by then
@@ -685,7 +716,12 @@ document.addEventListener('keydown', e => {
   if(e.key === 'ArrowDown' && selected < count - 1){ e.preventDefault(); select(selected + 1); }
   if(e.key === 'ArrowUp' && selected > 0){ e.preventDefault(); select(selected - 1); }
 });
-window.addEventListener('beforeunload', e => { if(Object.keys(edits).length) e.preventDefault(); });
+// Changes that would be lost on leaving: a picture saved for its scene is kept on the server
+function unsaved(){
+  return Object.entries(edits).some(([i, change]) =>
+    Object.keys(change.text || {}).length || change.retranslate || !previews[i]?.saved);
+}
+window.addEventListener('beforeunload', e => { if(unsaved()) e.preventDefault(); });
 
 // After the page's own scripts (escapeHtml is defined after this block, in base.html)
 document.addEventListener('DOMContentLoaded', () => loadStories().catch(e => showError(e.message)));
