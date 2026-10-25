@@ -39,6 +39,7 @@ WIDTH, HEIGHT, FPS = 1280, 720, 25
 SCENE_MIN = 8.0                       # seconds a scene stays at least: slow enough for a child to take it in
 FADE = 1.5                            # seconds two scenes overlap
 LEAD_IN = 0.6                         # silence before a scene's narration starts
+PART_GAP = 0.3                        # a breath between the speakers of one scene
 MIN_SCENES, MAX_SCENES = 5, 16
 # A story the person gives may be long - a 4,000-character limit, meant for a topic, turned one
 # away (2026-10-24) - and is cut into more scenes than a looked-up one, so no caption is a page long
@@ -716,36 +717,98 @@ def spoken(text, lang):
     return text.strip(), unspoken
 
 
-async def narrate(lang, texts, folder):
-    """[(wav path, seconds)] for each text, spoken in English ("en") or Bangla ("bn"). A line all in
-    Arabic is silence, held for reading; a line with some Arabic in it is held that much longer."""
-    said = [spoken(t, lang) for t in texts]
-    items, results = [], [None] * len(texts)
-    for i, (words, unspoken) in enumerate(said):
-        out = os.path.join(folder, f"{lang}-{i:02d}.wav")
-        if re.search(r"\w", words):
-            items.append({"text": words, "out": out, "i": i})
-        else:
-            results[i] = held_silence(texts[i], lang, out)
+async def narrate_parts(lang, scenes, cast_map, folder):
+    """[(wav path, seconds)] for each scene, its parts spoken by their speakers: the narrator, or a
+    character in the voice their slot is given (app/tools/voices.py), turned a little where the
+    language's model has no voice spare for them. `scenes` is a list of scenes, each a list of
+    {speaker, text} in this language, in order; `cast_map` maps a speaker id to their voice slot. A
+    part that is a verse of the Quran is the qari's, spliced into that part only; a part all in
+    Arabic is silence, held for reading; the parts of a scene are one line of audio, a breath apart."""
+    language = LANGUAGES.get(lang) or LANGUAGES["en"]
+    narrator = language["voice"]
+    plan = voices.plan(lang, narrator)
+    records = []
+    for i, scene in enumerate(scenes):
+        for k, part in enumerate(scene or []):
+            text = " ".join(str(part.get("text") or "").split())
+            if not text:
+                continue
+            slot = cast_map.get(part.get("speaker") or "narrator", "narrator")
+            pitch, tempo = (plan.get(slot) or plan["narrator"])[-2:]
+            words, unspoken = spoken(text, lang)
+            records.append({"i": i, "k": k, "text": text, "slot": slot, "pitch": pitch,
+                            "tempo": tempo, "words": words, "unspoken": unspoken})
+    # The words of every part, spoken in the speaker's voice, in one worker job (a model loads once)
+    items = []
+    for n, r in enumerate(records):
+        if re.search(r"\w", r["words"]):
+            r["out"] = os.path.join(folder, f"{lang}-{r['i']:02d}-{r['k']:02d}.wav")
+            items.append((n, {"text": r["words"], "out": r["out"],
+                              "voice": voices.job_voice(lang, r["slot"], narrator)}))
     if items:
-        language = LANGUAGES.get(lang) or LANGUAGES["en"]
-        # The language's own pace: Bangla a little slower, or the voice runs words together
-        job = {"lang": lang, "voice": language["voice"], "speed": language["speed"],
-               "items": [{"text": it["text"], "out": it["out"]} for it in items]}
+        job = {"lang": lang, "voice": narrator, "speed": language["speed"],
+               "items": [it for _, it in items]}
         out, err, code = await child.run(_python(), _worker(), stdin=json.dumps(job).encode(),
                                          stdout=asyncio.subprocess.PIPE)
         if code != 0:
             log.warning("narration in %s failed: %s", lang, err.decode(errors="replace")[-800:])
             raise VideoError(f"The {language_name(lang)} narration could not be made")
         durations = json.loads(out.decode().strip().splitlines()[-1])["durations"]
-        for item, seconds in zip(items, durations):
-            results[item["i"]] = (item["out"], seconds + READ_SECONDS * said[item["i"]][1])
-
-    for i, text in enumerate(texts):
-        path, seconds = results[i]
-        results[i] = await with_recitation(text, lang, path if re.search(r"\w", said[i][0]) else None,
-                                           seconds, folder, f"{lang}-{i:02d}") or results[i]
+        for (n, _), seconds in zip(items, durations):
+            records[n]["dur"] = seconds + READ_SECONDS * records[n]["unspoken"]
+    # Each part's audio: a shifted voice is turned first, so a qari spliced in after is not turned too
+    for r in records:
+        has_words = re.search(r"\w", r["words"]) is not None
+        name = f"{lang}-{r['i']:02d}-{r['k']:02d}"
+        if has_words:
+            path, seconds = r["out"], r["dur"]
+            if (r["pitch"], r["tempo"]) != (1.0, 1.0):
+                path, seconds = await _retune(path, r["pitch"], r["tempo"], folder, name)
+        else:
+            path, seconds = held_silence(r["text"], lang, os.path.join(folder, f"{name}.wav"))
+        r["audio"] = await with_recitation(r["text"], lang, path if has_words else None, seconds,
+                                           folder, name) or (path, seconds)
+    # One scene's parts, in order, into its one line of audio
+    by_scene = {}
+    for r in records:
+        by_scene.setdefault(r["i"], []).append(r["audio"])
+    results = []
+    for i in range(len(scenes)):
+        audio = by_scene.get(i)
+        if not audio:
+            results.append(held_silence("", lang, os.path.join(folder, f"{lang}-{i:02d}.wav")))
+        elif len(audio) == 1:
+            results.append(audio[0])
+        else:
+            results.append(await _concat_parts(audio, folder, f"{lang}-{i:02d}"))
     return results
+
+
+async def _retune(source, pitch, tempo, folder, name):
+    """(wav, seconds) of a line spoken in a voice the model does not have: turned a little in pitch
+    and pace (app/tools/voices.py), so two characters of a kind are told apart by ear."""
+    out = os.path.join(folder, f"{name}-turned.wav")
+    await _run([ffmpeg(), "-y", "-i", source, "-af", voices.retune(pitch, tempo), "-ar", "24000", out],
+               "turning a voice")
+    with wave.open(out, "rb") as w:
+        return out, w.getnframes() / w.getframerate()
+
+
+async def _concat_parts(audio, folder, name):
+    """(wav, seconds) of one scene's parts, in order, a breath between the speakers and none after
+    the last: the scene is held as long as all of them, told one after the other."""
+    out = os.path.join(folder, f"{name}.wav")
+    inputs, layers = [], []
+    for k, (path, _) in enumerate(audio):
+        inputs += ["-i", path]
+        pad = f",apad=pad_dur={PART_GAP}" if k < len(audio) - 1 else ""
+        layers.append(f"[{k}:a]aformat=sample_rates=24000:channel_layouts=mono{pad}[p{k}]")
+    layers.append("".join(f"[p{k}]" for k in range(len(audio))) +
+                  f"concat=n={len(audio)}:v=0:a=1[out]")
+    await _run([ffmpeg(), "-y", *inputs, "-filter_complex", ";".join(layers), "-map", "[out]", out],
+               "joining a scene's parts")
+    with wave.open(out, "rb") as w:
+        return out, w.getnframes() / w.getframerate()
 
 
 def held_silence(text, lang, out):

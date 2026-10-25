@@ -3,9 +3,13 @@
 Run by app/tools/video_story.py in its own Python (settings video.tts.python, a 3.12 environment:
 Kokoro's English text handling does not run on the gateway's 3.14). Reads one JSON object on stdin,
 {"lang": "en", "voice": ["kokoro", "a", "am_michael"] | ["mms", "facebook/mms-tts-ben"],
- "items": [{"text", "out"}], "speed": 0.92}, writes each WAV, and prints {"durations": [seconds, ...]}
-on stdout. Everything runs on the CPU; the GPUs are left to the models. The voice of each language is
-in app/tools/video_story.py (LANGUAGES):
+ "items": [{"text", "out", "voice"?}], "speed": 0.92}, writes each WAV, and prints
+{"durations": [seconds, ...]} on stdout. The job's "voice" is the default; an item may carry its own
+"voice" (the same shape), so the parts of one scene can be spoken by different characters. Items are
+grouped by (engine, model) before speaking, so a model loads once for the whole job, not once per
+voice - MMS in particular loads slowly and has one model per language anyway. Everything runs on the
+CPU; the GPUs are left to the models. The voice of each language is in app/tools/video_story.py
+(LANGUAGES) and app/tools/voices.py (a character's own voice, turned where the model has no spare):
 
   Kokoro-82M (hexgrad): English, Spanish, French, Chinese, Japanese, Hindi - a calm male narrator
     where the language has one
@@ -35,13 +39,14 @@ NOISE, NOISE_DURATION = 0.45, 0.5
 
 
 def kokoro(items, speed, lang_code="a", voice="am_michael"):
+    # One pipeline per lang_code; an item may name its own voice (a different character of the story)
     from kokoro import KPipeline
     pipeline = KPipeline(lang_code=lang_code, repo_id="hexgrad/Kokoro-82M")
     durations = []
     for item in items:
         try:
             pieces = [np.asarray(audio, dtype=np.float32)
-                      for _, _, audio in pipeline(item["text"], voice=voice, speed=speed)]
+                      for _, _, audio in pipeline(item["text"], voice=item.get("voice") or voice, speed=speed)]
         except Exception as e:            # one line the voice cannot say is silence, not a lost video
             print(f"line not spoken: {e}: {item['text'][:80]!r}", file=sys.stderr)
             pieces = []
@@ -100,13 +105,24 @@ def main():
     job = json.load(sys.stdin)
     speed = float(job.get("speed") or 0.92)
     items = job.get("items") or []
-    voice = job.get("voice") or (["mms", "facebook/mms-tts-ben"] if job.get("lang") == "bn"
-                                 else ["kokoro", "a", "am_michael"])
-    if voice[0] == "mms":
-        durations = mms(items, speed, voice[1], float(job.get("noise") or NOISE),
-                        float(job.get("noise_duration") or NOISE_DURATION))
-    else:
-        durations = kokoro(items, speed, voice[1], voice[2])
+    default = job.get("voice") or (["mms", "facebook/mms-tts-ben"] if job.get("lang") == "bn"
+                                   else ["kokoro", "a", "am_michael"])
+    durations = [None] * len(items)
+    # An item's voice, or the job's; grouped by (engine, model) so a model loads once per job, not once
+    # per voice - MMS loads slowly and has one model per language anyway
+    groups = {}
+    for i, item in enumerate(items):
+        voice = item.get("voice") or default
+        item["voice"] = voice[2] if voice[0] == "kokoro" else None
+        groups.setdefault((voice[0], voice[1]), []).append((i, item))
+    for (engine, model), members in groups.items():
+        if engine == "mms":
+            durs = mms([item for _, item in members], speed, model,
+                       float(job.get("noise") or NOISE), float(job.get("noise_duration") or NOISE_DURATION))
+        else:
+            durs = kokoro([item for _, item in members], speed, model)
+        for (i, _), dur in zip(members, durs):
+            durations[i] = dur
     print(json.dumps({"durations": durations}))
 
 
