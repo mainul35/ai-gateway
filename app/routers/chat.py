@@ -3027,12 +3027,16 @@ async def video_voice(message_id: int, payload: VoiceIn, principal: Principal = 
         raise HTTPException(status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, "A recording is too long; keep each scene under two minutes")
     # A scene that is all Arabic - a verse - is recited by the qari, not read by the person
     reads = [video_story.needs_reading(line, lang) for line in story[lang]]
+    # A scene not read yet keeps the voice it has (the machine's), so the scenes can be read one at a time
+    old_entries = (story.get("narration") or {}).get(lang) or []
+    unread = {n: old_entries[n] for n, (new, old) in enumerate(zip(payload.recordings, saved))
+              if reads[n] and not new and not old and n < len(old_entries) and old_entries[n]}
     missing = [n + 1 for n, (new, old) in enumerate(zip(payload.recordings, saved))
-               if reads[n] and not new and not old]
+               if reads[n] and not new and not old and n not in unread]
     if missing:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY,
                             "Read every scene first; not yet read: " + ", ".join(map(str, missing)))
-    wanted = list(story["pictures"]) + [old["file_id"] for old in saved if old]
+    wanted = list(story["pictures"]) + [old["file_id"] for old in saved if old] +         [entry["file_id"] for entry in unread.values()]
     found = await _load_files(session, user, wanted)
     if any(i not in found for i in wanted):
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Some of this story's pictures or recordings are gone")
@@ -3055,6 +3059,13 @@ async def video_voice(message_id: int, payload: VoiceIn, principal: Principal = 
                     voice.append(None)
                     narration.append(await video_story.with_recitation(line, lang, None, 0, folder, f"{lang}-{n:02d}")
                                      or video_story.held_silence(line, lang, os.path.join(folder, f"held-{n:02d}.wav")))
+                    continue
+                if n in unread:
+                    path = os.path.join(folder, f"kept-{n:02d}.m4a")
+                    with open(path, "wb") as f:
+                        f.write(found[unread[n]["file_id"]].data)
+                    voice.append(None)
+                    narration.append((path, unread[n]["seconds"]))
                     continue
                 if new:
                     yield _event("progress", stage=f"Cleaning up the recording of scene {n + 1}",
@@ -3085,9 +3096,11 @@ async def video_voice(message_id: int, payload: VoiceIn, principal: Principal = 
                                  or (path, voice[-1]["seconds"]))
             # Each scene's narration as it now is, kept like the machine's (the pipeline's "narration"),
             # so an edit later re-voices only the lines it changes and keeps the person's voice
-            old_entries = (story.get("narration") or {}).get(lang) or []
             entries = []
             for n, (path, seconds) in enumerate(narration):
+                if n in unread:
+                    entries.append(unread[n])
+                    continue
                 if reads[n] and path.endswith(f"voice-{n:02d}.m4a"):
                     entries.append({"file_id": voice[n]["file_id"], "seconds": seconds, "by": "recorded"})
                     continue
@@ -3099,7 +3112,8 @@ async def video_voice(message_id: int, payload: VoiceIn, principal: Principal = 
             yield _event("progress", stage=f"Putting the {word} video together with your voice", fraction=0.6)
             title = _title(video, lang)
             data, seconds = await video_story.assemble(paths, narration, story[lang], title, lang, folder,
-                                                       recorded=True, keys=story["pictures"],
+                                                       recorded=[n not in unread for n in range(count)],
+                                                       keys=story["pictures"],
                                                        cache=video_story.clip_cache(message_id))
             async with session_factory()() as db:
                 stored = ChatFile(user_id=user_id, kind="video", mime_type="video/mp4",
@@ -3111,7 +3125,8 @@ async def video_voice(message_id: int, payload: VoiceIn, principal: Principal = 
             # The video it replaces is kept as an earlier version, not removed
             _keep_version(video, lang)
             video.setdefault("videos", {})[lang] = {"file_id": stored.id, "url": f"/chat/files/{stored.id}",
-                                                    "seconds": seconds, "voice": "recorded"}
+                                                    "seconds": seconds,
+                                                    "voice": "partly recorded" if unread else "recorded"}
             story.setdefault("narration", {})[lang] = entries
             in_use = {entry["file_id"] for entry in entries} | {v["file_id"] for v in voice if v}
             replaced += [entry["file_id"] for entry in old_entries if entry and entry["file_id"] not in in_use]
