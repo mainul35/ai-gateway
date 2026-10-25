@@ -8,7 +8,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
-from app import activity, bootstrap, db, knowledge, settings, sso
+from app import activity, bootstrap, db, istory, knowledge, settings, sso
 
 # Pictures people upload, and pictures fetched from the web, are decoded in this process. A small
 # file can declare an enormous canvas (13000 x 13000 is about half a gigabyte decoded); Pillow only
@@ -40,6 +40,7 @@ async def lifespan(_: FastAPI):
     await supervisor.start_reaper()
     log.info("llama.cpp engine available: %s", supervisor.is_available())
     admin.resume_installs()          # model downloads a restart cut short carry on
+    await istory.resume()            # and so do video stories on their way to istory
     refresher = None
     try:
         await knowledge.ensure_schema()

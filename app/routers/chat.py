@@ -20,7 +20,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from app import access, backends, feedback, limits, settings, usage as usage_log
+from app import access, backends, feedback, istory, limits, settings, usage as usage_log
 from app.auth import Principal, authenticate
 from app.db import get_session, session_factory
 from app.models import AnswerFeedback, ChatFile, Conversation, ConversationMessage, MemoryEntry, utcnow
@@ -530,6 +530,16 @@ async def get_file(file_id: int, request: Request, principal: Principal = Depend
         return Response(stored.data[start:end + 1], status_code=206, media_type=stored.mime_type,
                         headers={**headers, "Content-Range": f"bytes {start}-{end}/{size}"})
     return Response(stored.data, media_type=stored.mime_type, headers=headers)
+
+
+@router.get("/files/{file_id}/istory")
+async def file_istory_status(file_id: int, principal: Principal = Depends(authenticate)):
+    """Whether a video story reached the person's istory studio (app/istory.py)."""
+    user = _require_user(principal)
+    found = await istory.status_of(user.id, file_id)
+    if found is None:
+        return {"status": "not_sent" if settings.istory_enabled() else "off"}
+    return found
 
 
 async def _load_files(session, user, file_ids):
@@ -2328,6 +2338,8 @@ async def make_video(payload: VideoIn, principal: Principal = Depends(authentica
                     await db.commit()
                     await db.refresh(stored)
                 videos[lang] = {"file_id": stored.id, "url": f"/chat/files/{stored.id}", "seconds": seconds}
+                # To the person's istory studio as a private draft, when both accounts are theirs
+                istory.send_soon(user_id, stored.id, title, lang)
 
             used = [sources[n - 1] for n in story["sources"] if 0 < n <= len(sources)] or sources[:5]
             video = {"title": story["title_en"], "title_bn": story["title_bn"], "videos": videos,
@@ -2489,6 +2501,7 @@ async def video_voice(message_id: int, payload: VoiceIn, principal: Principal = 
                 db.add(stored)
                 await db.commit()
             created.append(stored.id)
+            istory.send_soon(user_id, stored.id, f"{video.get('title_bn') or video.get('title', 'Video story')} (your voice)", "bn")
             previous = (video.get("videos") or {}).get("bn")
             video.setdefault("videos", {})["bn"] = {"file_id": stored.id, "url": f"/chat/files/{stored.id}",
                                                     "seconds": seconds, "voice": "recorded"}
