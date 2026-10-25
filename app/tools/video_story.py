@@ -193,6 +193,127 @@ def parse_translated_story(answer, count):
     return " ".join(str(told.get("title") or "").split()), lines
 
 
+# --- who speaks: the cast and each scene's parts -------------------------------------------------
+
+# The kinds of speaker, and how many distinct voices each has, so that two men in a story never sound
+# alike (app/tools/voices.py makes them). The narrator is one voice; the words of Allah, of a prophet
+# or of an angel are always given to the narrator, never to a character.
+KINDS = {"narrator": 1, "man": 3, "older man": 2, "woman": 3, "older woman": 2, "boy": 2, "girl": 2}
+
+CAST_PROMPT = """You prepare a story for a narrated children's video. For each numbered SCENE, say who speaks
+which part of it: the narrator, or a character whose own words are quoted.
+
+Rules:
+- Every part's "text" is copied exactly from the scene, and the parts, in order, make up the whole
+  scene - nothing added, nothing left out, nothing changed.
+- A character speaks only their own quoted words; everything else is the narrator's.
+- The words of Allah, of a prophet (any prophet, peace be upon them) or of an angel are NEVER given to
+  a character: their speaker is "narrator".
+- The cast lists each character who speaks: an id ("c1", "c2", ...), the name the story gives them,
+  and their kind - one of: man, older man, woman, older woman, boy, girl.
+
+Answer with JSON only:
+{"cast": [{"id": "c1", "name": "the woodcutter", "kind": "man"}],
+ "scenes": [[{"speaker": "narrator", "text": "..."}, {"speaker": "c1", "text": "..."}]]}"""
+
+
+def cast_request(model, texts):
+    """The chat request that finds the story's speakers and splits each scene into its spoken parts."""
+    body = "\n".join(f"{n}. {text}" for n, text in enumerate(texts, 1))
+    return {"model": model, "stream": False, "temperature": 0.1,
+            "max_tokens": min(32000, 3000 + 3 * sum(len(t) for t in texts)),
+            "chat_template_kwargs": {"enable_thinking": False},
+            "messages": [{"role": "system", "content": CAST_PROMPT}, {"role": "user", "content": f"SCENES:\n{body}"}]}
+
+
+def _same(a, b):
+    return " ".join((a or "").split()) == " ".join((b or "").split())
+
+
+def parse_cast(answer, texts):
+    """(cast, [[{speaker, text}]] for each scene): a scene whose parts do not make up its words exactly
+    is the narrator's alone, and a cast it does not fit is left out."""
+    match = re.search(r"\{.*\}", re.sub(r"<think>.*?</think>", "", answer or "", flags=re.S), re.S)
+    try:
+        found = json.loads(match.group(0)) if match else {}
+    except ValueError:
+        found = {}
+    cast = [{"id": "narrator", "name": "Narrator", "kind": "narrator"}]
+    for member in found.get("cast") or []:
+        if isinstance(member, dict) and str(member.get("id") or "").startswith("c") and member.get("kind") in KINDS:
+            cast.append({"id": str(member["id"]), "name": str(member.get("name") or member["id"])[:80],
+                         "kind": member["kind"]})
+    ids = {member["id"] for member in cast}
+    scenes = found.get("scenes") or []
+    parts = []
+    for i, text in enumerate(texts):
+        mine = scenes[i] if i < len(scenes) and isinstance(scenes[i], list) else []
+        mine = [{"speaker": p.get("speaker") if p.get("speaker") in ids else "narrator",
+                 "text": " ".join(str(p.get("text") or "").split())}
+                for p in mine if isinstance(p, dict) and str(p.get("text") or "").strip()]
+        if not mine or not _same(" ".join(p["text"] for p in mine), text):
+            mine = [{"speaker": "narrator", "text": " ".join(text.split())}]
+        merged = []                      # neighbours with one speaker are one part
+        for part in mine:
+            if merged and merged[-1]["speaker"] == part["speaker"]:
+                merged[-1]["text"] += " " + part["text"]
+            else:
+                merged.append(dict(part))
+        parts.append(merged)
+    used = {p["speaker"] for scene in parts for p in scene}
+    return assign_voices([m for m in cast if m["id"] in used or m["id"] == "narrator"]), parts
+
+
+def assign_voices(cast):
+    """The cast with a voice for each member: a different one for each of a kind, as far as the kind
+    has voices; one already chosen is kept."""
+    taken = {member.get("voice") for member in cast if member.get("voice")}
+    for member in cast:
+        if member.get("voice"):
+            continue
+        kind = member["kind"] if member["kind"] in KINDS else "man"
+        slots = [f"{kind.replace(' ', '-')}-{n}" for n in range(1, KINDS[kind] + 1)] if kind != "narrator" else ["narrator"]
+        member["voice"] = next((s for s in slots if s not in taken), slots[0])
+        taken.add(member["voice"])
+    return cast
+
+
+TRANSLATE_PARTS_PROMPT = """You translate the spoken parts of a story for a children's video into {language},
+faithfully: each numbered part on its own, sentence by sentence - nothing added, nothing left out,
+nothing explained or softened. Keep Islamic words as they are said in {language}. Text in Arabic script
+(a verse of the Quran, a blessing) is copied unchanged.
+
+Answer with JSON only, one entry for each numbered part, in order: {"lines": ["...", "..."]}"""
+
+
+def translate_parts_request(model, texts, lang):
+    """The chat request that translates the parts of scenes spoken by more than one voice."""
+    body = "\n".join(f"{n}. {text}" for n, text in enumerate(texts, 1))
+    return {"model": model, "stream": False, "temperature": 0.2,
+            "max_tokens": min(32000, 2000 + 3 * sum(len(t) for t in texts)),
+            "chat_template_kwargs": {"enable_thinking": False},
+            "messages": [{"role": "system", "content": TRANSLATE_PARTS_PROMPT.replace("{language}", language_name(lang))},
+                         {"role": "user", "content": body}]}
+
+
+def parse_translated_parts(answer, count):
+    if answer is None:
+        raise VideoError(MODEL_DOWN)
+    match = re.search(r"\{.*\}", re.sub(r"<think>.*?</think>", "", answer, flags=re.S), re.S)
+    try:
+        lines = [" ".join(str(x).split()) for x in (json.loads(match.group(0)).get("lines") or [])] if match else []
+    except (ValueError, AttributeError):
+        lines = []
+    if len(lines) != count or not all(lines):
+        raise VideoError("The parts could not be translated; try again")
+    return lines
+
+
+def scene_text(parts, lang):
+    """A scene's whole line in a language, from its parts."""
+    return " ".join((p.get("text") or {}).get(lang, "") for p in parts).strip()
+
+
 def translation(answer):
     """The translated line out of the model's answer, or None."""
     text = re.sub(r"<think>.*?</think>", "", answer or "", flags=re.S).strip().strip('"').strip()
