@@ -196,9 +196,33 @@ async def _free_vram_for_images():
     await supervisor._unload_ollama_models()
 
 
+RELEASE_WAIT_SECONDS = 30
+RELEASED_BELOW = 2 * 2**30        # bytes still in use on a card that count as handed back
+
+
 async def _release_comfy(client):
+    """Asks ComfyUI to unload its models, and waits until the cards are actually free.
+
+    ComfyUI unloads a few seconds after it is asked, on its own thread. A language model started at
+    once found GPU 0 still holding 12 GB of Qwen-Image and could not load - "failed to allocate CUDA0
+    buffer", and a video that had not even started its drawing failed (2026-10-25). Every language
+    model is stopped while an image is made, so what is still in use is ComfyUI's."""
+    base = settings.comfyui_url()
     with contextlib.suppress(httpx.HTTPError):
-        await client.post(f"{settings.comfyui_url()}/free", json={"unload_models": True, "free_memory": True})
+        await client.post(f"{base}/free", json={"unload_models": True, "free_memory": True})
+    deadline = asyncio.get_running_loop().time() + RELEASE_WAIT_SECONDS
+    while True:
+        try:
+            devices = (await client.get(f"{base}/system_stats")).json().get("devices") or []
+            used = [d["vram_total"] - d["vram_free"] for d in devices if d.get("type") == "cuda"]
+        except (httpx.HTTPError, ValueError, KeyError, TypeError):
+            return
+        if all(u < RELEASED_BELOW for u in used):
+            return
+        if asyncio.get_running_loop().time() > deadline:
+            log.warning("ComfyUI still holds %s MB after %ss", [u // 2**20 for u in used], RELEASE_WAIT_SECONDS)
+            return
+        await asyncio.sleep(1)
 
 
 async def _upload(client, base, client_id, index, data, mime):
