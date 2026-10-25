@@ -62,6 +62,31 @@ YOUNG = (1.07, 1.06)
 YOUNG_F = (1.1, 1.12)
 
 
+# The voice a language is narrated in by default - what a story's narrator gets, and what scripts/
+# tts_worker.py speaks a part with when the character's own voice asks for the language's. It lives
+# here and not in app/tools/video_story.py, because the voice table is what owns the voices, and this
+# module must stay importable by scripts/check_voice_table.py in a Python with none of the gateway's
+# other packages.
+NARRATORS = {
+    "en": ["kokoro", "a", "am_michael"],
+    "bn": ["mms", "facebook/mms-tts-ben"],
+    "es": ["kokoro", "e", "em_alex"],
+    "fr": ["kokoro", "f", "ff_siwis"],
+    "zh": ["kokoro", "z", "zm_yunjian"],
+    "ja": ["kokoro", "j", "jm_kumo"],
+    "ko": ["mms", "facebook/mms-tts-kor"],
+    "th": ["mms", "facebook/mms-tts-tha"],
+    "ar": ["mms", "facebook/mms-tts-ara"],
+    "ur": ["mms", "facebook/mms-tts-urd-script_arabic"],
+    "hi": ["kokoro", "h", "hm_omega"],
+}
+
+
+def narrator(lang):
+    """The language's own machine voice, in the shape scripts/tts_worker.py reads it."""
+    return NARRATORS[lang]
+
+
 def kinds():
     """Every voice slot a story can use: "narrator", and "<kind with a dash>-<n>" for the rest."""
     return ["narrator"] + [f"{kind.replace(' ', '-')}-{n}"

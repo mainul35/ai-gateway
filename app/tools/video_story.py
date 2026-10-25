@@ -114,28 +114,27 @@ Answer with JSON only, one entry for each scene, in order:
 
 # The languages a video story can be told in. For each: its name, the caption fonts (the first found
 # in video.fonts.dir), and its machine voice - Kokoro (a language code and a voice; a male narrator
-# where it has one) or one of Meta's MMS voices. "spaces": False for a script written without spaces
-# between words, wrapped at any letter instead; "arabic": its own script is Arabic, kept and spoken.
+# where it has one) or one of Meta's MMS voices, from app/tools/voices.py, which owns the voices.
+# "spaces": False for a script written without spaces between words, wrapped at any letter instead;
+# "arabic": its own script is Arabic, kept and spoken.
 LANGUAGES = {
-    "en": {"name": "English", "fonts": ["DejaVuSans.ttf"], "voice": ["kokoro", "a", "am_michael"], "speed": 0.92},
-    "bn": {"name": "Bangla", "fonts": ["NotoSansBengali.ttf"], "voice": ["mms", "facebook/mms-tts-ben"], "speed": 0.85},
-    "es": {"name": "Spanish", "fonts": ["DejaVuSans.ttf"], "voice": ["kokoro", "e", "em_alex"], "speed": 0.92},
-    "fr": {"name": "French", "fonts": ["DejaVuSans.ttf"], "voice": ["kokoro", "f", "ff_siwis"], "speed": 0.92},
-    "zh": {"name": "Chinese", "fonts": ["NotoSansSC[wght].ttf"], "voice": ["kokoro", "z", "zm_yunjian"],
-           "speed": 0.92, "spaces": False},
-    "ja": {"name": "Japanese", "fonts": ["NotoSansJP[wght].ttf"], "voice": ["kokoro", "j", "jm_kumo"],
-           "speed": 0.92, "spaces": False},
-    "ko": {"name": "Korean", "fonts": ["NotoSansKR[wght].ttf"], "voice": ["mms", "facebook/mms-tts-kor"], "speed": 0.9},
-    "th": {"name": "Thai", "fonts": ["NotoSansThai[wdth,wght].ttf"], "voice": ["mms", "facebook/mms-tts-tha"],
-           "speed": 0.9, "spaces": False},
+    "en": {"name": "English", "fonts": ["DejaVuSans.ttf"], "speed": 0.92},
+    "bn": {"name": "Bangla", "fonts": ["NotoSansBengali.ttf"], "speed": 0.85},
+    "es": {"name": "Spanish", "fonts": ["DejaVuSans.ttf"], "speed": 0.92},
+    "fr": {"name": "French", "fonts": ["DejaVuSans.ttf"], "speed": 0.92},
+    "zh": {"name": "Chinese", "fonts": ["NotoSansSC[wght].ttf"], "speed": 0.92, "spaces": False},
+    "ja": {"name": "Japanese", "fonts": ["NotoSansJP[wght].ttf"], "speed": 0.92, "spaces": False},
+    "ko": {"name": "Korean", "fonts": ["NotoSansKR[wght].ttf"], "speed": 0.9},
+    "th": {"name": "Thai", "fonts": ["NotoSansThai[wdth,wght].ttf"], "speed": 0.9, "spaces": False},
     "ar": {"name": "Arabic", "fonts": ["Amiri-Regular.ttf", "NotoNaskhArabic[wght].ttf"],
-           "voice": ["mms", "facebook/mms-tts-ara"], "speed": 0.9, "arabic": True},
+           "speed": 0.9, "arabic": True},
     "ur": {"name": "Urdu", "fonts": ["NotoNastaliqUrdu[wght].ttf", "Amiri-Regular.ttf"],
-           "voice": ["mms", "facebook/mms-tts-urd-script_arabic"], "speed": 0.9, "arabic": True,
-           "line_height": 2.4},           # Nastaliq stands tall and slopes: lines overlapped at 1.7
-    "hi": {"name": "Hindi", "fonts": ["NotoSansDevanagari[wdth,wght].ttf"], "voice": ["kokoro", "h", "hm_omega"],
+           "speed": 0.9, "arabic": True, "line_height": 2.4},
+    "hi": {"name": "Hindi", "fonts": ["NotoSansDevanagari[wdth,wght].ttf"],
            "speed": 0.92},
 }
+for _lang in LANGUAGES:
+    LANGUAGES[_lang]["voice"] = voices.narrator(_lang)
 
 
 def language_name(lang):
