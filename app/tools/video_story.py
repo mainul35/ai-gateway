@@ -131,7 +131,8 @@ LANGUAGES = {
     "ar": {"name": "Arabic", "fonts": ["Amiri-Regular.ttf", "NotoNaskhArabic[wght].ttf"],
            "voice": ["mms", "facebook/mms-tts-ara"], "speed": 0.9, "arabic": True},
     "ur": {"name": "Urdu", "fonts": ["NotoNastaliqUrdu[wght].ttf", "Amiri-Regular.ttf"],
-           "voice": ["mms", "facebook/mms-tts-urd-script_arabic"], "speed": 0.9, "arabic": True},
+           "voice": ["mms", "facebook/mms-tts-urd-script_arabic"], "speed": 0.9, "arabic": True,
+           "line_height": 2.4},           # Nastaliq stands tall and slopes: lines overlapped at 1.7
     "hi": {"name": "Hindi", "fonts": ["NotoSansDevanagari[wdth,wght].ttf"], "voice": ["kokoro", "h", "hm_omega"],
            "speed": 0.92},
 }
@@ -717,7 +718,14 @@ def _font(lang, size):
     path = next((os.path.join(folder, name) for name in names + ["DejaVuSans.ttf"]
                  if os.path.isfile(os.path.join(folder, name))), os.path.join(folder, "DejaVuSans.ttf"))
     engine = ImageFont.Layout.RAQM if hasattr(ImageFont, "Layout") else None
-    return ImageFont.truetype(path, size, layout_engine=engine)
+    font = ImageFont.truetype(path, size, layout_engine=engine)
+    # A variable font comes at its default weight, which for Noto Sans JP, KR and SC is Thin: the
+    # captions were faint hairlines. Medium reads well with the dark outline.
+    try:
+        font.set_variation_by_name("Medium")
+    except (OSError, ValueError, AttributeError):
+        pass                              # not a variable font, or no weight by that name
+    return font
 
 
 def _pieces(text):
@@ -749,9 +757,14 @@ def caption(text, path, lang, title=False):
     image = Image.new("RGBA", (WIDTH, HEIGHT), (0, 0, 0, 0))
     draw = ImageDraw.Draw(image)
 
+    def pieces(line):
+        # A line of Arabic or Urdu is laid out right to left as a whole, its stops and numbers with
+        # it: cut into pieces, the full stop was drawn after the Arabic, at its start
+        return [(line, True)] if language.get("arabic") else _pieces(line)
+
     def measure(line):
         return sum(draw.textlength(piece, font=fonts[ar], direction="rtl" if ar else None)
-                   for piece, ar in _pieces(line))
+                   for piece, ar in pieces(line))
 
     # Wrapped at the spaces - or, in Chinese, Japanese and Thai, written without them, at any letter
     # (a mark that sits on a letter stays with it)
@@ -773,12 +786,12 @@ def caption(text, path, lang, title=False):
         else:
             line = trial
     lines += [line.strip()] if line.strip() else []
-    step = int(size * (1.7 if ARABIC_RUN.search(text) else 1.45))
+    step = int(size * language.get("line_height", 1.7 if ARABIC_RUN.search(text) else 1.45))
     height = step * len(lines)
     y = (HEIGHT - height) // 2 if title else HEIGHT - 40 - height
     for one in lines:
         x = (WIDTH - measure(one)) / 2
-        for piece, ar in _pieces(one):
+        for piece, ar in pieces(one):
             # On a shared baseline, so the two scripts sit on one line
             draw.text((x, y + size), piece, font=fonts[ar], anchor="ls", direction="rtl" if ar else None,
                       fill=(255, 255, 255, 255), stroke_width=3 if title else 2, stroke_fill=(20, 20, 20, 230))
