@@ -2275,8 +2275,30 @@ async def _video_pipeline(principal, user_id, ctx):
     folder = video_story.workspace()
     events = asyncio.Queue()
 
+    # Two measures of progress, for the page's two bars: the part being done (planning, the pictures,
+    # each language's narration and video) and how far it has got, and the whole. One bar for both
+    # ran up and back with every picture's sampling, which said nothing about a 28-scene video.
+    parts = ["Planning the story", "Drawing and checking the pictures"]
+    for lang in languages:
+        word = "Bangla" if lang == "bn" else "English"
+        parts += [f"Narrating in {word}", f"Putting the {word} video together"]
+    weights = [0.06, 0.74] + [0.2 / (len(parts) - 2)] * (len(parts) - 2)
+    now = {"part": 1, "done": 0.0, "text": ""}
+
+    def step(part, done, text):
+        """A progress event: `part` (1-based) of the parts, `done` of it (0 to 1), what is happening."""
+        now.update(part=part, done=done, text=text)
+        return _step_event(part, done, text)
+
+    def _step_event(part, done, text):
+        overall = sum(weights[:part - 1]) + weights[part - 1] * done
+        return _event("progress", stage=text, fraction=round(overall, 3), step=part, steps=len(parts),
+                      step_name=parts[part - 1], part=round(done, 3))
+
     async def progress(stage, fraction=None):
-        await events.put(_event("progress", stage=stage, fraction=fraction))
+        """The image model's own progress, told as detail of the part it belongs to."""
+        detail = f"{now['text']} · {stage}" + (f" {round(fraction * 100)}%" if fraction is not None else "")
+        await events.put(_step_event(now["part"], now["done"], detail))
 
     async def relay(work):
         """Runs `work`, passing on its progress as it comes; returns its result."""
@@ -2301,7 +2323,7 @@ async def _video_pipeline(principal, user_id, ctx):
             prompt, material, earlier = ctx["prompt"], ctx["material"], ctx["earlier"]
             given = prompt if len(prompt) >= video_story.GIVEN_LENGTH else None
             if given is None and (material or any(len(e) >= video_story.GIVEN_LENGTH for e in earlier)):
-                yield _event("progress", stage="Finding the story you gave", fraction=0.02)
+                yield step(1, 0.1, "Finding the story you gave")
                 given = video_story.given_story(await _ask_helper(principal, video_story.choose_request(
                     story_model, prompt, earlier, material)), earlier, material)
             sources = []
@@ -2309,19 +2331,19 @@ async def _video_pipeline(principal, user_id, ctx):
                 # Read word for word: the scenes are its own sentences; the model only plans the
                 # pictures and translates into the other language. The Bangla model: on the Pond of
                 # Milk, Gemma's translation was faithful and natural where Qwen's was clumsy.
-                yield _event("progress", stage="Planning the pictures for your story", fraction=0.06)
+                yield step(1, 0.3, "Planning a picture for every scene, and the translation")
                 lang = "bn" if video_story.is_bangla(given) else "en"
                 title, parts = video_story.split_story(given)
                 story = video_story.parse_illustrated(await _ask_helper(principal, video_story.illustrate_request(
                     bangla_model, title, parts, lang)), title, parts, lang)
             else:
-                yield _event("progress", stage="Finding the facts", fraction=0.02)
+                yield step(1, 0.1, "Finding the facts")
                 facts, sources = await _video_facts(prompt)
-                yield _event("progress", stage="Writing the story", fraction=0.06)
+                yield step(1, 0.4, "Writing the story")
                 story = video_story.parse_story(await _ask_helper(principal, video_story.story_request(
                     story_model, prompt, material, facts, ctx["pictures"])))
             if "bn" in languages and not given:
-                yield _event("progress", stage="Making the Bangla easy for children", fraction=0.08)
+                yield step(1, 0.8, "Making the Bangla easy for children")
                 story = video_story.apply_bangla(
                     await _ask_helper(principal, video_story.bangla_request(bangla_model, story)), story)
             scenes = story["scenes"]
@@ -2353,7 +2375,7 @@ async def _video_pipeline(principal, user_id, ctx):
             video["state"] = "making"
             video.pop("paused", None)
             await _save_video(message_id, video)
-            yield _event("progress", stage="Carrying on from where it stopped", fraction=0.05)
+            yield step(1, 1.0, "Carrying on from where it stopped")
         yield _event("storyboard", title=video["title"], scenes=len(video["story"]["drawn"]),
                      message_id=message_id)
 
@@ -2376,15 +2398,17 @@ async def _video_pipeline(principal, user_id, ctx):
                 failed = []
                 for first in range(0, len(pending), DRAW_BATCH):
                     batch = pending[first:first + DRAW_BATCH]
-                    for n, i in enumerate(batch, first):
+                    for i in batch:
                         plain = attempt >= attempts - 1 and attempt > 0     # the last tries: nobody in it
                         # A picture whose only fault is a face keeps its moment: the editing model turns
                         # the people away (two people talking face each other, however the scene is
                         # asked for); if a face is still there after that, the scene is drawn again
                         turn = wrong.get(i) == "a face is visible" and i not in turned and i in paths
-                        yield _event("progress", stage=(f"Turning the people away in scene {i + 1}" if turn else
-                                                        f"Drawing scene {i + 1} of {len(scenes)}" + (" again" if attempt else "")),
-                                     fraction=0.1 + 0.65 * (n + 1) / max(1, len(pending)))
+                        kept_now = sum(1 for picture in told["pictures"] if picture is not None)
+                        yield step(2, kept_now / len(scenes),
+                                   (f"Turning the people away in scene {i + 1}" if turn else
+                                    f"Drawing scene {i + 1} of {len(scenes)}" + (" again" if attempt else ""))
+                                   + f" · {kept_now} of {len(scenes)} pictures ready")
                         png = None
                         if turn:
                             turned.add(i)
@@ -2403,7 +2427,9 @@ async def _video_pipeline(principal, user_id, ctx):
                         with open(paths[i], "wb") as f:
                             f.write(png)
                     for i in batch:
-                        yield _event("progress", stage=f"Checking scene {i + 1} against the rules")
+                        kept_now = sum(1 for picture in told["pictures"] if picture is not None)
+                        yield step(2, kept_now / len(scenes), f"Checking scene {i + 1} against the rules"
+                                   f" · {kept_now} of {len(scenes)} pictures ready")
                         with open(paths[i], "rb") as f:
                             ok, why = video_story.verdict(
                                 await _ask_helper(principal, video_story.check_request(check_model, f.read(), scenes[i])),
@@ -2460,11 +2486,10 @@ async def _video_pipeline(principal, user_id, ctx):
             if lang in videos:
                 continue                                         # made before it stopped
             word = "Bangla" if lang == "bn" else "English"
-            yield _event("progress", stage=f"Narrating in {word}", fraction=0.78 + 0.1 * k / len(languages))
+            yield step(3 + 2 * k, 0.0, f"Narrating in {word}")
             texts = told[lang]
             narration = await video_story.narrate(lang, texts, folder)
-            yield _event("progress", stage=f"Putting the {word} video together",
-                         fraction=0.83 + 0.15 * k / len(languages))
+            yield step(4 + 2 * k, 0.0, f"Putting the {word} video together")
             title = video["title_bn"] if lang == "bn" else video["title"]
             data, seconds = await video_story.assemble(paths, narration, texts, title, lang, folder)
             stored = await _store_file(user_id, "video", "video/mp4", f"{video['title'][:80]} ({word}).mp4", data,

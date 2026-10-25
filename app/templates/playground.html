@@ -179,6 +179,11 @@ a.cite{font-size:.75em;vertical-align:super;text-decoration:none;padding:0 .1rem
 @keyframes spin{to{transform:rotate(360deg)}}
 .bar{height:6px;background:var(--input);border-radius:3px;overflow:hidden;margin-top:.4rem}
 .bar div{height:100%;background:var(--primary);width:0;transition:width .3s}
+/* The whole of a long job, under the bar of the part it is in */
+.overall{margin-top:.55rem}
+.overall-text{font-size:.8rem;color:var(--muted)}
+.bar.total{height:4px;margin-top:.25rem}
+.bar.total div{background:var(--muted)}
 /* One + button, with the ways of attaching something listed under it rather than spread along
    the toolbar, which is where they would keep arriving as more kinds of file are supported. */
 .attach-wrap{position:relative;display:inline-flex}
@@ -1414,7 +1419,9 @@ async function attachToRunningJob(conversationId){
     await readEvents(response, chunk => {
       const event = chunk.gateway;
       if(event){
-        if(event.type === 'progress' || event.type === 'status'){
+        if(event.step != null){
+          showProgress(box, event);
+        }else if(event.type === 'progress' || event.type === 'status'){
           setStatus(box, event.stage || event.text,
                     event.fraction != null ? event.fraction : undefined);
         }else if(event.type === 'call'){
@@ -1955,9 +1962,33 @@ function statsText(stats){
           stats.total != null ? `${stats.total}s total` : ''].filter(Boolean).join(' · ');
 }
 
+/* A long job's progress, as two bars when the event says which part it is in (event.step of
+   event.steps, event.part of it done): the part, which fills and starts again with each part, and the
+   whole (event.fraction). One bar for both ran up and back with every picture of a 28-scene video. */
+function showProgress(box, event){
+  if(event.step == null){
+    box.querySelector('.overall')?.remove();
+    setStatus(box, event.fraction != null ? `${event.stage} · ${Math.round(event.fraction * 100)}%` : event.stage,
+              event.fraction);
+    return;
+  }
+  const detail = event.stage && event.stage !== event.step_name ? `: ${event.stage}` : '';
+  setStatus(box, `Part ${event.step} of ${event.steps} · ${event.step_name}${detail}`, event.part || 0);
+  let overall = box.querySelector('.overall');
+  if(!overall){
+    overall = document.createElement('div');
+    overall.className = 'overall';
+    overall.innerHTML = '<div class="overall-text"></div><div class="bar total"><div></div></div>';
+    box.querySelector('.bar').after(overall);
+  }
+  const whole = Math.round((event.fraction || 0) * 100);
+  overall.querySelector('.overall-text').textContent = `Overall ${whole}%`;
+  overall.querySelector('.bar div').style.width = whole + '%';
+}
+
 function setStatus(box, text, fraction){
   let line = box.querySelector('.status');
-  if(!text){ line?.remove(); box.querySelector('.bar')?.remove(); return; }
+  if(!text){ line?.remove(); box.querySelector('.bar')?.remove(); box.querySelector('.overall')?.remove(); return; }
   if(!line){
     line = document.createElement('div');
     line.className = 'status';
@@ -3781,8 +3812,7 @@ async function sendVideo(text, again){
       if(chunk.error){ showError(chunk.error.message || 'The video could not be made'); return; }
       if(!event) return;
       if(event.type === 'progress'){
-        setStatus(box, event.fraction != null ? `${event.stage} · ${Math.round(event.fraction * 100)}%` : event.stage,
-                  event.fraction);
+        showProgress(box, event);
       }else if(event.type === 'storyboard'){
         saved = event.message_id;
         setStatus(box, `"${event.title}": ${event.scenes} scenes to draw`);
@@ -3857,10 +3887,12 @@ async function renderVideoPaused(box, video, messageId){
       await readEvents(response, chunk => {
         const event = chunk.gateway;
         if(event?.type === 'progress'){
-          status.textContent = event.fraction != null ? `${event.stage} · ${Math.round(event.fraction * 100)}%` : event.stage;
+          status.textContent = '';
+          showProgress(box, event);
         }else if(event?.type === 'video') result = event;
       });
     }catch(e){
+      setStatus(box, null);
       status.textContent = 'It stopped again: ' + errorText(e) + '. What it made is kept.';
       button.disabled = false;
       return;
