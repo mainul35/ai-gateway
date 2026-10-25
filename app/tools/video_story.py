@@ -18,6 +18,7 @@ screen, drawn with libraqm so the Bangla script is shaped right.
 """
 import asyncio
 import base64
+import hashlib
 import io
 import json
 import logging
@@ -109,6 +110,29 @@ or a short plain one if it has none.
 
 Answer with JSON only, one entry for each scene, in order:
 {"title_en": "...", "title_bn": "...", "scenes": [{"picture": "...", "people": "none", "translation": "..."}]}"""
+
+LANGUAGE_NAMES = {"en": "English", "bn": "Bangla (Bengali script)"}
+
+TRANSLATE_PROMPT = """You translate one line of a story for a children's video into {language}, faithfully,
+sentence by sentence: every sentence, nothing added, nothing left out, nothing explained or softened.
+Keep Islamic words as they are said in {language}. Text in Arabic script (a verse of the Quran, a
+blessing) is copied unchanged. Answer with the translation only."""
+
+
+def translate_request(model, text, lang):
+    """The chat request that translates one edited line into another of the video's languages."""
+    language = LANGUAGE_NAMES.get(lang, lang)
+    return {"model": model, "stream": False, "temperature": 0.2, "max_tokens": 2000,
+            "chat_template_kwargs": {"enable_thinking": False},
+            "messages": [{"role": "system", "content": TRANSLATE_PROMPT.replace("{language}", language)},
+                         {"role": "user", "content": text}]}
+
+
+def translation(answer):
+    """The translated line out of the model's answer, or None."""
+    text = re.sub(r"<think>.*?</think>", "", answer or "", flags=re.S).strip().strip('"').strip()
+    return text or None
+
 
 SCENE_WORDS = 45          # a scene's narration is whole sentences, up to about this many words
 
@@ -712,9 +736,31 @@ async def clean_recording(raw, folder, n):
         return f.read(), round(seconds, 2)
 
 
-async def assemble(pictures, narration, texts, title, lang, folder, recorded=False):
+CLIP_VERSION = 1          # raised when the way a clip is made changes, so cached clips are made again
+
+
+def clip_cache(message_id):
+    """Where a video story's finished scene clips are kept between builds, or None."""
+    if message_id is None:
+        return None
+    return os.path.join(settings.PROJECT_ROOT, "state", "video-clips", str(int(message_id)))
+
+
+async def to_m4a(source, out):
+    """A line's narration as it is kept: AAC, a tenth of the WAV's size."""
+    await _run([ffmpeg(), "-y", "-i", source, "-c:a", "aac", "-b:a", "96k", out], "keeping the narration")
+    with open(out, "rb") as f:
+        return f.read()
+
+
+async def assemble(pictures, narration, texts, title, lang, folder, recorded=False, keys=None, cache=None):
     """The video for one language (`texts` its narration, `title` shown over the first scene): each picture held for its scene with a slow zoom or pan, scenes
-    cross-faded, the narration placed at each scene's start, the words faded in over each line as it is spoken. MP4 bytes."""
+    cross-faded, the narration placed at each scene's start, the words faded in over each line as it is spoken. MP4 bytes.
+
+    `recorded` - one flag, or one per scene - marks narration the person read. With `keys` (each
+    scene's picture, as kept) and `cache` (clip_cache), a scene whose picture, words and length are
+    unchanged reuses the clip made last time: an edited sentence remakes its own scene's clip, not
+    every scene's."""
     binary = ffmpeg()
     if not binary:
         raise VideoError("No ffmpeg on this server to put the video together")
@@ -724,9 +770,22 @@ async def assemble(pictures, narration, texts, title, lang, folder, recorded=Fal
         starts.append(at)
         at += length - FADE
     total = starts[-1] + lengths[-1]
+    if cache:
+        os.makedirs(cache, exist_ok=True)
+    used = set()
 
     clips = []
     for i, (png_path, length, text) in enumerate(zip(pictures, lengths, texts)):
+        if cache and keys:
+            key = hashlib.sha1(json.dumps([CLIP_VERSION, keys[i], text, round(length, 3), i,
+                                           title if i == 0 else ""]).encode()).hexdigest()[:20]
+            kept = os.path.join(cache, f"{lang}-{i:02d}-{key}.mp4")
+            used.add(kept)
+            if os.path.isfile(kept):
+                clips.append(kept)
+                continue
+        else:
+            kept = None
         frames = int(round(length * FPS))
         # Slow and gentle: in for one scene, out for the next, drifting a little sideways - never more
         # than 8 % over the whole scene, so nothing rushes past a child's eye
@@ -755,7 +814,15 @@ async def assemble(pictures, narration, texts, title, lang, folder, recorded=Fal
                     "-t", f"{length:.3f}", "-r", str(FPS), "-pix_fmt", "yuv420p",
                     "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", clip],
                    f"scene {i + 1}")
+        if kept:
+            shutil.copyfile(clip, kept)
         clips.append(clip)
+    if cache:
+        # Only the clips of this build are kept for the next
+        for name in os.listdir(cache):
+            path = os.path.join(cache, name)
+            if name.startswith(f"{lang}-") and path not in used:
+                os.remove(path)
 
     # The scenes joined, each fading into the next
     inputs, chain, last = [], [], "[0:v]"
@@ -773,8 +840,9 @@ async def assemble(pictures, narration, texts, title, lang, folder, recorded=Fal
     # The narration, each line where its scene begins
     audio_inputs, delays = [], []
     # The Bangla voice is bright and a little harsh: its highs softened
-    tone = "highshelf=f=3200:g=-5," if lang == "bn" and not recorded else ""
+    read = recorded if isinstance(recorded, list) else [recorded] * len(narration)
     for i, ((wav, _), start) in enumerate(zip(narration, starts)):
+        tone = "highshelf=f=3200:g=-5," if lang == "bn" and not read[i] else ""
         audio_inputs += ["-i", wav]
         ms = int((start + LEAD_IN) * 1000)
         delays.append(f"[{i + 1}:a]{tone}adelay={ms}|{ms},aformat=channel_layouts=stereo[a{i}]")

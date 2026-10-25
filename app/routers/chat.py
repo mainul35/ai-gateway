@@ -2230,6 +2230,160 @@ async def continue_video(message_id: int, principal: Principal = Depends(authent
                                       "X-Job-Id": str(job.id)})
 
 
+class SceneEdit(BaseModel):
+    index: int = Field(ge=0)
+    text: dict[str, str] = Field(default_factory=dict)          # language -> the scene's new words
+    retranslate: bool = False      # the scene's other languages translated again from the one edited
+    redraw: bool = False
+    picture: str | None = Field(default=None, max_length=1500)  # what to draw instead; redraws the scene
+
+
+class VideoEditIn(BaseModel):
+    scenes: list[SceneEdit] = Field(min_length=1, max_length=video_story.GIVEN_MAX_SCENES)
+
+
+def _forget_voice(story, lang, i):
+    """A line's narration and the person's reading of it no longer fit its changed words."""
+    entries = (story.get("narration") or {}).get(lang)
+    if entries and i < len(entries):
+        entries[i] = None
+    readings = story.get(f"voice_{lang}")
+    if readings and i < len(readings):
+        readings[i] = None
+
+
+async def _owned_video(session, user, message_id):
+    message = (await session.execute(
+        select(ConversationMessage).join(Conversation).where(
+            ConversationMessage.id == message_id, Conversation.user_id == user.id))).scalar_one_or_none()
+    video = (json.loads(message.attachments or "{}") if message else {}).get("video")
+    if not video:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Video story not found")
+    return message, video
+
+
+@router.post("/video/{message_id}/edit")
+async def edit_video(message_id: int, payload: VideoEditIn, principal: Principal = Depends(authenticate),
+                     session: AsyncSession = Depends(get_session)):
+    """Changes some scenes of a video story and makes again only what they change: a scene's words in
+    a language (re-voiced, that language's video remade), its other languages translated again, or its
+    picture drawn again (every language's video remade). Every other picture, line of narration and
+    finished scene clip is used as it is, and the videos replaced are kept as earlier versions."""
+    user = _require_user(principal)
+    message, video = await _owned_video(session, user, message_id)
+    story = video.get("story")
+    if not story or not story.get("pictures"):
+        raise HTTPException(status.HTTP_409_CONFLICT, "This video was made before stories were kept; make it again")
+    running = jobs.running_for(user.id, message.conversation_id)
+    if running is not None and running.kind == "video":
+        raise HTTPException(status.HTTP_409_CONFLICT, "This video is still being made")
+    languages = video.get("languages") or [lang for lang in ("en", "bn") if lang in story]
+    count = len(story["pictures"])
+    remake, translate = set(), []
+    for change in payload.scenes:
+        i = change.index
+        if i >= count:
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, f"This story has {count} scenes")
+        edited = None
+        for lang, text in change.text.items():
+            text = " ".join(text.split())
+            if lang not in languages or not text or text == story[lang][i]:
+                continue
+            story[lang][i] = text
+            _forget_voice(story, lang, i)
+            remake.add(lang)
+            edited = lang
+        if change.retranslate and edited:
+            for other in languages:
+                if other != edited:
+                    translate.append((i, edited, other))
+                    remake.add(other)
+        if change.picture and change.picture.strip():
+            story["drawn"][i] = change.picture.strip()
+        if change.redraw or (change.picture and change.picture.strip()):
+            story["pictures"][i] = None
+            remake.update(languages)
+    if not remake:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "Nothing was changed")
+    for lang in remake:
+        _keep_version(video, lang)
+    if any(picture is None for picture in story["pictures"]):
+        video["drawing"] = {"attempt": 0, "wrong": {}, "keep_every_scene": True}
+    else:
+        video["drawing"] = {"done": True}
+    if translate:
+        video["translate"] = translate
+    video["state"] = "paused"
+    video.pop("paused", None)
+    await _save_video(message.id, video)
+    ctx = {"prompt": video.get("asked", ""), "languages": languages,
+           "conversation_id": message.conversation_id, "message_id": message.id, "video": video}
+    slot = await limits.take_gpu_slot(principal)
+    job = jobs.start(user.id, message.conversation_id, "video", "editing: " + video.get("title", "")[:100],
+                     limits.holding(slot, _one_video_at_a_time(_video_pipeline(principal, user.id, ctx))))
+    return StreamingResponse(jobs.follow(job), media_type="text/event-stream",
+                             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no",
+                                      "X-Job-Id": str(job.id)})
+
+
+class VersionIn(BaseModel):
+    lang: str = Field(pattern="^[a-z]{2}$")
+    file_id: int
+
+
+@router.post("/video/{message_id}/version")
+async def restore_version(message_id: int, payload: VersionIn, principal: Principal = Depends(authenticate),
+                          session: AsyncSession = Depends(get_session)):
+    """Brings back an earlier version of a language's video; the one it replaces becomes a version."""
+    user = _require_user(principal)
+    message, video = await _owned_video(session, user, message_id)
+    versions = (video.get("versions") or {}).get(payload.lang) or []
+    chosen = next((v for v in versions if v.get("file_id") == payload.file_id), None)
+    if chosen is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "No such version")
+    versions.remove(chosen)
+    _keep_version(video, payload.lang)
+    video.setdefault("videos", {})[payload.lang] = {k: v for k, v in chosen.items() if k != "replaced_at"}
+    await _save_video(message.id, video)
+    return {"video": video}
+
+
+@router.get("/videos")
+async def list_videos(principal: Principal = Depends(authenticate), session: AsyncSession = Depends(get_session)):
+    """The person's video stories, newest first, for the Videos page."""
+    user = _require_user(principal)
+    rows = (await session.execute(
+        select(ConversationMessage, Conversation.uid).join(Conversation).where(
+            Conversation.user_id == user.id, ConversationMessage.role == "assistant",
+            ConversationMessage.content.like("(video story:%")).order_by(ConversationMessage.id.desc()))).all()
+    stories = []
+    for message, uid in rows:
+        video = json.loads(message.attachments or "{}").get("video")
+        if not video:
+            continue
+        story = video.get("story") or {}
+        pictures = [p for p in story.get("pictures") or [] if p]
+        stories.append({"message_id": message.id, "conversation": uid, "title": video.get("title"),
+                        "title_bn": video.get("title_bn"), "state": video.get("state", "done"),
+                        "languages": list((video.get("videos") or {}).keys()),
+                        "scenes": len(story.get("pictures") or []) or video.get("scenes"),
+                        "picture": pictures[0] if pictures else None, "editable": bool(story),
+                        "versions": sum(len(v) for v in (video.get("versions") or {}).values()),
+                        "made": message.created_at.isoformat(timespec="minutes")})
+    return {"videos": stories}
+
+
+@router.get("/videos/{message_id}")
+async def get_video(message_id: int, principal: Principal = Depends(authenticate),
+                    session: AsyncSession = Depends(get_session)):
+    user = _require_user(principal)
+    message, video = await _owned_video(session, user, message_id)
+    conversation = await session.get(Conversation, message.conversation_id)
+    running = jobs.running_for(user.id, message.conversation_id)
+    return {"message_id": message.id, "conversation": conversation.uid if conversation else None, "video": video,
+            "being_made": running is not None and running.kind == "video"}
+
+
 async def _save_video(message_id, video, stats=None):
     """The video story's state, written to its message as it goes."""
     if message_id is None:
@@ -2376,6 +2530,17 @@ async def _video_pipeline(principal, user_id, ctx):
             video.pop("paused", None)
             await _save_video(message_id, video)
             yield step(1, 1.0, "Carrying on from where it stopped")
+            # An edit asked for the other languages of a changed line to be translated again
+            for n, (i, source, target) in enumerate(video.get("translate") or []):
+                yield step(1, (n + 1) / len(video["translate"]), f"Translating scene {i + 1} again")
+                done = video_story.translation(await _ask_helper(principal, video_story.translate_request(
+                    bangla_model, video["story"][source][i], target)))
+                if done is None:
+                    raise video_story.VideoError(f"Scene {i + 1} could not be translated; try again")
+                video["story"][target][i] = done
+                _forget_voice(video["story"], target, i)
+            if video.pop("translate", None) is not None:
+                await _save_video(message_id, video)
         yield _event("storyboard", title=video["title"], scenes=len(video["story"]["drawn"]),
                      message_id=message_id)
 
@@ -2450,9 +2615,10 @@ async def _video_pipeline(principal, user_id, ctx):
                 if not pending:
                     break
             kept = [i for i, picture in enumerate(told["pictures"]) if picture is not None]
-            if video.get("from_story"):
-                # Every word of a given story is read: a scene whose picture never passed shows the
-                # nearest picture that did, rather than being left out
+            if video.get("from_story") or drawing.get("keep_every_scene"):
+                # Every word of a given story is read - and every scene of an edited one stays: a
+                # scene whose picture never passed shows the nearest picture that did, rather than
+                # being left out
                 if not kept:
                     raise video_story.VideoError("No picture passed the content check to make a video")
                 for i in range(len(told["pictures"])):
@@ -2482,19 +2648,54 @@ async def _video_pipeline(principal, user_id, ctx):
                 f.write(files[picture])
 
         videos = video.setdefault("videos", {})
+        voices = told.setdefault("narration", {})
+        cache = video_story.clip_cache(message_id)
         for k, lang in enumerate(languages):
             if lang in videos:
-                continue                                         # made before it stopped
+                continue                                         # made before it stopped, or not edited
             word = "Bangla" if lang == "bn" else "English"
-            yield step(3 + 2 * k, 0.0, f"Narrating in {word}")
             texts = told[lang]
-            narration = await video_story.narrate(lang, texts, folder)
+            # Each line's narration is kept: after an edit only the lines changed are voiced again,
+            # and a line the person read keeps their voice
+            entries = ((voices.get(lang) or []) + [None] * len(texts))[:len(texts)]
+            missing = [i for i, entry in enumerate(entries) if not entry]
+            yield step(3 + 2 * k, 0.0, f"Narrating in {word}" +
+                       (f": {len(missing)} of {len(texts)} lines" if 0 < len(missing) < len(texts) else ""))
+            if missing:
+                spoken = await video_story.narrate(lang, [texts[i] for i in missing], folder)
+                for i, (wav, seconds) in zip(missing, spoken):
+                    audio = await video_story.to_m4a(wav, os.path.join(folder, f"voice-{lang}-{i:02d}.m4a"))
+                    entries[i] = {"file_id": await _store_file(user_id, "voice", "audio/mp4",
+                                                               f"scene {i + 1} ({word}).m4a", audio),
+                                  "seconds": round(seconds, 3),
+                                  # a verse alone is the qari's recitation, never softened like the voice
+                                  "by": "machine" if video_story.needs_reading(texts[i]) else "qari"}
+                voices[lang] = entries
+                await _save_video(message_id, video)
+            async with session_factory()() as db:
+                audio = {f.id: f.data for f in (await db.execute(select(ChatFile).where(
+                    ChatFile.id.in_({entry["file_id"] for entry in entries}), ChatFile.user_id == user_id))).scalars()}
+            narration = []
+            for i, entry in enumerate(entries):
+                if entry["file_id"] not in audio:
+                    raise video_story.VideoError(f"The narration of scene {i + 1} is gone; edit the scene to voice it again")
+                path = os.path.join(folder, f"line-{lang}-{i:02d}.m4a")
+                with open(path, "wb") as f:
+                    f.write(audio[entry["file_id"]])
+                narration.append((path, entry["seconds"]))
             yield step(4 + 2 * k, 0.0, f"Putting the {word} video together")
             title = video["title_bn"] if lang == "bn" else video["title"]
-            data, seconds = await video_story.assemble(paths, narration, texts, title, lang, folder)
+            data, seconds = await video_story.assemble(paths, narration, texts, title, lang, folder,
+                                                       recorded=[entry.get("by") != "machine" for entry in entries],
+                                                       keys=told["pictures"], cache=cache)
             stored = await _store_file(user_id, "video", "video/mp4", f"{video['title'][:80]} ({word}).mp4", data,
                                        prompt=title)
             videos[lang] = {"file_id": stored, "url": f"/chat/files/{stored}", "seconds": seconds}
+            read = [entry.get("by") == "recorded" for entry in entries if entry.get("by") != "qari"]
+            if read and all(read):
+                videos[lang]["voice"] = "recorded"
+            elif any(read):
+                videos[lang]["voice"] = "partly recorded"
             await _save_video(message_id, video)
 
         video["state"] = "done"
@@ -2625,10 +2826,24 @@ async def video_voice(message_id: int, payload: VoiceIn, principal: Principal = 
                 narration.append(await video_story.with_recitation(line, lang, path, voice[-1]["seconds"],
                                                                    folder, f"{lang}-{n:02d}")
                                  or (path, voice[-1]["seconds"]))
+            # Each scene's narration as it now is, kept like the machine's (the pipeline's "narration"),
+            # so an edit later re-voices only the lines it changes and keeps the person's voice
+            old_entries = (story.get("narration") or {}).get(lang) or []
+            entries = []
+            for n, (path, seconds) in enumerate(narration):
+                if reads[n] and path.endswith(f"voice-{n:02d}.m4a"):
+                    entries.append({"file_id": voice[n]["file_id"], "seconds": seconds, "by": "recorded"})
+                    continue
+                audio = await video_story.to_m4a(path, os.path.join(folder, f"keep-{n:02d}.m4a"))
+                kept_id = await _store_file(user_id, "voice", "audio/mp4", f"scene {n + 1} ({word}).m4a", audio)
+                created.append(kept_id)
+                entries.append({"file_id": kept_id, "seconds": round(seconds, 3),
+                                "by": "recorded" if reads[n] else "qari"})
             yield _event("progress", stage=f"Putting the {word} video together with your voice", fraction=0.6)
             title = (video.get("title_bn") if lang == "bn" else video.get("title")) or ""
             data, seconds = await video_story.assemble(paths, narration, story[lang], title, lang, folder,
-                                                       recorded=True)
+                                                       recorded=True, keys=story["pictures"],
+                                                       cache=video_story.clip_cache(message_id))
             async with session_factory()() as db:
                 stored = ChatFile(user_id=user_id, kind="video", mime_type="video/mp4",
                                   name=f"{video.get('title', 'Video story')[:80]} ({word}, your voice).mp4",
@@ -2636,9 +2851,13 @@ async def video_voice(message_id: int, payload: VoiceIn, principal: Principal = 
                 db.add(stored)
                 await db.commit()
             created.append(stored.id)
-            previous = (video.get("videos") or {}).get(lang)
+            # The video it replaces is kept as an earlier version, not removed
+            _keep_version(video, lang)
             video.setdefault("videos", {})[lang] = {"file_id": stored.id, "url": f"/chat/files/{stored.id}",
                                                     "seconds": seconds, "voice": "recorded"}
+            story.setdefault("narration", {})[lang] = entries
+            in_use = {entry["file_id"] for entry in entries} | {v["file_id"] for v in voice if v}
+            replaced += [entry["file_id"] for entry in old_entries if entry and entry["file_id"] not in in_use]
             story[f"voice_{lang}"] = voice
             video["story"] = story
             filed["video"] = video
@@ -2647,7 +2866,7 @@ async def video_voice(message_id: int, payload: VoiceIn, principal: Principal = 
                 row.attachments = json.dumps(filed)
                 await db.commit()
             created = []
-            for file_id in replaced + ([previous["file_id"]] if previous else []):
+            for file_id in replaced:
                 await _drop_file(user_id, file_id)
             yield _event("video", **video, message_id=message_id)
         except video_story.VideoError as e:
@@ -2662,6 +2881,14 @@ async def video_voice(message_id: int, payload: VoiceIn, principal: Principal = 
     return StreamingResponse(jobs.follow(job), media_type="text/event-stream",
                              headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no",
                                       "X-Job-Id": str(job.id)})
+
+
+def _keep_version(video, lang):
+    """Moves a language's current video into its earlier versions, newest first."""
+    current = (video.get("videos") or {}).pop(lang, None)
+    if current:
+        versions = video.setdefault("versions", {}).setdefault(lang, [])
+        versions.insert(0, {**current, "replaced_at": utcnow().isoformat(timespec="seconds")})
 
 
 async def _drop_file(user_id, file_id):
