@@ -52,6 +52,9 @@ body.videos-studio main{max-width:none;padding:0}
 .editor .actions{display:flex;flex-wrap:wrap;gap:.6rem;margin-top:.8rem}
 .editor .drawState{font-size:.8rem;color:var(--muted);margin-top:.5rem}
 .editor .drawState.bad{color:#fca5a5}
+.editor .sceneBar{margin-top:.6rem;padding:.5rem .7rem;background:var(--input)}
+.editor .sceneBar .bar{background:var(--card)}
+.row .s .drawing{color:var(--primary);font-weight:600}
 .editor .newPicture{font-size:.8rem;color:#4ade80;margin-top:.4rem}
 .editor details.from{font-size:.78rem;color:var(--muted);margin-top:.4rem}
 .check{display:flex;gap:.45rem;align-items:center;font-size:.85rem;margin-top:.5rem;cursor:pointer}
@@ -117,6 +120,8 @@ const SCENE_MIN = 8, LEAD_IN = 0.6, FADE = 1.5;
 let stories = [], current = null, showing = null, selected = 0, edits = {}, busy = false;
 // Pictures drawn again for a scene and not yet in the video: {scene: {file_id, ok, why, drawn, people, note}}
 let previews = {};
+// Scenes whose picture is being drawn again, each with its own progress: {scene: {stage, fraction}}
+let drawing = {};
 
 function showError(text){
   const box = document.getElementById('error');
@@ -209,6 +214,7 @@ async function openStory(id){
   if(Object.keys(edits).length && current?.message_id !== id &&
      !confirm('Leave this story? The changes you have not saved will be lost.')){ renderHead(); return; }
   showError('');
+  if(current?.message_id !== id) drawing = {};      // a picture still drawing for the story left is not shown here
   try{ current = await api(`/chat/videos/${id}`); }catch(e){ showError(e.message); return; }
   history.replaceState(null, '', `/videos2?id=${id}`);
   edits = {};
@@ -297,7 +303,8 @@ function renderRows(){
       ${picture ? `<img src="/chat/files/${picture}" alt="" loading="lazy">` : '<img alt="">'}
       <span><span class="t" dir="auto">${i + 1} · ${escapeHtml(words)}</span>
         <span class="s">${at[i] !== undefined ? clock(at[i]) + ' · ' : ''}${voices.length ? [...new Set(voices)].map(v => BY[v]).join(', ') : 'machine voice'}${
-          edits[i] ? ' · <span class="edited">changed</span>' : ''}</span></span></button>`;
+          edits[i] ? ' · <span class="edited">changed</span>' : ''}<span class="drawing" data-drawing="${i}">${
+          drawing[i] ? ' · ' + drawingLabel(drawing[i]) : ''}</span></span></span></button>`;
   }).join('');
   document.querySelectorAll('.row').forEach(row => row.addEventListener('click', () => select(Number(row.dataset.i))));
 }
@@ -343,9 +350,11 @@ function renderEditor(){
           ${(told.drawn || [])[i] ? `<details class="from"><summary>What it is drawn from now</summary>${escapeHtml(told.drawn[i])}</details>` : ''}
         </div>
         ${editable ? `<div class="actions">
-          <button type="button" class="btn" id="regenerate">🎨 Regenerate the picture</button>
+          <button type="button" class="btn" id="regenerate" ${drawing[i] ? 'disabled' : ''}>🎨 Regenerate the picture</button>
           ${told.pictures.length > 1 ? `<button type="button" class="btn btn-secondary" id="deleteScene"
             style="border-color:#7f1d1d;color:#fca5a5">Delete this scene</button>` : ''}</div>` : ''}
+        <div class="progress sceneBar" id="sceneProgress" ${drawing[i] ? '' : 'hidden'}>
+          <div class="line"></div><div class="bar"><div></div></div></div>
         <div class="drawState ${preview && !preview.ok ? 'bad' : ''}" id="drawState">${
           preview && !preview.ok ? `This picture did not pass the check (${escapeHtml(preview.why || 'no reason given')}), so it is not used. Regenerate it again.`
           : preview?.note ? escapeHtml(preview.note) : ''}</div>
@@ -395,6 +404,25 @@ function renderEditor(){
   });
   editor.querySelectorAll('.record').forEach(button =>
     button.addEventListener('click', () => record(button.closest('[data-card]'), i)));
+  paintDrawing(i);
+}
+
+function drawingLabel(state){
+  return `drawing ${Math.round((state.fraction || 0) * 100)}%`;
+}
+
+// One scene's drawing progress, where it shows: its row, and its card when it is the one open
+function paintDrawing(i){
+  const state = drawing[i];
+  const label = document.querySelector(`[data-drawing="${i}"]`);
+  if(label) label.textContent = state ? ' · ' + drawingLabel(state) : '';
+  if(selected !== i) return;
+  const box = document.getElementById('sceneProgress');
+  if(!box) return;
+  box.hidden = !state;
+  if(!state) return;
+  box.querySelector('.line').textContent = state.stage || '';
+  box.querySelector('.bar div').style.width = Math.round((state.fraction || 0) * 100) + '%';
 }
 
 // The scene's picture drawn again from what the person asked, to look at; the video is made with it
@@ -404,6 +432,7 @@ async function regenerate(i){
   const box = editor.querySelector('#redraw');
   const asked = editor.querySelector('#describe').value.trim();
   const state = editor.querySelector('#drawState');
+  if(drawing[i]) return;
   if(!box.checked || !asked){
     box.checked = true;
     editor.querySelector('#describeBox').hidden = false;
@@ -414,11 +443,15 @@ async function regenerate(i){
     return;
   }
   keep();                                   // the request stays in its box when the editor is drawn again
-  showError('');
-  busy = true;
-  updateSave();
+  // Each scene's drawing is followed on its own: several can be asked for, and the server draws them
+  // one after another, each telling its own scene how far it has got
+  const story_id = current.message_id;
+  drawing[i] = {stage: 'Starting', fraction: 0};
   editor.querySelector('#regenerate').disabled = true;
-  showProgress({stage: 'Starting', fraction: 0});
+  state.className = 'drawState';
+  state.textContent = '';
+  updateSave();
+  paintDrawing(i);
   let drawn = null, trouble = '';
   try{
     const response = await fetch(`/chat/video/${current.message_id}/redraw`, {method: 'POST', headers: JSON_HEADERS,
@@ -430,20 +463,43 @@ async function regenerate(i){
     await readEvents(response, chunk => {
       if(chunk.error) throw new Error(chunk.error.message);
       const event = chunk.gateway;
-      if(event?.type === 'progress') showProgress(event);
-      else if(event?.type === 'picture') drawn = event;
+      if(current.message_id !== story_id) return;          // another story is open now
+      if(event?.type === 'progress'){
+        drawing[i] = {stage: event.stage, fraction: event.fraction};
+        paintDrawing(i);
+      }else if(event?.type === 'picture') drawn = event;
     });
   }catch(e){
-    trouble = 'The picture was not drawn: ' + e.message;
+    trouble = e.message;
   }
-  busy = false;
-  document.getElementById('progress').hidden = true;
+  if(current.message_id !== story_id) return;
+  delete drawing[i];
   if(drawn) previews[i] = drawn;
-  else if(!trouble) trouble = 'The picture was not drawn; try again.';
-  if(selected === i) renderEditor();
-  keep();
+  else if(!trouble) trouble = 'it stopped before the picture was ready';
+  settle(i, trouble);
+}
+
+// A scene's new picture (or why there is none) put in its place, whichever scene is open by then
+function settle(i, trouble){
+  if(selected === i){
+    keep();                                 // what is typed in the open editor is not lost
+    renderEditor();
+    keep();
+    if(trouble){
+      const state = document.getElementById('drawState');
+      state.className = 'drawState bad';
+      state.textContent = 'The picture was not drawn: ' + trouble + '. Regenerate it again.';
+    }
+  }else{
+    const preview = previews[i];
+    if(preview?.ok){
+      edits[i] = Object.assign(edits[i] || {text: {}}, {redraw: true, picture_file: preview.file_id,
+                                                         picture: preview.drawn, people: preview.people});
+    }
+    if(trouble) showError(`Scene ${i + 1}: the picture was not drawn: ${trouble}.`);
+  }
   renderRows();
-  if(trouble) showError(trouble);
+  updateSave();
 }
 
 // One line read in the person's voice: recorded, listened to, then that language's video made again
@@ -567,8 +623,10 @@ function keep(){
 
 function updateSave(){
   const count = Object.keys(edits).length;
-  document.getElementById('save').disabled = !count || busy || current?.being_made;
-  document.getElementById('changes').textContent = count ? `${count} scene${count === 1 ? '' : 's'} changed` : 'Nothing changed yet.';
+  const pending = Object.keys(drawing).length;
+  document.getElementById('save').disabled = !count || busy || pending > 0 || current?.being_made;
+  document.getElementById('changes').textContent = (count ? `${count} scene${count === 1 ? '' : 's'} changed` : 'Nothing changed yet.') +
+    (pending ? ` · ${pending} picture${pending === 1 ? '' : 's'} being drawn` : '');
 }
 
 function showProgress(event){

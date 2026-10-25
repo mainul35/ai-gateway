@@ -2474,7 +2474,7 @@ async def redraw_picture(message_id: int, payload: RedrawIn, principal: Principa
             png, ok, why, turned = None, False, "", False
             for attempt in range(2):
                 yield _event("progress", stage=f"Drawing scene {i + 1}" + (" again" if attempt else ""), fraction=0.05)
-                if why == "a face is visible" and not turned:
+                if why in video_story.TURNABLE and not turned:
                     turned = True
                     work = images.generate(video_story.TURN_AWAY, video_story.SIZE,
                                            sources=[(png, "image/png")], on_progress=progress)
@@ -2504,7 +2504,8 @@ async def redraw_picture(message_id: int, payload: RedrawIn, principal: Principa
 
     slot = await limits.take_gpu_slot(principal)
     job = jobs.start(user.id, message.conversation_id, "picture", f"redrawing scene {i + 1}",
-                     limits.holding(slot, _one_video_at_a_time(stream())))
+                     limits.holding(slot, _one_video_at_a_time(
+                         stream(), "Waiting: another picture or video is being made first")))
     return StreamingResponse(jobs.follow(job), media_type="text/event-stream",
                              headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no",
                                       "X-Job-Id": str(job.id)})
@@ -2931,7 +2932,7 @@ async def _video_pipeline(principal, user_id, ctx):
                         # A picture whose only fault is a face keeps its moment: the editing model turns
                         # the people away (two people talking face each other, however the scene is
                         # asked for); if a face is still there after that, the scene is drawn again
-                        turn = wrong.get(i) == "a face is visible" and i not in turned and i in paths
+                        turn = wrong.get(i) in video_story.TURNABLE and i not in turned and i in paths
                         kept_now = sum(1 for picture in told["pictures"] if picture is not None)
                         yield step(2, kept_now / len(scenes),
                                    (f"Turning the people away in scene {i + 1}" if turn else
@@ -3092,9 +3093,9 @@ async def _video_pipeline(principal, user_id, ctx):
 _video_turn = asyncio.Lock()
 
 
-async def _one_video_at_a_time(work):
+async def _one_video_at_a_time(work, waiting="Waiting for the video already being made"):
     if _video_turn.locked():
-        yield _event("progress", stage="Waiting for the video already being made", fraction=0.0)
+        yield _event("progress", stage=waiting, fraction=0.0)
     async with _video_turn:
         async for chunk in work:
             yield chunk
