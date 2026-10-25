@@ -376,6 +376,51 @@ def illustrate_request(model, title, scenes, lang):
                          {"role": "user", "content": text}]}
 
 
+REDRAW_PROMPT = """You rewrite what one scene's picture shows, for a calm story video for children and
+families. You are given the scene's words (what is read aloud while it shows), the description its
+picture was drawn from, and the person's request. The request is about this picture only. It may be
+a whole new description, or only what should be different - then keep everything else from the
+current description and change what it asks. Follow what it asks closely and literally: the pose,
+the action, the place, the light, the number of people, the shot.
+Write the new description in English, as one paragraph: who is in it and how many, what each is doing
+and how they are placed, where, the objects that matter, the light and the time of day, and the shot.
+Describe each person in full, as the current description does, so they look the same as in the other
+scenes. One moment in one picture. Never a face, never text.
+These rules come before the request, and the description must keep to them even when the request
+asks otherwise: a prophet (peace be upon them) is never drawn in any form - show the place, the light
+or the path instead; angels, jinn and Iblis are never figures, and Allah is never depicted in any
+form; people are seen from behind or far away, the face completely hidden, modestly dressed in long
+loose clothing; any woman fully covered in a long loose robe and a headscarf.
+Answer with JSON only: {"picture": "...", "people": "none" or "from_behind", "note": "..."} -
+"people" is "none" when nobody may or need be in it; "note" says in one short sentence, in the
+language of the request, what of the request could not be followed and why, or is "" when all of it was."""
+
+
+def redraw_request(model, words, current, asked):
+    """The chat request for one scene's picture description, rewritten as the person asks."""
+    text = (f"SCENE WORDS: {words or '(none)'}\n\nCURRENT DESCRIPTION: {current or '(none)'}\n\n"
+            f"REQUEST: {asked}")
+    return {"model": model, "stream": False, "temperature": 0.2, "max_tokens": 1500,
+            "chat_template_kwargs": {"enable_thinking": False},
+            "messages": [{"role": "system", "content": REDRAW_PROMPT}, {"role": "user", "content": text}]}
+
+
+def parse_redraw(answer):
+    """(picture, people, note) from the rewritten description; VideoError when there is none."""
+    if answer is None:
+        raise VideoError(MODEL_DOWN)
+    match = re.search(r"\{.*\}", re.sub(r"<think>.*?</think>", "", answer or "", flags=re.S), re.S)
+    try:
+        found = json.loads(match.group(0)) if match else {}
+    except ValueError:
+        found = {}
+    picture = " ".join(str(found.get("picture") or "").split())
+    if not picture:
+        raise VideoError("The new picture could not be described; try again")
+    people = "none" if found.get("people") == "none" else "from_behind"
+    return picture, people, " ".join(str(found.get("note") or "").split())
+
+
 def parse_illustrated(answer, title, scenes, lang):
     """The storyboard of a given story: its own words for its language, the translation for the other,
     a picture for every scene. Every scene must be there, or nothing is made."""
