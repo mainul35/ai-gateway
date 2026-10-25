@@ -1,0 +1,379 @@
+{% extends "base.html" %}
+{% block title %}Videos 2 &middot; Model Gateway{% endblock %}
+{% block body_class %}videos-studio{% endblock %}
+{% block content %}
+{# Layout B ("Studio"), offered beside /videos (layout A) to compare; the same endpoints underneath #}
+<style>
+body.videos-studio main{max-width:none;padding:0}
+.studio{display:grid;grid-template-columns:minmax(0,1fr) 24rem;height:calc(100vh - 4.2rem)}
+.stage{padding:1rem 1.4rem 1.5rem;overflow-y:auto}
+.strip{border-left:1px solid var(--border);display:flex;flex-direction:column;min-height:0;background:var(--bg)}
+.strip .rows{overflow-y:auto;flex:1}
+@media (max-width:900px){
+  .studio{grid-template-columns:1fr;height:auto}
+  .strip{border-left:none;border-top:1px solid var(--border)}
+  .strip .rows{max-height:none}
+}
+.head{display:flex;flex-wrap:wrap;gap:.6rem;align-items:center;margin-bottom:.8rem}
+.head select{width:auto;max-width:24rem}
+.langs{display:flex;flex-wrap:wrap;gap:.35rem}
+.langs button{background:none;border:1px solid var(--border);border-radius:999px;padding:.2rem .75rem;color:var(--muted);
+              cursor:pointer;font-size:.85rem}
+.langs button.on{background:var(--primary);border-color:var(--primary);color:#fff}
+.head .spacer{flex:1}
+.stage video{width:100%;max-height:56vh;aspect-ratio:16/9;border-radius:12px;background:#000;display:block}
+.versions{font-size:.85rem;margin:.6rem 0 0}
+.versions summary{cursor:pointer;color:var(--muted)}
+.versions li{margin:.3rem 0}
+.editor{margin-top:1rem;background:var(--card);border-radius:12px;padding:1rem;display:grid;
+        grid-template-columns:minmax(12rem,15rem) repeat(var(--columns,2),minmax(0,1fr));gap:1rem;align-items:start}
+@media (max-width:640px){.editor{grid-template-columns:1fr}}
+.editor img{width:100%;aspect-ratio:16/9;object-fit:cover;border-radius:8px;display:block;cursor:zoom-in;background:var(--input)}
+.editor .where{font-size:.8rem;color:var(--muted);margin-top:.4rem}
+.editor label.field{display:flex;gap:.45rem;align-items:center;font-size:.8rem;color:var(--muted);margin-bottom:.3rem}
+.editor textarea{width:100%;min-height:8rem;resize:vertical;font-family:inherit;font-size:.95rem;line-height:1.55}
+.editor textarea.changed{border-color:var(--primary)}
+.editor .describe{min-height:4rem;font-size:.85rem;margin-top:.4rem}
+.check{display:flex;gap:.45rem;align-items:center;font-size:.85rem;margin-top:.5rem;cursor:pointer}
+.check input{width:auto;margin:0}
+.stale{font-size:.78rem;color:#f59e0b;margin-top:.25rem}
+.row{display:grid;grid-template-columns:104px 1fr;gap:.65rem;padding:.55rem .8rem;border-bottom:1px solid var(--card);
+     cursor:pointer;align-items:center;background:none;border-left:none;border-right:none;border-top:none;width:100%;
+     text-align:left;color:var(--text);font:inherit}
+.row:hover{background:var(--card)}
+.row.sel{background:var(--card);box-shadow:inset 3px 0 0 var(--primary)}
+.row img{width:104px;aspect-ratio:16/9;object-fit:cover;border-radius:6px;display:block;background:var(--input)}
+.row .t{font-size:.82rem;line-height:1.35;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.row .s{font-size:.72rem;color:var(--muted);margin-top:.2rem}
+.row .s .edited{color:#f59e0b;font-weight:600}
+.badge{font-size:.7rem;border-radius:999px;padding:.05rem .45rem;border:1px solid var(--border);color:var(--muted);white-space:nowrap}
+.badge.recorded{border-color:#22c55e;color:#4ade80}
+.badge.qari{border-color:#8b5cf6;color:#c4b5fd}
+.savebar{border-top:1px solid var(--border);padding:.7rem .8rem;display:flex;gap:.7rem;align-items:center;background:var(--bg)}
+.savebar .spacer{flex:1}
+.progress{margin-top:.8rem;background:var(--card);border-radius:10px;padding:.7rem 1rem}
+.progress .line{font-size:.85rem;color:var(--muted)}
+.progress .bar{height:6px;background:var(--input);border-radius:3px;overflow:hidden;margin:.3rem 0 .5rem}
+.progress .bar div{height:100%;background:var(--primary);width:0;transition:width .3s}
+.progress .bar.total{height:4px;margin-bottom:0}
+.progress .bar.total div{background:var(--muted)}
+dialog.zoom{border:none;background:none;padding:0;max-width:96vw}
+dialog.zoom img{max-width:96vw;max-height:90vh;border-radius:8px}
+dialog.zoom::backdrop{background:rgba(0,0,0,.8)}
+</style>
+
+<div class="studio">
+  <div class="stage">
+    <div id="error" class="note err" hidden></div>
+    <div class="head" id="head"><span class="muted">Loading…</span></div>
+    <div id="player"></div>
+    <div class="progress" id="progress" hidden><div class="line" id="partLine"></div><div class="bar"><div id="partBar"></div></div>
+      <div class="line" id="wholeLine"></div><div class="bar total"><div id="wholeBar"></div></div></div>
+    <div class="editor" id="editor" hidden></div>
+  </div>
+  <div class="strip">
+    <div class="rows" id="rows"></div>
+    <div class="savebar"><span class="muted" id="changes">Nothing changed yet.</span><span class="spacer"></span>
+      <button class="btn" id="save" disabled>Save and remake</button></div>
+  </div>
+</div>
+<dialog class="zoom" id="zoom"><img alt=""></dialog>
+
+<script>
+const NAMES = {en: 'English', bn: 'বাংলা', es: 'Español', fr: 'Français', zh: '中文', ja: '日本語', ko: '한국어',
+               th: 'ไทย', ar: 'العربية', ur: 'اردو', hi: 'हिन्दी'};
+const IN_ENGLISH = {en: 'English', bn: 'Bangla', es: 'Spanish', fr: 'French', zh: 'Chinese', ja: 'Japanese',
+                    ko: 'Korean', th: 'Thai', ar: 'Arabic', ur: 'Urdu', hi: 'Hindi'};
+const BY = {machine: 'machine voice', recorded: 'your voice', qari: 'qari'};
+const JSON_HEADERS = {'Content-Type': 'application/json'};
+// How long a scene stays on screen, as app/tools/video_story.py scene_lengths: to find where it starts
+const SCENE_MIN = 8, LEAD_IN = 0.6, FADE = 1.5;
+let stories = [], current = null, showing = null, selected = 0, edits = {}, busy = false;
+
+function showError(text){
+  const box = document.getElementById('error');
+  box.textContent = text || '';
+  box.hidden = !text;
+}
+
+async function api(path, options){
+  const response = await fetch(path, options);
+  if(response.status === 401){ location.href = '/login'; throw new Error('signed out'); }
+  const body = await response.json().catch(() => ({}));
+  if(!response.ok) throw new Error((typeof body.detail === 'string' && body.detail) || `HTTP ${response.status}`);
+  return body;
+}
+
+async function readEvents(response, onData){
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  while(true){
+    const {value, done} = await reader.read();
+    if(done) break;
+    buffer += decoder.decode(value, {stream: true});
+    const lines = buffer.split('\n');
+    buffer = lines.pop();
+    for(const line of lines){
+      if(!line.startsWith('data:')) continue;
+      let chunk;
+      try{ chunk = JSON.parse(line.slice(5).trim()); }catch(e){ continue; }
+      if(chunk.error) throw new Error(chunk.error.message || 'It stopped');
+      onData(chunk);
+    }
+  }
+}
+
+const story = () => current?.video?.story || {};
+const languages = () => current?.video?.languages || Object.keys(current?.video?.videos || {});
+const clean = text => (text || '').split(/\s+/).join(' ').trim();
+const clock = s => `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, '0')}`;
+
+// Where each scene starts in the language's video, from its narration's length
+function starts(lang){
+  const entries = (story().narration || {})[lang] || [];
+  if(!entries.length) return [];
+  let at = 0;
+  return entries.map(entry => {
+    const start = at;
+    at += Math.max(SCENE_MIN, LEAD_IN + (entry?.seconds || 0) + 1.4 + FADE) - FADE;
+    return start;
+  });
+}
+
+async function loadStories(){
+  ({videos: stories} = await api('/chat/videos'));
+  if(!stories.length){
+    document.getElementById('head').innerHTML =
+      '<p class="muted">No video stories yet. Make one in the Playground with Video story switched on.</p>';
+    return;
+  }
+  const wanted = Number(new URLSearchParams(location.search).get('id')) || stories[0].message_id;
+  await openStory(stories.some(s => s.message_id === wanted) ? wanted : stories[0].message_id);
+}
+
+async function openStory(id){
+  if(Object.keys(edits).length && current?.message_id !== id &&
+     !confirm('Leave this story? The changes you have not saved will be lost.')){ renderHead(); return; }
+  showError('');
+  try{ current = await api(`/chat/videos/${id}`); }catch(e){ showError(e.message); return; }
+  history.replaceState(null, '', `/videos2?id=${id}`);
+  edits = {};
+  selected = 0;
+  const made = Object.keys(current.video.videos || {});
+  showing = made.includes(showing) ? showing : made[0] || null;
+  renderHead();
+  renderPlayer();
+  renderRows();
+  renderEditor();
+  updateSave();
+}
+
+function renderHead(){
+  const video = current.video;
+  const told = story();
+  const missing = Object.keys(NAMES).filter(l => !languages().includes(l));
+  const editable = !!told.pictures && !current.being_made;
+  const earlier = showing ? ((video.versions || {})[showing] || []) : [];
+  document.getElementById('head').innerHTML = `
+    <select id="pickStory">${stories.map(s => `<option value="${s.message_id}" ${s.message_id === current.message_id ? 'selected' : ''}>
+      ${escapeHtml(s.title || 'Video story')} — ${s.scenes || '?'} scenes${s.state !== 'done' ? ' · ' + escapeHtml(s.state) : ''}</option>`).join('')}</select>
+    <div class="langs">${Object.keys(video.videos || {}).map(l => `<button type="button" data-lang="${l}" class="${l === showing ? 'on' : ''}">
+      ${NAMES[l] || l}${video.videos[l].seconds ? ' ' + clock(video.videos[l].seconds) : ''}${
+      video.videos[l].voice ? ' · ' + escapeHtml(video.videos[l].voice === 'recorded' ? 'your voice' : video.videos[l].voice) : ''}</button>`).join('')}</div>
+    <span class="spacer"></span>
+    ${editable && missing.length ? `<select id="addLang"><option value="">＋ Add a language…</option>${
+      missing.map(l => `<option value="${l}">${NAMES[l]} · ${IN_ENGLISH[l]}</option>`).join('')}</select>` : ''}
+    ${current.conversation ? `<a class="btn btn-secondary" href="/playground?c=${encodeURIComponent(current.conversation)}"
+      title="Read a language in your own voice, under the video in its conversation">🎙 Read in your voice</a>` : ''}
+    ${earlier.length ? `<details class="versions" style="flex-basis:100%"><summary>⟲ ${earlier.length} earlier ${IN_ENGLISH[showing] || ''} version${earlier.length > 1 ? 's' : ''}</summary><ol>${
+      earlier.map(v => `<li>replaced ${escapeHtml((v.replaced_at || '').replace('T', ' '))} ·
+        <a href="${escapeHtml(v.url)}" target="_blank" rel="noopener">play</a>
+        ${editable ? `<button type="button" class="btn btn-secondary" data-restore="${v.file_id}">Bring back</button>` : ''}</li>`).join('')}</ol></details>` : ''}
+    ${current.being_made ? '<div class="note" style="flex-basis:100%">Being made right now; its scenes can be changed once it is done.</div>' : ''}
+    ${video.state && video.state !== 'done' && !current.being_made ? `<div class="note" style="flex-basis:100%">It stopped partway${
+      video.paused ? ': ' + escapeHtml(video.paused) : ''}. What it made is kept.
+      <button type="button" class="btn btn-secondary" id="carryOn">Continue from where it stopped</button></div>` : ''}
+    ${!told.pictures ? '<div class="note" style="flex-basis:100%">Made before its scenes were kept, so it cannot be edited.</div>' : ''}`;
+  document.getElementById('pickStory').addEventListener('change', e => openStory(Number(e.target.value)));
+  document.querySelectorAll('.langs button').forEach(b => b.addEventListener('click', () => {
+    showing = b.dataset.lang; renderHead(); renderPlayer(); renderRows();
+  }));
+  document.getElementById('addLang')?.addEventListener('change', e => {
+    const lang = e.target.value;
+    if(lang && confirm(`Translate this story into ${IN_ENGLISH[lang]} and make its video? No picture is drawn again.`)) remake([], [lang]);
+    e.target.value = '';
+  });
+  document.getElementById('carryOn')?.addEventListener('click', () => remake(null));
+  document.querySelectorAll('[data-restore]').forEach(b => b.addEventListener('click', async () => {
+    try{
+      await api(`/chat/video/${current.message_id}/version`, {method: 'POST', headers: JSON_HEADERS,
+        body: JSON.stringify({lang: showing, file_id: Number(b.dataset.restore)})});
+      await openStory(current.message_id);
+    }catch(e){ showError(e.message); }
+  }));
+}
+
+function renderPlayer(){
+  const now = showing && (current.video.videos || {})[showing];
+  document.getElementById('player').innerHTML = now
+    ? `<video id="video" controls preload="metadata" playsinline src="${escapeHtml(now.url)}"></video>`
+    : '<div class="note">No video made yet.</div>';
+}
+
+function renderRows(){
+  const told = story();
+  const langs = languages();
+  const first = langs[0];
+  const at = starts(showing);
+  document.getElementById('rows').innerHTML = (told.pictures || []).map((picture, i) => {
+    const words = edits[i]?.text?.[first] ?? (told[first] || [])[i] ?? '';
+    const voices = langs.map(l => ((told.narration || {})[l] || [])[i]?.by).filter(by => by && by !== 'machine');
+    return `<button type="button" class="row ${i === selected ? 'sel' : ''}" data-i="${i}">
+      ${picture ? `<img src="/chat/files/${picture}" alt="" loading="lazy">` : '<img alt="">'}
+      <span><span class="t" dir="auto">${i + 1} · ${escapeHtml(words)}</span>
+        <span class="s">${at[i] !== undefined ? clock(at[i]) + ' · ' : ''}${voices.length ? [...new Set(voices)].map(v => BY[v]).join(', ') : 'machine voice'}${
+          edits[i] ? ' · <span class="edited">changed</span>' : ''}</span></span></button>`;
+  }).join('');
+  document.querySelectorAll('.row').forEach(row => row.addEventListener('click', () => select(Number(row.dataset.i))));
+}
+
+function select(i){
+  selected = i;
+  renderRows();
+  renderEditor();
+  // The player goes to where the scene starts
+  const at = starts(showing)[i];
+  const video = document.getElementById('video');
+  if(video && at !== undefined){ video.currentTime = at + 0.1; }
+}
+
+function renderEditor(){
+  const told = story();
+  const editor = document.getElementById('editor');
+  if(!told.pictures){ editor.hidden = true; return; }
+  const i = selected;
+  const langs = languages();
+  const change = edits[i] || {};
+  const editable = !current.being_made;
+  editor.hidden = false;
+  // A column for each language, up to three side by side; more wrap onto the next row
+  editor.style.setProperty('--columns', Math.min(langs.length, 3));
+  editor.innerHTML = `<div>
+      ${told.pictures[i] ? `<img src="/chat/files/${told.pictures[i]}" alt="Scene ${i + 1}">` : ''}
+      <div class="where">Scene ${i + 1} of ${told.pictures.length}</div>
+      <label class="check"><input type="checkbox" id="redraw" ${change.redraw ? 'checked' : ''} ${editable ? '' : 'disabled'}> Draw this picture again</label>
+      <textarea class="describe" id="describe" ${change.redraw ? '' : 'hidden'} placeholder="What to draw (as before if left as it is)">${
+        escapeHtml(change.picture ?? (told.drawn || [])[i] ?? '')}</textarea></div>
+    ${langs.map(l => {
+      const entry = ((told.narration || {})[l] || [])[i];
+      const words = change.text?.[l] ?? (told[l] || [])[i] ?? '';
+      return `<div><label class="field">${NAMES[l] || l}${entry ? `<span class="badge ${entry.by}">${BY[entry.by] || entry.by}</span>` : ''}</label>
+        <textarea class="line ${change.text?.[l] !== undefined ? 'changed' : ''}" data-lang="${l}" lang="${l}" dir="auto"
+          ${editable ? '' : 'readonly'}>${escapeHtml(words)}</textarea>
+        ${entry?.by === 'recorded' ? `<div class="stale" ${change.text?.[l] !== undefined ? '' : 'hidden'}>Your reading of this
+          line no longer fits; the machine voice reads it until you read it again.</div>` : ''}</div>`;
+    }).join('')}
+    ${langs.length > 1 ? `<label class="check" style="grid-column:1/-1"><input type="checkbox" id="retranslate"
+      ${change.retranslate ? 'checked' : ''} ${editable ? '' : 'disabled'}> Translate my change into the other language${langs.length > 2 ? 's' : ''}</label>` : ''}`;
+  editor.querySelector('img')?.addEventListener('click', e => {
+    const zoom = document.getElementById('zoom');
+    zoom.querySelector('img').src = e.target.src;
+    zoom.showModal();
+  });
+  editor.querySelector('#redraw').addEventListener('change', e => {
+    editor.querySelector('#describe').hidden = !e.target.checked;
+    keep();
+  });
+  editor.querySelector('#retranslate')?.addEventListener('change', keep);
+}
+
+// What the editor says now, kept for its scene while other scenes are opened
+function keep(){
+  const i = selected;
+  const told = story();
+  const editor = document.getElementById('editor');
+  const change = {text: {}};
+  editor.querySelectorAll('.line').forEach(area => {
+    const edited = clean(area.value) && clean(area.value) !== clean((told[area.dataset.lang] || [])[i]);
+    area.classList.toggle('changed', !!edited);
+    const stale = area.nextElementSibling;
+    if(stale?.classList.contains('stale')) stale.hidden = !edited;
+    if(edited) change.text[area.dataset.lang] = clean(area.value);
+  });
+  change.retranslate = !!editor.querySelector('#retranslate')?.checked && Object.keys(change.text).length > 0;
+  if(editor.querySelector('#redraw')?.checked){
+    change.redraw = true;
+    const describe = editor.querySelector('#describe').value.trim();
+    if(describe && describe !== ((told.drawn || [])[i] || '').trim()) change.picture = describe;
+  }
+  const had = !!edits[i];
+  if(Object.keys(change.text).length || change.redraw) edits[i] = change;
+  else delete edits[i];
+  if(had !== !!edits[i]) renderRows();
+  updateSave();
+}
+
+function updateSave(){
+  const count = Object.keys(edits).length;
+  document.getElementById('save').disabled = !count || busy || current?.being_made;
+  document.getElementById('changes').textContent = count ? `${count} scene${count === 1 ? '' : 's'} changed` : 'Nothing changed yet.';
+}
+
+function showProgress(event){
+  document.getElementById('progress').hidden = false;
+  if(event.step != null){
+    const detail = event.stage && event.stage !== event.step_name ? `: ${event.stage}` : '';
+    document.getElementById('partLine').textContent = `Part ${event.step} of ${event.steps} · ${event.step_name}${detail}`;
+    document.getElementById('partBar').style.width = Math.round((event.part || 0) * 100) + '%';
+  }else{
+    document.getElementById('partLine').textContent = event.stage || '';
+  }
+  const whole = Math.round((event.fraction || 0) * 100);
+  document.getElementById('wholeLine').textContent = `Overall ${whole}%`;
+  document.getElementById('wholeBar').style.width = whole + '%';
+}
+
+async function remake(list, add = []){
+  if(list && !list.length && !add.length) return;
+  showError('');
+  busy = true;
+  updateSave();
+  showProgress({stage: 'Starting', fraction: 0});
+  let trouble = '';
+  try{
+    const response = list
+      ? await fetch(`/chat/video/${current.message_id}/edit`, {method: 'POST', headers: JSON_HEADERS,
+                                                             body: JSON.stringify({scenes: list, add_languages: add})})
+      : await fetch(`/chat/video/${current.message_id}/continue`, {method: 'POST'});
+    if(!response.ok){
+      const err = await response.json().catch(() => ({}));
+      throw new Error((typeof err.detail === 'string' && err.detail) || `HTTP ${response.status}`);
+    }
+    await readEvents(response, chunk => { if(chunk.gateway?.type === 'progress') showProgress(chunk.gateway); });
+  }catch(e){
+    trouble = 'It stopped: ' + e.message + '. What was made is kept.';
+  }
+  busy = false;
+  document.getElementById('progress').hidden = true;
+  edits = {};
+  ({videos: stories} = await api('/chat/videos').catch(() => ({videos: stories})));
+  await openStory(current.message_id);
+  if(trouble) showError(trouble);
+}
+
+document.getElementById('editor').addEventListener('input', keep);
+document.getElementById('save').addEventListener('click', () =>
+  remake(Object.entries(edits).map(([i, change]) => ({index: Number(i), ...change}))));
+document.addEventListener('keydown', e => {
+  if(e.target.matches('textarea, input, select')) return;
+  const count = (story().pictures || []).length;
+  if(e.key === 'ArrowDown' && selected < count - 1){ e.preventDefault(); select(selected + 1); }
+  if(e.key === 'ArrowUp' && selected > 0){ e.preventDefault(); select(selected - 1); }
+});
+window.addEventListener('beforeunload', e => { if(Object.keys(edits).length) e.preventDefault(); });
+
+// After the page's own scripts (escapeHtml is defined after this block, in base.html)
+document.addEventListener('DOMContentLoaded', () => loadStories().catch(e => showError(e.message)));
+</script>
+{% endblock %}
