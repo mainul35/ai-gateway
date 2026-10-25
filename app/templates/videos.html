@@ -88,6 +88,7 @@ dialog.zoom::backdrop{background:rgba(0,0,0,.8)}
   <div class="line" id="wholeLine"></div><div class="bar total"><div id="wholeBar"></div></div></div>
 <dialog class="zoom" id="zoom"><img alt=""></dialog>
 
+<script src="/static/video_draft.js"></script>
 <script>
 // The languages a video story can be told in (app/tools/video_story.py LANGUAGES)
 const NAMES = {en: 'English', bn: 'বাংলা', es: 'Español', fr: 'Français', zh: '中文', ja: '日本語', ko: '한국어',
@@ -177,6 +178,13 @@ async function openStory(id){
 // --- the story: player, actions, scenes -------------------------------------------------------
 
 function render(){
+  // Not made yet: its scenes as text, to read and correct before anything is drawn
+  if(current.video.state === 'draft'){
+    renderDraft(document.getElementById('story'), current, {showError, readEvents,
+      progress: event => event ? showProgress(event) : (document.getElementById('progress').hidden = true),
+      reload: async () => { await openStory(current.message_id); loadShelf(); }});
+    return;
+  }
   const video = current.video;
   const told = story();
   const langs = languages();
@@ -277,6 +285,8 @@ function openDrawer(i){
     }).join('')}
     ${langs.length > 1 ? `<label class="check"><input type="checkbox" id="retranslate" ${change.retranslate ? 'checked' : ''}
       ${editable ? '' : 'disabled'}> Translate my change into the other language${langs.length > 2 ? 's' : ''}</label>` : ''}
+    ${editable && told.pictures.length > 1 ? `<button type="button" class="btn btn-secondary" id="deleteScene"
+      style="margin-top:1rem;border-color:#7f1d1d;color:#fca5a5">Delete this scene</button>` : ''}
     <div class="nav-row"><button type="button" class="btn btn-secondary" id="prev" ${i === 0 ? 'disabled' : ''}>‹ Scene ${i}</button>
       <button type="button" class="btn btn-secondary" id="next" ${i === told.pictures.length - 1 ? 'disabled' : ''}>Scene ${i + 2} ›</button></div>`;
   drawer.classList.add('open');
@@ -285,6 +295,11 @@ function openDrawer(i){
     const zoom = document.getElementById('zoom');
     zoom.querySelector('img').src = e.target.src;
     zoom.showModal();
+  });
+  drawer.querySelector('#deleteScene')?.addEventListener('click', () => {
+    if(!confirm(`Delete scene ${i + 1}? Every language's video is made again without it; nothing is drawn.`)) return;
+    delete edits[i];
+    remake(Object.entries(edits).map(([k, change]) => ({index: Number(k), ...change})), [], [i]);
   });
   drawer.querySelector('#prev').addEventListener('click', () => openDrawer(i - 1));
   drawer.querySelector('#next').addEventListener('click', () => openDrawer(i + 1));
@@ -356,8 +371,8 @@ function showProgress(event){
 
 // `list` the scenes changed (and `add` languages to add), or null to carry on with a video that
 // stopped partway
-async function remake(list, add = []){
-  if(list && !list.length && !add.length) return;
+async function remake(list, add = [], gone = []){
+  if(list && !list.length && !add.length && !gone.length) return;
   showError('');
   busy = true;
   updatePill();
@@ -367,7 +382,7 @@ async function remake(list, add = []){
   try{
     const response = list
       ? await fetch(`/chat/video/${current.message_id}/edit`, {method: 'POST', headers: JSON_HEADERS,
-                                                             body: JSON.stringify({scenes: list, add_languages: add})})
+                                                             body: JSON.stringify({scenes: list, add_languages: add, delete: gone})})
       : await fetch(`/chat/video/${current.message_id}/continue`, {method: 'POST'});
     if(!response.ok){
       const err = await response.json().catch(() => ({}));

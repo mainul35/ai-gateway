@@ -3858,6 +3858,8 @@ async function sendVideo(text, again){
       if(!event) return;
       if(event.type === 'progress'){
         showProgress(box, event);
+      }else if(event.type === 'draft'){
+        saved = event.message_id;           // prepared: shown as a draft to read, below
       }else if(event.type === 'storyboard'){
         saved = event.message_id;
         setStatus(box, `"${event.title}": ${event.scenes} scenes to draw`);
@@ -3898,6 +3900,17 @@ async function sendVideo(text, again){
    progress is shown by attachToRunningJob, and this only says so. */
 async function renderVideoPaused(box, video, messageId){
   const body = box.querySelector('.body');
+  // Prepared, not made: the scenes are read and corrected on the Videos page, and made there
+  if(video.state === 'draft'){
+    const count = (video.story?.parts || video.story?.pictures || []).length;
+    body.innerHTML = `<div class="video-story">
+        <div class="video-title"><b>${escapeHtml(video.title || 'Video story')}</b>
+          ${video.title_bn ? `<span class="muted"> · ${escapeHtml(video.title_bn)}</span>` : ''}</div>
+        <p>${count} scenes ready to read. Nothing has been drawn or voiced yet: check the words, who says
+          them and what each picture should show, then make the video.</p>
+        <a class="btn" href="/videos?id=${messageId}">Read and correct the scenes ›</a></div>`;
+    return;
+  }
   const pictures = video.story?.pictures || [];
   const ready = pictures.filter(Boolean).length;
   const made = Object.keys(video.videos || {}).length;

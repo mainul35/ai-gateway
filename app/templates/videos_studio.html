@@ -8,6 +8,8 @@ body.videos-studio main{max-width:none;padding:0}
 .studio{display:grid;grid-template-columns:minmax(0,1fr) 24rem;height:calc(100vh - 4.2rem)}
 .stage{padding:1rem 1.4rem 1.5rem;overflow-y:auto}
 .strip{border-left:1px solid var(--border);display:flex;flex-direction:column;min-height:0;background:var(--bg)}
+.studio.drafting{grid-template-columns:1fr}
+.studio.drafting .strip,.studio.drafting #player,.studio.drafting #editor{display:none}
 .strip .rows{overflow-y:auto;flex:1}
 @media (max-width:900px){
   .studio{grid-template-columns:1fr;height:auto}
@@ -70,6 +72,7 @@ dialog.zoom::backdrop{background:rgba(0,0,0,.8)}
     <div class="progress" id="progress" hidden><div class="line" id="partLine"></div><div class="bar"><div id="partBar"></div></div>
       <div class="line" id="wholeLine"></div><div class="bar total"><div id="wholeBar"></div></div></div>
     <div class="editor" id="editor" hidden></div>
+    <div id="draftArea"></div>
   </div>
   <div class="strip">
     <div class="rows" id="rows"></div>
@@ -79,6 +82,7 @@ dialog.zoom::backdrop{background:rgba(0,0,0,.8)}
 </div>
 <dialog class="zoom" id="zoom"><img alt=""></dialog>
 
+<script src="/static/video_draft.js"></script>
 <script>
 const NAMES = {en: 'English', bn: 'বাংলা', es: 'Español', fr: 'Français', zh: '中文', ja: '日本語', ko: '한국어',
                th: 'ไทย', ar: 'العربية', ur: 'اردو', hi: 'हिन्दी'};
@@ -162,6 +166,20 @@ async function openStory(id){
   selected = 0;
   const made = Object.keys(current.video.videos || {});
   showing = made.includes(showing) ? showing : made[0] || null;
+  // Not made yet: its scenes as text, to read and correct before anything is drawn
+  const drafting = current.video.state === 'draft';
+  document.querySelector('.studio').classList.toggle('drafting', drafting);
+  document.getElementById('draftArea').innerHTML = '';
+  if(drafting){
+    document.getElementById('head').innerHTML = `<select id="pickStory">${stories.map(s => `<option value="${s.message_id}"
+      ${s.message_id === current.message_id ? 'selected' : ''}>${escapeHtml(s.title || 'Video story')} — ${s.scenes || '?'} scenes${
+      s.state !== 'done' ? ' · ' + escapeHtml(s.state) : ''}</option>`).join('')}</select>`;
+    document.getElementById('pickStory').addEventListener('change', e => openStory(Number(e.target.value)));
+    renderDraft(document.getElementById('draftArea'), current, {showError, readEvents,
+      progress: event => event ? showProgress(event) : (document.getElementById('progress').hidden = true),
+      reload: async () => { ({videos: stories} = await api('/chat/videos')); await openStory(current.message_id); }});
+    return;
+  }
   renderHead();
   renderPlayer();
   renderRows();
@@ -274,6 +292,8 @@ function renderEditor(){
         ${entry?.by === 'recorded' ? `<div class="stale" ${change.text?.[l] !== undefined ? '' : 'hidden'}>Your reading of this
           line no longer fits; the machine voice reads it until you read it again.</div>` : ''}</div>`;
     }).join('')}
+    ${editable && told.pictures.length > 1 ? `<div style="grid-column:1/-1"><button type="button" class="btn btn-secondary"
+      id="deleteScene" style="border-color:#7f1d1d;color:#fca5a5">Delete this scene</button></div>` : ''}
     ${langs.length > 1 ? `<label class="check" style="grid-column:1/-1"><input type="checkbox" id="retranslate"
       ${change.retranslate ? 'checked' : ''} ${editable ? '' : 'disabled'}> Translate my change into the other language${langs.length > 2 ? 's' : ''}</label>` : ''}`;
   editor.querySelector('img')?.addEventListener('click', e => {
@@ -286,6 +306,11 @@ function renderEditor(){
     keep();
   });
   editor.querySelector('#retranslate')?.addEventListener('change', keep);
+  editor.querySelector('#deleteScene')?.addEventListener('click', () => {
+    if(!confirm(`Delete scene ${i + 1}? Every language's video is made again without it; nothing is drawn.`)) return;
+    delete edits[i];
+    remake(Object.entries(edits).map(([k, change]) => ({index: Number(k), ...change})), [], [i]);
+  });
 }
 
 // What the editor says now, kept for its scene while other scenes are opened
@@ -334,8 +359,8 @@ function showProgress(event){
   document.getElementById('wholeBar').style.width = whole + '%';
 }
 
-async function remake(list, add = []){
-  if(list && !list.length && !add.length) return;
+async function remake(list, add = [], gone = []){
+  if(list && !list.length && !add.length && !gone.length) return;
   showError('');
   busy = true;
   updateSave();
@@ -344,7 +369,7 @@ async function remake(list, add = []){
   try{
     const response = list
       ? await fetch(`/chat/video/${current.message_id}/edit`, {method: 'POST', headers: JSON_HEADERS,
-                                                             body: JSON.stringify({scenes: list, add_languages: add})})
+                                                             body: JSON.stringify({scenes: list, add_languages: add, delete: gone})})
       : await fetch(`/chat/video/${current.message_id}/continue`, {method: 'POST'});
     if(!response.ok){
       const err = await response.json().catch(() => ({}));

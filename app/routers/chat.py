@@ -2147,6 +2147,9 @@ class VideoIn(BaseModel):
     file_ids: list[int] = Field(default_factory=list, max_length=6)     # pictures and documents as material
     languages: list[str] = Field(default_factory=lambda: ["en", "bn"])
     answers_to: int | None = None
+    # Prepare the scenes as text to read and correct first, and draw and voice nothing until the
+    # person asks for the video (POST /chat/video/{message}/produce). Needs a conversation to keep it.
+    review: bool = True
 
 
 async def _video_facts(prompt):
@@ -2189,7 +2192,8 @@ async def make_video(payload: VideoIn, principal: Principal = Depends(authentica
     pictures = [(f.data, f.mime_type) for f in found.values() if f.kind != "document" and (f.mime_type or "").startswith("image/")]
     material = "\n\n".join(f"{f.name}:\n{(f.prompt or '')[:6000]}" for f in found.values() if f.kind == "document")
     ctx = {"prompt": payload.prompt, "languages": languages, "material": material, "pictures": pictures,
-           "earlier": earlier, "conversation_id": payload.conversation_id, "answers_to": payload.answers_to}
+           "earlier": earlier, "conversation_id": payload.conversation_id, "answers_to": payload.answers_to,
+           "review": payload.review and payload.conversation_id is not None}
     slot = await limits.take_gpu_slot(principal)
     work = limits.holding(slot, _one_video_at_a_time(_video_pipeline(principal, user.id, ctx)))
     if payload.conversation_id is not None:
@@ -2217,6 +2221,8 @@ async def continue_video(message_id: int, principal: Principal = Depends(authent
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Video story not found")
     if video.get("state", "done") == "done":
         raise HTTPException(status.HTTP_409_CONFLICT, "This video is already finished")
+    if video.get("state") == "draft":
+        raise HTTPException(status.HTTP_409_CONFLICT, "This story is waiting to be read; make its video from the Videos page")
     running = jobs.running_for(user.id, message.conversation_id)
     if running is not None and running.kind == "video":
         raise HTTPException(status.HTTP_409_CONFLICT, "This video is still being made")
@@ -2242,6 +2248,40 @@ class VideoEditIn(BaseModel):
     scenes: list[SceneEdit] = Field(default_factory=list, max_length=video_story.GIVEN_MAX_SCENES)
     # Languages to add: the story translated, voiced and made into a video in each
     add_languages: list[str] = Field(default_factory=list, max_length=len(video_story.LANGUAGES))
+    # Scenes to take out (their numbers as they are now, from 0); every language is made again from
+    # the pictures and narration kept, nothing drawn
+    delete: list[int] = Field(default_factory=list, max_length=video_story.GIVEN_MAX_SCENES)
+
+
+# Everything kept for each scene, in scene order: taken out together when a scene is
+PER_SCENE = ("pictures", "drawn", "people", "parts") + tuple(video_story.LANGUAGES)
+
+
+def _set_line(story, lang, i, text):
+    """A scene's whole line in a language changed, and its parts with it: a scene of one part takes the
+    new words; the parts of a scene of several voices no longer fit them, and it becomes the narrator's."""
+    story[lang][i] = text
+    _forget_voice(story, lang, i)
+    parts = story.get("parts")
+    if not parts or i >= len(parts):
+        return
+    if len(parts[i]) == 1:
+        parts[i][0].setdefault("text", {})[lang] = text
+    else:
+        parts[i] = [{"speaker": "narrator",
+                     "text": {code: story[code][i] for code in video_story.LANGUAGES if i < len(story.get(code) or [])}}]
+
+
+def _drop_scene(story, i):
+    for key in PER_SCENE:
+        if isinstance(story.get(key), list) and i < len(story[key]):
+            del story[key][i]
+    for lang in list((story.get("narration") or {})):
+        if i < len(story["narration"][lang]):
+            del story["narration"][lang][i]
+    for key in [k for k in story if k.startswith("voice_")]:
+        if isinstance(story[key], list) and i < len(story[key]):
+            del story[key][i]
 
 
 def _forget_voice(story, lang, i):
@@ -2291,8 +2331,7 @@ async def edit_video(message_id: int, payload: VideoEditIn, principal: Principal
             text = " ".join(text.split())
             if lang not in languages or not text or text == story[lang][i]:
                 continue
-            story[lang][i] = text
-            _forget_voice(story, lang, i)
+            _set_line(story, lang, i, text)
             remake.add(lang)
             edited = lang
         if change.retranslate and edited:
@@ -2309,6 +2348,17 @@ async def edit_video(message_id: int, payload: VideoEditIn, principal: Principal
         if lang in video_story.LANGUAGES and lang not in languages:
             languages.append(lang)
             remake.add(lang)
+    # Scenes taken out last, so the numbers above are the ones the person saw
+    gone = sorted({i for i in payload.delete if 0 <= i < count}, reverse=True)
+    if len(gone) >= count:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "A video needs at least one scene")
+    for i in gone:
+        _drop_scene(story, i)
+    if gone:
+        video["scenes"] = len(story["pictures"])
+        translate = [(i - sum(1 for g in gone if g < i), source, target) for i, source, target in translate
+                     if i not in gone]
+        remake.update(languages)
     video["languages"] = languages
     if not remake:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "Nothing was changed")
@@ -2331,6 +2381,108 @@ async def edit_video(message_id: int, payload: VideoEditIn, principal: Principal
     return StreamingResponse(jobs.follow(job), media_type="text/event-stream",
                              headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no",
                                       "X-Job-Id": str(job.id)})
+
+
+class DraftPart(BaseModel):
+    speaker: str = Field(min_length=1, max_length=20)
+    text: dict[str, str] = Field(default_factory=dict)         # language -> this part's words
+
+
+class DraftScene(BaseModel):
+    parts: list[DraftPart] = Field(min_length=1, max_length=30)
+    picture: str = Field(default="", max_length=1500)          # what to draw
+    people: str = Field(default="from_behind", pattern="^(none|from_behind)$")
+
+
+class CastMember(BaseModel):
+    id: str = Field(min_length=1, max_length=20)
+    name: str = Field(default="", max_length=80)
+    kind: str
+    voice: str | None = Field(default=None, max_length=30)
+
+
+class DraftIn(BaseModel):
+    scenes: list[DraftScene] = Field(min_length=1, max_length=video_story.GIVEN_MAX_SCENES)
+    cast: list[CastMember] = Field(min_length=1, max_length=40)
+
+
+async def _draft_of(session, user, message_id):
+    message, video = await _owned_video(session, user, message_id)
+    if video.get("state") != "draft":
+        raise HTTPException(status.HTTP_409_CONFLICT, "This story's video is already made; edit its scenes instead")
+    running = jobs.running_for(user.id, message.conversation_id)
+    if running is not None and running.kind == "video":
+        raise HTTPException(status.HTTP_409_CONFLICT, "This story is being prepared right now")
+    return message, video
+
+
+@router.put("/video/{message_id}/draft")
+async def save_draft(message_id: int, payload: DraftIn, principal: Principal = Depends(authenticate),
+                     session: AsyncSession = Depends(get_session)):
+    """The scenes of a story not yet made into a video, as the person has corrected them: their order,
+    each part's speaker and words in every language, what each picture should show, and the cast.
+    A part with words missing in a language is translated by POST /chat/video/{message}/prepare."""
+    user = _require_user(principal)
+    message, video = await _draft_of(session, user, message_id)
+    story = video["story"]
+    cast = [member.model_dump() for member in payload.cast if member.kind in video_story.KINDS]
+    if not any(member["id"] == "narrator" for member in cast):
+        cast.insert(0, {"id": "narrator", "name": "Narrator", "kind": "narrator", "voice": "narrator"})
+    ids = {member["id"] for member in cast}
+    languages = [code for code in video_story.LANGUAGES if code in story or code in (video.get("languages") or [])]
+    parts = []
+    for scene in payload.scenes:
+        parts.append([{"speaker": part.speaker if part.speaker in ids else "narrator",
+                       "text": {lang: " ".join(text.split()) for lang, text in part.text.items()
+                                if lang in video_story.LANGUAGES and text.strip()}} for part in scene.parts])
+    story["parts"] = parts
+    story["cast"] = video_story.assign_voices(cast)
+    story["drawn"] = [" ".join(scene.picture.split()) for scene in payload.scenes]
+    story["people"] = [scene.people for scene in payload.scenes]
+    story["pictures"] = [None] * len(parts)
+    for lang in languages:
+        story[lang] = [video_story.scene_text(scene, lang) for scene in parts]
+    for key in [k for k in story if k == "narration" or k.startswith("voice_")]:
+        story.pop(key)
+    video["scenes"] = len(parts)
+    await _save_video(message.id, video)
+    missing = any(not (part["text"] or {}).get(lang) for scene in parts for part in scene for lang in languages)
+    return {"video": video, "needs_translation": missing}
+
+
+@router.post("/video/{message_id}/prepare")
+async def prepare_draft(message_id: int, principal: Principal = Depends(authenticate),
+                        session: AsyncSession = Depends(get_session)):
+    """Fills in what a draft is missing - the words of a part in a language it was not written in, the
+    speakers of a story that has none - and leaves it a draft."""
+    user = _require_user(principal)
+    message, video = await _draft_of(session, user, message_id)
+    ctx = {"prompt": video.get("asked", ""), "languages": video.get("languages") or ["en", "bn"], "review": True,
+           "conversation_id": message.conversation_id, "message_id": message.id, "video": video}
+    job = jobs.start(user.id, message.conversation_id, "video", "preparing: " + video.get("title", "")[:100],
+                     _one_video_at_a_time(_video_pipeline(principal, user.id, ctx)))
+    return StreamingResponse(jobs.follow(job), media_type="text/event-stream",
+                             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no", "X-Job-Id": str(job.id)})
+
+
+@router.post("/video/{message_id}/produce")
+async def produce_video(message_id: int, principal: Principal = Depends(authenticate),
+                        session: AsyncSession = Depends(get_session)):
+    """Makes the video of a story the person has read and corrected: every picture drawn and checked,
+    every part voiced, a video for each language. Only now is the GPUs' time spent."""
+    user = _require_user(principal)
+    if not images.is_available() or not video_story.is_available():
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "Video stories are not set up on this server")
+    message, video = await _draft_of(session, user, message_id)
+    video["drawing"] = {"attempt": 0, "wrong": {}, "keep_every_scene": True}
+    await _save_video(message.id, video)
+    ctx = {"prompt": video.get("asked", ""), "languages": video.get("languages") or ["en", "bn"],
+           "conversation_id": message.conversation_id, "message_id": message.id, "video": video}
+    slot = await limits.take_gpu_slot(principal)
+    job = jobs.start(user.id, message.conversation_id, "video", "producing: " + video.get("title", "")[:100],
+                     limits.holding(slot, _one_video_at_a_time(_video_pipeline(principal, user.id, ctx))))
+    return StreamingResponse(jobs.follow(job), media_type="text/event-stream",
+                             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no", "X-Job-Id": str(job.id)})
 
 
 class VersionIn(BaseModel):
@@ -2512,7 +2664,8 @@ async def _video_pipeline(principal, user_id, ctx):
             video = {"title": story["title_en"], "title_bn": story["title_bn"], "videos": {},
                      "scenes": len(scenes), "perspectives": [] if given else story["perspectives"],
                      "sources": [] if given else used, "asked": prompt, "from_story": bool(given),
-                     "languages": languages, "state": "making",
+                     "languages": languages, "state": "draft" if ctx.get("review") else "making",
+                     "source": lang if given else "en",          # the language the story was written in
                      "story": {"pictures": [None] * len(scenes), "en": [s["narration_en"] for s in scenes],
                                "bn": [s["narration_bn"] for s in scenes],
                                "drawn": [s["picture"] for s in scenes],     # what each was drawn from
@@ -2533,10 +2686,10 @@ async def _video_pipeline(principal, user_id, ctx):
                         await db.commit()
                         message_id = message.id
         else:
-            video["state"] = "making"
+            video["state"] = "draft" if ctx.get("review") else "making"
             video.pop("paused", None)
             await _save_video(message_id, video)
-            yield step(1, 1.0, "Carrying on from where it stopped")
+            yield step(1, 1.0, "Preparing the scenes" if ctx.get("review") else "Carrying on from where it stopped")
             # An edit asked for the other languages of a changed line to be translated again
             for n, (i, source, target) in enumerate(video.get("translate") or []):
                 yield step(1, (n + 1) / len(video["translate"]), f"Translating scene {i + 1} again")
@@ -2544,8 +2697,7 @@ async def _video_pipeline(principal, user_id, ctx):
                     bangla_model, video["story"][source][i], target)))
                 if done is None:
                     raise video_story.VideoError(f"Scene {i + 1} could not be translated; try again")
-                video["story"][target][i] = done
-                _forget_voice(video["story"], target, i)
+                _set_line(video["story"], target, i, done)
             if video.pop("translate", None) is not None:
                 await _save_video(message_id, video)
         for lang in languages:
@@ -2560,6 +2712,53 @@ async def _video_pipeline(principal, user_id, ctx):
             video["story"][lang] = lines
             video.setdefault("titles", {})[lang] = title or _title(video, source)
             await _save_video(message_id, video)
+
+        # Who speaks each part of each scene - the narrator, or a character in their own words - in
+        # every language, so that each can be given their own voice
+        told = video["story"]
+        if "parts" not in told:
+            yield step(1, 0.92, "Finding who speaks each part")
+            source = video.get("source") if video.get("source") in told else "en"
+            cast, found = video_story.parse_cast(await _ask_helper(principal, video_story.cast_request(
+                bangla_model, told[source])), told[source])
+            told["cast"] = cast
+            told["parts"] = [[{"speaker": p["speaker"], "text": {source: p["text"]}} for p in scene] for scene in found]
+            await _save_video(message_id, video)
+        for lang in [code for code in video_story.LANGUAGES if code in told]:
+            missing = [(i, k) for i, scene in enumerate(told["parts"]) for k, part in enumerate(scene)
+                       if not (part.get("text") or {}).get(lang)]
+            if not missing:
+                continue
+            # A scene of one part is its whole line; the parts of a scene of several are translated
+            single = [(i, k) for i, k in missing
+                      if len(told["parts"][i]) == 1 and i < len(told.get(lang) or []) and told[lang][i]]
+            for i, k in single:
+                told["parts"][i][k].setdefault("text", {})[lang] = told[lang][i]
+            several = [(i, k) for i, k in missing if (i, k) not in single]
+            if several:
+                yield step(1, 0.96, f"Translating the speakers' parts into {video_story.language_name(lang)}")
+                sources = []
+                for i, k in several:
+                    text = told["parts"][i][k]["text"]
+                    sources.append(next((text[l] for l in (video.get("source"), "en", "bn") if l and text.get(l)),
+                                        next(iter(text.values()), "")))
+                lines = video_story.parse_translated_parts(await _ask_helper(principal, video_story.translate_parts_request(
+                    bangla_model, sources, lang)), len(sources))
+                for (i, k), line in zip(several, lines):
+                    told["parts"][i][k].setdefault("text", {})[lang] = line
+            for i, scene in enumerate(told["parts"]):
+                whole = video_story.scene_text(scene, lang)
+                if whole and told.setdefault(lang, [""] * len(told["parts"]))[i] != whole:
+                    told[lang][i] = whole
+                    _forget_voice(told, lang, i)
+            await _save_video(message_id, video)
+
+        # Prepared for review: nothing is drawn or voiced until the person has read the scenes and
+        # asks for the video (produce_video)
+        if video.get("state") == "draft":
+            await _save_video(message_id, video)
+            yield _event("draft", title=video["title"], scenes=len(told["parts"]), message_id=message_id)
+            return
         yield _event("storyboard", title=video["title"], scenes=len(video["story"]["drawn"]),
                      message_id=message_id)
 
@@ -2728,7 +2927,8 @@ async def _video_pipeline(principal, user_id, ctx):
         if not expected:
             log.exception("video story stopped")
         if video is not None:
-            video["state"] = "paused"
+            # A draft being prepared stays a draft, to be read and prepared again
+            video["state"] = "draft" if ctx.get("review") else "paused"
             video["paused"] = str(e) if expected else "Something went wrong while it was being made"
             await _save_video(message_id, video)
         yield _error((str(e) if expected else "The video stopped partway") +
