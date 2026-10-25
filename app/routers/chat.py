@@ -2301,6 +2301,8 @@ def _drop_scene(story, i):
     for key in [k for k in story if k.startswith("voice_")]:
         if isinstance(story[key], list) and i < len(story[key]):
             del story[key][i]
+    if story.get("pending"):
+        story["pending"] = {str(int(k) - (int(k) > i)): v for k, v in story["pending"].items() if int(k) != i}
 
 
 def _forget_voice(story, lang, i):
@@ -2365,6 +2367,7 @@ async def edit_video(message_id: int, payload: VideoEditIn, principal: Principal
             if change.picture_file not in drawn or drawn[change.picture_file].kind != "video-scene":
                 raise HTTPException(status.HTTP_404_NOT_FOUND, f"The new picture for scene {i + 1} is gone; draw it again")
             story["pictures"][i] = change.picture_file
+            (story.get("pending") or {}).pop(str(i), None)
             if change.people and isinstance(story.get("people"), list) and i < len(story["people"]):
                 story["people"][i] = change.people
             remake.update(languages)
@@ -2509,6 +2512,40 @@ async def redraw_picture(message_id: int, payload: RedrawIn, principal: Principa
     return StreamingResponse(jobs.follow(job), media_type="text/event-stream",
                              headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no",
                                       "X-Job-Id": str(job.id)})
+
+
+class PendingPictureIn(BaseModel):
+    index: int = Field(ge=0)
+    file_id: int | None = None          # None: the scene keeps its picture, nothing waits for it
+    drawn: str = Field(default="", max_length=3000)
+    people: str = Field(default="from_behind", pattern="^(none|from_behind)$")
+
+
+@router.put("/video/{message_id}/pending-picture")
+async def save_pending_picture(message_id: int, payload: PendingPictureIn, principal: Principal = Depends(authenticate),
+                               session: AsyncSession = Depends(get_session)):
+    """A picture drawn again for a scene (redraw_picture), kept with the story until the video is made
+    again with it: it survives the page being closed, and the next edit puts it in. The video itself
+    does not change until then."""
+    user = _require_user(principal)
+    message, video = await _owned_video(session, user, message_id)
+    story = video.get("story") or {}
+    if payload.index >= len(story.get("pictures") or []):
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "No such scene")
+    running = jobs.running_for(user.id, message.conversation_id)
+    if running is not None and running.kind == "video":
+        raise HTTPException(status.HTTP_409_CONFLICT, "This video is still being made")
+    pending = story.setdefault("pending", {})
+    if payload.file_id is None:
+        pending.pop(str(payload.index), None)
+    else:
+        found = await _load_files(session, user, [payload.file_id])
+        if payload.file_id not in found or found[payload.file_id].kind != "video-scene":
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "That picture is gone; draw it again")
+        pending[str(payload.index)] = {"file_id": payload.file_id, "drawn": payload.drawn, "people": payload.people}
+    video["story"] = story
+    await _save_video(message.id, video)
+    return {"pending": pending}
 
 
 class DraftPart(BaseModel):
