@@ -2184,7 +2184,7 @@ async def make_video(payload: VideoIn, principal: Principal = Depends(authentica
             .order_by(ConversationMessage.id.desc()).limit(6))).scalars().all()
         earlier = list(dict.fromkeys(text[:video_story.STORY_CHARS] for text in reversed(rows)
                                      if text and text.strip() != payload.prompt.strip()))[-5:]
-    languages = [lang for lang in ("en", "bn") if lang in payload.languages] or ["en"]
+    languages = list(dict.fromkeys(lang for lang in payload.languages if lang in video_story.LANGUAGES)) or ["en"]
     found = await _load_files(session, user, payload.file_ids)
     pictures = [(f.data, f.mime_type) for f in found.values() if f.kind != "document" and (f.mime_type or "").startswith("image/")]
     material = "\n\n".join(f"{f.name}:\n{(f.prompt or '')[:6000]}" for f in found.values() if f.kind == "document")
@@ -2239,7 +2239,9 @@ class SceneEdit(BaseModel):
 
 
 class VideoEditIn(BaseModel):
-    scenes: list[SceneEdit] = Field(min_length=1, max_length=video_story.GIVEN_MAX_SCENES)
+    scenes: list[SceneEdit] = Field(default_factory=list, max_length=video_story.GIVEN_MAX_SCENES)
+    # Languages to add: the story translated, voiced and made into a video in each
+    add_languages: list[str] = Field(default_factory=list, max_length=len(video_story.LANGUAGES))
 
 
 def _forget_voice(story, lang, i):
@@ -2303,6 +2305,11 @@ async def edit_video(message_id: int, payload: VideoEditIn, principal: Principal
         if change.redraw or (change.picture and change.picture.strip()):
             story["pictures"][i] = None
             remake.update(languages)
+    for lang in payload.add_languages:
+        if lang in video_story.LANGUAGES and lang not in languages:
+            languages.append(lang)
+            remake.add(lang)
+    video["languages"] = languages
     if not remake:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "Nothing was changed")
     for lang in remake:
@@ -2434,7 +2441,7 @@ async def _video_pipeline(principal, user_id, ctx):
     # ran up and back with every picture's sampling, which said nothing about a 28-scene video.
     parts = ["Planning the story", "Drawing and checking the pictures"]
     for lang in languages:
-        word = "Bangla" if lang == "bn" else "English"
+        word = video_story.language_name(lang)
         parts += [f"Narrating in {word}", f"Putting the {word} video together"]
     weights = [0.06, 0.74] + [0.2 / (len(parts) - 2)] * (len(parts) - 2)
     now = {"part": 1, "done": 0.0, "text": ""}
@@ -2541,6 +2548,18 @@ async def _video_pipeline(principal, user_id, ctx):
                 _forget_voice(video["story"], target, i)
             if video.pop("translate", None) is not None:
                 await _save_video(message_id, video)
+        for lang in languages:
+            if lang in video["story"]:
+                continue
+            yield step(1, 0.9, f"Translating the story into {video_story.language_name(lang)}")
+            source = "en" if "en" in video["story"] else next(k for k in ("bn",) if k in video["story"])
+            title, lines = video_story.parse_translated_story(await _ask_helper(
+                principal, video_story.translate_story_request(bangla_model, _title(video, source),
+                                                               video["story"][source], lang)),
+                len(video["story"][source]))
+            video["story"][lang] = lines
+            video.setdefault("titles", {})[lang] = title or _title(video, source)
+            await _save_video(message_id, video)
         yield _event("storyboard", title=video["title"], scenes=len(video["story"]["drawn"]),
                      message_id=message_id)
 
@@ -2653,7 +2672,7 @@ async def _video_pipeline(principal, user_id, ctx):
         for k, lang in enumerate(languages):
             if lang in videos:
                 continue                                         # made before it stopped, or not edited
-            word = "Bangla" if lang == "bn" else "English"
+            word = video_story.language_name(lang)
             texts = told[lang]
             # Each line's narration is kept: after an edit only the lines changed are voiced again,
             # and a line the person read keeps their voice
@@ -2669,7 +2688,7 @@ async def _video_pipeline(principal, user_id, ctx):
                                                                f"scene {i + 1} ({word}).m4a", audio),
                                   "seconds": round(seconds, 3),
                                   # a verse alone is the qari's recitation, never softened like the voice
-                                  "by": "machine" if video_story.needs_reading(texts[i]) else "qari"}
+                                  "by": "machine" if video_story.needs_reading(texts[i], lang) else "qari"}
                 voices[lang] = entries
                 await _save_video(message_id, video)
             async with session_factory()() as db:
@@ -2684,7 +2703,7 @@ async def _video_pipeline(principal, user_id, ctx):
                     f.write(audio[entry["file_id"]])
                 narration.append((path, entry["seconds"]))
             yield step(4 + 2 * k, 0.0, f"Putting the {word} video together")
-            title = video["title_bn"] if lang == "bn" else video["title"]
+            title = _title(video, lang)
             data, seconds = await video_story.assemble(paths, narration, texts, title, lang, folder,
                                                        recorded=[entry.get("by") != "machine" for entry in entries],
                                                        keys=told["pictures"], cache=cache)
@@ -2738,7 +2757,7 @@ class VoiceIn(BaseModel):
     recordings: list[str | None] = Field(max_length=video_story.GIVEN_MAX_SCENES)
     # Which language's video: the person reads the English too - its voice says Arabic names and
     # blessings wrongly
-    lang: str = Field(default="bn", pattern="^(en|bn)$")
+    lang: str = Field(default="bn", pattern="^[a-z]{2}$")
 
 
 @router.post("/video/{message_id}/voice")
@@ -2760,7 +2779,7 @@ async def video_voice(message_id: int, payload: VoiceIn, principal: Principal = 
                             "This video was made before stories were kept; make it again to read it yourself")
     count = len(story["pictures"])
     lang = payload.lang
-    word = "Bangla" if lang == "bn" else "English"
+    word = video_story.language_name(lang)
     if lang not in story or lang not in (video.get("videos") or {}):
         raise HTTPException(status.HTTP_409_CONFLICT, f"This story has no {word} video to read")
     saved = story.get(f"voice_{lang}") or [None] * count
@@ -2769,7 +2788,7 @@ async def video_voice(message_id: int, payload: VoiceIn, principal: Principal = 
     if any(len(r or "") > 6_000_000 for r in payload.recordings):
         raise HTTPException(status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, "A recording is too long; keep each scene under two minutes")
     # A scene that is all Arabic - a verse - is recited by the qari, not read by the person
-    reads = [video_story.needs_reading(line) for line in story[lang]]
+    reads = [video_story.needs_reading(line, lang) for line in story[lang]]
     missing = [n + 1 for n, (new, old) in enumerate(zip(payload.recordings, saved))
                if reads[n] and not new and not old]
     if missing:
@@ -2840,7 +2859,7 @@ async def video_voice(message_id: int, payload: VoiceIn, principal: Principal = 
                 entries.append({"file_id": kept_id, "seconds": round(seconds, 3),
                                 "by": "recorded" if reads[n] else "qari"})
             yield _event("progress", stage=f"Putting the {word} video together with your voice", fraction=0.6)
-            title = (video.get("title_bn") if lang == "bn" else video.get("title")) or ""
+            title = _title(video, lang)
             data, seconds = await video_story.assemble(paths, narration, story[lang], title, lang, folder,
                                                        recorded=True, keys=story["pictures"],
                                                        cache=video_story.clip_cache(message_id))
@@ -2881,6 +2900,13 @@ async def video_voice(message_id: int, payload: VoiceIn, principal: Principal = 
     return StreamingResponse(jobs.follow(job), media_type="text/event-stream",
                              headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no",
                                       "X-Job-Id": str(job.id)})
+
+
+def _title(video, lang):
+    """A video story's title in one of its languages."""
+    if lang == "bn" and video.get("title_bn"):
+        return video["title_bn"]
+    return (video.get("titles") or {}).get(lang) or video.get("title") or ""
 
 
 def _keep_version(video, lang):

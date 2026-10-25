@@ -35,6 +35,8 @@
 .scene .stale{font-size:.78rem;color:#f59e0b;margin-top:.2rem}
 .save-row{position:sticky;bottom:0;background:var(--bg);padding:.8rem 0;border-top:1px solid var(--border);
           display:flex;flex-wrap:wrap;gap:.75rem;align-items:center;margin-top:.5rem}
+.add-lang{display:inline-flex;gap:.5rem;align-items:center;margin-left:auto;flex-wrap:wrap}
+.add-lang select{width:auto}
 .progress{margin-top:.6rem}
 .progress .line{font-size:.85rem;color:var(--muted)}
 .progress .bar{height:6px;background:var(--input);border-radius:3px;overflow:hidden;margin:.3rem 0 .5rem}
@@ -58,7 +60,10 @@ dialog.zoom::backdrop{background:rgba(0,0,0,.8)}
 <dialog class="zoom" id="zoom"><img alt=""></dialog>
 
 <script>
-const NAMES = {en: 'English', bn: 'বাংলা (Bangla)'};
+// The languages a video story can be told in (app/tools/video_story.py LANGUAGES)
+const NAMES = {en: 'English', bn: 'বাংলা (Bangla)', es: 'Español (Spanish)', fr: 'Français (French)',
+               zh: '中文 (Chinese)', ja: '日本語 (Japanese)', ko: '한국어 (Korean)', th: 'ไทย (Thai)',
+               ar: 'العربية (Arabic)', ur: 'اردو (Urdu)', hi: 'हिन्दी (Hindi)'};
 const BY = {machine: 'machine voice', recorded: 'your voice', qari: 'recited by the qari'};
 const JSON_HEADERS = {'Content-Type': 'application/json'};
 let current = null;             // {message_id, conversation, video, being_made}
@@ -160,7 +165,11 @@ function render(){
           ${langs.length > 1 ? '<label><input type="checkbox" class="retranslate"> Translate my change into the other language' + (langs.length > 2 ? 's' : '') + '</label>' : ''}
         </div></div>`).join('')}
     ${story.pictures ? `<div class="save-row"><button class="btn" id="save" disabled>Save and remake what changed</button>
-      <span class="muted" id="changes">Nothing changed yet.</span></div>
+      <span class="muted" id="changes">Nothing changed yet.</span>
+      ${Object.keys(NAMES).some(l => !langs.includes(l)) ? `<span class="add-lang">
+        <select id="addLang"><option value="">Add a language…</option>${Object.entries(NAMES).filter(([l]) => !langs.includes(l))
+          .map(([l, name]) => `<option value="${l}">${name}</option>`).join('')}</select>
+        <button type="button" class="btn btn-secondary" id="addLangGo" disabled>Translate and make it</button></span>` : ''}</div>
       <div class="progress" id="progress" hidden><div class="line" id="partLine"></div><div class="bar"><div id="partBar"></div></div>
         <div class="line" id="wholeLine"></div><div class="bar total"><div id="wholeBar"></div></div></div>` : ''}`;
   wire();
@@ -216,6 +225,10 @@ function wire(){
   editor.addEventListener('change', update);
   save?.addEventListener('click', () => remake(changes()));
   document.getElementById('carryOn')?.addEventListener('click', () => remake(null));
+  const pick = document.getElementById('addLang');
+  const go = document.getElementById('addLangGo');
+  pick?.addEventListener('change', () => { go.disabled = !pick.value || current.being_made; });
+  go?.addEventListener('click', () => remake([], [pick.value]));
   editor.querySelectorAll('[data-restore]').forEach(button => button.addEventListener('click', async () => {
     try{
       await api(`/chat/video/${current.message_id}/version`, {method: 'POST', headers: JSON_HEADERS,
@@ -241,16 +254,17 @@ function showProgress(event){
   document.getElementById('wholeBar').style.width = whole + '%';
 }
 
-// `list` the scenes changed, or null to carry on with a video that stopped partway
-async function remake(list){
-  if(list && !list.length) return;
+// `list` the scenes changed (and `add` languages to add), or null to carry on with a video that
+// stopped partway
+async function remake(list, add = []){
+  if(list && !list.length && !add.length) return;
   showError('');
   document.querySelectorAll('#editor textarea, #editor input, #editor button').forEach(el => el.disabled = true);
   let done = false, trouble = '';
   try{
     const response = list
       ? await fetch(`/chat/video/${current.message_id}/edit`, {method: 'POST', headers: JSON_HEADERS,
-                                                             body: JSON.stringify({scenes: list})})
+                                                             body: JSON.stringify({scenes: list, add_languages: add})})
       : await fetch(`/chat/video/${current.message_id}/continue`, {method: 'POST'});
     if(!response.ok){
       const err = await response.json().catch(() => ({}));

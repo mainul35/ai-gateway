@@ -370,6 +370,15 @@ a.paper{color:var(--text);text-decoration:none}
           padding:.45rem .7rem;cursor:pointer;font-size:.9rem;font-family:inherit}
 .icon-btn:hover{background:var(--border)}
 .inline{display:inline-flex;gap:.4rem;align-items:center;font-size:.83rem;color:var(--muted)}
+/* The languages of a video story: a short summary, opening onto a list to tick */
+.lang-pick{position:relative}
+.lang-pick summary{cursor:pointer;list-style:none;border:1px solid var(--border);border-radius:999px;padding:.15rem .7rem;
+  max-width:16rem;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.lang-pick .lang-list{position:absolute;bottom:calc(100% + .4rem);left:0;z-index:20;background:var(--card);
+  border:1px solid var(--border);border-radius:10px;padding:.5rem .7rem;display:grid;gap:.3rem;min-width:12rem;
+  max-height:60vh;overflow:auto}
+.lang-pick .lang-list label{display:flex;gap:.45rem;align-items:center;color:var(--text);white-space:nowrap;cursor:pointer}
+.lang-pick .lang-list input{width:auto;margin:0}
 .inline select,.inline input{width:auto;padding:.3rem .5rem;font-size:.83rem}
 .hint{font-size:.8rem;color:var(--muted);margin-top:.45rem;min-height:1.1rem}
 .hint.warn{color:var(--warning)}
@@ -568,6 +577,11 @@ a.paper{color:var(--text);text-decoration:none}
             <input type="file" id="cameraInput" accept="image/*" capture="environment" hidden>
             <span class="inline" id="sizeRow" hidden>Shape
               <select id="imageSize"></select>
+            </span>
+            <span class="inline" id="videoLangRow" hidden
+                  title="The languages the video story is told in: a video for each, narrated and with its words on screen">
+              <details class="lang-pick"><summary id="videoLangSummary">Languages</summary>
+                <div class="lang-list" id="videoLangList"></div></details>
             </span>
             <span class="inline" id="blurRow" hidden
                   title="Off: a photograph is never given a blurred background, whatever the words say">
@@ -824,11 +838,41 @@ function canAttach(){ return (tools.vision && caps.vision) || imageMode() || vid
 const qwenEdits = () => caps.edit_engine === 'qwen';
 const editLimit = () => qwenEdits() ? (caps.max_edit_images || 3) : 1;
 
+// The languages a video story is told in, as each calls itself; app/tools/video_story.py LANGUAGES
+const VIDEO_LANGUAGES = {en: 'English', bn: 'বাংলা', es: 'Español', fr: 'Français', zh: '中文', ja: '日本語',
+                         ko: '한국어', th: 'ไทย', ar: 'العربية', ur: 'اردو', hi: 'हिन्दी'};
+const LANGUAGE_IN_ENGLISH = {en: 'English', bn: 'Bangla', es: 'Spanish', fr: 'French', zh: 'Chinese', ja: 'Japanese',
+                             ko: 'Korean', th: 'Thai', ar: 'Arabic', ur: 'Urdu', hi: 'Hindi'};
+let videoLangs = ['en', 'bn'];
+try{
+  const saved = JSON.parse(localStorage.getItem('pg.videoLangs') || 'null');
+  if(Array.isArray(saved) && saved.length) videoLangs = saved.filter(l => VIDEO_LANGUAGES[l]);
+}catch(e){}
+
+function renderVideoLangs(){
+  const list = document.getElementById('videoLangList');
+  list.innerHTML = Object.entries(VIDEO_LANGUAGES).map(([code, name]) =>
+    `<label><input type="checkbox" value="${code}" ${videoLangs.includes(code) ? 'checked' : ''}>
+       ${name}${code !== 'en' ? ` <span class="muted">${LANGUAGE_IN_ENGLISH[code]}</span>` : ''}</label>`).join('');
+  // (fixed names, not escaped: this runs before base.html defines escapeHtml)
+  document.getElementById('videoLangSummary').textContent = videoLangs.map(l => VIDEO_LANGUAGES[l]).join(' · ');
+}
+
+document.getElementById('videoLangList').addEventListener('change', e => {
+  const picked = [...document.querySelectorAll('#videoLangList input:checked')].map(i => i.value);
+  if(!picked.length){ e.target.checked = true; return; }        // at least one
+  videoLangs = picked;
+  try{ localStorage.setItem('pg.videoLangs', JSON.stringify(videoLangs)); }catch(err){}
+  renderVideoLangs();
+});
+renderVideoLangs();
+
 function syncTools(){
   document.querySelectorAll('.chip[data-tool]').forEach(chip =>
     chip.setAttribute('aria-pressed', String(!!tools[chip.dataset.tool])));
   // Always there: what is inside the menu changes with the tools, the way in does not
-  document.getElementById('sizeRow').hidden = !imageMode() || attachedPictures().length > 0;
+  document.getElementById('sizeRow').hidden = !imageMode() || videoMode() || attachedPictures().length > 0;
+  document.getElementById('videoLangRow').hidden = !videoMode();
   document.getElementById('strengthRow').hidden = !imageMode() || pending.length === 0 || qwenEdits();
   document.getElementById('blurRow').hidden = !imageMode() || pending.length === 0 || !caps.photo_blur;
   document.getElementById('backdropRow').hidden =
@@ -3807,7 +3851,7 @@ async function sendVideo(text, again){
     const response = await postStream('/chat/video', {prompt: text, conversation_id: currentId,
                                                       answers_to: box.dataset.turn ? Number(box.dataset.turn) : null,
                                                       file_ids: material.slice(0, 6).map(f => f.id),
-                                                      languages: ['en', 'bn']});
+                                                      languages: videoLangs});
     await readEvents(response, chunk => {
       const event = chunk.gateway;
       if(chunk.error){ showError(chunk.error.message || 'The video could not be made'); return; }
@@ -3909,12 +3953,12 @@ function renderVideo(box, video, messageId, showLang){
   if(video.state && video.state !== 'done') return renderVideoPaused(box, video, messageId || video.message_id);
   const body = box.querySelector('.body');
   const langs = Object.keys(video.videos || {});
-  const names = {en: 'English', bn: 'বাংলা'};
+  const names = VIDEO_LANGUAGES;
   const first = langs.includes(showLang) ? showLang : langs[0];
   messageId = messageId || video.message_id;
   // Either language can be read by the person: the English voice says Arabic names and blessings wrongly
   const readable = video.story && messageId ? langs.filter(l => video.story[l]) : [];
-  const words = {en: 'English', bn: 'Bangla'};
+  const words = LANGUAGE_IN_ENGLISH;
   body.innerHTML = `<div class="video-story">
       <div class="video-title"><b>${escapeHtml(video.title || 'Video story')}</b>
         ${video.title_bn ? `<span class="muted"> · ${escapeHtml(video.title_bn)}</span>` : ''}</div>
@@ -3953,12 +3997,12 @@ function renderVideo(box, video, messageId, showLang){
 async function openVoicePanel(box, video, messageId, lang){
   const story = video.story;
   const lines = story[lang];
-  const word = lang === 'bn' ? 'Bangla' : 'English';
+  const word = LANGUAGE_IN_ENGLISH[lang] || lang;
   const saved = story[`voice_${lang}`] || [];
   const fresh = lines.map(() => null);             // Blobs recorded now
   // A line all in Arabic - a verse - is recited by the qari, not read (needs_reading on the server)
   const ARABIC = /[؀-ۿݐ-ݿࢠ-ࣿﭐ-﷿ﹰ-﻿]/g;
-  const reads = lines.map(line => /[\p{L}\p{N}_]/u.test(line.replace(ARABIC, ' ')));
+  const reads = lines.map(line => ['ar', 'ur'].includes(lang) || /[\p{L}\p{N}_]/u.test(line.replace(ARABIC, ' ')));
   const panel = document.createElement('div');
   panel.className = 'voice-panel';
   panel.innerHTML = `<p class="muted">Read each line slowly and calmly, close to the phone, in a quiet room.
