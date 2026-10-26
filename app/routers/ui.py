@@ -18,6 +18,20 @@ TEMPLATES_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__f
 
 router = APIRouter(tags=["ui"], include_in_schema=False)
 templates = Jinja2Templates(directory=TEMPLATES_DIR)
+STATIC_DIR = os.path.join(os.path.dirname(TEMPLATES_DIR), "static")
+
+
+def static_url(name):
+    """/static/<name>?v=<when it last changed>: a changed file is a new address, so neither Cloudflare
+    nor a browser - both keep static files for hours - goes on serving the old one. A fixed draft
+    editor script was served broken for hours after its deploy that way (2026-10-26)."""
+    try:
+        return f"/static/{name}?v={int(os.path.getmtime(os.path.join(STATIC_DIR, name)))}"
+    except OSError:
+        return f"/static/{name}"
+
+
+templates.env.globals["static_url"] = static_url
 
 
 async def signed_in_user(session: AsyncSession, cookie_value):

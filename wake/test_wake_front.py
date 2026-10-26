@@ -50,6 +50,9 @@ FAKE_BOX = textwrap.dedent('''
             return JSONResponse({"error": "Invalid API key"}, status_code=401)
         return {"data": [{"id": "claude-sonnet-5" if anthropic_version else "qwen3.6-256k"}]}
 
+    @app.get("/auth/me")
+    async def me(): return JSONResponse({"detail": "Not signed in"}, status_code=401)
+
     @app.get("/static/app.css")
     async def css(): return PlainTextResponse("body{}", media_type="text/css")
 
@@ -226,6 +229,19 @@ def test_rejected_key_never_wakes_again(setup):
                       headers={"Authorization": f"Bearer {OTHER_KEY}"}).status_code == 401
     status = httpx.get(f"{base}/__wake/status").json()
     assert status["up"] is True
+
+
+def test_login_only_401_does_not_reject_a_good_key(setup):
+    base, woken = setup
+    key = {"Authorization": f"Bearer {GOOD_KEY}"}
+    assert httpx.post(f"{base}/v1/chat/completions", json={"model": "x"}, timeout=60, headers=key).status_code == 200
+    # /auth/me wants a login cookie: a 401 there is about the cookie, not the key
+    assert httpx.get(f"{base}/auth/me", headers=key).status_code == 401
+    httpx.post(f"{base}/__sleep", headers=key)
+    time.sleep(1)
+    # Asleep now: the key must still be one that may wake it - held while waking, not turned away
+    answer = httpx.get(f"{base}/chat/conversations", headers=key, timeout=60).json()
+    assert "authenticated request wakes it" not in json.dumps(answer)
 
 
 RESTARTING_BOX = textwrap.dedent('''
