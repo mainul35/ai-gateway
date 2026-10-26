@@ -1,7 +1,9 @@
-"""Per-model llama-server launch profiles, loaded from config/engines.yaml.
+"""Per-model engine launch profiles, loaded from config/engines.yaml.
 
-Each profile is one llama-server process: which GGUF to load and exactly how to split it between
-GPU and CPU. These are the knobs Ollama does not expose.
+Each profile is one server process: by default llama-server, with which GGUF to load and exactly how
+to split it between GPU and CPU - the knobs Ollama does not expose. A profile can instead run vLLM or
+SGLang (`server`), on a folder of safetensors split across both GPUs; all three answer the same
+OpenAI API, so a request goes to any of them the same way.
 """
 import os
 from dataclasses import dataclass, field
@@ -16,8 +18,14 @@ PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(_
 @dataclass
 class EngineProfile:
     name: str                       # model name clients request
-    model_path: str                 # GGUF file on disk
+    model_path: str                 # GGUF file on disk; for vllm and sglang, the model's folder
     port: int
+    # "llama" (llama-server), "vllm" or "sglang". binary is then the vllm program, or the Python of
+    # SGLang's environment
+    server: str = "llama"
+    tensor_parallel: int | None = None   # vllm/sglang: GPUs the model is split across
+    gpu_memory: float | None = None      # vllm/sglang: share of each GPU's memory to take (weights + cache)
+    vision: bool = False                 # vllm/sglang: the model reads images (llama-server: mmproj)
     n_gpu_layers: int | None = None  # -ngl: layers on GPU ("all" = 999)
     n_cpu_ffn: int | None = None     # -ncffn: dense FFN weights of the first N layers kept on CPU
     n_cpu_moe: int | None = None     # --n-cpu-moe: MoE expert weights of the first N layers on CPU
@@ -56,8 +64,12 @@ class EngineProfile:
         return "--spec-type" in self.extra_args or "-st" in self.extra_args
 
     def command(self, binary, mtp=False):
-        """The llama-server command line this profile describes; `mtp` adds the multi-token
-        prediction draft (unless extra_args already say how to draft)."""
+        """The command line this profile describes; `mtp` adds llama-server's multi-token prediction
+        draft (unless extra_args already say how to draft)."""
+        if self.server == "vllm":
+            return self._vllm_command(binary)
+        if self.server == "sglang":
+            return self._sglang_command(binary)
         args = [binary, "--model", self.model_path, "--host", "127.0.0.1", "--port", str(self.port),
                 "--ctx-size", str(self.ctx_size), "--alias", self.name]
         if self.n_gpu_layers is not None:
@@ -94,6 +106,30 @@ class EngineProfile:
         if mtp and not self.has_mtp_flags():
             # Two tokens ahead: each further guess is less often right, and two measured fastest
             args += MTP_ARGS
+        return args + list(self.extra_args)
+
+
+    def _vllm_command(self, binary):
+        # The model's own settings (its tool-call and reasoning parsers) go in extra_args
+        args = [binary, "serve", self.model_path, "--host", "127.0.0.1", "--port", str(self.port),
+                "--served-model-name", self.name, "--max-model-len", str(self.ctx_size)]
+        if self.tensor_parallel:
+            args += ["--tensor-parallel-size", str(self.tensor_parallel)]
+        if self.gpu_memory:
+            args += ["--gpu-memory-utilization", str(self.gpu_memory)]
+        if self.parallel:
+            args += ["--max-num-seqs", str(self.parallel)]
+        return args + list(self.extra_args)
+
+    def _sglang_command(self, binary):
+        args = [binary, "-m", "sglang.launch_server", "--model-path", self.model_path, "--host", "127.0.0.1",
+                "--port", str(self.port), "--served-model-name", self.name, "--context-length", str(self.ctx_size)]
+        if self.tensor_parallel:
+            args += ["--tp-size", str(self.tensor_parallel)]
+        if self.gpu_memory:
+            args += ["--mem-fraction-static", str(self.gpu_memory)]
+        if self.parallel:
+            args += ["--max-running-requests", str(self.parallel)]
         return args + list(self.extra_args)
 
 

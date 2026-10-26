@@ -227,7 +227,9 @@ async def _real_count(body, backend, model):
     try:
         with supervisor.track_request(running):      # not reaped mid-count
             async with httpx.AsyncClient(timeout=httpx.Timeout(TOKENIZE_TIMEOUT, connect=5)) as client:
-                response = await client.post(f"{running.base_url}/tokenize", json={"content": text},
+                # llama-server reads "content", vLLM "prompt" and the model's name; both answer "tokens"
+                response = await client.post(f"{running.base_url}/tokenize",
+                                             json={"content": text, "prompt": text, "model": model},
                                              headers=backend.headers())
         if not response.is_success:
             return None

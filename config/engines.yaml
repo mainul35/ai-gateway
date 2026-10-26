@@ -147,3 +147,61 @@ models:
     parallel: 1
     # The image reader's room, as for qwen3.6; conversations set aside resume from RAM
     extra_args: ["--fit", "on", "--fit-target", "1536", "--cache-ram", "24576"]
+
+  # vLLM and SGLang (installed 2026-10-26 in ~/inference, each its own Python 3.12 environment): the
+  # same qwen3.6 on both 3090s at once (tensor parallel), from safetensors - AWQ 4-bit
+  # (QuantTrio/Qwen3.6-35B-A3B-AWQ, 25.5 GB; the attention, the linear attention, the image reader and
+  # the MTP layers stay unquantized). Only 10 of its 40 layers keep a KV cache (2 heads of 256), about
+  # 20 KB a token: 256K is 5 GB, so the cache has room for several agents at once. Their ports are set,
+  # so the profiles after them keep theirs.
+  # FlashInfer builds its kernels on first use, and none come prebuilt for its version: without a CUDA
+  # compiler vLLM loaded the model and stopped at its first sampled token ("Could not find nvcc"), and
+  # with the one the environments carry (13.4) beside torch's CUDA headers (13.0) the build fails
+  # ("CUDA compiler and CUDA toolkit headers are incompatible", 2026-10-26). So nothing of FlashInfer is
+  # used: vLLM samples with PyTorch.
+  # vLLM, for agents: tool calls parsed by qwen3_coder, thinking split off by the qwen3 parser, a shared
+  # prompt prefix computed once for every request that starts with it.
+  - name: qwen3.6-vllm
+    server: vllm
+    binary: /home/mainul35/inference/vllm-venv/bin/vllm
+    model_path: /home/mainul35/models/Qwen3.6-35B-A3B-AWQ
+    port: 8120
+    parameter_size: 35B
+    vision: true
+    ctx_size: 262144
+    tensor_parallel: 2
+    gpu_memory: 0.90
+    env: {VLLM_USE_FLASHINFER_SAMPLER: "0"}
+    # Requests answered at once, each with the whole window if the cache has room for it
+    parallel: 4
+    extra_args: ["--enable-auto-tool-choice", "--tool-call-parser", "qwen3_coder", "--reasoning-parser", "qwen3",
+                 "--enable-prefix-caching"]
+
+  # SGLang, for the long window: 1M tokens by YaRN x4 past the trained 256K, as qwen3.6-1m does in
+  # llama.cpp; the cache in 8 bits (about 10 GB at 1M). SGLang refuses a window past the trained one
+  # unless told it may.
+  - name: qwen3.6-sglang-1m
+    server: sglang
+    binary: /home/mainul35/inference/sglang-venv/bin/python
+    model_path: /home/mainul35/models/Qwen3.6-35B-A3B-AWQ
+    port: 8121
+    parameter_size: 35B
+    vision: true
+    ctx_size: 1048576
+    tensor_parallel: 2
+    gpu_memory: 0.88
+    parallel: 2
+    # It builds the kernel that repacks AWQ for its 4-bit path on first start: with the environment's own
+    # CUDA compiler, brought to 13.0 to match torch's CUDA headers (nvidia-cuda-nvcc/-crt 13.0.88), and
+    # ninja on PATH. No FlashInfer (see qwen3.6-vllm): Triton's attention, PyTorch's sampling.
+    env: {SGLANG_ALLOW_OVERWRITE_LONGER_CONTEXT_LEN: "1",
+          CUDA_HOME: /home/mainul35/inference/sglang-venv/lib/python3.12/site-packages/nvidia/cu13,
+          PATH: "/home/mainul35/inference/sglang-venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"}
+    extra_args: ["--tool-call-parser", "qwen3_coder", "--reasoning-parser", "qwen3", "--kv-cache-dtype", "fp8_e5m2",
+                 "--attention-backend", "triton", "--sampling-backend", "pytorch",
+                 # AWQ computes in float16 by default, and the linear attention's state is bfloat16: the
+                 # first prompt stopped on the mismatch ("Index put requires the source and destination
+                 # dtypes match", 2026-10-26). The whole model in bfloat16 keeps the state's precision.
+                 "--dtype", "bfloat16",
+                 "--json-model-override-args",
+                 '{"text_config": {"max_position_embeddings": 1048576, "rope_parameters": {"mrope_interleaved": true, "mrope_section": [11, 11, 10], "partial_rotary_factor": 0.25, "rope_theta": 10000000, "rope_type": "yarn", "factor": 4.0, "original_max_position_embeddings": 262144}}}']
