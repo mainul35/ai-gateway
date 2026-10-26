@@ -1,6 +1,6 @@
 /* A video story's scenes before its video is made: text only, to read and correct.
 
-   Shared by /videos and /videos2. Nothing here draws or voices anything; "Make the video" is the one
+   Used by the Videos page. Nothing here draws or voices anything; "Make the video" is the one
    button that spends the GPUs' time (POST /chat/video/{message}/produce). The scenes as corrected are
    kept with PUT /chat/video/{message}/draft, and words missing in a language - a part written in one
    language only - are translated by POST /chat/video/{message}/prepare.
