@@ -60,6 +60,7 @@ body.videos-studio main{max-width:none;padding:0}
 .editor .sceneBar .bar{background:var(--card)}
 .row .s .drawing{color:var(--primary);font-weight:600}
 .editor .newPicture{font-size:.8rem;color:#4ade80;margin-top:.4rem}
+.editor .newPicture.bad{color:#fca5a5}
 .editor details.from{font-size:.78rem;color:var(--muted);margin-top:.4rem}
 .check{display:flex;gap:.45rem;align-items:center;font-size:.85rem;margin-top:.5rem;cursor:pointer}
 .check input{width:auto;margin:0}
@@ -355,8 +356,9 @@ function renderEditor(){
         <div class="where">Scene ${i + 1} of ${told.pictures.length}</div>
         ${((told.notes || [])[i] || []).length ? `<div class="where">After it, on a dark screen and not read: ${
           told.notes[i].map(note => escapeHtml(note)).join(' · ')}</div>` : ''}
-        ${preview?.ok ? `<div class="newPicture">${preview.saved
+        ${preview ? `<div class="newPicture ${!preview.ok ? 'bad' : ''}">${preview.saved
             ? 'The new picture is saved for this scene: it goes into the video when you save and remake.'
+            : !preview.ok ? `The new picture: it did not pass the check (${escapeHtml(preview.why || '')}), so it is not used, but you can save it to keep it.`
             : 'The new picture: it goes into the video when you save and remake. Save it to keep it if you leave the page.'}
           <div class="actions" style="margin-top:.4rem">
             ${preview.saved ? '' : '<button type="button" class="btn" id="savePicture">💾 Save this picture</button>'}
