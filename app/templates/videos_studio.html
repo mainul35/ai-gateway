@@ -261,6 +261,8 @@ function renderHead(){
     <div class="langs">${Object.keys(video.videos || {}).map(l => `<button type="button" data-lang="${l}" class="${l === showing ? 'on' : ''}">
       ${NAMES[l] || l}${video.videos[l].seconds ? ' ' + clock(video.videos[l].seconds) : ''}${
       video.videos[l].voice ? ' · ' + escapeHtml(video.videos[l].voice === 'recorded' ? 'your voice' : video.videos[l].voice) : ''}</button>`).join('')}</div>
+    ${editable ? languages().filter(l => !(video.videos || {})[l]).map(l => `<button type="button" class="btn btn-secondary"
+      data-make="${l}" title="The story is told in ${IN_ENGLISH[l] || l} already: this makes its video">＋ ${NAMES[l] || l} video</button>`).join('') : ''}
     <span class="spacer"></span>
     ${editable && missing.length ? `<select id="addLang"><option value="">＋ Add a language…</option>${
       missing.map(l => `<option value="${l}">${NAMES[l]} · ${IN_ENGLISH[l]}</option>`).join('')}</select>` : ''}
@@ -284,6 +286,10 @@ function renderHead(){
     e.target.value = '';
   });
   document.getElementById('carryOn')?.addEventListener('click', () => remake(null));
+  document.querySelectorAll('[data-make]').forEach(b => b.addEventListener('click', () => {
+    const lang = b.dataset.make;
+    if(confirm(`Make the ${IN_ENGLISH[lang] || lang} video? Its words are ready; it is voiced and put together from the pictures already drawn.`)) remake([], [lang]);
+  }));
   document.querySelectorAll('[data-restore]').forEach(b => b.addEventListener('click', async () => {
     try{
       await api(`/chat/video/${current.message_id}/version`, {method: 'POST', headers: JSON_HEADERS,
