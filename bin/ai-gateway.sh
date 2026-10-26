@@ -225,13 +225,42 @@ EOF
     else
         echo "The gateway did not take the model choice: $answer" >&2
     fi
-    # Not restarted from here: on Linux the app goes by several names, depending on how it was
-    # installed, and "claude" is also Claude Code - quitting the wrong one would end someone's session
-    if [ "$RESTORE" = 1 ]; then
-        echo "The Claude desktop app is set back to your Claude account. Quit it and open it again."
+    # The app reads which profile is in use only when it starts, so it is quit and opened again. On
+    # Linux "claude" is also Claude Code, so the app is known by what only an Electron app has: its
+    # code in resources/app.asar beside the program. Its main process (no --type= in its arguments)
+    # is asked to quit, and the same command line started again - by a process of its own, so this
+    # works typed in a terminal inside the app too. With no display to open it on, it is left alone.
+    app_pid=""
+    for proc in /proc/[0-9]*; do
+        exe=$(readlink "$proc/exe" 2>/dev/null) || continue
+        case "$(basename "$exe" | tr '[:upper:]' '[:lower:]')" in claude|claude-desktop) ;; *) continue ;; esac
+        [ -f "$(dirname "$exe")/resources/app.asar" ] || continue
+        [ "$(stat -c %u "$proc")" = "$(id -u)" ] || continue
+        tr '\0' '\n' < "$proc/cmdline" 2>/dev/null | grep -q '^--type=' && continue
+        app_pid=${proc#/proc/}; break
+    done
+    then=" Quit it and open it again: it reads which profile is in use only when it starts."
+    if [ -n "$app_pid" ] && [ -n "${DISPLAY:-}${WAYLAND_DISPLAY:-}" ]; then
+        setsid nohup bash -c '
+            pid=$1; mapfile -d "" -t command < "/proc/$pid/cmdline"
+            # An AppImage runs from a mount that goes when it quits: started again from the file itself
+            image=$(tr "\0" "\n" < "/proc/$pid/environ" 2>/dev/null | sed -n "s/^APPIMAGE=//p" | head -1)
+            [ -n "$image" ] && command[0]=$image
+            kill -TERM "$pid" 2>/dev/null
+            i=0; while kill -0 "$pid" 2>/dev/null && [ $i -lt 60 ]; do sleep 0.25; i=$((i + 1)); done
+            kill -0 "$pid" 2>/dev/null && exit 0      # still running: not forced, the person decides
+            sleep 1
+            exec "${command[@]}"' restart "$app_pid" >/dev/null 2>&1 < /dev/null &
+        then=" It is restarting."
+    elif [ -n "$app_pid" ]; then
+        then=" It was not restarted from here (no display in this terminal): quit it and open it again."
     else
-        echo "The Claude desktop app now uses $GATEWAY (profile \"AI Gateway\"), set in $support."
-        echo "Quit it and open it again: it reads which profile is in use only when it starts."
+        then=" It is not running: it uses the profile when it is next opened."
+    fi
+    if [ "$RESTORE" = 1 ]; then
+        echo "The Claude desktop app is set back to your Claude account.$then"
+    else
+        echo "The Claude desktop app now uses $GATEWAY (profile \"AI Gateway\"), set in $support.$then"
         if [ "$chose" = 1 ]; then echo "It runs $MODEL, whichever of Claude's names it shows (Sonnet 4.6 stays Auto)."
         else echo "Its model picker offers Claude's names standing for gateway models; --model <name> makes them all one model."; fi
         echo "ai-gateway launch claude-desktop --restore undoes this."
