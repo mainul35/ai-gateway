@@ -2375,9 +2375,15 @@ async def edit_video(message_id: int, payload: VideoEditIn, principal: Principal
             story["pictures"][i] = None
             remake.update(languages)
     for lang in payload.add_languages:
-        if lang in video_story.LANGUAGES and lang not in languages:
+        if lang not in video_story.LANGUAGES:
+            continue
+        if lang not in languages:                   # a new language: translated, then its video made
             languages.append(lang)
-            remake.add(lang)
+        elif lang in (video.get("videos") or {}):
+            continue
+        remake.add(lang)                            # (told in it already: only its video is made)
+        if video.get("make") is not None and lang not in video["make"]:
+            video["make"].append(lang)
     # Scenes taken out last, so the numbers above are the ones the person saw
     gone = sorted({i for i in payload.delete if 0 <= i < count}, reverse=True)
     if len(gone) >= count:
@@ -2633,15 +2639,27 @@ async def prepare_draft(message_id: int, principal: Principal = Depends(authenti
                              headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no", "X-Job-Id": str(job.id)})
 
 
+class ProduceIn(BaseModel):
+    # The story's languages to make a video in now; the others keep their words, and their video can be
+    # made later (an edit adding the language). None: every one of them
+    languages: list[str] | None = Field(default=None, max_length=len(video_story.LANGUAGES))
+
+
 @router.post("/video/{message_id}/produce")
-async def produce_video(message_id: int, principal: Principal = Depends(authenticate),
+async def produce_video(message_id: int, payload: ProduceIn | None = None, principal: Principal = Depends(authenticate),
                         session: AsyncSession = Depends(get_session)):
     """Makes the video of a story the person has read and corrected: every picture drawn and checked,
-    every part voiced, a video for each language. Only now is the GPUs' time spent."""
+    every part voiced, a video in each language asked for. Only now is the GPUs' time spent."""
     user = _require_user(principal)
     if not images.is_available() or not video_story.is_available():
         raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "Video stories are not set up on this server")
     message, video = await _draft_of(session, user, message_id)
+    told_in = video.get("languages") or ["en", "bn"]
+    if payload is not None and payload.languages is not None:
+        chosen = [lang for lang in told_in if lang in payload.languages]
+        if not chosen:
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "Pick at least one language to make a video in")
+        video["make"] = chosen
     video["drawing"] = {"attempt": 0, "wrong": {}, "keep_every_scene": True}
     await _save_video(message.id, video)
     ctx = {"prompt": video.get("asked", ""), "languages": video.get("languages") or ["en", "bn"],
@@ -2771,6 +2789,10 @@ async def _video_pipeline(principal, user_id, ctx):
     languages = ctx["languages"]
     message_id = ctx.get("message_id")
     video = ctx.get("video")
+    # The languages a video is made in: those asked for (video["make"]), else every one it is told in.
+    # The others are still planned and translated; their video can be made later
+    wanted = (video or {}).get("make")
+    produced = [lang for lang in languages if wanted is None or lang in wanted]
     folder = video_story.workspace()
     events = asyncio.Queue()
 
@@ -2778,7 +2800,7 @@ async def _video_pipeline(principal, user_id, ctx):
     # each language's narration and video) and how far it has got, and the whole. One bar for both
     # ran up and back with every picture's sampling, which said nothing about a 28-scene video.
     parts = ["Planning the story", "Drawing and checking the pictures"]
-    for lang in languages:
+    for lang in produced:
         word = video_story.language_name(lang)
         parts += [f"Narrating in {word}", f"Putting the {word} video together"]
     weights = [0.06, 0.74] + [0.2 / (len(parts) - 2)] * (len(parts) - 2)
@@ -3064,7 +3086,7 @@ async def _video_pipeline(principal, user_id, ctx):
         cache = video_story.clip_cache(message_id)
         # Who speaks each part, in which voice: a character's id to the voice slot their cast gives them
         cast_map = {m["id"]: m.get("voice") or "narrator" for m in told.get("cast") or []}
-        for k, lang in enumerate(languages):
+        for k, lang in enumerate(produced):
             if lang in videos:
                 continue                                         # made before it stopped, or not edited
             word = video_story.language_name(lang)

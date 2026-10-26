@@ -227,12 +227,13 @@
     }
 
     // A job on the draft - filling in translations, or making the video - followed to its end
-    async function run(path){
+    async function run(path, body){
       working = true;
       container.querySelectorAll('button, textarea, input, select').forEach(el => el.disabled = true);
       hooks.progress({stage: 'Starting', fraction: 0});
       try{
-        const response = await fetch(path, {method: 'POST'});
+        const response = await fetch(path, body ? {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)}
+                                                 : {method: 'POST'});
         if(!response.ok){
           const err = await response.json().catch(() => ({}));
           throw new Error((typeof err.detail === 'string' && err.detail) || `HTTP ${response.status}`);
@@ -253,6 +254,13 @@
         <button type="button" class="btn btn-secondary" id="draftSave" disabled>Save</button>
         <button type="button" class="btn btn-secondary" id="draftFill" title="Translate the words missing in any language">Fill in translations</button>
         <button type="button" class="btn" id="draftMake">Make the video ›</button></div>
+      <div class="draft-note" id="draftWhich" hidden><b>Make a video in:</b>
+        ${langs.map(l => `<label style="margin:0 .8rem 0 .4rem;white-space:nowrap"><input type="checkbox" value="${l}"
+          ${(video.make || langs).includes(l) ? 'checked' : ''}> ${NAMES[l]}</label>`).join('')}
+        <div class="muted" style="margin:.3rem 0">The words stay in every language; a language left out can have its video made
+          later, from its button on the Videos page.</div>
+        <button type="button" class="btn" id="draftMakeGo">Make it</button>
+        <button type="button" class="btn btn-secondary" id="draftMakeCancel">Cancel</button></div>
       <div class="draft-note">Nothing has been drawn or voiced yet. Read the scenes, correct the words and who says them,
         delete or add scenes, say what each picture should show - then make the video.
         ${video.paused ? `<br><span style="color:#f59e0b">${esc(video.paused)}</span>` : ''}</div>
@@ -279,11 +287,18 @@
       try{ if(dirty) await save(); }catch(e){ hooks.showError(e.message); return; }
       run(`/chat/video/${current.message_id}/prepare`);
     });
-    container.querySelector('#draftMake').addEventListener('click', async () => {
+    // Which languages get a video is asked here: the pictures are drawn once for all of them, and each
+    // language's narration and video are made only where it is wanted
+    const which = container.querySelector('#draftWhich');
+    container.querySelector('#draftMake').addEventListener('click', () => { which.hidden = !which.hidden; });
+    container.querySelector('#draftMakeCancel').addEventListener('click', () => { which.hidden = true; });
+    container.querySelector('#draftMakeGo').addEventListener('click', async () => {
+      const chosen = [...which.querySelectorAll('input:checked')].map(box => box.value);
+      if(!chosen.length){ hooks.showError('Pick at least one language to make a video in.'); return; }
       if(!confirm(`Make the video now? Its ${draft.scenes.length} pictures are drawn and every part voiced, in ` +
-                  `${langs.length} language${langs.length === 1 ? '' : 's'} - this takes a while.`)) return;
+                  chosen.map(l => NAMES[l]).join(', ') + ' - this takes a while.')) return;
       try{ if(dirty) await save(); }catch(e){ hooks.showError(e.message); return; }
-      run(`/chat/video/${current.message_id}/produce`);
+      run(`/chat/video/${current.message_id}/produce`, {languages: chosen});
     });
     window.addEventListener('beforeunload', e => { if(dirty) e.preventDefault(); });
   };
