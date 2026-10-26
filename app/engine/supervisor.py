@@ -1,4 +1,4 @@
-"""Starts, stops and swaps llama-server processes.
+"""Starts, stops and swaps engine processes: llama-server, vLLM or SGLang (EngineProfile.server).
 
 Only one large model fits in 24 GB, so profiles marked exclusive stop each other. A model is started
 on the first request that needs it and unloaded again once it has been idle for its TTL.
@@ -8,6 +8,7 @@ import contextlib
 import logging
 import os
 import shutil
+import signal
 import time
 
 import httpx
@@ -65,6 +66,17 @@ async def _drain(process, path):
                 out = open(path, "ab")
     finally:
         out.close()
+
+
+def _signal(pid, sig, group=None):
+    """A signal to an engine: to its whole process group when it leads one (vLLM, SGLang and their
+    GPU workers), else to it alone. `group` True: the group this gateway started it in, signalled by
+    its id even after the server itself has gone. Gone already is fine."""
+    with contextlib.suppress(ProcessLookupError, PermissionError):
+        if group or (group is None and os.getpgid(pid) == pid):
+            os.killpg(pid, sig)
+        else:
+            os.kill(pid, sig)
 
 
 class RunningModel:
@@ -137,24 +149,29 @@ class Supervisor:
                     args = f.read().decode(errors="replace").split("\0")
             except OSError:
                 continue
-            if not args or not os.path.basename(args[0]).startswith("llama-server") or int(pid) in tracked:
+            if not args or int(pid) in tracked:
                 continue
             named = dict(zip(args, args[1:]))
             # By its name alone: a port can have moved since it was started (profiles are numbered in
-            # order), and Ollama's runner never carries one of our profiles' names
-            if named.get("--alias") in ours:
-                strays.append((int(pid), named["--alias"]))
+            # order), and Ollama's runner never carries one of our profiles' names. vLLM and SGLang
+            # name it with --served-model-name, and are known by what they run
+            if os.path.basename(args[0]).startswith("llama-server"):
+                name = named.get("--alias")
+            elif (any(os.path.basename(a) == "vllm" for a in args[:2]) and "serve" in args[:3])                     or "sglang.launch_server" in args[:3]:
+                name = named.get("--served-model-name")
+            else:
+                continue
+            if name in ours:
+                strays.append((int(pid), name))
         for pid, name in strays:
             log.warning("stopping %s (pid %s): left running by a gateway that did not stop it", name, pid)
-            with contextlib.suppress(ProcessLookupError):
-                os.kill(pid, 15)
+            _signal(pid, signal.SIGTERM)
         for _ in range(20):
             if not any(os.path.exists(f"/proc/{pid}") for pid, _ in strays):
                 return
             await asyncio.sleep(0.5)
         for pid, _ in strays:
-            with contextlib.suppress(ProcessLookupError):
-                os.kill(pid, 9)
+            _signal(pid, signal.SIGKILL)
 
     async def shutdown(self):
         if self._reaper:
@@ -182,7 +199,7 @@ class Supervisor:
         profile = profiles.get(name)
         if profile is None:
             return None, f"No engine profile named '{name}'"
-        if not self.is_available():
+        if profile.server == "llama" and not profile.binary and not self.is_available():
             return None, "llama-server binary not found; set engine.llama_server.path"
 
         # A model in the middle of someone's answer is never stopped to make room for another: that
@@ -352,12 +369,16 @@ class Supervisor:
             log.warning("Could not reach Ollama to unload models: %s", e)
 
     async def _start_locked(self, profile):
-        if not os.path.isfile(profile.model_path):
+        if profile.server == "llama" and not os.path.isfile(profile.model_path):
             return None, f"Model file not found: {profile.model_path}"
+        if profile.server != "llama" and not os.path.isdir(profile.model_path):
+            return None, f"Model folder not found: {profile.model_path}"
 
+        if profile.server != "llama" and not profile.binary:
+            return None, f"Profile {profile.name} runs {profile.server} but names no binary for it"
         binary = profile.binary or self.binary()
         if profile.binary and not (os.path.isfile(binary) and os.access(binary, os.X_OK)):
-            return None, f"llama-server not found at {binary} (profile {profile.name})"
+            return None, f"{profile.server} not found at {binary} (profile {profile.name})"
         mtp = self.mtp_for(profile, binary)
         model, problem = await self._launch(profile, binary, mtp)
         if model is None and mtp and profile.mtp == "auto":
@@ -375,7 +396,7 @@ class Supervisor:
     @staticmethod
     def mtp_for(profile, binary):
         """Whether this profile's engine runs with multi-token prediction: see EngineProfile.mtp."""
-        if profile.mtp == "off" or profile.has_mtp_flags():
+        if profile.server != "llama" or profile.mtp == "off" or profile.has_mtp_flags():
             return False                 # off, or drafting already set by hand in extra_args
         if profile.mtp == "on":
             return True
@@ -393,6 +414,9 @@ class Supervisor:
         process = await asyncio.create_subprocess_exec(
             *command, env=env,
             stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE,
+            # vLLM and SGLang run a worker per GPU besides the server: a group of their own, so
+            # stopping the group stops every one of them, and none is left holding a GPU
+            start_new_session=profile.server != "llama",
         )
         model = RunningModel(profile, process)
         # Read for as long as it runs: a pipe nobody reads fills, and the server then blocks on its
@@ -413,7 +437,8 @@ class Supervisor:
         async with httpx.AsyncClient(timeout=5) as client:
             while time.monotonic() < deadline:
                 if model.process.returncode is not None:
-                    return False, f"llama-server exited ({model.process.returncode}): {await self._stderr_tail(model)}"
+                    return False, (f"{model.profile.server} exited ({model.process.returncode}): "
+                                   f"{await self._stderr_tail(model)}")
                 try:
                     response = await client.get(f"{model.base_url}/health")
                     if response.status_code == 200:
@@ -421,7 +446,7 @@ class Supervisor:
                 except httpx.HTTPError:
                     pass
                 await asyncio.sleep(1)
-        return False, f"llama-server did not become ready within {STARTUP_TIMEOUT}s"
+        return False, f"{model.profile.server} did not become ready within {STARTUP_TIMEOUT}s"
 
     @staticmethod
     async def _stderr_tail(model, limit=500):
@@ -448,13 +473,17 @@ class Supervisor:
         if model is None:
             return False
         process = model.process
+        group = model.profile.server != "llama"
         if process.returncode is None:
-            process.terminate()
+            _signal(process.pid, signal.SIGTERM, group=True) if group else process.terminate()
             try:
-                await asyncio.wait_for(process.wait(), timeout=20)
+                # vLLM and SGLang take longer to let both GPUs go
+                await asyncio.wait_for(process.wait(), timeout=40 if group else 20)
             except asyncio.TimeoutError:
-                process.kill()
+                _signal(process.pid, signal.SIGKILL, group=True) if group else process.kill()
                 await process.wait()
+        if group:
+            _signal(process.pid, signal.SIGKILL, group=True)     # a worker the server left behind
         return True
 
     # --- introspection ----------------------------------------------------

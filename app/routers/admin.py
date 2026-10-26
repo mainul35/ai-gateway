@@ -569,6 +569,8 @@ def _mtp_state(name, backend, running):
     profile = engine_profiles.load_profiles().get(backend.upstream_model)
     if profile is None:
         return {"state": "n/a", "why": ""}
+    if profile.server != "llama":
+        return {"state": "n/a", "why": f"served by {profile.server}, which drafts ahead only as its profile says"}
     layers = gguf_meta.mtp_layers(profile.model_path)
     if running is not None:
         on = bool(running.get("mtp")) or profile.has_mtp_flags()

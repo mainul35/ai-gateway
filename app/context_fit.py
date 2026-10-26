@@ -609,7 +609,9 @@ async def fit_for(body, backend, chat_url, force=False, shape=MESSAGES):
             return None
         try:
             async with httpx.AsyncClient(timeout=httpx.Timeout(60, connect=5)) as client:
-                response = await client.post(chat_url.split("/v1/")[0] + "/tokenize", json={"content": text},
+                # llama-server reads "content", vLLM "prompt" and the model's name; both answer "tokens"
+                response = await client.post(chat_url.split("/v1/")[0] + "/tokenize",
+                                             json={"content": text, "prompt": text, "model": backend.upstream_model},
                                              headers=backend.headers())
             return len(response.json()["tokens"]) if response.is_success else None
         except (httpx.HTTPError, ValueError, KeyError) as e:
