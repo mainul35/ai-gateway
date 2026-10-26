@@ -15,12 +15,16 @@ body.videos-studio main{max-width:none;padding:0}
 .studio.drafting{grid-template-columns:22rem minmax(0,1fr)}
 .studio.drafting .strip,.studio.drafting #player,.studio.drafting #editor{display:none}
 .stories .rows,.strip .rows{overflow-y:auto;flex:1}
+/* Narrow screens stack the three panels; each keeps a height of its own and scrolls inside it, as on
+   a wide screen, so the page moves from panel to panel rather than through one endless column:
+   the stories and the scenes about three rows each, the player and editor about a screen's worth */
 @media (max-width:1024px){
   .studio{grid-template-columns:1fr;height:auto}
   .stories{border-right:none;border-bottom:1px solid var(--border)}
   .stories .rows{max-height:16rem}
+  .stage{max-height:75vh;overflow-y:auto;border-bottom:1px solid var(--border)}
   .strip{border-left:none;border-top:1px solid var(--border)}
-  .strip .rows{max-height:none}
+  .strip .rows{max-height:16rem}
 }
 .head{display:flex;flex-wrap:wrap;gap:.6rem;align-items:center;margin-bottom:.8rem}
 .head select{width:auto;max-width:24rem}
