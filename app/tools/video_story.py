@@ -1174,6 +1174,17 @@ async def clean_recording(raw, folder, n):
         return f.read(), round(seconds, 2)
 
 
+async def audio_to_m4a(raw, out):
+    """Convert raw audio bytes to m4a and return the duration in seconds."""
+    source = out + ".in"
+    with open(source, "wb") as f:
+        f.write(raw)
+    await _run([ffmpeg(), "-y", "-i", source, "-c:a", "aac", "-b:a", "96k", "-ar", "24000", "-ac", "1", out], "converting audio")
+    with wave.open(out, "rb") as w:
+        seconds = w.getnframes() / w.getframerate()
+    return round(seconds, 2)
+
+
 CLIP_VERSION = 1          # raised when the way a clip is made changes, so cached clips are made again
 NOTE_BACKGROUND = "0x101216"   # the dark screen a note is shown on
 

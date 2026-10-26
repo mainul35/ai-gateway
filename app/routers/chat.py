@@ -13,7 +13,7 @@ import shutil
 import time
 from datetime import timedelta
 
-from fastapi import APIRouter, Depends, File, HTTPException, Request, Response, UploadFile, status
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, Response, UploadFile, status
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select
@@ -3332,6 +3332,99 @@ async def video_voice(message_id: int, payload: VoiceIn, principal: Principal = 
 
     # A job, like the video itself: leaving the page does not stop it
     job = jobs.start(user.id, message.conversation_id, "video", "reading the story in your voice", stream())
+    return StreamingResponse(jobs.follow(job), media_type="text/event-stream",
+                             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no",
+                                      "X-Job-Id": str(job.id)})
+
+
+@router.post("/video/{message_id}/upload-voice")
+async def upload_voiceover(message_id: int, audio: UploadFile = File(...), lang: str = Form(...),
+                           index: int = Form(...), principal: Principal = Depends(authenticate),
+                           session: AsyncSession = Depends(get_session)):
+    """Upload a voiceover for one scene of one language: convert the audio, store it, update the narration.
+    The user clicks "Save and remake" to rebuild the video with the uploaded voice."""
+    user = _require_user(principal)
+    message = (await session.execute(
+        select(ConversationMessage).join(Conversation).where(
+            ConversationMessage.id == message_id, Conversation.user_id == user.id))).scalar_one_or_none()
+    if message is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Video story not found")
+    filed = json.loads(message.attachments or "{}")
+    video = filed.get("video") or {}
+    story = video.get("story")
+    if not story:
+        raise HTTPException(status.HTTP_409_CONFLICT,
+                            "This video was made before stories were kept; make it again")
+    count = len(story["pictures"])
+    word = video_story.language_name(lang)
+    if lang not in story:
+        raise HTTPException(status.HTTP_409_CONFLICT, f"This story has no {word}")
+    if index < 0 or index >= count:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, f"This story has {count} scenes (0–{count - 1})")
+    # A scene that is all Arabic - a verse - is recited by the qari, not uploaded
+    line = story[lang][index]
+    if video_story.needs_reading(line, lang):
+        raise HTTPException(status.HTTP_409_CONFLICT, "This scene is a verse recited by the qari; only qari recitation is allowed")
+    user_id = user.id
+    folder = video_story.workspace()
+
+    async def stream():
+        replaced, created = [], []
+        try:
+            yield _event("progress", stage="Converting audio", fraction=0.0)
+            raw = await audio.read()
+            if not raw or len(raw) < 100:
+                raise video_story.VideoError("The uploaded file is empty or too small")
+            # Convert uploaded audio to m4a
+            audio_path = os.path.join(folder, f"upload-{index:02d}.m4a")
+            try:
+                seconds = await video_story.audio_to_m4a(raw, audio_path)
+            except video_story.VideoError as e:
+                raise video_story.VideoError(f"The uploaded audio could not be processed: {e}")
+            except Exception as e:
+                raise video_story.VideoError(f"The uploaded audio could not be processed; please upload an mp3, m4a, or wav file")
+            # Store the voiceover file
+            mime = audio.content_type or "audio/mpeg"
+            mime = "audio/mpeg" if mime == "audio/mp3" else mime
+            ext = audio.filename.rsplit(".", 1)[-1] if "." in audio.filename else "m4a"
+            async with session_factory()() as db:
+                kept = ChatFile(user_id=user_id, kind="voice", mime_type=mime,
+                                name=f"scene {index + 1} ({word}).{ext}",
+                                data=raw)
+                db.add(kept)
+                await db.commit()
+                created.append(kept.id)
+            # Update the narration entry for this scene
+            old_entries = (story.get("narration") or {}).get(lang) or []
+            old_entry = old_entries[index] if index < len(old_entries) else None
+            if old_entry and old_entry.get("file_id"):
+                replaced.append(old_entry["file_id"])
+            # Mark this scene as having a user upload for the "stale" check
+            old_entry_count = len(old_entries)
+            entries = list(old_entries) if old_entries else []
+            while len(entries) <= index:
+                entries.append(None)
+            entries[index] = {"file_id": kept.id, "seconds": round(seconds, 3), "by": "uploaded"}
+            story.setdefault("narration", {})[lang] = entries
+            video["story"] = story
+            filed["video"] = video
+            async with session_factory()() as db:
+                row = await db.get(ConversationMessage, message_id)
+                row.attachments = json.dumps(filed)
+                await db.commit()
+            for file_id in replaced:
+                await _drop_file(user_id, file_id)
+            created = []
+            yield _event("progress", stage="Done", fraction=1.0)
+            yield _event("voiceover", {"scene": index + 1, "lang": lang, "file_id": kept.id})
+        except video_story.VideoError as e:
+            yield _error(str(e))
+        finally:
+            for file_id in created:
+                await _drop_file(user_id, file_id)
+            shutil.rmtree(folder, ignore_errors=True)
+
+    job = jobs.start(user.id, message.conversation_id, "video", f"uploading voiceover for scene {index + 1}", stream())
     return StreamingResponse(jobs.follow(job), media_type="text/event-stream",
                              headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no",
                                       "X-Job-Id": str(job.id)})

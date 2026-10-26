@@ -117,7 +117,7 @@ const NAMES = {en: 'English', bn: 'বাংলা', es: 'Español', fr: 'Franç
                th: 'ไทย', ar: 'العربية', ur: 'اردو', hi: 'हिन्दी'};
 const IN_ENGLISH = {en: 'English', bn: 'Bangla', es: 'Spanish', fr: 'French', zh: 'Chinese', ja: 'Japanese',
                     ko: 'Korean', th: 'Thai', ar: 'Arabic', ur: 'Urdu', hi: 'Hindi'};
-const BY = {machine: 'machine voice', recorded: 'your voice', qari: 'qari'};
+const BY = {machine: 'machine voice', recorded: 'your voice', qari: 'qari', uploaded: 'uploaded audio'};
 const JSON_HEADERS = {'Content-Type': 'application/json'};
 // How long a scene stays on screen, as app/tools/video_story.py scene_lengths: to find where it starts
 const SCENE_MIN = 8, LEAD_IN = 0.6, FADE = 1.5;
@@ -312,10 +312,11 @@ function renderRows(){
   const first = langs[0];
   const at = starts(showing);
   document.getElementById('rows').innerHTML = (told.pictures || []).map((picture, i) => {
+    const displayPic = previews[i]?.file_id || picture;
     const words = edits[i]?.text?.[first] ?? (told[first] || [])[i] ?? '';
     const voices = langs.map(l => ((told.narration || {})[l] || [])[i]?.by).filter(by => by && by !== 'machine');
     return `<button type="button" class="row ${i === selected ? 'sel' : ''}" data-i="${i}">
-      ${picture ? `<img src="/chat/files/${picture}" alt="" loading="lazy">` : '<img alt="">'}
+      ${displayPic ? `<img src="/chat/files/${displayPic}" alt="" loading="lazy">` : '<img alt="">'}
       <span><span class="t" dir="auto">${i + 1} · ${escapeHtml(words)}</span>
         <span class="s">${at[i] !== undefined ? clock(at[i]) + ' · ' : ''}${voices.length ? [...new Set(voices)].map(v => BY[v]).join(', ') : 'machine voice'}${
           edits[i] ? ' · <span class="edited">changed</span>' : ''}<span class="drawing" data-drawing="${i}">${
@@ -396,8 +397,11 @@ function renderEditor(){
           ${entry ? `<audio controls preload="none" src="/chat/files/${entry.file_id}" title="As it is read now"></audio>` : ''}
           ${entry?.by === 'qari' ? '<span>A verse: the qari recites it.</span>'
             : !made[l] ? `<span>Once the ${IN_ENGLISH[l] || l} video is made, this line can be read in your voice.</span>`
-            : editable ? `<button type="button" class="btn btn-secondary record">🎙 ${entry?.by === 'recorded' ? 'Record the voiceover again' : 'Record the voiceover'}</button>
-                <span class="said"></span>` : ''}
+            : editable ? `<div style="display:flex;gap:.4rem;flex-wrap:wrap;align-items:center">
+                <button type="button" class="btn btn-secondary record">🎙 ${entry?.by === 'recorded' ? 'Record again' : 'Record voiceover'}</button>
+                <button type="button" class="btn btn-secondary upload-voice">📁 Upload audio</button>
+                <input type="file" accept="audio/*" hidden data-scene="${i}" data-lang="${l}">
+                <span class="said"></span></div>` : ''}
         </div></div>`;
     }).join('')}
     ${langs.length > 1 ? `<label class="check"><input type="checkbox" id="retranslate"
@@ -408,6 +412,7 @@ function renderEditor(){
     zoom.showModal();
   });
   editor.querySelector('#redraw').addEventListener('change', e => {
+    edits[i] = {...(edits[i] || {}), redraw: e.target.checked};
     editor.querySelector('#describeBox').hidden = !e.target.checked;
     if(e.target.checked) editor.querySelector('#describe').focus();
     keep();
@@ -430,6 +435,19 @@ function renderEditor(){
   });
   editor.querySelectorAll('.record').forEach(button =>
     button.addEventListener('click', () => record(button.closest('[data-card]'), i)));
+  editor.querySelectorAll('.upload-voice').forEach(button => {
+    const input = button.nextElementSibling;
+    button.addEventListener('click', () => input.click());
+    input.addEventListener('change', async (e) => {
+      const file = e.target.files[0];
+      if (!file) return;
+      const si = Number(input.dataset.scene);
+      const ln = input.dataset.lang;
+      if (si !== selected) return;
+      await uploadVoiceover(si, ln, file);
+      input.value = '';
+    });
+  });
   paintDrawing(i);
 }
 
@@ -631,6 +649,47 @@ async function useReading(i, lang, blob){
   ({videos: stories} = await api('/chat/videos').catch(() => ({videos: stories})));
   await openStory(current.message_id);
   if(trouble) showError(trouble);
+}
+
+async function uploadVoiceover(scene, lang, file){
+  const formData = new FormData();
+  formData.append('audio', file);
+  formData.append('lang', lang);
+  formData.append('index', scene);
+  showError('');
+  busy = true;
+  updateSave();
+  showProgress({stage: 'Uploading voiceover', fraction: 0});
+  let trouble = '';
+  try{
+    const response = await fetch(`/chat/video/${current.message_id}/upload-voice`, {method: 'POST', body: formData});
+    if(!response.ok){
+      const err = await response.json().catch(() => ({}));
+      throw new Error((typeof err.detail === 'string' && err.detail) || `HTTP ${response.status}`);
+    }
+    await readEvents(response, chunk => {
+      if(chunk.error) throw new Error(chunk.error.message);
+      if(chunk.gateway?.type === 'progress') showProgress(chunk.gateway);
+    });
+  }catch(e){
+    trouble = 'Voiceover upload failed: ' + e.message;
+  }
+  busy = false;
+  document.getElementById('progress').hidden = true;
+  if(trouble){
+    showError(trouble);
+  }else{
+    // Re-fetch to get the updated narration entry
+    ({videos: stories} = await api('/chat/videos').catch(() => ({videos: stories})));
+    const updated = await api(`/chat/videos/${current.message_id}`).catch(() => null);
+    if(updated){
+      current = updated;
+      showing = lang;
+      renderRows();
+      renderEditor();
+      updateSave();
+    }
+  }
 }
 
 // What the editor says now, kept for its scene while other scenes are opened
