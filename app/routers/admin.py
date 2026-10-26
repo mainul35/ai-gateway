@@ -546,7 +546,7 @@ async def list_models_for_admin(_: Principal = Depends(require_admin),
                 parameter_size=details.get("parameter_size", ""),
                 quantization=details.get("quantization_level", ""),
                 context_length=backend.context_length, capabilities=backend.capabilities,
-                backend=backend.kind),
+                backend=backend.kind, engine=backend.name),
             "usage": {k: v for k, v in stats.items() if not k.startswith("_")},
             "used_for": used_for,
             "granted_to": sorted(granted.get(name, [])),
@@ -1097,9 +1097,12 @@ async def system_overview(_: Principal = Depends(require_admin), session: AsyncS
     ollama = check_ollama_status()
     engine = supervisor.status()
     return {
+        "providers": _providers(ollama, engine),
         "ollama": {"status": ollama.get("status"), "version": ollama.get("version"),
                    "models": await _ollama_models() if ollama.get("status") == "running" else []},
         "engine": {"available": engine["available"], "profiles": engine["profiles"],
+                   "servers": {name: ENGINE_LABELS.get(profile.server, profile.server)
+                               for name, profile in engine_profiles.load_profiles().items()},
                    "running": [{k: r[k] for k in ("name", "running", "uptime_seconds", "idle_seconds",
                                                   "in_flight", "ttl_seconds")} for r in engine["running"]]},
         "gpus": info["gpu_info"],
@@ -1110,6 +1113,43 @@ async def system_overview(_: Principal = Depends(require_admin), session: AsyncS
         "counts": {"users": users, "active_keys": keys,
                    "requests_24h": requests_today, "tokens_24h": int(tokens_today)},
     }
+
+
+ENGINE_LABELS = {"llama": "llama.cpp", "vllm": "vLLM", "sglang": "SGLang"}
+
+
+def _providers(ollama, engine):
+    """Every kind of model provider this gateway has, with whether it can answer: Ollama, each engine
+    the profiles run (llama.cpp, vLLM, SGLang - one entry each, with its profiles and how many are
+    loaded) and each OpenAI-compatible API in models.yaml, by its host. Never an address, port or path."""
+    from app.backends import _load_model_file
+
+    out = [{"name": "Ollama", "status": ollama.get("status") or "unknown",
+            "ok": ollama.get("status") == "running", "detail": ("v" + ollama["version"]) if ollama.get("version") else ""}]
+    profiles = engine_profiles.load_profiles()
+    loaded = {r["name"] for r in engine["running"]}
+    for server, label in ENGINE_LABELS.items():
+        names = [n for n, p in profiles.items() if p.server == server]
+        if server == "llama":
+            installed = engine["available"] or any(
+                p.binary and os.path.isfile(p.binary) for p in profiles.values() if p.server == "llama")
+        else:
+            installed = any(p.binary and os.path.isfile(p.binary) for p in profiles.values() if p.server == server)
+        if not names and server != "llama":
+            continue
+        running = [n for n in names if n in loaded]
+        out.append({"name": label, "status": ("running" if running else "available") if installed else "not installed",
+                    "ok": installed, "detail": f"{len(names)} model{'' if len(names) == 1 else 's'}"
+                    + (f", {len(running)} loaded" if running else "")})
+    upstreams = {}
+    for backend in _load_model_file().values():
+        if backend.kind == "openai":
+            host = (backend.base_url or "").split("://", 1)[-1].split("/", 1)[0].split("@")[-1]
+            upstreams[host] = upstreams.get(host, 0) + 1
+    for host, count in sorted(upstreams.items()):
+        out.append({"name": host or "OpenAI-compatible API", "status": "configured", "ok": True,
+                    "detail": f"{count} model{'' if count == 1 else 's'}"})
+    return out
 
 
 # --- knowledge base -------------------------------------------------------------------------

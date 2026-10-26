@@ -89,7 +89,7 @@
 </div>
 
 <div class="card" style="margin-bottom:1.5rem">
-  <h2>llama.cpp engine</h2>
+  <h2>Engines: llama.cpp, vLLM, SGLang</h2>
   <div id="engine" class="muted">Loading&hellip;</div>
 </div>
 
@@ -424,20 +424,20 @@ async function loadAdmin(){
     document.getElementById('statTokens').textContent = system.counts.tokens_24h.toLocaleString();
 
     const ollama = system.ollama;
-    document.getElementById('backends').innerHTML = `
-      Ollama <span class="pill ${ollama.status === 'running' ? 'on' : 'err'}">${escapeHtml(ollama.status)}</span>
-        ${ollama.version ? 'v' + escapeHtml(ollama.version) : ''}
-      &nbsp;&middot;&nbsp; llama.cpp <span class="pill ${system.engine.available ? 'on' : 'off'}">
-        ${system.engine.available ? 'available' : 'not installed'}</span>`;
+    // Every provider the gateway has, as the server lists them: Ollama, each engine, each API
+    document.getElementById('backends').innerHTML = (system.providers || []).map(p =>
+      `<span style="white-space:nowrap">${escapeHtml(p.name)} <span class="pill ${p.ok ? 'on' : 'err'}">${escapeHtml(p.status)}</span>
+        ${p.detail ? `<span class="muted">${escapeHtml(p.detail)}</span>` : ''}</span>`).join(' &nbsp;&middot;&nbsp; ');
 
     const engine = system.engine;
     const running = new Map(engine.running.map(r => [r.name, r]));
     document.getElementById('engine').innerHTML = engine.profiles.length
-      ? `<table><tr><th>Profile</th><th>State</th><th>Idle</th><th></th></tr>` + engine.profiles.map(name => {
+      ? `<table><tr><th>Profile</th><th>Engine</th><th>State</th><th>Idle</th><th></th></tr>` + engine.profiles.map(name => {
           const r = running.get(name);
           const pending = engineActions.get(name);
           const label = pending ? ENGINE_PENDING_LABEL[pending] : r ? 'Unload' : 'Load';
           return `<tr><td>${escapeHtml(name)}</td>
+            <td class="muted">${escapeHtml((engine.servers || {})[name] || 'llama.cpp')}</td>
             <td>${r ? '<span class="pill on">loaded</span>' : '<span class="pill off">not loaded</span>'}</td>
             <td class="muted">${r ? r.idle_seconds + 's of ' + r.ttl_seconds + 's' : '&mdash;'}</td>
             <td style="text-align:right">
