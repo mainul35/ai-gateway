@@ -187,19 +187,29 @@ a.cite{font-size:.75em;vertical-align:super;text-decoration:none;padding:0 .1rem
 .bar.total div{background:var(--muted)}
 /* One + button, with the ways of attaching something listed under it rather than spread along
    the toolbar, which is where they would keep arriving as more kinds of file are supported. */
-.attach-wrap{position:relative;display:inline-flex}
-.attach-menu{position:absolute;bottom:calc(100% + .45rem);left:0;z-index:40;min-width:min(14rem,calc(100vw - 1rem));
+.menu-wrap{position:relative;display:inline-flex}
+.menu-wrap[hidden]{display:none}
+.menu{position:absolute;bottom:calc(100% + .45rem);left:0;z-index:40;min-width:min(14rem,calc(100vw - 1rem));
              max-width:calc(100vw - 1rem);
              background:var(--card);border:1px solid var(--border);border-radius:10px;padding:.3rem;
              box-shadow:0 .6rem 1.6rem rgba(0,0,0,.45);display:flex;flex-direction:column;gap:.1rem}
-.attach-menu button{display:flex;align-items:center;gap:.6rem;width:100%;text-align:left;
+.menu button{display:flex;align-items:center;gap:.6rem;width:100%;text-align:left;
                     background:none;border:none;color:var(--text);font-family:inherit;
                     font-size:.88rem;padding:.45rem .55rem;border-radius:7px;cursor:pointer}
-.attach-menu button:hover:not(:disabled),.attach-menu button:focus-visible{background:var(--input)}
-.attach-menu button:disabled{opacity:.45;cursor:not-allowed}
-.attach-menu .glyph{font-size:1.15rem;flex:none}
-.attach-menu b{display:block;font-weight:600}
-.attach-menu small{display:block;color:var(--muted);font-size:.75rem}
+.menu button:hover:not(:disabled),.menu button:focus-visible{background:var(--input)}
+.menu button:disabled{opacity:.45;cursor:not-allowed}
+.menu .glyph{font-size:1.15rem;flex:none}
+.menu b{display:block;font-weight:600}
+.menu small{display:block;color:var(--muted);font-size:.75rem;font-weight:400}
+/* The tools, each with what it does and a dot that is green while it is on. Several can be on at
+   once, so the menu stays open while they are switched */
+.tools-menu{min-width:min(19rem,calc(100vw - 1rem))}
+.tools-menu .chip{border:1px solid transparent;border-radius:7px;color:var(--text)}
+.tools-menu .chip[hidden]{display:none}
+.tools-menu .chip[aria-pressed="true"]{background:rgba(99,102,241,.16);border-color:transparent}
+.tools-menu .chip .dot{flex:none}
+#toolsButton .caret{font-size:.7rem;opacity:.7}
+#toolsButton[aria-expanded="true"]{color:var(--text);border-color:var(--primary)}
 
 /* A map answer: the map itself, then the places under it as a list worth reading on its own */
 .mapbox{border:1px solid var(--border);border-radius:10px;overflow:hidden;margin:.3rem 0 .6rem;
@@ -541,22 +551,28 @@ a.paper{color:var(--text);text-decoration:none}
                     title="Enter to send, Shift+Enter for a new line"
                     placeholder="Ask anything&hellip;"></textarea>
           <div class="tools">
-            <button class="chip" id="toolSearch" data-tool="web_search" aria-pressed="false" hidden
-                    title="Search the web and answer from the results, with sources"><span class="dot"></span>Web search</button>
-            <button class="chip" id="toolVision" data-tool="vision" aria-pressed="false" hidden
-                    title="Attach images for the model to look at"><span class="dot"></span>Image understanding</button>
-            <button class="chip" id="toolMaps" data-tool="maps" aria-pressed="false" hidden
-                    title="Find places, routes, and what is along the way, on OpenStreetMap"><span class="dot"></span>Maps</button>
-            <button class="chip" id="toolImage" data-tool="image_generation" aria-pressed="false" hidden
-                    title="Create a new image, or edit an attached one, instead of chatting"><span class="dot"></span>Image generation</button>
-            <button class="chip" id="toolVideo" data-tool="video" aria-pressed="false" hidden
-                    title="Tell a true story as a calm, narrated, illustrated video in English and Bangla"><span class="dot"></span>Video story</button>
-            <button class="chip" id="toolAgent" data-tool="agent" aria-pressed="false" hidden
-                    title="Let the model use the tool servers: call one, read what came back, call another, then answer"><span class="dot"></span>Agent</button>
-            <span class="attach-wrap">
+            <span class="menu-wrap" id="toolsWrap" hidden>
+              <button class="chip" id="toolsButton" aria-haspopup="true" aria-expanded="false"
+                      title="Turn tools on or off"><span class="dot"></span><span id="toolsSummary">Tools</span><span class="caret">&#9662;</span></button>
+              <div class="menu tools-menu" id="toolsMenu" hidden>
+                <button class="chip" id="toolSearch" data-tool="web_search" aria-pressed="false" hidden><span class="dot"></span>
+                  <span><b>Web search</b><small>Search the web and answer from the results, with sources</small></span></button>
+                <button class="chip" id="toolVision" data-tool="vision" aria-pressed="false" hidden><span class="dot"></span>
+                  <span><b>Image understanding</b><small>Attach images for the model to look at</small></span></button>
+                <button class="chip" id="toolMaps" data-tool="maps" aria-pressed="false" hidden><span class="dot"></span>
+                  <span><b>Maps</b><small>Places, routes and what is along the way, on OpenStreetMap</small></span></button>
+                <button class="chip" id="toolImage" data-tool="image_generation" aria-pressed="false" hidden><span class="dot"></span>
+                  <span><b>Image generation</b><small>Create a new image, or edit an attached one</small></span></button>
+                <button class="chip" id="toolVideo" data-tool="video" aria-pressed="false" hidden><span class="dot"></span>
+                  <span><b>Video story</b><small>A calm, narrated, illustrated video of a true story</small></span></button>
+                <button class="chip" id="toolAgent" data-tool="agent" aria-pressed="false" hidden><span class="dot"></span>
+                  <span><b>Agent</b><small>Use the tool servers: call one, read the result, call another, then answer</small></span></button>
+              </div>
+            </span>
+            <span class="attach-wrap menu-wrap">
               <button class="icon-btn" id="attach" aria-haspopup="menu" aria-expanded="false"
                       title="Attach something (you can also paste or drop it)">+</button>
-              <div class="attach-menu" id="attachMenu" role="menu" hidden>
+              <div class="attach-menu menu" id="attachMenu" role="menu" hidden>
                 <button role="menuitem" data-pick="camera">
                   <span class="glyph">&#128247;</span>
                   <span><b>Take a photo</b><small>Use the camera now</small></span></button>
@@ -816,6 +832,7 @@ async function loadCapabilities(){
   document.getElementById('toolMaps').hidden = !caps.maps;
   document.getElementById('toolAgent').hidden = !caps.agent;
   document.getElementById('toolVideo').hidden = !caps.video;
+  document.getElementById('toolsWrap').hidden = !document.querySelector('#toolsMenu .chip:not([hidden])');
   document.getElementById('imageSize').innerHTML = caps.image_sizes.map(s =>
     `<option value="${s}">${s[0].toUpperCase() + s.slice(1)}</option>`).join('');
   syncTools();
@@ -870,6 +887,13 @@ renderVideoLangs();
 function syncTools(){
   document.querySelectorAll('.chip[data-tool]').forEach(chip =>
     chip.setAttribute('aria-pressed', String(!!tools[chip.dataset.tool])));
+  // The menu's button says what is on, so the closed menu still shows it
+  const on = [...document.querySelectorAll('#toolsMenu .chip[data-tool]:not([hidden])')]
+    .filter(chip => tools[chip.dataset.tool]).map(chip => chip.querySelector('b').textContent);
+  document.getElementById('toolsSummary').textContent =
+    !on.length ? 'Tools' : on.length <= 2 ? on.join(' · ') : `${on.length} tools on`;
+  document.getElementById('toolsButton').setAttribute('aria-pressed', String(on.length > 0));
+  document.getElementById('toolsButton').title = on.length ? 'On: ' + on.join(', ') : 'Turn tools on or off';
   // Always there: what is inside the menu changes with the tools, the way in does not
   document.getElementById('sizeRow').hidden = !imageMode() || videoMode() || attachedPictures().length > 0;
   document.getElementById('videoLangRow').hidden = !videoMode();
@@ -1166,21 +1190,50 @@ function openAttachMenu(open){
   attachMenu.hidden = !open;
   attachButton.setAttribute('aria-expanded', String(open));
   if(open){
+    if(!toolsMenu.hidden) openToolsMenu(false);
     placeAttachMenu();
     attachMenu.querySelector('[data-pick]:not(:disabled)')?.focus();
   }
 }
 
-// The menu opens from the button's left edge, and the button can end up at the right end of a
+// A menu opens from its button's left edge, and the button can end up at the right end of a
 // wrapped row of chips - on a phone the menu then ran off the screen. Pulled left by the overflow,
 // never past the screen's left edge.
-function placeAttachMenu(){
-  attachMenu.style.left = '0px';
-  const margin = 8, box = attachMenu.getBoundingClientRect();
+function placeMenu(menu){
+  menu.style.left = '0px';
+  const margin = 8, box = menu.getBoundingClientRect();
   const over = box.right - (document.documentElement.clientWidth - margin);
-  if(over > 0) attachMenu.style.left = `-${Math.min(over, box.left - margin)}px`;
+  if(over > 0) menu.style.left = `-${Math.min(over, box.left - margin)}px`;
 }
-window.addEventListener('resize', () => { if(!attachMenu.hidden) placeAttachMenu(); });
+const placeAttachMenu = () => placeMenu(attachMenu);
+window.addEventListener('resize', () => {
+  if(!attachMenu.hidden) placeAttachMenu();
+  if(!toolsMenu.hidden) placeMenu(toolsMenu);
+});
+
+// --- the tools menu: one button for every tool, opened like the + menu --------------------------
+const toolsButton = document.getElementById('toolsButton');
+const toolsMenu = document.getElementById('toolsMenu');
+
+function openToolsMenu(open){
+  toolsMenu.hidden = !open;
+  toolsButton.setAttribute('aria-expanded', String(open));
+  if(open){
+    openAttachMenu(false);
+    placeMenu(toolsMenu);
+    toolsMenu.querySelector('.chip:not([hidden])')?.focus();
+  }
+}
+toolsButton.addEventListener('click', e => {
+  e.stopPropagation();
+  openToolsMenu(toolsMenu.hidden);
+});
+// Switching a tool keeps the menu open: several are often wanted together
+toolsMenu.addEventListener('click', e => e.stopPropagation());
+document.addEventListener('click', () => { if(!toolsMenu.hidden) openToolsMenu(false); });
+document.addEventListener('keydown', e => {
+  if(e.key === 'Escape' && !toolsMenu.hidden){ openToolsMenu(false); toolsButton.focus(); }
+});
 
 attachButton.addEventListener('click', e => {
   e.stopPropagation();
