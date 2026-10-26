@@ -148,6 +148,40 @@ function convertedNote(data){
     </div>`;
 }
 
+// Every way this machine runs a model - Ollama, llama.cpp, vLLM, SGLang - and whether this one can go
+// that way here, or why not. vLLM and SGLang load the model's own files (safetensors), from this
+// repository or the model it was made from, so they get a download of their own.
+function providersTable(data){
+  const providers = data.providers || [];
+  if(!providers.length) return '';
+  const serving = data.serving || {};
+  const source = serving.source;
+  const rows = providers.map(p => {
+    const action = p.server && p.supported
+      ? `<button class="btn btn-sm" data-install="${escapeHtml(p.server)}" data-source="${escapeHtml(source)}"
+           title="Downloads ${escapeHtml(source)} into ~/models and adds a ${escapeHtml(p.name)} engine for it on both GPUs">
+           Download for ${escapeHtml(p.name)}</button>`
+      : p.supported ? '<span class="muted" style="font-size:.8rem">with the files below</span>' : '';
+    return `<tr>
+      <td><strong>${escapeHtml(p.name)}</strong></td>
+      <td>${p.supported ? '<span class="pill on">Supported</span>'
+                        : `<span class="pill err">Not supported</span>
+                           <div class="muted" style="font-size:.78rem">${escapeHtml(p.why)}</div>`}</td>
+      <td style="white-space:nowrap">${action}</td></tr>`;
+  }).join('');
+  const fromOther = source && source !== (data.model_info || {}).id;
+  const weights = serving.weights_bytes ? ` (${(serving.weights_bytes / 1e9).toFixed(1)} GB of weights${
+    serving.quantization ? ', ' + escapeHtml(serving.quantization.toUpperCase()) : ''})` : '';
+  const alternatives = (serving.alternatives || []).map(o =>
+    `<button class="btn btn-sm btn-secondary" data-repo="${escapeHtml(o.id)}" style="margin:.2rem .3rem 0 0">
+       ${escapeHtml(o.id)} <span class="muted">${Math.round(o.downloads / 1000)}k</span></button>`).join('');
+  return `<table style="margin-bottom:.9rem"><tr><th>Provider</th><th>Here</th><th></th></tr>${rows}</table>
+    ${source ? `<p class="muted" style="margin:-.4rem 0 .9rem;font-size:.82rem">vLLM and SGLang would load
+      <code>${escapeHtml(source)}</code>${fromOther ? ', the model this was made from' : ''}${weights}.</p>` : ''}
+    ${alternatives ? `<div class="note" style="margin:0 0 .9rem">4-bit versions that may fit vLLM and SGLang here:
+      <div style="margin-top:.4rem">${alternatives}</div></div>` : ''}`;
+}
+
 function fitRows(data){
   if(!data.recommendations.length){
     return '<p class="note warn" style="margin:0">None of its quantizations fit in this machine\'s memory.</p>';
@@ -211,7 +245,7 @@ async function check(original){
     }
     found.converted_from = original || null;
     document.getElementById('about').innerHTML = aboutModel(found);
-    document.getElementById('fit').innerHTML = convertedNote(found) + fitRows(found);
+    document.getElementById('fit').innerHTML = convertedNote(found) + providersTable(found) + fitRows(found);
     document.getElementById('found').hidden = false;
   }catch(e){ showError(e.message); }
   finally{
@@ -288,8 +322,9 @@ function installEnded(finished){
   const heading = document.getElementById('installHeading');
   if(finished && finished.success){
     heading.textContent = 'Installed';
-    document.getElementById('installStage').textContent = installMode === 'engine'
-      ? `Ready to use as ${finished.model_name} (a llama.cpp engine: its settings are in config/engines.local.yaml)`
+    const engineName = {engine: 'llama.cpp', vllm: 'vLLM', sglang: 'SGLang'}[installMode];
+    document.getElementById('installStage').textContent = engineName
+      ? `Ready to use as ${finished.model_name} (a ${engineName} engine: its settings are in config/engines.local.yaml)`
       : `Ready to use as ${finished.model_name}`;
     document.getElementById('installBar').style.width = '100%';
     document.getElementById('installPercent').textContent = '100%';
@@ -341,16 +376,19 @@ async function rejoinInstall(){
 
 let installMode = null;
 
-async function install(mode, quantization){
+async function install(mode, quantization, source){
   if(installJob){ showError('Something is already installing.'); return; }
   showError('');
   installMode = mode;
-  showInstallCard(found.model_info.id);
+  // vLLM and SGLang download the repository with the model's own files, which may be the one this
+  // was converted from
+  const model = source || found.model_info.id;
+  showInstallCard(model);
   let finished = null;
   try{
     const response = await fetch('/admin/models/install', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({model_id: found.model_info.id, quantization, mode,
+      body: JSON.stringify({model_id: model, quantization: quantization || 'weights', mode,
                             context_length: parseInt(document.getElementById('context')?.value, 10) || 4096})});
     if(!response.ok){
       const body = await response.json().catch(() => null);
@@ -363,7 +401,7 @@ async function install(mode, quantization){
 
 document.getElementById('fit').addEventListener('click', e => {
   const wanted = e.target.closest('[data-install]');
-  if(wanted) return install(wanted.dataset.install, wanted.dataset.quant);
+  if(wanted) return install(wanted.dataset.install, wanted.dataset.quant, wanted.dataset.source);
   const conversion = e.target.closest('[data-repo]');
   if(conversion){
     document.getElementById('repo').value = conversion.dataset.repo;
