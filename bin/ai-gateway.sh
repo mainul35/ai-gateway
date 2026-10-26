@@ -9,7 +9,7 @@
 #   ai-gateway launch hermes --model gemma4:31b
 #   ai-gateway launch openclaw --model gemma4:31b
 #   ai-gateway launch claude --model qwen3.6-256k -- -p "fix the failing test"   # after --: the app's own
-#   ai-gateway launch claude-desktop            # the Claude desktop app (macOS), all its sessions
+#   ai-gateway launch claude-desktop            # the Claude desktop app (macOS, Linux), all its sessions
 #   ai-gateway launch claude-desktop --restore  # back to your Claude account
 #   ai-gateway models                                                             # what you may use
 #   ai-gateway update                                                             # the newest launcher
@@ -155,8 +155,91 @@ fi
 # `ollama launch claude-desktop` does - and made the one in use. The app then asks the gateway for its
 # models, and the gateway offers Claude's IDs standing for its own (app/claude_desktop.py). Every
 # desktop session moves to the gateway, Code and Cowork alike, until --restore.
+if [ "$APP" = claude-desktop ] && [ "$(uname -s)" != Darwin ]; then
+    [ "$(uname -s)" = Linux ] || die "the Claude desktop app is set up from here on macOS and Linux; on Windows use ai-gateway.ps1"
+    # Where the app keeps its settings on Linux: the XDG config folder, as Electron apps do, or the
+    # folder a Flatpak or a Snap gives it - the first that has the app's own folder in it
+    support=""
+    for dir in "${XDG_CONFIG_HOME:-$HOME/.config}" "$HOME"/.var/app/*/config "$HOME"/snap/*/current/.config; do
+        if [ -d "$dir/Claude" ] || [ -d "$dir/Claude-3p" ]; then support=$dir; break; fi
+    done
+    [ -n "$support" ] || die "the Claude desktop app's settings were not found (looked in ${XDG_CONFIG_HOME:-$HOME/.config}, Flatpak and Snap folders); open the app once, then run this again"
+    command -v python3 >/dev/null || die "python3 is needed to write the Claude desktop app's settings"
+    # The same profile as on macOS (below), written by Python rather than by AppleScript
+    AIGW_MODE=$([ "$RESTORE" = 1 ] && echo restore || echo apply) AIGW_URL="$GATEWAY" AIGW_KEY="$KEY" \
+    AIGW_SUPPORT="$support" python3 - <<'EOF' || die "could not write the Claude desktop app's settings"
+import json, os
+ID, NAME = "00000000-0000-4000-8000-00000000a16e", "AI Gateway"
+base, restore = os.environ["AIGW_SUPPORT"], os.environ["AIGW_MODE"] == "restore"
+
+def read(path):
+    try:
+        with open(path, encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return {}
+
+def write(path, value):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path + ".new", "w", encoding="utf-8") as f:
+        json.dump(value, f, indent=2)
+    os.chmod(path + ".new", 0o600)           # it holds the gateway key
+    os.replace(path + ".new", path)
+
+def mode(path, value):
+    config = read(path)
+    config["deploymentMode"] = value
+    write(path, config)
+
+mode(os.path.join(base, "Claude", "claude_desktop_config.json"), "1p" if restore else "3p")
+third = os.path.join(base, "Claude-3p")
+mode(os.path.join(third, "claude_desktop_config.json"), "1p" if restore else "3p")
+meta_path = os.path.join(third, "configLibrary", "_meta.json")
+profile_path = os.path.join(third, "configLibrary", ID + ".json")
+meta = read(meta_path)
+meta["entries"] = [e for e in meta.get("entries") or [] if e and e.get("id") != ID]
+if restore:
+    if meta.get("appliedId") == ID:
+        del meta["appliedId"]
+    if os.path.exists(profile_path):
+        os.remove(profile_path)
+else:
+    meta["appliedId"] = ID
+    meta["entries"].append({"id": ID, "name": NAME})
+    profile = read(profile_path)
+    profile.update(inferenceProvider="gateway", inferenceGatewayBaseUrl=os.environ["AIGW_URL"],
+                   inferenceGatewayApiKey=os.environ["AIGW_KEY"], inferenceGatewayAuthScheme="bearer",
+                   deploymentDisplayName=NAME, chatTabEnabled=True, disableDeploymentModeChooser=False,
+                   coworkEgressAllowedHosts=["*"], disableEssentialTelemetry=True,
+                   disableNonessentialTelemetry=True, autoModeEnabled=False)
+    profile.pop("inferenceModels", None)    # the app asks the gateway for its models instead
+    write(profile_path, profile)
+write(meta_path, meta)
+EOF
+    chosen=null; chose=0
+    if [ "$RESTORE" != 1 ] && [ -n "$MODEL" ]; then
+        chosen=${MODEL//\\/\\\\}; chosen="\"${chosen//\"/\\\"}\""
+    fi
+    if answer=$(gateway_put /auth/desktop-model "{\"model\":$chosen}"); then
+        [ "$chosen" != null ] && chose=1
+    else
+        echo "The gateway did not take the model choice: $answer" >&2
+    fi
+    # Not restarted from here: on Linux the app goes by several names, depending on how it was
+    # installed, and "claude" is also Claude Code - quitting the wrong one would end someone's session
+    if [ "$RESTORE" = 1 ]; then
+        echo "The Claude desktop app is set back to your Claude account. Quit it and open it again."
+    else
+        echo "The Claude desktop app now uses $GATEWAY (profile \"AI Gateway\"), set in $support."
+        echo "Quit it and open it again: it reads which profile is in use only when it starts."
+        if [ "$chose" = 1 ]; then echo "It runs $MODEL, whichever of Claude's names it shows (Sonnet 4.6 stays Auto)."
+        else echo "Its model picker offers Claude's names standing for gateway models; --model <name> makes them all one model."; fi
+        echo "ai-gateway launch claude-desktop --restore undoes this."
+    fi
+    exit 0
+fi
+
 if [ "$APP" = claude-desktop ]; then
-    [ "$(uname -s)" = Darwin ] || die "the Claude desktop app is set up from here on macOS; on Windows use ai-gateway.ps1, and Linux has no Claude desktop app"
     support="$HOME/Library/Application Support"
     [ -d "$support/Claude" ] || [ -d "$support/Claude-3p" ] || die "the Claude desktop app has not been opened on this Mac yet; open it once, then run this again"
     AIGW_MODE=$([ "$RESTORE" = 1 ] && echo restore || echo apply) AIGW_URL="$GATEWAY" AIGW_KEY="$KEY" \
