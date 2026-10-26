@@ -362,6 +362,98 @@ def split_story(text, most=None):
     return title, scenes
 
 
+NOTES_PROMPT = """You prepare a story someone wrote for a video in which every word of the story is read
+aloud. Some of what they wrote is not part of the story to be read: a reference or citation (a hadith's
+collection and number, a verse's surah and ayah number, a book and its page, a link), a footnote, a
+source note, a "References" or "Sources" list, a footnote marker such as [1], * or a superscript number.
+These are shown silently on a dark screen instead of being read.
+You get the text in numbered paragraphs. List every such piece, copied exactly as it is written,
+character for character, with the number of its paragraph. A piece is a whole paragraph, a whole line,
+or the exact words inside a sentence (a citation in brackets at the end of a sentence).
+Everything else is the story and is not listed: the narration, what people said, and the words of a
+verse or a hadith that are part of the telling. Only where something comes from is a note, never
+what it says. When unsure, it is the story.
+"show" is false for a bare marker ([1], *, a superscript number) that only points to a note, and true
+for anything with content.
+Answer with JSON only: {"notes": [{"paragraph": 1, "text": "...", "show": true}]}, an empty list when
+there are none."""
+
+
+def story_paragraphs(text):
+    """A given story's paragraphs as split_story finds them: apart at blank lines."""
+    return [p for p in re.split(r"\n\s*\n", (text or "").replace("\r", "").strip()) if p.strip()]
+
+
+def notes_request(model, paragraphs):
+    """The chat request that finds a given story's references and footnotes (NOTES_PROMPT)."""
+    text = "\n\n".join(f"[{n}] {p}" for n, p in enumerate(paragraphs, 1))
+    return {"model": model, "stream": False, "temperature": 0, "max_tokens": 4000,
+            "chat_template_kwargs": {"enable_thinking": False},
+            "messages": [{"role": "system", "content": NOTES_PROMPT}, {"role": "user", "content": text}]}
+
+
+def take_notes(answer, paragraphs):
+    """(the story without its notes, [(paragraph index, note)], each paragraph without its notes).
+    Only a piece found in its paragraph exactly as the model copied it (spacing aside) is taken out,
+    so no word of the story is lost to a model's mistake; a bare marker is taken out and not shown.
+    No answer, or one that would leave no story, takes nothing out."""
+    match = re.search(r"\{.*\}", re.sub(r"<think>.*?</think>", "", answer or "", flags=re.S), re.S)
+    try:
+        listed = (json.loads(match.group(0)).get("notes") or []) if match else []
+    except (ValueError, AttributeError):
+        listed = []
+    kept, notes = list(paragraphs), []
+    for entry in listed if isinstance(listed, list) else []:
+        if not isinstance(entry, dict):
+            continue
+        try:
+            k = int(entry.get("paragraph")) - 1
+        except (TypeError, ValueError):
+            continue
+        piece = " ".join(str(entry.get("text") or "").split())
+        if not piece or not 0 <= k < len(kept):
+            continue
+        found = re.search(r"\s+".join(map(re.escape, piece.split())), kept[k])
+        if not found:
+            continue
+        kept[k] = kept[k][:found.start()] + kept[k][found.end():]
+        if entry.get("show", True) is not False and re.search(r"\w", piece):
+            notes.append((k, piece))
+    # What a citation leaves behind: empty brackets, a space before a full stop, lines with no word
+    tidy = []
+    for paragraph in kept:
+        paragraph = re.sub(r"[(\[]\s*[)\]]", "", paragraph)
+        paragraph = re.sub(r"[ \t]+([.,;:!?।])", r"\1", paragraph)
+        tidy.append("\n".join(line.rstrip() for line in paragraph.split("\n") if re.search(r"\w", line)))
+    told = "\n\n".join(p for p in tidy if p.strip())
+    if not re.search(r"\w", told):
+        return "\n\n".join(paragraphs), [], list(paragraphs)
+    return told, notes, tidy
+
+
+def notes_by_scene(notes, tidy, scenes):
+    """[[note, ...] for each scene]: each note shown after the scene where the story before it ends -
+    the scene holding the end of the nearest paragraph at or before the note's that still has story
+    in it (`tidy`, take_notes's paragraphs); the first scene when there is none."""
+    out = [[] for _ in scenes]
+    flat = [" ".join(s.split()) for s in scenes]
+    for k, note in notes:
+        at = None
+        for paragraph in reversed(tidy[:k + 1]):
+            tail = " ".join(paragraph.split())[-40:]
+            at = next((i for i in range(len(flat) - 1, -1, -1) if tail and tail in flat[i]), None)
+            if at is not None:
+                break
+        if scenes:
+            out[at or 0].append(note)
+    return out
+
+
+def note_seconds(text):
+    """How long a note stays on the dark screen: long enough to read it, slowly."""
+    return min(14.0, max(5.0, 3.0 + 0.4 * len(text.split())))
+
+
 def illustrate_request(model, title, scenes, lang):
     """The chat request for each fixed scene's picture and its translation into the other language."""
     other = "English" if lang == "bn" else "Bangla (Bengali script)"
@@ -981,13 +1073,14 @@ def _pieces(text):
     return out
 
 
-def caption(text, path, lang, title=False):
+def caption(text, path, lang, title=False, note=False):
     """A transparent frame-sized PNG with the words on it: the title in the middle, a line of
-    narration at the bottom - white, outlined in dark, wrapped to fit. Arabic in it is set in an
-    Arabic font, right to left."""
+    narration at the bottom - white, outlined in dark, wrapped to fit. A note (a reference shown on the
+    dark screen) is set in the middle, smaller and in a soft grey. Arabic in it is set in an Arabic
+    font, right to left."""
     from PIL import Image, ImageDraw
     # A long line of a story read word for word is set a little smaller, to cover less of the picture
-    size = 54 if title else 34 if len(text) <= 160 else 29
+    size = 54 if title else 30 if note else 34 if len(text) <= 160 else 29
     language = LANGUAGES.get(lang) or LANGUAGES["en"]
     # Arabic in the line: in the language's own font when it is written in Arabic script (Urdu's
     # Nastaliq), otherwise in one with the Quran's letters
@@ -1027,13 +1120,14 @@ def caption(text, path, lang, title=False):
     lines += [line.strip()] if line.strip() else []
     step = int(size * language.get("line_height", 1.7 if ARABIC_RUN.search(text) else 1.45))
     height = step * len(lines)
-    y = (HEIGHT - height) // 2 if title else HEIGHT - 40 - height
+    y = (HEIGHT - height) // 2 if title or note else HEIGHT - 40 - height
     for one in lines:
         x = (WIDTH - measure(one)) / 2
         for piece, ar in pieces(one):
             # On a shared baseline, so the two scripts sit on one line
             draw.text((x, y + size), piece, font=fonts[ar], anchor="ls", direction="rtl" if ar else None,
-                      fill=(255, 255, 255, 255), stroke_width=3 if title else 2, stroke_fill=(20, 20, 20, 230))
+                      fill=(214, 214, 206, 255) if note else (255, 255, 255, 255),
+                      stroke_width=0 if note else 3 if title else 2, stroke_fill=(20, 20, 20, 230))
             x += draw.textlength(piece, font=fonts[ar], direction="rtl" if ar else None)
         y += step
     image.save(path)
@@ -1081,6 +1175,7 @@ async def clean_recording(raw, folder, n):
 
 
 CLIP_VERSION = 1          # raised when the way a clip is made changes, so cached clips are made again
+NOTE_BACKGROUND = "0x101216"   # the dark screen a note is shown on
 
 
 def clip_cache(message_id):
@@ -1097,29 +1192,70 @@ async def to_m4a(source, out):
         return f.read()
 
 
-async def assemble(pictures, narration, texts, title, lang, folder, recorded=False, keys=None, cache=None):
+async def _note_clip(text, length, lang, folder, n, cache, used):
+    """One note's clip: its words fading in on the dark screen and out again, in silence. Set in the
+    note's own script (a Bangla note in a Bangla font, any other in the Latin one), whichever language's
+    video it is in: a reference is shown as it was written."""
+    script = "bn" if is_bangla(text) else "en"
+    kept = None
+    if cache:
+        key = hashlib.sha1(json.dumps([CLIP_VERSION, "note", text, round(length, 3), script]).encode()).hexdigest()[:20]
+        kept = os.path.join(cache, f"{lang}-note-{key}.mp4")
+        used.add(kept)
+        if os.path.isfile(kept):
+            return kept
+    png = caption(text, os.path.join(folder, f"note-{lang}-{n:02d}.png"), script, note=True)
+    clip = os.path.join(folder, f"clip-note-{n:02d}.mp4")
+    until = length - FADE
+    await _run([ffmpeg(), "-y", "-f", "lavfi", "-i", f"color=c={NOTE_BACKGROUND}:s={WIDTH}x{HEIGHT}:r={FPS}:d={length:.3f}",
+                "-loop", "1", "-t", f"{length:.3f}", "-i", png, "-filter_complex",
+                f"[1:v]format=rgba,fade=t=in:st=0.6:d=0.6:alpha=1,fade=t=out:st={max(0.6, until - 0.6):.2f}:d=0.6:alpha=1[w];"
+                f"[0:v][w]overlay=0:0,format=yuv420p[v]", "-map", "[v]", "-t", f"{length:.3f}", "-r", str(FPS),
+                "-pix_fmt", "yuv420p", "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", clip], "a note")
+    if kept:
+        shutil.copyfile(clip, kept)
+    return clip
+
+
+async def assemble(pictures, narration, texts, title, lang, folder, recorded=False, keys=None, cache=None,
+                   notes=None):
     """The video for one language (`texts` its narration, `title` shown over the first scene): each picture held for its scene with a slow zoom or pan, scenes
     cross-faded, the narration placed at each scene's start, the words faded in over each line as it is spoken. MP4 bytes.
 
     `recorded` - one flag, or one per scene - marks narration the person read. With `keys` (each
     scene's picture, as kept) and `cache` (clip_cache), a scene whose picture, words and length are
     unchanged reuses the clip made last time: an edited sentence remakes its own scene's clip, not
-    every scene's."""
+    every scene's.
+
+    `notes` - for each scene, the notes shown after it (references, footnotes): each on a dark screen
+    of its own, in silence, as long as it takes to read; the story's narration is not read over them."""
     binary = ffmpeg()
     if not binary:
         raise VideoError("No ffmpeg on this server to put the video together")
-    lengths = scene_lengths([seconds for _, seconds in narration])
+    # What is shown, in order: each scene, then its notes. ("scene", i) or ("note", text)
+    items = []
+    for i in range(len(pictures)):
+        items.append(("scene", i))
+        items += [("note", note) for note in ((notes or [])[i] if i < len(notes or []) else []) if note]
+    scene_length = scene_lengths([seconds for _, seconds in narration])
+    lengths = [scene_length[what] if kind == "scene" else note_seconds(what) + FADE for kind, what in items]
     starts, at = [], 0.0
     for length in lengths:
         starts.append(at)
         at += length - FADE
     total = starts[-1] + lengths[-1]
+    scene_starts = [start for (kind, _), start in zip(items, starts) if kind == "scene"]
     if cache:
         os.makedirs(cache, exist_ok=True)
     used = set()
 
     clips = []
-    for i, (png_path, length, text) in enumerate(zip(pictures, lengths, texts)):
+    for n, ((kind, what), length) in enumerate(zip(items, lengths)):
+        if kind == "note":
+            clips.append(await _note_clip(what, length, lang, folder, n, cache, used))
+            continue
+        i = what
+        png_path, text = pictures[i], texts[i]
         if cache and keys:
             key = hashlib.sha1(json.dumps([CLIP_VERSION, keys[i], text, round(length, 3), i,
                                            title if i == 0 else ""]).encode()).hexdigest()[:20]
@@ -1185,7 +1321,7 @@ async def assemble(pictures, narration, texts, title, lang, folder, recorded=Fal
     audio_inputs, delays = [], []
     # The Bangla voice is bright and a little harsh: its highs softened
     read = recorded if isinstance(recorded, list) else [recorded] * len(narration)
-    for i, ((wav, _), start) in enumerate(zip(narration, starts)):
+    for i, ((wav, _), start) in enumerate(zip(narration, scene_starts)):
         tone = "highshelf=f=3200:g=-5," if lang == "bn" and not read[i] else ""
         audio_inputs += ["-i", wav]
         ms = int((start + LEAD_IN) * 1000)
