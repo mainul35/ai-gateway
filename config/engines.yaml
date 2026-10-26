@@ -154,6 +154,11 @@ models:
   # the MTP layers stay unquantized). Only 10 of its 40 layers keep a KV cache (2 heads of 256), about
   # 20 KB a token: 256K is 5 GB, so the cache has room for several agents at once. Their ports are set,
   # so the profiles after them keep theirs.
+  # FlashInfer builds its kernels on first use, and none come prebuilt for its version: without a CUDA
+  # compiler vLLM loaded the model and stopped at its first sampled token ("Could not find nvcc"), and
+  # with the one the environments carry (13.4) beside torch's CUDA headers (13.0) the build fails
+  # ("CUDA compiler and CUDA toolkit headers are incompatible", 2026-10-26). So nothing of FlashInfer is
+  # used: vLLM samples with PyTorch.
   # vLLM, for agents: tool calls parsed by qwen3_coder, thinking split off by the qwen3 parser, a shared
   # prompt prefix computed once for every request that starts with it.
   - name: qwen3.6-vllm
@@ -166,6 +171,7 @@ models:
     ctx_size: 262144
     tensor_parallel: 2
     gpu_memory: 0.90
+    env: {VLLM_USE_FLASHINFER_SAMPLER: "0"}
     # Requests answered at once, each with the whole window if the cache has room for it
     parallel: 4
     extra_args: ["--enable-auto-tool-choice", "--tool-call-parser", "qwen3_coder", "--reasoning-parser", "qwen3",
@@ -185,7 +191,17 @@ models:
     tensor_parallel: 2
     gpu_memory: 0.88
     parallel: 2
-    env: {SGLANG_ALLOW_OVERWRITE_LONGER_CONTEXT_LEN: "1"}
+    # It builds the kernel that repacks AWQ for its 4-bit path on first start: with the environment's own
+    # CUDA compiler, brought to 13.0 to match torch's CUDA headers (nvidia-cuda-nvcc/-crt 13.0.88), and
+    # ninja on PATH. No FlashInfer (see qwen3.6-vllm): Triton's attention, PyTorch's sampling.
+    env: {SGLANG_ALLOW_OVERWRITE_LONGER_CONTEXT_LEN: "1",
+          CUDA_HOME: /home/mainul35/inference/sglang-venv/lib/python3.12/site-packages/nvidia/cu13,
+          PATH: "/home/mainul35/inference/sglang-venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"}
     extra_args: ["--tool-call-parser", "qwen3_coder", "--reasoning-parser", "qwen3", "--kv-cache-dtype", "fp8_e5m2",
+                 "--attention-backend", "triton", "--sampling-backend", "pytorch",
+                 # AWQ computes in float16 by default, and the linear attention's state is bfloat16: the
+                 # first prompt stopped on the mismatch ("Index put requires the source and destination
+                 # dtypes match", 2026-10-26). The whole model in bfloat16 keeps the state's precision.
+                 "--dtype", "bfloat16",
                  "--json-model-override-args",
                  '{"text_config": {"max_position_embeddings": 1048576, "rope_parameters": {"mrope_interleaved": true, "mrope_section": [11, 11, 10], "partial_rotary_factor": 0.25, "rope_theta": 10000000, "rope_type": "yarn", "factor": 4.0, "original_max_position_embeddings": 262144}}}']
