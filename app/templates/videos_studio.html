@@ -588,7 +588,6 @@ async function record(card, i){
   const button = card.querySelector('.record');
   const said = card.querySelector('.said');
   if(recorder?.state === 'recording'){ clearTimeout(limit); recorder.stop(); return; }
-  }
   try{
     microphone = await navigator.mediaDevices.getUserMedia(
       {audio: {echoCancellation: true, noiseSuppression: true, autoGainControl: true}});
