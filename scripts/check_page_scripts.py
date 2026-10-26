@@ -20,6 +20,9 @@ import tempfile
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 TEMPLATES = os.path.join(ROOT, "app", "templates")
+# Scripts the pages load as files: checked as they are. A syntax error in one (a line break written
+# into a string, 2026-10-26) stopped the draft editor and the check, reading templates only, missed it
+STATIC = os.path.join(ROOT, "app", "static")
 
 
 def scripts_of(path):
@@ -35,10 +38,15 @@ def main(paths):
     if not node:
         print("check_page_scripts: node is not installed here; page scripts not checked")
         return 0
-    paths = paths or sorted(os.path.join(TEMPLATES, f) for f in os.listdir(TEMPLATES) if f.endswith(".html"))
+    paths = paths or (sorted(os.path.join(TEMPLATES, f) for f in os.listdir(TEMPLATES) if f.endswith(".html"))
+                      + sorted(os.path.join(STATIC, f) for f in os.listdir(STATIC) if f.endswith(".js")))
     broken = 0
     for path in paths:
-        code = scripts_of(path)
+        if path.endswith(".js"):
+            with open(path, encoding="utf-8") as f:
+                code = f.read()
+        else:
+            code = scripts_of(path)
         if not code.strip():
             continue
         with tempfile.NamedTemporaryFile("w", suffix=".js", delete=False, encoding="utf-8") as f:
@@ -52,7 +60,7 @@ def main(paths):
             lines = [l for l in result.stderr.splitlines() if l.strip()][:4]
             print(f"check_page_scripts: {os.path.relpath(path, ROOT)} does not parse:\n  " + "\n  ".join(lines))
     if not broken:
-        print("check_page_scripts: every page's script parses")
+        print("check_page_scripts: every page's script and script file parses")
     return 1 if broken else 0
 
 

@@ -87,8 +87,7 @@
         text: Object.fromEntries(langs.map(l => [l, (told[l] || [])[i] || '']))}])).map((parts, i) => ({
           parts: JSON.parse(JSON.stringify(parts)), picture: (told.drawn || [])[i] || '',
           people: (told.people || [])[i] || 'from_behind',
-          notes: ((told.notes || [])[i] || []).join('
-')}))
+          notes: ((told.notes || [])[i] || []).join('\n')}))
     };
     let dirty = false, working = false;
 
@@ -215,8 +214,7 @@
       const scenes = draft.scenes.map(s => ({
         parts: s.parts.map(p => ({speaker: p.speaker, text: Object.fromEntries(Object.entries(p.text || {})
           .map(([l, t]) => [l, clean(t)]).filter(([, t]) => t))})), picture: clean(s.picture), people: s.people,
-        notes: (s.notes || '').split('
-').map(clean).filter(Boolean)}));
+        notes: (s.notes || '').split('\n').map(clean).filter(Boolean)}));
       if(scenes.some(s => s.parts.every(p => !Object.keys(p.text).length))){
         throw new Error('Every scene needs some words; delete an empty one');
       }
