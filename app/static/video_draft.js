@@ -24,6 +24,16 @@
 .draft-head{display:flex;flex-wrap:wrap;gap:.7rem;align-items:center;margin-bottom:1rem}
 .draft-head h2{margin:0;font-size:1.3rem;color:var(--text)}
 .draft-head .spacer{flex:1}
+.video-langs{position:relative}
+.video-langs summary{cursor:pointer;list-style:none;border:1px solid var(--border);border-radius:8px;padding:.4rem .7rem;
+                     font-size:.88rem;color:var(--text);white-space:nowrap}
+.video-langs summary::-webkit-details-marker{display:none}
+.video-langs summary::after{content:" ▾";color:var(--muted)}
+.video-langs-list{position:absolute;right:0;top:calc(100% + .3rem);z-index:30;background:var(--card);
+                  border:1px solid var(--border);border-radius:8px;padding:.35rem .5rem;min-width:11rem;
+                  box-shadow:0 .5rem 1.4rem rgba(0,0,0,.4)}
+.video-langs-list label{display:flex;gap:.5rem;align-items:center;padding:.25rem .2rem;cursor:pointer;white-space:nowrap}
+.video-langs-list input{width:auto;margin:0}
 .draft-note{margin:.2rem 0 1rem;color:var(--muted);font-size:.9rem}
 .draft-cast{background:var(--card);border-radius:12px;padding:.8rem 1rem;margin-bottom:1rem}
 .draft-cast summary{cursor:pointer;font-weight:600}
@@ -253,14 +263,11 @@
         <span class="spacer"></span><span class="muted" id="draftState">Saved</span>
         <button type="button" class="btn btn-secondary" id="draftSave" disabled>Save</button>
         <button type="button" class="btn btn-secondary" id="draftFill" title="Translate the words missing in any language">Fill in translations</button>
+        <details class="video-langs" id="draftWhich" title="The words stay in every language; one left out can have its video made later, from its button on the Videos page">
+          <summary id="draftWhichSummary"></summary>
+          <div class="video-langs-list">${langs.map(l => `<label><input type="checkbox" value="${l}"
+            ${(video.make || langs).includes(l) ? 'checked' : ''}> ${NAMES[l]}</label>`).join('')}</div></details>
         <button type="button" class="btn" id="draftMake">Make the video ›</button></div>
-      <div class="draft-note" id="draftWhich" hidden><b>Make a video in:</b>
-        ${langs.map(l => `<label style="margin:0 .8rem 0 .4rem;white-space:nowrap"><input type="checkbox" value="${l}"
-          ${(video.make || langs).includes(l) ? 'checked' : ''}> ${NAMES[l]}</label>`).join('')}
-        <div class="muted" style="margin:.3rem 0">The words stay in every language; a language left out can have its video made
-          later, from its button on the Videos page.</div>
-        <button type="button" class="btn" id="draftMakeGo">Make it</button>
-        <button type="button" class="btn btn-secondary" id="draftMakeCancel">Cancel</button></div>
       <div class="draft-note">Nothing has been drawn or voiced yet. Read the scenes, correct the words and who says them,
         delete or add scenes, say what each picture should show - then make the video.
         ${video.paused ? `<br><span style="color:#f59e0b">${esc(video.paused)}</span>` : ''}</div>
@@ -287,13 +294,22 @@
       try{ if(dirty) await save(); }catch(e){ hooks.showError(e.message); return; }
       run(`/chat/video/${current.message_id}/prepare`);
     });
-    // Which languages get a video is asked here: the pictures are drawn once for all of them, and each
-    // language's narration and video are made only where it is wanted
+    // Which languages get a video: a dropdown of checkboxes beside the button, its summary saying which.
+    // The pictures are drawn once for all of them; each language's narration and video only where wanted
     const which = container.querySelector('#draftWhich');
-    container.querySelector('#draftMake').addEventListener('click', () => { which.hidden = !which.hidden; });
-    container.querySelector('#draftMakeCancel').addEventListener('click', () => { which.hidden = true; });
-    container.querySelector('#draftMakeGo').addEventListener('click', async () => {
-      const chosen = [...which.querySelectorAll('input:checked')].map(box => box.value);
+    const picked = () => [...which.querySelectorAll('input:checked')].map(box => box.value);
+    const sayWhich = () => {
+      const chosen = picked();
+      container.querySelector('#draftWhichSummary').textContent = 'Videos in: ' +
+        (!chosen.length ? 'none' : chosen.length === langs.length && langs.length > 2 ? 'every language'
+          : chosen.map(l => NAMES[l]).join(' · '));
+    };
+    which.addEventListener('change', sayWhich);
+    sayWhich();
+    // Closed by a click anywhere else, like any dropdown
+    document.addEventListener('click', e => { if(which.open && !which.contains(e.target)) which.open = false; });
+    container.querySelector('#draftMake').addEventListener('click', async () => {
+      const chosen = picked();
       if(!chosen.length){ hooks.showError('Pick at least one language to make a video in.'); return; }
       if(!confirm(`Make the video now? Its ${draft.scenes.length} pictures are drawn and every part voiced, in ` +
                   chosen.map(l => NAMES[l]).join(', ') + ' - this takes a while.')) return;
