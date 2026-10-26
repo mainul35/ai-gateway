@@ -62,6 +62,7 @@ body.videos-studio main{max-width:none;padding:0}
 .editor .newPicture{font-size:.8rem;color:#4ade80;margin-top:.4rem}
 .editor .newPicture.bad{color:#fca5a5}
 .editor details.from{font-size:.78rem;color:var(--muted);margin-top:.4rem}
+.btn-small{font-size:.8rem;padding:.25rem .6rem}
 .check{display:flex;gap:.45rem;align-items:center;font-size:.85rem;margin-top:.5rem;cursor:pointer}
 .check input{width:auto;margin:0}
 .stale{font-size:.78rem;color:#f59e0b;margin-top:.25rem}
@@ -400,6 +401,7 @@ function renderEditor(){
           ${entry?.by === 'qari' ? '<span>A verse: the qari recites it.</span>'
             : !made[l] ? `<span>Once the ${IN_ENGLISH[l] || l} video is made, this line can be read in your voice.</span>`
             : editable ? `<div style="display:flex;gap:.4rem;flex-wrap:wrap;align-items:center">
+                ${change.text?.[l] !== undefined ? '<button type="button" class="btn btn-small save-lang" data-lang="' + l + '">💾 Save</button>' : ''}
                 <button type="button" class="btn btn-secondary record">🎙 ${entry?.by === 'recorded' ? 'Record again' : 'Record voiceover'}</button>
                 <button type="button" class="btn btn-secondary upload-voice">📁 Upload audio</button>
                 <input type="file" accept="audio/*" hidden data-scene="${i}" data-lang="${l}">
@@ -448,6 +450,11 @@ function renderEditor(){
       if (si !== selected) return;
       await uploadVoiceover(si, ln, file);
       input.value = '';
+    });
+  });
+  editor.querySelectorAll('.save-lang').forEach(button => {
+    button.addEventListener('click', async () => {
+      await saveLanguage(button.dataset.lang, i);
     });
   });
   paintDrawing(i);
@@ -581,9 +588,6 @@ async function record(card, i){
   const button = card.querySelector('.record');
   const said = card.querySelector('.said');
   if(recorder?.state === 'recording'){ clearTimeout(limit); recorder.stop(); return; }
-  if(edits[i]?.text?.[lang] !== undefined){
-    said.textContent = 'Save your changes first (click "Save and remake" at the bottom right), then record.';
-    return;
   }
   try{
     microphone = await navigator.mediaDevices.getUserMedia(
@@ -616,22 +620,19 @@ async function record(card, i){
 }
 
 async function useReading(i, lang, blob){
-  if(Object.keys(edits).length && !confirm('The changes you have not saved are lost when the video is made again. Go on?')) return;
   const recording = await new Promise((resolve, reject) => {
     const reader = new FileReader();
     reader.onload = () => resolve(reader.result);
     reader.onerror = () => reject(reader.error);
     reader.readAsDataURL(blob);
   });
-  const recordings = (story().pictures || []).map((_, n) => n === i ? recording : null);
   showError('');
   busy = true;
-  updateSave();
-  showProgress({stage: 'Sending the recording', fraction: 0});
+  showProgress({stage: 'Saving recording', fraction: 0});
   let trouble = '';
   try{
-    const response = await fetch(`/chat/video/${current.message_id}/voice`, {method: 'POST', headers: JSON_HEADERS,
-                                                                           body: JSON.stringify({recordings, lang})});
+    const response = await fetch(`/chat/video/${current.message_id}/store-voice`, {method: 'POST', headers: JSON_HEADERS,
+                                                                           body: JSON.stringify({recording, lang, index: i})});
     if(!response.ok){
       const err = await response.json().catch(() => ({}));
       throw new Error((typeof err.detail === 'string' && err.detail) || `HTTP ${response.status}`);
@@ -653,26 +654,64 @@ async function useReading(i, lang, blob){
   if(trouble) showError(trouble);
 }
 
-async function uploadVoiceover(scene, lang, file){
-  const formData = new FormData();
-  formData.append('audio', file);
-  formData.append('lang', lang);
-  formData.append('index', scene);
+async function saveLanguage(lang, sceneIndex){
+  const told = story();
+  const editor = document.getElementById('editor');
+  const textarea = editor.querySelector(`.line[data-lang="${lang}"]`);
+  if (!textarea) return;
+  const newWords = clean(textarea.value);
+  const oldWords = clean((told[lang] || [])[sceneIndex]);
+  if (newWords === oldWords) return;  // nothing to save
   showError('');
-  busy = true;
-  updateSave();
-  showProgress({stage: 'Uploading voiceover', fraction: 0});
-  let trouble = '';
+  const button = editor.querySelector('.save-lang[data-lang="' + lang + '"]');
+  if (button) button.disabled = true;
   try{
-    const response = await fetch(`/chat/video/${current.message_id}/upload-voice`, {method: 'POST', body: formData});
+    const response = await fetch(`/chat/video/${current.message_id}/save`, {
+      method: 'POST', headers: JSON_HEADERS,
+      body: JSON.stringify({lang, index: sceneIndex, text: newWords})});
     if(!response.ok){
       const err = await response.json().catch(() => ({}));
       throw new Error((typeof err.detail === 'string' && err.detail) || `HTTP ${response.status}`);
     }
-    await readEvents(response, chunk => {
-      if(chunk.error) throw new Error(chunk.error.message);
-      if(chunk.gateway?.type === 'progress') showProgress(chunk.gateway);
+    const result = await response.json();
+    // Update local state
+    if (!edits[sceneIndex]) edits[sceneIndex] = {};
+    if (!edits[sceneIndex].text) edits[sceneIndex].text = {};
+    edits[sceneIndex].text[lang] = newWords;
+    // Update the story data
+    told[lang][sceneIndex] = newWords;
+    textarea.classList.remove('changed');
+    const stale = textarea.closest('.card').querySelector('.stale');
+    if (stale) stale.hidden = true;
+    // Refresh the page to get the updated data
+    ({videos: stories} = await api('/chat/videos').catch(() => ({videos: stories})));
+    await openStory(current.message_id);
+    if (button) button.disabled = false;
+  }catch(e){
+    showError('Save failed: ' + e.message);
+    if (button) button.disabled = false;
+  }
+}
+
+async function uploadVoiceover(scene, lang, file){
+  showError('');
+  busy = true;
+  showProgress({stage: 'Uploading voiceover', fraction: 0});
+  let trouble = '';
+  try{
+    const raw = await new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(reader.result);
+      reader.onerror = () => reject(reader.error);
+      reader.readAsDataURL(file);
     });
+    const response = await fetch(`/chat/video/${current.message_id}/store-voice`, {method: 'POST', headers: JSON_HEADERS,
+                                                                             body: JSON.stringify({recording: raw, lang, index: scene})});
+    if(!response.ok){
+      const err = await response.json().catch(() => ({}));
+      throw new Error((typeof err.detail === 'string' && err.detail) || `HTTP ${response.status}`);
+    }
+    const result = await response.json();
   }catch(e){
     trouble = 'Voiceover upload failed: ' + e.message;
   }
@@ -681,7 +720,6 @@ async function uploadVoiceover(scene, lang, file){
   if(trouble){
     showError(trouble);
   }else{
-    // Re-fetch to get the updated narration entry
     ({videos: stories} = await api('/chat/videos').catch(() => ({videos: stories})));
     const updated = await api(`/chat/videos/${current.message_id}`).catch(() => null);
     if(updated){

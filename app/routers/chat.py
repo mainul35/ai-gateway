@@ -2425,6 +2425,118 @@ class RedrawIn(BaseModel):
     request: str = Field(min_length=1, max_length=1500)
 
 
+class SaveIn(BaseModel):
+    lang: str = Field(pattern="^[a-z]{2}$")
+    index: int = Field(ge=0)
+    text: str = Field(min_length=1)
+
+
+class StoreVoiceIn(BaseModel):
+    # A recording (base64, as the browser recorded it) for one scene
+    recording: str = Field(min_length=100)
+    lang: str = Field(pattern="^[a-z]{2}$")
+    index: int = Field(ge=0)
+
+
+@router.post("/video/{message_id}/store-voice")
+async def store_voiceover(message_id: int, payload: StoreVoiceIn, principal: Principal = Depends(authenticate),
+                          session: AsyncSession = Depends(get_session)):
+    """Store one scene's recording without rebuilding the video. The voice is used when the video is remade."""
+    user = _require_user(principal)
+    message = (await session.execute(
+        select(ConversationMessage).join(Conversation).where(
+            ConversationMessage.id == message_id, Conversation.user_id == user.id))).scalar_one_or_none()
+    if message is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Video story not found")
+    filed = json.loads(message.attachments or "{}")
+    video = filed.get("video") or {}
+    story = video.get("story")
+    if not story:
+        raise HTTPException(status.HTTP_409_CONFLICT,
+                            "This video was made before stories were kept; make it again to read it yourself")
+    count = len(story["pictures"])
+    lang = payload.lang
+    word = video_story.language_name(lang)
+    if lang not in story:
+        raise HTTPException(status.HTTP_409_CONFLICT, f"This story has no {word}")
+    if payload.index < 0 or payload.index >= count:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, f"This story has {count} scenes (0–{count - 1})")
+    # A scene that is all Arabic - a verse - is recited by the qari, not read by the person
+    line = story[lang][payload.index]
+    if video_story.needs_reading(line, lang):
+        raise HTTPException(status.HTTP_409_CONFLICT, "This scene is a verse recited by the qari")
+    user_id = user.id
+    folder = video_story.workspace()
+    try:
+        # Decode base64 recording and clean it
+        raw = base64.b64decode(payload.recording)
+        if not raw or len(raw) < 100:
+            raise video_story.VideoError("The recording is empty or too short")
+        cleaned, seconds = await video_story.clean_recording(raw, folder, payload.index)
+        # Store the cleaned recording
+        async with session_factory()() as db:
+            kept = ChatFile(user_id=user_id, kind="voice", mime_type="audio/mp4",
+                            name=f"scene {payload.index + 1} ({word}).m4a",
+                            data=cleaned)
+            db.add(kept)
+            await db.commit()
+        # Update the stored voice entry for this scene
+        old_saved = story.get(f"voice_{lang}") or [None] * count
+        old_entry = old_saved[payload.index]
+        if old_entry and isinstance(old_entry, dict) and old_entry.get("file_id"):
+            await _drop_file(user_id, old_entry["file_id"])
+        if not old_saved or len(old_saved) <= payload.index:
+            old_saved = [None] * count
+        old_saved[payload.index] = {"file_id": kept.id, "seconds": round(seconds, 2)}
+        story[f"voice_{lang}"] = old_saved
+        video["story"] = story
+        filed["video"] = video
+        async with session_factory()() as db:
+            row = await db.get(ConversationMessage, message_id)
+            row.attachments = json.dumps(filed)
+            await db.commit()
+    except video_story.VideoError:
+        raise
+    except Exception:
+        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "Could not process the recording")
+    finally:
+        shutil.rmtree(folder, ignore_errors=True)
+    return {"ok": True, "file_id": kept.id, "seconds": round(seconds, 2)}
+
+
+@router.post("/video/{message_id}/save")
+async def save_scene_text(message_id: int, payload: SaveIn, principal: Principal = Depends(authenticate),
+                          session: AsyncSession = Depends(get_session)):
+    """Save a scene's text in one language without rebuilding the video."""
+    user = _require_user(principal)
+    message = (await session.execute(
+        select(ConversationMessage).join(Conversation).where(
+            ConversationMessage.id == message_id, Conversation.user_id == user.id))).scalar_one_or_none()
+    if message is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Video story not found")
+    filed = json.loads(message.attachments or "{}")
+    video = filed.get("video") or {}
+    story = video.get("story")
+    if not story:
+        raise HTTPException(status.HTTP_409_CONFLICT,
+                            "This video was made before stories were kept; make it again")
+    word = video_story.language_name(payload.lang)
+    if payload.lang not in story:
+        raise HTTPException(status.HTTP_409_CONFLICT, f"This story has no {word}")
+    count = len(story["pictures"])
+    if payload.index < 0 or payload.index >= count:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, f"This story has {count} scenes (0–{count - 1})")
+    # Save the text
+    _set_line(story, payload.lang, payload.index, payload.text)
+    video["story"] = story
+    filed["video"] = video
+    async with session_factory()() as db:
+        row = await db.get(ConversationMessage, message_id)
+        row.attachments = json.dumps(filed)
+        await db.commit()
+    return {"ok": True}
+
+
 @router.post("/video/{message_id}/redraw")
 async def redraw_picture(message_id: int, payload: RedrawIn, principal: Principal = Depends(authenticate),
                          session: AsyncSession = Depends(get_session)):
