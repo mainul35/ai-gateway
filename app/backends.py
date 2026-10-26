@@ -141,10 +141,16 @@ def _ollama_context_limit():
         return 65536
 
 
+# Which engine serves a profile's model, as /v1/models and the usage records name it
+ENGINE_NAMES = {"llama": "llamacpp", "vllm": "vllm", "sglang": "sglang"}
+
+
 def _engine_models():
-    """Models served by our own llama-server processes; started on demand when first requested."""
+    """Models served by our own engine processes (llama-server, vLLM or SGLang); started on demand
+    when first requested. All are kind "llamacpp" - started and stopped by the supervisor - and named
+    after their engine."""
     return {
-        name: Backend(name="llamacpp", kind="llamacpp",
+        name: Backend(name=ENGINE_NAMES.get(profile.server, profile.server), kind="llamacpp",
                       base_url=f"http://127.0.0.1:{profile.port}/v1", upstream_model=name,
                       # llama-server only sees images when it is given the model's vision projector.
                       # Tool calls go through the model's own chat template (--jinja, on by default).

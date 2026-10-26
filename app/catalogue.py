@@ -54,7 +54,7 @@ def capability_words(capabilities):
 
 
 def describe(name, *, override="", family="", parameter_size="", quantization="",
-             context_length=None, capabilities=(), backend=""):
+             context_length=None, capabilities=(), backend="", engine=""):
     """One or two sentences: what this model is, and what it can do."""
     if override:
         return override.strip()
@@ -81,7 +81,8 @@ def describe(name, *, override="", family="", parameter_size="", quantization=""
     if can:
         said.append(f"It {can}.")
     if backend == "llamacpp":
-        said.append("Served by this gateway's own tuned llama.cpp profile rather than by Ollama.")
+        said.append("Served by this gateway's own tuned " + {"vllm": "vLLM", "sglang": "SGLang"}.get(engine, "llama.cpp")
+                    + " profile rather than by Ollama.")
     elif backend not in ("", "ollama"):
         said.append("Served by an upstream API, so nothing is stored on this machine.")
     return " ".join(said) or "Nothing is known about this model beyond its name."
