@@ -434,6 +434,9 @@ def _notes(name, backend, usage, used_for, granted, reachable):
     return notes
 
 
+PROVIDER_LABELS = {"ollama": "Ollama", "llamacpp": "llama.cpp", "vllm": "vLLM", "sglang": "SGLang"}
+
+
 def _deletability(backend):
     """Models Ollama holds and the llama.cpp ones - downloaded here or in config/engines.yaml - can be
     deleted from here; the rest are someone else's to remove."""
@@ -448,7 +451,10 @@ SPLIT_PART = re.compile(r"^(.*)-\d{5}-of-(\d{5})\.gguf$")
 
 
 def _gguf_parts(model_path):
-    """A GGUF's files: every part of one split in several (-00001-of-00003.gguf), else itself."""
+    """A model's files: a GGUF's every part when it is split in several (-00001-of-00003.gguf), else
+    itself; for vLLM and SGLang, whose model is a folder of safetensors, every file in the folder."""
+    if model_path and os.path.isdir(model_path):
+        return [os.path.join(top, name) for top, _, names in os.walk(model_path) for name in names]
     split = SPLIT_PART.match(os.path.basename(model_path or ""))
     if not split:
         return [model_path] if model_path else []
@@ -489,7 +495,7 @@ async def _delete_engine_model(name):
             folders.add(os.path.dirname(path))
         except OSError as e:
             log.warning("Could not delete %s: %s", path, e)
-    for folder in folders:
+    for folder in sorted(folders, key=len, reverse=True):      # a model folder's own folders first
         if os.path.realpath(folder) != os.path.realpath(MODELS_ROOT):
             try:
                 os.rmdir(folder)        # only when empty
@@ -534,6 +540,8 @@ async def list_models_for_admin(_: Principal = Depends(require_admin),
             "name": name,
             "backend": backend.kind,
             "owned_by": backend.name,
+            # Who serves it, as the page groups the models: Ollama, llama.cpp, vLLM, SGLang or an API
+            "provider": PROVIDER_LABELS.get(backend.name, backend.name),
             "size_bytes": backend.size_bytes,
             "parameter_size": details.get("parameter_size", ""),
             "quantization": details.get("quantization_level", ""),

@@ -411,7 +411,7 @@ function modelCard(m){
       ].filter(Boolean).join(' · ')
     : 'No requests recorded in the window.';
   const button = m.can_delete
-    ? `<button class="btn btn-danger btn-sm" data-delete="${escapeHtml(m.name)}" data-backend="${escapeHtml(m.backend)}">Delete</button>`
+    ? `<button class="btn btn-danger btn-sm" data-delete="${escapeHtml(m.name)}" data-backend="${escapeHtml(m.backend)}" data-provider="${escapeHtml(m.provider || '')}">Delete</button>`
     : `<span class="muted" style="font-size:.8rem" title="${escapeHtml(m.delete_note)}">kept elsewhere</span>`;
   // One line of what it is, one of how it has done; the description and the notes fold away, with
   // the worst note's colour on the toggle so a warning is not hidden by it
@@ -431,7 +431,7 @@ function modelCard(m){
   return `<div style="border:1px solid var(--border);border-radius:10px;padding:.55rem .9rem;margin-bottom:.5rem">
     <div style="display:flex;gap:.5rem;align-items:center;flex-wrap:wrap">
       <code style="font-size:.92rem">${escapeHtml(m.name)}</code>
-      <span class="pill ${m.reachable ? 'on' : 'err'}">${m.reachable ? m.backend : 'unreachable'}</span>
+      <span class="pill ${m.reachable ? 'on' : 'err'}">${escapeHtml(m.reachable ? (m.provider || m.backend) : 'unreachable')}</span>
       ${(m.capabilities || []).map(c => `<span class="pill off">${escapeHtml(c)}</span>`).join('')}
       ${mtp.state === 'on' ? `<span class="pill on" title="${escapeHtml(mtp.why)}">MTP</span>` : ''}
       ${best.map(b => `<span class="pill on" title="${escapeHtml(b.evidence)}">best: ${escapeHtml(b.label.split(' (')[0].toLowerCase())}</span>`).join('')}
@@ -472,7 +472,15 @@ async function loadModels(){
     bestTable(data.best_for || []);
     document.getElementById('windowDays').textContent = data.window_days;
     target.classList.remove('muted');
-    target.innerHTML = data.models.map(modelCard).join('') || '<span class="muted">No models found.</span>';
+    // Grouped by who serves them, in this order, then any other API by its name
+    const order = ['Ollama', 'llama.cpp', 'vLLM', 'SGLang'];
+    const groups = {};
+    for(const m of data.models) (groups[m.provider || m.backend] ||= []).push(m);
+    const names = Object.keys(groups).sort((a, b) =>
+      (order.includes(a) ? order.indexOf(a) : 99) - (order.includes(b) ? order.indexOf(b) : 99) || a.localeCompare(b));
+    target.innerHTML = names.map(name => `<h3 style="margin:1rem 0 .45rem;font-size:1rem">${escapeHtml(name)}
+        <span class="muted" style="font-weight:400">&middot; ${groups[name].length}</span></h3>`
+      + groups[name].map(modelCard).join('')).join('') || '<span class="muted">No models found.</span>';
   }catch(e){ target.textContent = 'Could not load models: ' + e.message; }
 }
 
@@ -483,7 +491,8 @@ document.getElementById('models').addEventListener('click', async e => {
   if(!button) return;
   const name = button.dataset.delete;
   const where = button.dataset.backend === 'llamacpp'
-    ? 'from the server: its llama.cpp engine and its files in ~/models' : 'from the Ollama server';
+    ? `from the server: its ${button.dataset.provider || 'llama.cpp'} profile and its files in ~/models `
+      + '(kept while another profile uses them)' : 'from the Ollama server';
   if(!confirm(`Delete ${name} ${where}?\n\nThis frees its disk space and cannot be undone `
               + `without downloading it again.`)) return;
   button.disabled = true;
