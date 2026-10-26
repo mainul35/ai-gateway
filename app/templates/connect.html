@@ -61,7 +61,7 @@
 
 <div class="card" style="margin-top:1.5rem">
   <h2>Claude Desktop</h2>
-  <p class="muted">The GUI application (macOS / Windows).</p>
+  <p class="muted">The GUI application (macOS / Windows / Linux).</p>
   <p class="note warn" style="margin:.6rem 0 .4rem;font-size:.88rem;padding:.5rem .6rem;border-left:3px solid var(--warning);background:rgba(245,158,11,.08);border-radius:4px">
     <strong>Completely separate from Claude Code CLI.</strong> The config above (in
     <code>.claude/settings.local.json</code>) has <em>zero effect</em> on this app. Claude Desktop is
@@ -69,7 +69,8 @@
   </p>
   <p><strong>Automatically:</strong> the launcher command above, <code>ai-gateway launch claude-desktop</code>,
     does everything below for you: it writes an <em>AI Gateway</em> profile into the app's settings and
-    makes it the one in use, then closes the app (also from the tray) and opens it again. Its model
+    makes it the one in use, then closes the app (also from the tray) and opens it again - on Linux you
+    quit it and open it again yourself, since the app goes by several names there. Its model
     picker then lists this gateway's models under Claude's names - Sonnet, Opus, Haiku and Fable all run
     <code>qwen3.6-256k</code>, which also reads images, so a picture never swaps models mid-task, and
     Sonnet 4.6 runs <code>auto</code>. The second command, with <code>-Restore</code>
@@ -117,7 +118,7 @@ document.querySelectorAll('.agent-guide .origin').forEach(e => e.textContent = l
 document.querySelectorAll('.agent-guide .origin-v1').forEach(e => e.textContent = location.origin + '/v1');
 const APPS = [
   {id: 'claude', name: 'Claude Code', about: "Anthropic's coding agent, on the Messages API"},
-  {id: 'claude-desktop', name: 'Claude desktop app', about: 'every desktop session, macOS and Windows; it runs the model chosen above under every Claude name; either command closes the app and opens it again',
+  {id: 'claude-desktop', name: 'Claude desktop app', about: 'every desktop session, macOS, Windows and Linux; it runs the model chosen above under every Claude name; either command closes the app and opens it again',
    undo: {label: 'Back to your Claude account', windows: '-Restore', unix: '--restore'}},
   {id: 'opencode', name: 'OpenCode', about: 'Open-source coding agent'},
   {id: 'codex', name: 'Codex CLI', about: "OpenAI's coding agent, on the Responses API"},
