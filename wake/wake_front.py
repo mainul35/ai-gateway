@@ -264,8 +264,16 @@ def _upstream_headers(request, plain=False):
     return headers
 
 
-def _learn(h, status_code):
+# Where a 401 says nothing about a key: the login pages and the signed-in user's own account
+# (/auth/me answers "Not signed in" to anything but a login cookie). Counted there, a good key sent to
+# /auth/me was refused from then on, and stopped waking the machine (2026-10-26).
+NOT_ABOUT_KEYS = re.compile(r"^/(auth|login|logout|sso)(/|$)")
+
+
+def _learn(h, status_code, path=""):
     if h is None:
+        return
+    if status_code == 401 and NOT_ABOUT_KEYS.match(path or ""):
         return
     if status_code == 401:
         state.rejected.add(h)
@@ -281,7 +289,7 @@ async def open_upstream(request, path, body, h, plain=False):
     upstream = client.build_request(request.method, url, headers=_upstream_headers(request, plain), content=body)
     response = await client.send(upstream, stream=True)
     state.up, state.checked_at = True, time.monotonic()
-    _learn(h, response.status_code)
+    _learn(h, response.status_code, path)
     return response
 
 
