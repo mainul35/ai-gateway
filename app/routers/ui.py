@@ -184,13 +184,15 @@ async def playground_page(request: Request, user: User | None = Depends(current_
 
 @router.get("/videos")
 async def videos_page(request: Request, user: User | None = Depends(current_user)):
-    return _require_login(user, "/videos") or _page(request, "videos.html", user)
+    """The video stories: the list of stories, the player, the scenes and the editor ("Studio" layout,
+    chosen over the other one tried beside it, 2026-10-26)."""
+    return _require_login(user, "/videos") or _page(request, "videos_studio.html", user)
 
 
 @router.get("/videos2")
-async def videos_studio_page(request: Request, user: User | None = Depends(current_user)):
-    """The Videos page laid out the other way (layout B, "Studio"), to compare with /videos."""
-    return _require_login(user, "/videos2") or _page(request, "videos_studio.html", user)
+async def videos_studio_page(request: Request):
+    """Where the Studio layout was while it was compared: its links keep working."""
+    return RedirectResponse(f"/videos?{request.url.query}" if request.url.query else "/videos", status_code=301)
 
 
 @router.get("/tasks")

@@ -1,8 +1,8 @@
 {% extends "base.html" %}
-{% block title %}Videos 2 &middot; Model Gateway{% endblock %}
+{% block title %}Videos &middot; Model Gateway{% endblock %}
 {% block body_class %}videos-studio{% endblock %}
 {% block content %}
-{# Layout B ("Studio"), offered beside /videos (layout A) to compare; the same endpoints underneath #}
+{# The Videos page: stories on the left, the player and the scene editor in the middle, the scenes on the right #}
 <style>
 body.videos-studio main{max-width:none;padding:0}
 .studio{display:grid;grid-template-columns:22rem minmax(0,1fr) 24rem;height:calc(100vh - 4.2rem)}
@@ -216,7 +216,7 @@ async function openStory(id){
   showError('');
   if(current?.message_id !== id) drawing = {};      // a picture still drawing for the story left is not shown here
   try{ current = await api(`/chat/videos/${id}`); }catch(e){ showError(e.message); return; }
-  history.replaceState(null, '', `/videos2?id=${id}`);
+  history.replaceState(null, '', `/videos?id=${id}`);
   edits = {};
   previews = {};
   // New pictures saved for scenes earlier: shown and waiting to go into the video, as when they were drawn
