@@ -21,7 +21,7 @@ from app.tools import jobs, mcp_client, mcp_config
 from app.auth import Principal, generate_key, hash_key, require_admin, require_manager
 from app import config_writer
 from app.engine.supervisor import supervisor
-from app.engine import builds as engine_builds, gguf_meta, profiles as engine_profiles
+from app.engine import builds as engine_builds, gguf_meta, profiles as engine_profiles, serving
 from utils import hf_client, hf_download
 from utils.ollama_client import (StreamCancellation, check_ollama_status, ollama_host,
                                  stream_create_model, stream_pull_model)
@@ -675,8 +675,9 @@ class ModelInstall(BaseModel):
     # A QUANTIZATION_LEVELS key, or utils.hf_client.FILE_KEY + a file's name for one that names none
     quantization: str = Field(min_length=1, max_length=300)
     # "pull" takes the published GGUF as it is; "create" builds a local model with a context length;
-    # "engine" downloads it for llama.cpp and adds an engine profile (config/engines.local.yaml)
-    mode: str = Field(default="pull", pattern="^(pull|create|engine)$")
+    # "engine" downloads it for llama.cpp and adds an engine profile (config/engines.local.yaml);
+    # "vllm" and "sglang" download the model's own files (safetensors) and add a profile that runs them
+    mode: str = Field(default="pull", pattern="^(pull|create|engine|vllm|sglang)$")
     context_length: int = fitting.DEFAULT_CONTEXT_LENGTH
 
 
@@ -727,7 +728,12 @@ def _look_up(model_id):
     pick = next((r for r in recommendations if r.get("recommended") and r.get("available")),
                 next((r for r in recommendations if r.get("available")), None))
     tried = (details.get(pick["quantization"]) or {}).get("files") or [] if pick else []
+    builds = _build_answers(model_id, info, tried, gguf.get("architecture")) if gguf_files else []
+    served = serving.assess(model_id, info, system)
     return {
+        # Every way this machine runs a model, and whether this one can go that way - and why not
+        "providers": _provider_answers(gguf_files, recommendations, builds, served),
+        "serving": served,
         "model_info": hf_client.public_model_info(info),
         # Ollama installs GGUF and nothing else, so a repository without it needs somewhere to go
         "gguf_alternatives": [] if gguf_files else hf_client.search_gguf(model_id),
@@ -744,8 +750,34 @@ def _look_up(model_id):
                      "context_length": gguf.get("context_length") or 0,
                      "image_reader": bool(hf_client.mmproj_files(info)),
                      "tested_with": os.path.basename(tried[0]) if tried else "",
-                     "builds": _build_answers(model_id, info, tried, gguf.get("architecture")) if gguf_files else []},
+                     "builds": builds},
     }
+
+
+def _provider_answers(gguf_files, recommendations, builds, served):
+    """[{"name", "supported", "why"}] for Ollama, llama.cpp, vLLM and SGLang."""
+    fits = [r for r in recommendations if r.get("available")]
+    if not gguf_files:
+        ollama = (False, "it publishes no GGUF files, the only thing Ollama installs")
+    elif not fits:
+        ollama = (False, "none of its files fits in this machine's memory")
+    elif not any(r.get("ollama") for r in fits):
+        ollama = (False, "its files are split in parts, or named so Ollama cannot pull them")
+    else:
+        ollama = (True, "")
+    if not gguf_files:
+        llama = (False, "it publishes no GGUF files, the only thing llama.cpp loads")
+    elif any(b.get("supported") for b in builds):
+        llama = (True, "")
+    else:
+        problem = next((b.get("problem") for b in builds if b.get("problem")), "")
+        llama = (False, "no llama.cpp build here can load it" + (f" ({problem})" if problem else ""))
+    answers = [{"name": "Ollama", "supported": ollama[0], "why": ollama[1]},
+               {"name": "llama.cpp", "supported": llama[0], "why": llama[1]}]
+    for server, answer in (served.get("engines") or {}).items():
+        answers.append({"name": answer["label"], "server": server, "supported": answer["supported"],
+                        "why": answer["why"]})
+    return answers
 
 
 @router.post("/models/check")
@@ -874,6 +906,42 @@ def _engine_rows(entry, name, cancellation):
     yield {"status": "success"}
 
 
+def _serving_rows(entry, name, cancellation):
+    """A model's own files downloaded for vLLM or SGLang, then a profile that runs them on both GPUs:
+    progress events, as an Ollama pull's. Asked again whether it can run here before anything is
+    downloaded, so a resumed download works from the same facts."""
+    model_id, server = entry["model_id"], entry["mode"]
+    yield {"status": "reading the repository"}
+    info = hf_client.get_model_info(model_id)
+    if "error" in info:
+        yield {"error": info["error"]}
+        return
+    system = get_system_info()
+    answer = serving.assess(model_id, info, system)
+    verdict = (answer.get("engines") or {}).get(server) or {}
+    if answer.get("source") != model_id or not verdict.get("supported"):
+        yield {"error": f"{serving.ENGINES[server]} cannot run {model_id} here: "
+                        + (verdict.get("why") or "it is not the repository with the model's own files")}
+        return
+    files = serving.download_files(info)
+    sizes = {s.get("rfilename"): s.get("size") or 0 for s in info.get("siblings", [])}
+    folder = os.path.join(os.path.expanduser("~"), "models", fitting.short_name(model_id))
+    for event in hf_download.download(model_id, files, folder, cancellation, sizes):
+        if event.get("status") == "success":
+            break
+        yield event
+        if "error" in event or event.get("cancelled"):
+            return
+    config = hf_client.get_model_config(model_id)
+    entry = serving.profile(server, name, folder, {} if "error" in config else config, system)
+    count = hf_client.get_parameter_count(info, hf_client.get_model_sizes(info))[0]
+    if count:
+        entry["parameter_size"] = f"{round(count / 1e9)}B"
+    engine_profiles.add_local_profile(entry)
+    log.info("%s engine %s added (%s)", serving.ENGINES[server], name, folder)
+    yield {"status": "success"}
+
+
 def _start_install(entry, who):
     """Starts a pull, build or llama.cpp download as a job of its own, listed until it ends:
     (job, model name)."""
@@ -883,6 +951,9 @@ def _start_install(entry, who):
     if entry["mode"] == "engine":
         name = fitting.engine_name(entry["model_id"], entry["quantization"], label)
         rows = _engine_rows(entry, name, cancellation)
+    elif entry["mode"] in serving.ENGINES:
+        name = f"{fitting.short_name(entry['model_id'])}-{entry['mode']}"
+        rows = _serving_rows(entry, name, cancellation)
     elif entry["mode"] == "create":
         name = fitting.ollama_name(entry["model_id"], entry["quantization"], label)
         rows = stream_create_model(name, source, {"num_ctx": fitting.clamp_context(entry["context_length"])},
@@ -934,7 +1005,7 @@ async def install_model(payload: ModelInstall, principal: Principal = Depends(re
     if not hf_client.is_valid_model_id(model_id):
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "That is not a Hugging Face repository name")
     label = ""
-    if payload.quantization not in fitting.QUANTIZATION_LEVELS:
+    if payload.mode not in serving.ENGINES and payload.quantization not in fitting.QUANTIZATION_LEVELS:
         if not payload.quantization.startswith(hf_client.FILE_KEY):
             raise HTTPException(status.HTTP_400_BAD_REQUEST, f"Unknown quantization {payload.quantization}")
         # A file that names no standard quantization: Ollama finds it by the label its name shows
