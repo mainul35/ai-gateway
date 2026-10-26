@@ -86,7 +86,9 @@
       scenes: (told.parts || (told[langs[0]] || []).map((_, i) => [{speaker: 'narrator',
         text: Object.fromEntries(langs.map(l => [l, (told[l] || [])[i] || '']))}])).map((parts, i) => ({
           parts: JSON.parse(JSON.stringify(parts)), picture: (told.drawn || [])[i] || '',
-          people: (told.people || [])[i] || 'from_behind'}))
+          people: (told.people || [])[i] || 'from_behind',
+          notes: ((told.notes || [])[i] || []).join('
+')}))
     };
     let dirty = false, working = false;
 
@@ -162,6 +164,9 @@
           <div><div class="lang">People in it</div><select data-field="people">
             <option value="from_behind" ${scene.people === 'from_behind' ? 'selected' : ''}>People, seen from behind</option>
             <option value="none" ${scene.people === 'none' ? 'selected' : ''}>No people</option></select></div></div>
+        <div class="draft-picture"><div><div class="lang">Notes after this scene: shown on a dark screen, not read
+            (references, footnotes; one a line)</div>
+            <textarea data-field="notes" dir="auto" placeholder="None">${esc(scene.notes || '')}</textarea></div></div>
       </div>`).join('');
       list.querySelectorAll('.draft-scene').forEach(card => {
         const i = Number(card.dataset.i);
@@ -173,6 +178,8 @@
             e.target.classList.toggle('missing', !clean(e.target.value));
           }else if(e.target.dataset.field === 'picture'){
             scene.picture = e.target.value;
+          }else if(e.target.dataset.field === 'notes'){
+            scene.notes = e.target.value;
           }
           card.classList.add('changed');
           markDirty();
@@ -190,7 +197,7 @@
           const k = Number(b.closest('.draft-part')?.dataset.k);
           if(act === 'up') [draft.scenes[i - 1], draft.scenes[i]] = [draft.scenes[i], draft.scenes[i - 1]];
           if(act === 'down') [draft.scenes[i + 1], draft.scenes[i]] = [draft.scenes[i], draft.scenes[i + 1]];
-          if(act === 'add') draft.scenes.splice(i + 1, 0, {parts: [{speaker: 'narrator', text: {}}], picture: '', people: 'from_behind'});
+          if(act === 'add') draft.scenes.splice(i + 1, 0, {parts: [{speaker: 'narrator', text: {}}], picture: '', people: 'from_behind', notes: ''});
           if(act === 'delete'){
             if(!confirm(`Delete scene ${i + 1}?`)) return;
             draft.scenes.splice(i, 1);
@@ -207,7 +214,9 @@
     async function save(){
       const scenes = draft.scenes.map(s => ({
         parts: s.parts.map(p => ({speaker: p.speaker, text: Object.fromEntries(Object.entries(p.text || {})
-          .map(([l, t]) => [l, clean(t)]).filter(([, t]) => t))})), picture: clean(s.picture), people: s.people}));
+          .map(([l, t]) => [l, clean(t)]).filter(([, t]) => t))})), picture: clean(s.picture), people: s.people,
+        notes: (s.notes || '').split('
+').map(clean).filter(Boolean)}));
       if(scenes.some(s => s.parts.every(p => !Object.keys(p.text).length))){
         throw new Error('Every scene needs some words; delete an empty one');
       }

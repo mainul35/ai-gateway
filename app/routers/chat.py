@@ -2257,7 +2257,7 @@ class VideoEditIn(BaseModel):
 
 
 # Everything kept for each scene, in scene order: taken out together when a scene is
-PER_SCENE = ("pictures", "drawn", "people", "parts") + tuple(video_story.LANGUAGES)
+PER_SCENE = ("pictures", "drawn", "people", "parts", "notes") + tuple(video_story.LANGUAGES)
 
 
 def _set_line(story, lang, i, text):
@@ -2557,6 +2557,8 @@ class DraftScene(BaseModel):
     parts: list[DraftPart] = Field(min_length=1, max_length=30)
     picture: str = Field(default="", max_length=1500)          # what to draw
     people: str = Field(default="from_behind", pattern="^(none|from_behind)$")
+    # Shown after the scene on a dark screen, not read: references, footnotes
+    notes: list[str] = Field(default_factory=list, max_length=20)
 
 
 class CastMember(BaseModel):
@@ -2604,6 +2606,7 @@ async def save_draft(message_id: int, payload: DraftIn, principal: Principal = D
     story["cast"] = video_story.assign_voices(cast)
     story["drawn"] = [" ".join(scene.picture.split()) for scene in payload.scenes]
     story["people"] = [scene.people for scene in payload.scenes]
+    story["notes"] = [[" ".join(note.split())[:1000] for note in scene.notes if note.strip()] for scene in payload.scenes]
     story["pictures"] = [None] * len(parts)
     for lang in languages:
         story[lang] = [video_story.scene_text(scene, lang) for scene in parts]
@@ -2829,7 +2832,12 @@ async def _video_pipeline(principal, user_id, ctx):
                 # Milk, Gemma's translation was faithful and natural where Qwen's was clumsy.
                 yield step(1, 0.3, "Planning a picture for every scene, and the translation")
                 lang = "bn" if video_story.is_bangla(given) else "en"
-                title, parts = video_story.split_story(given)
+                # References and footnotes in it are shown on a dark screen after their scene, not read
+                yield step(1, 0.2, "Setting the references and footnotes apart from the story")
+                paragraphs = video_story.story_paragraphs(given)
+                told_text, notes, tidy = video_story.take_notes(await _ask_helper(
+                    principal, video_story.notes_request(bangla_model, paragraphs)), paragraphs)
+                title, parts = video_story.split_story(told_text)
                 story = video_story.parse_illustrated(await _ask_helper(principal, video_story.illustrate_request(
                     bangla_model, title, parts, lang)), title, parts, lang)
             else:
@@ -2852,7 +2860,10 @@ async def _video_pipeline(principal, user_id, ctx):
                      "story": {"pictures": [None] * len(scenes), "en": [s["narration_en"] for s in scenes],
                                "bn": [s["narration_bn"] for s in scenes],
                                "drawn": [s["picture"] for s in scenes],     # what each was drawn from
-                               "people": [s["people"] for s in scenes]},
+                               "people": [s["people"] for s in scenes],
+                               # shown after each scene on a dark screen, not read: references, footnotes
+                               "notes": video_story.notes_by_scene(notes, tidy, parts) if given else
+                               [[] for _ in scenes]},
                      "drawing": {"attempt": 0, "wrong": {}}}
             if ctx.get("conversation_id") is not None:
                 async with session_factory()() as db:
@@ -3092,7 +3103,7 @@ async def _video_pipeline(principal, user_id, ctx):
             title = _title(video, lang)
             data, seconds = await video_story.assemble(paths, narration, texts, title, lang, folder,
                                                        recorded=[entry.get("by") != "machine" for entry in entries],
-                                                       keys=told["pictures"], cache=cache)
+                                                       keys=told["pictures"], cache=cache, notes=told.get("notes"))
             stored = await _store_file(user_id, "video", "video/mp4", f"{video['title'][:80]} ({word}).mp4", data,
                                        prompt=title)
             videos[lang] = {"file_id": stored, "url": f"/chat/files/{stored}", "seconds": seconds}
@@ -3262,7 +3273,7 @@ async def video_voice(message_id: int, payload: VoiceIn, principal: Principal = 
             title = _title(video, lang)
             data, seconds = await video_story.assemble(paths, narration, story[lang], title, lang, folder,
                                                        recorded=[n not in unread for n in range(count)],
-                                                       keys=story["pictures"],
+                                                       keys=story["pictures"], notes=story.get("notes"),
                                                        cache=video_story.clip_cache(message_id))
             async with session_factory()() as db:
                 stored = ChatFile(user_id=user_id, kind="video", mime_type="video/mp4",

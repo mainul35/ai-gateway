@@ -342,6 +342,8 @@ function renderEditor(){
       <div>
         ${shown ? `<img src="/chat/files/${shown}" alt="Scene ${i + 1}">` : ''}
         <div class="where">Scene ${i + 1} of ${told.pictures.length}</div>
+        ${((told.notes || [])[i] || []).length ? `<div class="where">After it, on a dark screen and not read: ${
+          told.notes[i].map(note => escapeHtml(note)).join(' · ')}</div>` : ''}
         ${preview?.ok ? `<div class="newPicture">${preview.saved
             ? 'The new picture is saved for this scene: it goes into the video when you save and remake.'
             : 'The new picture: it goes into the video when you save and remake. Save it to keep it if you leave the page.'}
