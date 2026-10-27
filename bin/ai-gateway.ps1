@@ -13,6 +13,8 @@
   ai-gateway launch claude -Model qwen3.6-256k -- -p "fix the failing test"    # after --: the app's own
   ai-gateway launch claude-desktop             # the Claude desktop app, all its sessions
   ai-gateway launch claude-desktop -Restore    # back to your Claude account
+  ai-gateway sessions                       # this computer's Claude Code sessions, in the playground
+  ai-gateway sessions --allow-commands      # ...and messages sent to them there may run commands too
   ai-gateway models                                                             # what you may use
   ai-gateway update                                                             # the newest launcher
 
@@ -66,7 +68,7 @@ function ConvertFrom-JsonTable($text) { return ConvertTo-Hashtable ($text | Conv
 function Write-Utf8($path, $text) {
     [System.IO.File]::WriteAllText($path, ($text -join "`n") + "`n", (New-Object System.Text.UTF8Encoding $false))
 }
-if ($Command -notin @("launch", "models", "update")) {
+if ($Command -notin @("launch", "models", "update", "sessions")) {
     Get-Help $MyInvocation.MyCommand.Path -Detailed | Out-String | Write-Host; exit 0
 }
 
@@ -128,6 +130,29 @@ if ($Command -eq "update") {
     Move-Item $new $target -Force
     Write-Host "ai-gateway is updated ($target)." -ForegroundColor Cyan
     exit 0
+}
+
+# --- this computer's Claude Code sessions, in the playground ---------------------------------------
+# The sessions agent (served by the gateway: app/static/claude-sessions.py) reports the sessions Claude
+# Code keeps for this launcher (~\.claude-gateway) to the playground's Code mode, and runs a message sent
+# to one of them there, in its folder. It stays in the foreground: Ctrl+C stops it. Fetched anew each
+# time, so it is the gateway's own version; checked to be Python before it is run.
+if ($Command -eq "sessions") {
+    $python = Get-Command python, py -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $python) { Fail "Python is needed for the sessions agent (https://www.python.org/downloads/)" }
+    $folder = Join-Path $HOME ".ai-gateway"
+    New-Item -ItemType Directory -Force -Path $folder | Out-Null
+    $agent = Join-Path $folder "claude-sessions.py"; $new = "$agent.new"
+    try { Invoke-Gateway "/static/claude-sessions.py" $new }
+    catch { Remove-Item $new -ErrorAction SilentlyContinue; Fail "could not download the sessions agent from ${Gateway}: $($_.Exception.Message)" }
+    & $python.Source -c "import ast, sys; ast.parse(open(sys.argv[1], encoding='utf-8').read())" $new 2>$null
+    if ($LASTEXITCODE -ne 0 -or -not (Select-String -Path $new -Pattern "def read_session" -Quiet)) {
+        Remove-Item $new; Fail "what the gateway sent is not the sessions agent"
+    }
+    Move-Item $new $agent -Force
+    $env:GATEWAY_KEY = $Key
+    & $python.Source $agent --gateway $Gateway @Extra
+    exit $LASTEXITCODE
 }
 
 # --- what the gateway says about the models ------------------------------------------------------

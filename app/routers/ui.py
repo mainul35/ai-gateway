@@ -196,6 +196,23 @@ async def playground_page(request: Request, user: User | None = Depends(current_
     return _require_login(user, "/playground") or _page(request, "playground.html", user)
 
 
+@router.get("/s/{token}")
+async def shared_conversation_page(token: str, user: User | None = Depends(current_user),
+                                   session: AsyncSession = Depends(get_session)):
+    """A shared conversation's link: signed in (after the login page, which comes back here), the person
+    may read it and is taken to it in the playground."""
+    from app.routers import chat            # here: chat imports much, and this page only needs one thing of it
+    if not chat.SHARE_TOKEN.match(token):
+        return PlainTextResponse("This link does not work.", status_code=404)
+    if user is None:
+        return RedirectResponse(f"/login?next=/s/{token}", status_code=303)
+    uid = await chat.join_share(session, user, token)
+    if uid is None:
+        return PlainTextResponse("This link does not work: it was never made, or its owner stopped sharing it.",
+                                 status_code=404)
+    return RedirectResponse(f"/playground?c={uid}", status_code=303)
+
+
 @router.get("/videos")
 async def videos_page(request: Request, user: User | None = Depends(current_user)):
     """The video stories: the list of stories, the player, the scenes and the editor ("Studio" layout,

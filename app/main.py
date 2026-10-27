@@ -21,7 +21,8 @@ _Image.MAX_IMAGE_PIXELS = 50_000_000
 warnings.simplefilter("error", _Image.DecompressionBombWarning)
 from app.engine.supervisor import supervisor
 from app.coding import runner as coding_runner
-from app.routers import admin, anthropic_v1, auth_sso, chat, coding, mcp_server, openai_v1, projects, responses_v1, shares, ui
+from app.routers import (admin, anthropic_v1, auth_sso, chat, code_sessions, coding, mcp_server, openai_v1, projects,
+                         responses_v1, shares, ui)
 from utils.ollama_client import ollama_host
 
 # Without this our own INFO logs never reach the console; uvicorn only configures its own loggers
@@ -120,6 +121,7 @@ app.include_router(responses_v1.router)
 app.include_router(admin.router)
 app.include_router(shares.router)
 app.include_router(auth_sso.router)
+app.include_router(code_sessions.router)
 app.include_router(chat.router)
 app.include_router(coding.router)
 app.include_router(projects.router)
