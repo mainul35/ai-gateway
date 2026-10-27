@@ -2483,7 +2483,9 @@ async def store_voiceover(message_id: int, payload: StoreVoiceIn, principal: Pri
         # Update the stored narration entry for this scene
         old_narration = story.setdefault("narration", {})
         old_entries = (old_narration.get(lang) or [])
-        old_entries = [None] * count  # always pad to current scene count
+        # Ensure array is long enough
+        while len(old_entries) < count:
+            old_entries.append(None)
         old_narration[lang] = old_entries
         old_entries[payload.index] = {"file_id": kept.id, "seconds": round(seconds, 2), "by": "recorded"}
         video["story"] = story
