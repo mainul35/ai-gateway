@@ -11,6 +11,8 @@
 #   ai-gateway launch claude --model qwen3.6-256k -- -p "fix the failing test"   # after --: the app's own
 #   ai-gateway launch claude-desktop            # the Claude desktop app (macOS, Linux), all its sessions
 #   ai-gateway launch claude-desktop --restore  # back to your Claude account
+#   ai-gateway sessions                       # this computer's Claude Code sessions, in the playground
+#   ai-gateway sessions --allow-commands      # ...and messages sent to them there may run commands too
 #   ai-gateway models                                                             # what you may use
 #   ai-gateway update                                                             # the newest launcher
 #
@@ -58,9 +60,9 @@ done
 GATEWAY=${GATEWAY%/}
 case "$command" in
     launch) ;;
-    models|update) ;;
+    models|update|sessions) ;;
     ""|-h|--help|help) usage ;;
-    *) die "unknown command '$command' (launch, models, update)" ;;
+    *) die "unknown command '$command' (launch, sessions, models, update)" ;;
 esac
 if [ "$command" = launch ]; then
     case " $APPS " in *" $APP "*) ;; *) die "launch which app? one of: $APPS" ;; esac
@@ -125,6 +127,25 @@ if [ "$command" = update ]; then
     cat "$new" > "$target" && rm -f "$new"      # written into, so the file keeps its permissions
     echo "ai-gateway is updated ($target)."
     exit 0
+fi
+
+# --- this computer's Claude Code sessions, in the playground ---------------------------------------
+# The sessions agent (served by the gateway: app/static/claude-sessions.py) reports the sessions Claude
+# Code keeps for this launcher (~/.claude-gateway) to the playground's Code mode, and runs a message sent
+# to one of them there, in its folder. It stays in the foreground: Ctrl+C stops it. Fetched anew each
+# time, so it is the gateway's own version; checked to be Python before it is run.
+if [ "$command" = sessions ]; then
+    command -v python3 >/dev/null || die "python3 is needed for the sessions agent"
+    agent="$HOME/.ai-gateway/claude-sessions.py"
+    (umask 077; mkdir -p "$HOME/.ai-gateway")
+    gateway_get /static/claude-sessions.py "$agent.new" \
+        || { rm -f "$agent.new"; die "could not download the sessions agent from $GATEWAY"; }
+    if ! python3 -c 'import ast, sys; ast.parse(open(sys.argv[1], encoding="utf-8").read())' "$agent.new" 2>/dev/null \
+        || ! grep -q 'def read_session' "$agent.new"; then
+        rm -f "$agent.new"; die "what the gateway sent is not the sessions agent"
+    fi
+    mv "$agent.new" "$agent"
+    GATEWAY_KEY=$KEY exec python3 "$agent" --gateway "$GATEWAY" ${extra[@]+"${extra[@]}"}
 fi
 
 # --- what the gateway says about the models ------------------------------------------------------

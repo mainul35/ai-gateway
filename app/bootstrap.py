@@ -35,6 +35,10 @@ _ADDED_COLUMNS = (
     ("users", "sso_subject", "VARCHAR(320)"),
     ("users", "approval", "VARCHAR(16)"),
     ("users", "session_epoch", "INTEGER DEFAULT 0"),
+    # Who wrote a message in a shared conversation; what the Code mode needs of a Claude Code session
+    ("conversation_messages", "author_id", "INTEGER REFERENCES users(id) ON DELETE SET NULL"),
+    ("ccd_sessions", "seen_at", "TIMESTAMPTZ"),
+    ("ccd_sessions", "transcript", "TEXT"),
 )
 
 

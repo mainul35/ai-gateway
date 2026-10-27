@@ -228,7 +228,12 @@ def is_navigation(request):
 # stats, the tasks page's project list and event feed, a folder waiting for remote work. Keep in
 # step with POLLED in app/activity.py, which leaves the same requests out of the idle check.
 POLLED = re.compile(r"^/(admin/system|admin/usage|admin/usage/hourly|admin/metrics|v1/models|coding/projects|coding/tasks/\d+/events"
-                    r"|coding/remote/\d+/next)$")
+                    r"|coding/remote/\d+/next|chat/sessions)$")
+
+
+# The Claude Code sessions agent's own requests (app/routers/code_sessions.py), every half minute from
+# each computer running it: never a reason to wake the machine
+AGENT_PATHS = re.compile(r"^/chat/sessions/(agent/next|agent/events|register)$")
 
 
 def is_background_poll(request, path):
@@ -539,6 +544,10 @@ async def gateway(request: Request, rest: str):
     # --- the gateway is asleep from here on ---
     if path == "/health":
         return asleep("homelabai is asleep")            # the deploy script's check; wakes nothing
+    if AGENT_PATHS.match(path):
+        # A Claude Code sessions agent asking for work or reporting its sessions: it waits for the
+        # machine to be up. A message sent to a session from the playground is what wakes it
+        return asleep("homelabai is asleep")
     if request.method in ("GET", "HEAD") and path in kept:
         return served_kept(*kept[path], request.method)  # a launcher or static file: no need to wake
     if model_list in models_kept:

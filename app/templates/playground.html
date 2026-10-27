@@ -86,6 +86,36 @@ dialog.aside::backdrop{background:rgba(0,0,0,.55)}
 .msg.assistant .failed{color:var(--danger);font-size:.85rem}
 .msg.user .who{display:none}
 .msg .who{font-size:.72rem;color:var(--muted);margin-bottom:.45rem;font-weight:600;letter-spacing:.02em}
+/* Shared conversations */
+.share-panel{background:var(--card);border:1px solid var(--border);border-radius:10px;padding:.7rem .9rem;
+             margin:.3rem 0 .5rem;font-size:.86rem;display:flex;flex-direction:column;gap:.5rem}
+.share-panel p{margin:0}
+.share-link{display:flex;gap:.4rem}
+.share-link input{flex:1;min-width:0;font-size:.8rem}
+.share-check{display:flex;gap:.45rem;align-items:center;margin:0;cursor:pointer}
+.share-check input{width:auto;margin:0}
+.share-people{display:flex;flex-direction:column;gap:.25rem}
+.share-person{display:flex;justify-content:space-between;gap:.5rem;flex-wrap:wrap;align-items:center}
+.share-person.state-pending b{color:var(--warning, #f59e0b)}
+.share-panel .danger{color:var(--danger);align-self:flex-start}
+.shared-bar{font-size:.85rem;color:var(--muted);margin:0 0 .4rem;display:flex;gap:.6rem;align-items:center;flex-wrap:wrap}
+.shared-head{font-size:.72rem;letter-spacing:.05em;text-transform:uppercase;color:var(--muted);padding:.6rem .5rem .2rem}
+/* Code mode */
+.code-pane{flex:1;display:flex;flex-direction:column;min-height:0;overflow:hidden;padding-bottom:.6rem}
+.code-pane .column{display:flex;flex-direction:column;min-height:0;height:100%}
+.code-about{font-size:.82rem;padding:.4rem 0;overflow-wrap:anywhere}
+.code-log{flex:1;overflow-y:auto;min-height:0;padding:.3rem 0}
+.code-line{font-family:ui-monospace,monospace;font-size:.78rem;color:var(--muted);margin:.15rem 0 .15rem .4rem;
+           white-space:pre-wrap;overflow-wrap:anywhere}
+.code-line.result{opacity:.75}
+.code-line.status{font-family:inherit;font-style:italic}
+.code-line.failed{color:var(--danger)}
+.code-composer textarea{width:100%}
+.session-item.offline{opacity:.55}
+.session-item.active{border-color:var(--primary);background:var(--input)}
+.session-where{display:block;font-size:.74rem;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.session-status.gone{background:transparent;border:1px solid var(--border)}
+.session-note{padding:.4rem .5rem;font-size:.82rem;line-height:1.45;list-style:none}
 /* Mode switch */
 .mode-switch{display:flex;gap:.3rem;margin-bottom:.3rem}
 .mode-btn{flex:1;padding:.3rem .5rem;border:1px solid var(--border);border-radius:6px;
@@ -99,7 +129,7 @@ dialog.aside::backdrop{background:rgba(0,0,0,.55)}
               font-size:.85rem;border:1px solid transparent;transition:border-color .15s}
 .session-item:hover{border-color:var(--text);background:var(--input)}
 .session-title{display:block;font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.session-pc{font-size:.75rem;color:var(--muted);float:right}
+.session-pc{display:block;font-size:.72rem;color:var(--muted)}
 .session-status{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:.3rem}
 .session-status.running{background:#10b981;box-shadow:0 0 4px #10b981}
 .session-status.idle{background:var(--border)}
@@ -514,6 +544,7 @@ a.paper{color:var(--text);text-decoration:none}
         <button class="linkish" id="newChat" title="Start a new conversation">+ New</button>
       </div>
       <div class="convs" id="convs"><span class="muted" style="padding:0 .5rem">Loading&hellip;</span></div>
+      <div class="convs shared-convs" id="sharedWithMe" hidden></div>
       <div class="sessions" id="sessions" hidden><ul id="sessionList"></ul></div>
     </div>
 
@@ -553,8 +584,9 @@ a.paper{color:var(--text);text-decoration:none}
         <button class="linkish reader-btn" id="readerToggle" aria-pressed="false"
                 title="Reading mode: hide the menu and the message box, so the answer has the whole screen"
                 aria-label="Reading mode">&#8597;</button>
-        <button class="linkish" id="shareBtn" hidden>&#8599; Share</button>
+        <button class="linkish" id="shareBtn" hidden title="Share this conversation by a link">&#8599; Share</button>
       </div>
+      <div class="column"><div class="share-panel" id="sharePanel" hidden></div></div>
     </header>
     <!-- Reading mode's way back: the message box, one tap away from wherever you have scrolled -->
     <button class="btn reader-write" id="readerWrite" hidden>&#9998; Write</button>
@@ -568,8 +600,28 @@ a.paper{color:var(--text);text-decoration:none}
       </div>
     </div>
 
+    <!-- Code mode: a Claude Code session on one of your computers, and a message for it -->
+    <div class="code-pane" id="codePane" hidden>
+      <div class="column">
+        <div class="code-about muted" id="codeAbout">Pick a session on the left.</div>
+        <div class="code-log" id="codeLog"></div>
+        <div class="composer code-composer">
+          <textarea id="codePrompt" rows="2" placeholder="Pick a session first"></textarea>
+          <div class="tools">
+            <select id="codePermission" title="What Claude Code may do on that computer for this message">
+              <option value="edits">File edits only</option>
+              <option value="commands">Edits and commands</option>
+            </select>
+            <span class="spacer"></span>
+            <button class="btn btn-sm" id="codeSend" disabled>Send</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
     <div class="composer-wrap">
       <div class="column">
+        <div class="shared-bar" id="sharedBar" hidden></div>
         <div class="composer" id="composer">
           <div class="queue" id="queue" hidden></div>
           <div class="thumbs" id="pending"></div>
@@ -1397,6 +1449,7 @@ async function loadConversations(){
       </div>`).join('')
       : '<span class="muted" style="padding:0 .5rem;font-size:.88rem">No saved conversations yet.</span>';
   }catch(e){ target.innerHTML = `<span class="muted">Could not load: ${escapeHtml(errorText(e))}</span>`; }
+  loadSharedWithMe();
 }
 
 // The open conversation is in the address by its random uid (/playground?c=<uuid>), never its row
@@ -1425,6 +1478,8 @@ function resetChat(how = 'push'){
   systemBox.value = '';
   pending = []; renderPending();
   document.getElementById('chatTitle').textContent = 'New conversation';
+  document.getElementById('chatTitle').dataset.chat = 'New conversation';
+  showAccess(null);
   chat.innerHTML = '<p class="muted" id="empty">Pick a model and say something.</p>';
   loadConversations();
   loadMemory();
@@ -1450,6 +1505,7 @@ function fillTranscript(messages){
       // was sent in the first place
       const forTools = extra.mode === 'image' || extra.mode === 'photo';
       const box = addUserMessage(m.content, imageIds.map(fileUrl), attached, !forTools);
+      if(m.author && m.by_me === false) box.querySelector('.who').textContent = m.author;
       lastHadPicture = attached.some(f => !f.document);
       box._messageId = m.id;
       box.dataset.message = m.id;
@@ -1507,6 +1563,8 @@ async function openConversation(id, how = 'push'){
     chosenModel = conversation.model && models[conversation.model] ? conversation.model : '';
     syncModel();
     document.getElementById('chatTitle').textContent = conversation.title;
+    document.getElementById('chatTitle').dataset.chat = conversation.title;
+    showAccess(conversation);
     chat.innerHTML = '';
     history = [];
     fillTranscript(conversation.messages);
@@ -4317,159 +4375,266 @@ async function openFromUrl(how){
 }
 window.addEventListener('popstate', () => { if(!controller) openFromUrl('none'); });
 
-// --- Mode switch: Chat / Code -----------------------------------------------------------------
+// --- Chat and Code -----------------------------------------------------------------------------
+// Chat is this page as it always was. Code lists the Claude Code sessions on your own computers -
+// the ones each computer's sessions agent reports (`ai-gateway sessions`) - and talks to one of them:
+// a message is run on that computer, in the session (app/routers/code_sessions.py).
 let currentMode = 'chat';
+let openSession = null;          // the session open in the Code pane
+let sessionsTimer = null;
 
-function setMode(mode) {
+function setMode(mode){
   currentMode = mode;
-  document.querySelectorAll('.mode-btn').forEach(btn => {
-    btn.classList.toggle('active', btn.dataset.mode === mode);
-  });
-  const convs = document.getElementById('convs');
-  const sessions = document.getElementById('sessions');
-  const title = document.getElementById('sideTitle');
-  if (mode === 'chat') {
-    convs.hidden = false;
-    sessions.hidden = true;
-    title.textContent = 'Conversations';
-    document.getElementById('newChat').style.display = '';
-  } else {
-    convs.hidden = true;
-    sessions.hidden = false;
-    title.textContent = 'Sessions';
-    document.getElementById('newChat').style.display = 'none';
+  try{ localStorage.setItem('pg.mode', mode); }catch(e){}
+  document.querySelectorAll('.mode-btn').forEach(b => b.classList.toggle('active', b.dataset.mode === mode));
+  const code = mode === 'code';
+  document.getElementById('convs').hidden = code;
+  document.getElementById('sharedWithMe').hidden = code || !document.getElementById('sharedWithMe').innerHTML;
+  document.getElementById('sessions').hidden = !code;
+  document.getElementById('sideTitle').textContent = code ? 'Claude Code sessions' : 'Conversations';
+  document.getElementById('newChat').hidden = code;
+  document.getElementById('codePane').hidden = !code;
+  document.getElementById('transcript').hidden = code;
+  document.querySelector('.composer-wrap').hidden = code;
+  document.getElementById('shareBtn').hidden = code || !shareable();
+  document.getElementById('chatTitle').textContent = code ? (openSession ? openSession.title : 'Claude Code')
+                                                          : (document.getElementById('chatTitle').dataset.chat || 'New conversation');
+  clearInterval(sessionsTimer);
+  if(code){
     loadSessions();
+    sessionsTimer = setInterval(loadSessions, 30000);   // computers come and go
   }
 }
 
-async function loadSessions() {
-  try {
-    const resp = await api('/chat/sessions');
-    const list = document.getElementById('sessionList');
-    // Filter out stale sessions (last active more than 5 min ago)
-    const now = new Date();
-    const active = resp.filter(s => {
-      const last = new Date(s.last_active);
-      return (now - last) < 5 * 60 * 1000;
-    });
-    if (active.length === 0) {
-      list.innerHTML = '<li class="session-item"><span class="muted">No active sessions. Open Claude Code on your PC to connect.</span></li>';
-      return;
+function sessionWhere(s){
+  const folder = (s.workspace_path || '').split(/[\\/]/).filter(Boolean).pop() || '';
+  return [folder, s.branch_name && s.branch_name !== 'HEAD' ? s.branch_name : ''].filter(Boolean).join(' · ');
+}
+
+async function loadSessions(){
+  const list = document.getElementById('sessionList');
+  let sessions;
+  try{ sessions = await api('/chat/sessions'); }
+  catch(e){ list.innerHTML = `<li class="muted session-note">Could not load the sessions: ${escapeHtml(errorText(e))}</li>`; return; }
+  if(!sessions.length){
+    list.innerHTML = `<li class="muted session-note">No sessions yet. On a computer where you use Claude Code through
+      <code>ai-gateway launch claude</code>, run <code>ai-gateway sessions</code>: its sessions appear here.</li>`;
+    return;
+  }
+  list.innerHTML = sessions.map(s => `
+    <li class="session-item ${s.online ? '' : 'offline'} ${openSession && openSession.session_id === s.session_id ? 'active' : ''}"
+        data-session="${escapeHtml(s.session_id)}" title="${escapeHtml(s.workspace_path || '')}">
+      <span class="session-status ${s.online ? s.status : 'gone'}"></span>
+      <span class="session-title">${escapeHtml(s.title)}</span>
+      <span class="session-where">${escapeHtml(sessionWhere(s))}</span>
+      <span class="session-pc">${escapeHtml(s.pc_name)}${s.online ? '' : ' · not connected'} · ${relativeTime(s.last_active)}</span>
+    </li>`).join('');
+  list.querySelectorAll('[data-session]').forEach(li => li.addEventListener('click', () => {
+    showSession(li.dataset.session);
+    if(window.innerWidth < 900) document.getElementById('pg').classList.remove('open');
+  }));
+}
+
+function sessionLine(role, text, extra = ''){
+  const line = document.createElement('div');
+  line.className = `code-line ${role} ${extra}`;
+  line.textContent = text;
+  return line;
+}
+
+function renderSessionMessage(m){
+  if(m.role === 'tool') return sessionLine('tool', m.text);
+  const box = document.createElement('div');
+  box.className = `msg ${m.role === 'user' ? 'user' : 'assistant'}`;
+  box.innerHTML = `<div class="who">${m.role === 'user' ? 'You' : 'Claude Code'}</div><div class="body"></div>`;
+  box.querySelector('.body').textContent = m.text;
+  return box;
+}
+
+async function showSession(id){
+  let s;
+  try{ s = await api(`/chat/sessions/${encodeURIComponent(id)}`); }
+  catch(e){ showError('Could not open the session: ' + errorText(e)); return; }
+  openSession = s;
+  document.getElementById('chatTitle').textContent = s.title;
+  document.getElementById('codeAbout').innerHTML =
+    `<b>${escapeHtml(s.pc_name)}</b> · <code>${escapeHtml(s.workspace_path || '')}</code>`
+    + (s.branch_name && s.branch_name !== 'HEAD' ? ` · ${escapeHtml(s.branch_name)}` : '')
+    + (s.model ? ` · ${escapeHtml(s.model)}` : '')
+    + (s.online ? '' : ' · <span style="color:var(--danger)">its computer is not connected now</span>');
+  const log = document.getElementById('codeLog');
+  log.innerHTML = '';
+  (s.transcript || []).forEach(m => log.appendChild(renderSessionMessage(m)));
+  if(!(s.transcript || []).length) log.innerHTML = '<p class="muted">No messages kept for this session yet.</p>';
+  log.scrollTop = log.scrollHeight;
+  const permission = document.getElementById('codePermission');
+  permission.querySelector('option[value="commands"]').disabled = !s.allow_commands;
+  if(!s.allow_commands) permission.value = 'edits';
+  permission.title = s.allow_commands ? '' : `${s.pc_name}'s agent was started without --allow-commands`;
+  document.getElementById('codeSend').disabled = !s.online;
+  document.getElementById('codePrompt').placeholder = s.online
+    ? `Message this session on ${s.pc_name}…` : `${s.pc_name} is not connected: run "ai-gateway sessions" there`;
+  loadSessions();
+}
+
+async function sendToSession(){
+  const box = document.getElementById('codePrompt');
+  const text = box.value.trim();
+  if(!text || !openSession) return;
+  const log = document.getElementById('codeLog');
+  log.querySelector('p.muted')?.remove();
+  log.appendChild(renderSessionMessage({role: 'user', text}));
+  const status = sessionLine('status', 'Sending');
+  log.appendChild(status);
+  log.scrollTop = log.scrollHeight;
+  box.value = '';
+  const button = document.getElementById('codeSend');
+  button.disabled = true;
+  try{
+    const response = await fetch(`/chat/sessions/${encodeURIComponent(openSession.session_id)}/message`, {
+      method: 'POST', headers: JSON_HEADERS,
+      body: JSON.stringify({text, permission: document.getElementById('codePermission').value})});
+    if(!response.ok){
+      const err = await response.json().catch(() => ({}));
+      throw new Error((typeof err.detail === 'string' && err.detail) || `HTTP ${response.status}`);
     }
-    list.innerHTML = active.map(s => {
-      const branch = s.branch_name ? `<span class="session-branch">${esc(s.branch_name)}</span>` : '';
-      const pr = s.pr_url ? `<a href="${esc(s.pr_url)}" target="_blank" class="session-pr">PR</a>` : '';
-      return `<li class="session-item" data-session-id="${esc(s.session_id)}">
-        <span class="session-status ${s.status}"></span>
-        <span class="session-title">${esc(s.title)}</span>
-        <span class="session-pc">${esc(s.pc_name)}</span>
-        ${branch}${pr}
-      </li>`;
-    }).join('');
-    list.querySelectorAll('.session-item').forEach(li => {
-      li.addEventListener('click', () => selectSession(li.dataset.sessionId));
+    await readEvents(response, chunk => {
+      const e = chunk.session;
+      if(!e) return;
+      if(e.kind === 'status') status.textContent = e.text;
+      else if(e.kind === 'text') log.insertBefore(renderSessionMessage({role: 'assistant', text: e.text}), status);
+      else if(e.kind === 'tool') log.insertBefore(sessionLine('tool', `[${e.name}] ${e.input || ''}`), status);
+      else if(e.kind === 'tool_result') log.insertBefore(sessionLine('tool', e.text, e.error ? 'failed' : 'result'), status);
+      else if(e.kind === 'error') log.insertBefore(sessionLine('status', e.text, 'failed'), status);
+      else if(e.kind === 'result') status.textContent = (e.error ? 'Ended with an error' : 'Done')
+        + (e.seconds ? ` in ${e.seconds} s` : '') + (e.turns ? `, ${e.turns} turn${e.turns === 1 ? '' : 's'}` : '');
+      else if(e.kind === 'done' && status.textContent.startsWith('Running')) status.textContent = 'Done';
+      log.scrollTop = log.scrollHeight;
     });
-  } catch (e) {
-    const list = document.getElementById('sessionList');
-    list.innerHTML = '<li class="session-item"><span class="muted">Failed to load sessions</span></li>';
+  }catch(e){
+    status.textContent = 'It did not run: ' + errorText(e);
+    status.classList.add('failed');
   }
+  button.disabled = !(openSession && openSession.online);
 }
 
-// Send a heartbeat every 60s so the gateway knows this PC is alive
-setInterval(() => {
-  const mySession = {
-    session_id: 'local_' + (currentUid || 'unknown'),
-    title: (document.getElementById('chatTitle')?.textContent || 'Untitled') || 'New conversation',
-    status: controller ? 'running' : 'idle',
-    pc_name: navigator.userAgent.includes('Windows') ? 'Windows PC' : navigator.userAgent.includes('Mac') ? 'Mac' : 'Unknown PC',
-  };
-  try {
-    fetch('/chat/sessions/register', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ pc_name: mySession.pc_name, sessions: [mySession] })
-    }).catch(() => {});
-  } catch(e) {}
-}, 60000);
-
-function selectSession(sessionId) {
-  // For now: scroll to top and show session info in the main panel
-  // TODO: integrate with session backend for live chat
-  console.log('Selected session:', sessionId);
-}
-
-// Mode switch click handlers
-document.querySelectorAll('.mode-btn').forEach(btn => {
-  btn.addEventListener('click', () => setMode(btn.dataset.mode));
+document.querySelectorAll('.mode-btn').forEach(b => b.addEventListener('click', () => setMode(b.dataset.mode)));
+document.getElementById('codeSend').addEventListener('click', sendToSession);
+document.getElementById('codePrompt').addEventListener('keydown', e => {
+  if(e.key === 'Enter' && !e.shiftKey && !e.isComposing){ e.preventDefault(); sendToSession(); }
 });
 
-// --- Share conversation -----------------------------------------------------------------------
-const shareBtn = document.getElementById('shareBtn');
-let shareRow = document.getElementById('shareRow');
-if (!shareRow) {
-  shareRow = document.createElement('div');
-  shareRow.id = 'shareRow';
-  shareRow.style.cssText = 'display:flex;gap:.3rem;margin:.5rem 0;align-items:center';
-  const input = document.createElement('input');
-  input.id = 'shareUrl';
-  input.style.cssText = 'flex:1;padding:.3rem;font-size:.8rem;border:1px solid var(--border);border-radius:4px';
-  const copyBtn = document.createElement('button');
-  copyBtn.className = 'linkish';
-  copyBtn.textContent = 'Copy';
-  copyBtn.addEventListener('click', () => {
-    const url = document.getElementById('shareUrl').value;
-    navigator.clipboard.writeText(url);
-    copyBtn.textContent = 'Copied!';
-    setTimeout(() => { copyBtn.textContent = 'Copy'; }, 1500);
-  });
-  const closeBtn = document.createElement('button');
-  closeBtn.className = 'linkish';
-  closeBtn.textContent = '✕';
-  closeBtn.addEventListener('click', () => { shareRow.hidden = true; });
-  shareRow.appendChild(input);
-  shareRow.appendChild(copyBtn);
-  shareRow.appendChild(closeBtn);
-  document.querySelector('.side .group').appendChild(shareRow);
-}
+// --- shared conversations ----------------------------------------------------------------------
+// A conversation is shared by a link: whoever is signed in here and opens it reads it, and may ask
+// to write in it; its owner approves or refuses each of them (app/routers/chat.py).
+let conversationAccess = 'owner';     // of the open conversation: owner, editor or viewer
 
-if (shareBtn) {
-  shareBtn.addEventListener('click', () => {
-    if (currentId) {
-      shareConversation(currentId);
-    }
+function shareable(){ return !!currentId && conversationAccess === 'owner'; }
+
+function showAccess(conversation){
+  conversationAccess = conversation ? conversation.access || 'owner' : 'owner';
+  const bar = document.getElementById('sharedBar');
+  const send = document.getElementById('send');
+  const reading = conversationAccess === 'viewer';
+  promptBox.disabled = reading;
+  send.disabled = reading;
+  document.getElementById('shareBtn').hidden = currentMode === 'code' || !shareable();
+  document.getElementById('sharePanel').hidden = true;
+  if(!conversation || conversationAccess === 'owner'){ bar.hidden = true; return; }
+  bar.hidden = false;
+  const owner = escapeHtml(conversation.owner || 'someone');
+  bar.innerHTML = conversationAccess === 'editor'
+    ? `Shared by <b>${owner}</b>: you can write in it, and your questions are shown as yours.`
+    : conversation.asked === 'pending' ? `Shared by <b>${owner}</b>: you asked to write in it, and ${owner} has not answered yet.`
+    : conversation.asked === 'rejected' ? `Shared by <b>${owner}</b>: you can read it.`
+    : `Shared by <b>${owner}</b>: you can read it.` + (conversation.may_ask
+        ? ' <button class="btn btn-sm" id="askToWrite">Ask to write in it</button>' : '');
+  document.getElementById('askToWrite')?.addEventListener('click', async () => {
+    try{
+      await api(`/chat/conversations/${currentId}/share/ask`, {method: 'POST'});
+      showAccess({...conversation, asked: 'pending', may_ask: false});
+    }catch(e){ showError(errorText(e)); }
   });
 }
 
-async function shareConversation(convId) {
-  try {
-    const result = await api.post('/chat/share-conversation', { conversation_id: convId });
-    const input = document.getElementById('shareUrl');
-    input.value = location.origin + result.path;
-    shareRow.hidden = false;
-    shareRow.style.display = 'flex';
-  } catch (e) {
-    showError('Could not create share link: ' + errorText(e));
+function renderSharePanel(shared){
+  const panel = document.getElementById('sharePanel');
+  if(!shared){
+    panel.innerHTML = `<p>Anyone signed in to this gateway who has the link can read this conversation.</p>
+      <label class="share-check"><input type="checkbox" id="shareAsk" checked> Let them ask to write in it</label>
+      <button class="btn btn-sm" id="shareMake">Make a link</button>`;
+    panel.querySelector('#shareMake').addEventListener('click', () => changeShare({allow_edit_requests: panel.querySelector('#shareAsk').checked}));
+    return;
   }
+  const url = location.origin + shared.path;
+  const word = {viewer: 'reads it', pending: 'asks to write', approved: 'writes in it', rejected: 'refused; reads it'};
+  panel.innerHTML = `<div class="share-link"><input readonly value="${escapeHtml(url)}"><button class="btn btn-sm" id="shareCopy">Copy</button></div>
+    <label class="share-check"><input type="checkbox" id="shareAsk" ${shared.allow_edit_requests ? 'checked' : ''}> Let them ask to write in it</label>
+    <div class="share-people">${shared.people.length ? shared.people.map(p => `
+      <div class="share-person state-${p.status}"><span><b>${escapeHtml(p.name)}</b> <span class="muted">${word[p.status] || p.status}</span></span>
+        <span>${p.status !== 'approved' ? `<button class="linkish" data-person="${p.id}" data-act="approve">Let write</button>` : ''}
+          ${p.status === 'approved' || p.status === 'pending' ? `<button class="linkish" data-person="${p.id}" data-act="reject">${p.status === 'approved' ? 'Read only' : 'Refuse'}</button>` : ''}
+          <button class="linkish" data-person="${p.id}" data-act="remove" title="Takes it away; opening the link again gives it back to read">Remove</button></span>
+      </div>`).join('') : '<p class="muted">Nobody has opened the link yet.</p>'}</div>
+    <button class="linkish danger" id="shareStop">Stop sharing</button>`;
+  panel.querySelector('#shareCopy').addEventListener('click', e => {
+    navigator.clipboard.writeText(url).then(() => { e.target.textContent = 'Copied'; setTimeout(() => e.target.textContent = 'Copy', 1500); });
+  });
+  panel.querySelector('#shareAsk').addEventListener('change', e => changeShare({allow_edit_requests: e.target.checked}));
+  panel.querySelector('#shareStop').addEventListener('click', async () => {
+    if(!confirm('Stop sharing? The link stops working, and everyone it was shared with loses the conversation.')) return;
+    try{ renderSharePanel((await api(`/chat/conversations/${currentId}/share`, {method: 'DELETE'})).shared); }
+    catch(e){ showError(errorText(e)); }
+  });
+  panel.querySelectorAll('[data-person]').forEach(b => b.addEventListener('click', async () => {
+    try{
+      renderSharePanel((await api(`/chat/conversations/${currentId}/share/people/${b.dataset.person}`, {
+        method: 'POST', headers: JSON_HEADERS, body: JSON.stringify({action: b.dataset.act})})).shared);
+    }catch(e){ showError(errorText(e)); }
+  }));
 }
 
-// Show/hide share button based on whether we have a conversation
-const origOpenConversation = openConversation;
-if (origOpenConversation) {
-  window.openConversation = async function(id, how) {
-    await origOpenConversation(id, how);
-    if (currentId) {
-      shareBtn.hidden = false;
-    } else {
-      shareBtn.hidden = true;
-    }
-  };
+async function changeShare(body){
+  try{
+    renderSharePanel((await api(`/chat/conversations/${currentId}/share`, {method: 'POST', headers: JSON_HEADERS,
+                                                                         body: JSON.stringify(body)})).shared);
+  }catch(e){ showError('Could not share it: ' + errorText(e)); }
 }
+
+document.getElementById('shareBtn').addEventListener('click', async () => {
+  const panel = document.getElementById('sharePanel');
+  if(!panel.hidden){ panel.hidden = true; return; }
+  try{ renderSharePanel((await api(`/chat/conversations/${currentId}/share`)).shared); }
+  catch(e){ showError(errorText(e)); return; }
+  panel.hidden = false;
+});
+
+async function loadSharedWithMe(){
+  const box = document.getElementById('sharedWithMe');
+  let shared = [];
+  try{ shared = await api('/chat/shared-with-me'); }catch(e){ shared = []; }
+  box.innerHTML = shared.length ? '<div class="shared-head">Shared with you</div>' + shared.map(c => `
+    <div class="conv ${c.id === currentId ? 'active' : ''}" data-open="${escapeHtml(c.uid)}" title="${escapeHtml(c.title)}">
+      <div style="flex:1;min-width:0">
+        <div class="title">${escapeHtml(c.title)}</div>
+        <div class="when">${escapeHtml(c.owner)} &middot; ${c.access === 'editor' ? 'you write in it' : 'you read it'}</div>
+      </div></div>`).join('') : '';
+  box.hidden = currentMode === 'code' || !shared.length;
+}
+
+document.getElementById('sharedWithMe').addEventListener('click', e => {
+  const item = e.target.closest('[data-open]');
+  if(item) openConversation(item.dataset.open);
+});
 
 fitComposer();
 // The conversation in the address opens once the models are known, whatever becomes of the list
 // and the memory panel beside it
 Promise.all([loadModels(), loadCapabilities()]).then(() => {
   openFromUrl('replace');
+  let mode = 'chat';
+  try{ mode = localStorage.getItem('pg.mode') || 'chat'; }catch(e){}
+  if(mode === 'code') setMode('code');
   return Promise.all([loadConversations(), loadMemory()]);
 });
 </script>

@@ -118,6 +118,9 @@ class ConversationMessage(Base):
     stats: Mapped[str | None] = mapped_column(Text, nullable=True)
     # JSON: attached or generated images ([{"file_id", "kind"}]) and web sources ([{"title", "url"}])
     attachments: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Who wrote a question, in a conversation shared with people allowed to write in it (None: its
+    # owner, or an answer)
+    author_id: Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
     conversation: Mapped[Conversation] = relationship(back_populates="messages")
@@ -317,7 +320,8 @@ class SharedPage(Base):
 
 
 class CCDSessions(Base):
-    """Claude Code sessions reported by PCs."""
+    """A Claude Code session on one of the person's computers, as its sessions agent reports it
+    (app/static/claude-sessions.py): the playground's Code mode lists them and talks to them through it."""
     __tablename__ = "ccd_sessions"
 
     id: Mapped[int] = mapped_column(primary_key=True)
@@ -336,10 +340,15 @@ class CCDSessions(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     last_active: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    # When its computer last reported it: the session can be talked to while that is recent
+    seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # JSON: its latest messages, as the agent read them from the session's file
+    transcript: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
 class SharedConversation(Base):
-    """Shared conversation with invite-only access."""
+    """A conversation shared by a link (app/routers/chat.py, shared conversations). Stopping the sharing
+    deletes it, and with it everyone it was shared with."""
     __tablename__ = "shared_conversations"
 
     id: Mapped[int] = mapped_column(primary_key=True)
@@ -347,14 +356,15 @@ class SharedConversation(Base):
     conversation_id: Mapped[int] = mapped_column(
         ForeignKey("conversations.id", ondelete="CASCADE"), unique=True, index=True)
     owner_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
-    editors: Mapped[str] = mapped_column(String(512), default="")
+    editors: Mapped[str] = mapped_column(String(512), default="")   # unused: who may write is SharedAccessRequest
     status: Mapped[str] = mapped_column(String(16), default="active")
     allow_edit_requests: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
 class SharedAccessRequest(Base):
-    """Edit access request for a shared conversation."""
+    """Someone a conversation is shared with: they opened its link ("viewer"), asked to write in it
+    ("pending"), were let ("approved") or refused ("rejected")."""
     __tablename__ = "shared_access_requests"
 
     id: Mapped[int] = mapped_column(primary_key=True)
