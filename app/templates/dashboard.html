@@ -104,6 +104,20 @@
   <div id="usage" class="muted">Loading&hellip;</div>
 </div>
 
+<div class="card" style="margin-bottom:1.5rem" id="onlineCard" hidden>
+  <h2>Online Users <span class="muted" style="font-size:.85rem">· active in last 5 minutes</span></h2>
+  <table class="usage-table" id="onlineTable">
+    <thead><tr>
+      <th class="sort-col" data-key="name">Name <span class="sort-arrow"></span></th>
+      <th>Email</th>
+      <th>Role</th>
+      <th class="sort-col" data-key="last_active">Last Active <span class="sort-arrow"></span></th>
+      <th>Requests</th>
+    </tr></thead>
+    <tbody id="onlineBody"></tbody>
+  </table>
+</div>
+
 <!-- One person's usage, model by model: opened from a row of the table above -->
 <dialog id="usageDialog" class="usage-dialog">
   <div class="row" style="justify-content:space-between;align-items:center;margin-bottom:.6rem">
@@ -472,6 +486,40 @@ async function loadAdmin(){
   }catch(e){ showError('Could not load dashboard: ' + e.message); }
 }
 
+// --- Online Users --------------------------------------------------------------------------------
+let onlineSort = {key: 'last_active', asc: false};
+function timeAgo(iso){
+  if(!iso) return '—';
+  const secs = (Date.now() - new Date(iso).getTime()) / 1000;
+  if(secs < 60) return 'just now';
+  if(secs < 3600) return Math.floor(secs / 60) + ' min ago';
+  return Math.floor(secs / 3600) + 'h ago';
+}
+async function loadOnlineUsers(){
+  try{
+    const resp = await api('/admin/online-users');
+    const card = document.getElementById('onlineCard');
+    const body = document.getElementById('onlineBody');
+    const users = resp.users || [];
+    if(!users.length){ card.hidden = true; return; }
+    card.hidden = false;
+    users.sort((a, b) => {
+      let va = a[onlineSort.key], vb = b[onlineSort.key];
+      if(onlineSort.key === 'name') va = va || '', vb = vb || '';
+      if(typeof va === 'string') vb = vb || '';
+      const cmp = va < vb ? -1 : va > vb ? 1 : 0;
+      return onlineSort.asc ? cmp : -cmp;
+    });
+    body.innerHTML = users.map(u =>
+      `<tr data-name="${escapeHtml(u.name)}"><td class="usage-user">${escapeHtml(u.name)}</td>
+        <td class="muted">${escapeHtml(u.email || '')}</td>
+        <td><span class="pill ${u.role === 'admin' ? 'on' : 'off'}">${escapeHtml(u.role)}</span></td>
+        <td class="muted">${timeAgo(u.last_active)}</td>
+        <td>${u.requests}</td></tr>`
+    ).join('');
+  }catch(e){}
+}
+
 // Loads and unloads in progress, by profile. The cards redraw every 15 s and a big model takes
 // longer than that to load, so the redraw has to know, or it puts a fresh Load button back mid-load.
 const engineActions = new Map();
@@ -800,6 +848,7 @@ loadProjects();
 if(isAdmin){
   loadAdmin(); setInterval(loadAdmin, 15000);
   loadActivity(); setInterval(() => { if(!document.hidden) loadActivity(); }, 60000);
+  loadOnlineUsers(); setInterval(() => { if(!document.hidden) loadOnlineUsers(); }, 30000);
   startLive();
   document.getElementById('live').addEventListener('mousemove', liveHover);
   document.getElementById('live').addEventListener('mouseleave', liveHover);

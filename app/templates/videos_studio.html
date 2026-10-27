@@ -13,7 +13,7 @@ body.videos-studio main{max-width:none;padding:0}
 .stories .cap{padding:.5rem .8rem;font-size:.72rem;letter-spacing:.05em;text-transform:uppercase;color:var(--muted);
                border-bottom:1px solid var(--card);flex:none}
 .studio.drafting{grid-template-columns:22rem minmax(0,1fr)}
-.studio.drafting .strip,.studio.drafting #player,.studio.drafting #editor{display:none}
+.studio.drafting #player,.studio.drafting #editor{display:none}
 .stories .rows,.strip .rows{overflow-y:auto;flex:1}
 /* Narrow screens stack the three panels; each keeps a height of its own and scrolls inside it, as on
    a wide screen, so the page moves from panel to panel rather than through one endless column:
@@ -80,7 +80,7 @@ body.videos-studio main{max-width:none;padding:0}
 .badge.qari{border-color:#8b5cf6;color:#c4b5fd}
 .savebar{border-top:1px solid var(--border);padding:.7rem .8rem;display:flex;gap:.7rem;align-items:center;background:var(--bg)}
 .savebar .spacer{flex:1}
-.progress{margin-top:.8rem;background:var(--card);border-radius:10px;padding:.7rem 1rem}
+.progress{position:fixed; top:1rem; left:50%; transform:translateX(-50%); min-width:280px; max-width:90vw; background:var(--card); border-radius:12px; padding:.8rem 1.2rem; box-shadow:0 4px 24px rgba(0,0,0,.18); z-index:999}
 .progress .line{font-size:.85rem;color:var(--muted)}
 .progress .bar{height:6px;background:var(--input);border-radius:3px;overflow:hidden;margin:.3rem 0 .5rem}
 .progress .bar div{height:100%;background:var(--primary);width:0;transition:width .3s}
@@ -92,6 +92,8 @@ dialog.zoom::backdrop{background:rgba(0,0,0,.8)}
 </style>
 
 <div class="studio">
+  <div class="progress" id="progress" hidden><div class="line" id="partLine"></div><div class="bar"><div id="partBar"></div></div>
+    <div class="line" id="wholeLine"></div><div class="bar total"><div id="wholeBar"></div></div></div>
   <div class="stories">
     <div class="cap" id="storyCap">Stories</div>
     <div class="rows" id="storyRows"><span class="muted" style="padding:.8rem">Loading…</span></div>
@@ -100,8 +102,6 @@ dialog.zoom::backdrop{background:rgba(0,0,0,.8)}
     <div id="error" class="note err" hidden></div>
     <div class="head" id="head"><span class="muted">Loading…</span></div>
     <div id="player"></div>
-    <div class="progress" id="progress" hidden><div class="line" id="partLine"></div><div class="bar"><div id="partBar"></div></div>
-      <div class="line" id="wholeLine"></div><div class="bar total"><div id="wholeBar"></div></div></div>
     <div class="editor" id="editor" hidden></div>
     <div id="draftArea"></div>
   </div>

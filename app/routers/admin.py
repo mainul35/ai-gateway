@@ -299,6 +299,32 @@ async def usage_summary(days: int = 7, _: Principal = Depends(require_manager),
     }
 
 
+@router.get("/online-users")
+async def online_users(_: Principal = Depends(require_admin),
+                       session: AsyncSession = Depends(get_session)):
+    """Users who made requests in the last 5 minutes, sorted by latest activity."""
+    cutoff = utcnow() - timedelta(minutes=5)
+    result = await session.execute(
+        select(User.name, User.email, User.role,
+               func.max(UsageRecord.created_at).label("last_active"),
+               func.count(UsageRecord.id).label("requests"))
+        .join(User, User.id == UsageRecord.user_id)
+        .where(UsageRecord.created_at >= cutoff)
+        .group_by(User.id, User.name, User.email, User.role)
+        .order_by(func.max(UsageRecord.created_at).desc())
+    )
+    users = []
+    for name, email, role, last_active, requests in result.all():
+        users.append({
+            "name": name,
+            "email": email,
+            "role": role,
+            "last_active": last_active.isoformat() if last_active else None,
+            "requests": int(requests),
+        })
+    return {"users": users}
+
+
 @router.get("/usage/hourly")
 async def usage_hourly(hours: int = 24, _: Principal = Depends(require_manager),
                        session: AsyncSession = Depends(get_session)):
