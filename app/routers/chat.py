@@ -2480,15 +2480,12 @@ async def store_voiceover(message_id: int, payload: StoreVoiceIn, principal: Pri
                             data=cleaned)
             db.add(kept)
             await db.commit()
-        # Update the stored voice entry for this scene
-        old_saved = story.get(f"voice_{lang}") or [None] * count
-        old_entry = old_saved[payload.index]
-        if old_entry and isinstance(old_entry, dict) and old_entry.get("file_id"):
-            await _drop_file(user_id, old_entry["file_id"])
-        if not old_saved or len(old_saved) <= payload.index:
-            old_saved = [None] * count
-        old_saved[payload.index] = {"file_id": kept.id, "seconds": round(seconds, 2)}
-        story[f"voice_{lang}"] = old_saved
+        # Update the stored narration entry for this scene
+        old_narration = story.setdefault("narration", {})
+        old_entries = (old_narration.get(lang) or [])
+        old_entries = [None] * count  # always pad to current scene count
+        old_narration[lang] = old_entries
+        old_entries[payload.index] = {"file_id": kept.id, "seconds": round(seconds, 2), "by": "recorded"}
         video["story"] = story
         filed["video"] = video
         async with session_factory()() as db:
