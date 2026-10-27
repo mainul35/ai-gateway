@@ -3198,7 +3198,7 @@ async def _video_pipeline(principal, user_id, ctx):
         # Who speaks each part, in which voice: a character's id to the voice slot their cast gives them
         cast_map = {m["id"]: m.get("voice") or "narrator" for m in told.get("cast") or []}
         for k, lang in enumerate(produced):
-            if lang in videos:
+            if lang in videos and not voices.get(lang):
                 continue                                         # made before it stopped, or not edited
             word = video_story.language_name(lang)
             texts = told[lang]
