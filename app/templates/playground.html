@@ -86,6 +86,26 @@ dialog.aside::backdrop{background:rgba(0,0,0,.55)}
 .msg.assistant .failed{color:var(--danger);font-size:.85rem}
 .msg.user .who{display:none}
 .msg .who{font-size:.72rem;color:var(--muted);margin-bottom:.45rem;font-weight:600;letter-spacing:.02em}
+/* Mode switch */
+.mode-switch{display:flex;gap:.3rem;margin-bottom:.3rem}
+.mode-btn{flex:1;padding:.3rem .5rem;border:1px solid var(--border);border-radius:6px;
+          background:none;color:var(--muted);font-size:.82rem;cursor:pointer;font-weight:500}
+.mode-btn.active{color:var(--text);background:var(--input);border-color:var(--text)}
+.mode-btn:hover:not(.active){background:var(--input)}
+/* Sessions list */
+.sessions{margin-top:.5rem}
+.sessions ul{list-style:none;padding:0;margin:0}
+.session-item{padding:.4rem .5rem;border-radius:6px;cursor:pointer;margin-bottom:.15rem;
+              font-size:.85rem;border:1px solid transparent;transition:border-color .15s}
+.session-item:hover{border-color:var(--text);background:var(--input)}
+.session-title{display:block;font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.session-pc{font-size:.75rem;color:var(--muted);float:right}
+.session-status{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:.3rem}
+.session-status.running{background:#10b981;box-shadow:0 0 4px #10b981}
+.session-status.idle{background:var(--border)}
+.session-branch{font-size:.72rem;color:#6366f1;margin-left:.3rem}
+.session-pr{font-size:.72rem;color:#6366f1;margin-left:.3rem;text-decoration:none}
+.session-pr:hover{text-decoration:underline}
 /* white-space:normal is the important one. The body is pre-wrap so that a streaming answer keeps
    its line breaks before anything has rendered it; once the Markdown is in, the newlines between
    </p> and <p> are still being honoured as real line breaks, which lands a blank line on top of
@@ -484,12 +504,17 @@ a.paper{color:var(--text);text-decoration:none}
 <div class="pg" id="pg">
   <div class="scrim" id="scrim"></div>
   <aside class="side">
+    <div class="mode-switch">
+      <button class="mode-btn active" data-mode="chat">Chat</button>
+      <button class="mode-btn" data-mode="code">Code</button>
+    </div>
     <div class="group">
       <div class="head">
-        <h2>Conversations</h2>
+        <h2 id="sideTitle">Conversations</h2>
         <button class="linkish" id="newChat" title="Start a new conversation">+ New</button>
       </div>
       <div class="convs" id="convs"><span class="muted" style="padding:0 .5rem">Loading&hellip;</span></div>
+      <div class="sessions" id="sessions" hidden><ul id="sessionList"></ul></div>
     </div>
 
     <div class="group" id="memoryCard" hidden>
@@ -528,6 +553,7 @@ a.paper{color:var(--text);text-decoration:none}
         <button class="linkish reader-btn" id="readerToggle" aria-pressed="false"
                 title="Reading mode: hide the menu and the message box, so the answer has the whole screen"
                 aria-label="Reading mode">&#8597;</button>
+        <button class="linkish" id="shareBtn" hidden>&#8599; Share</button>
       </div>
     </header>
     <!-- Reading mode's way back: the message box, one tap away from wherever you have scrolled -->
@@ -4290,6 +4316,127 @@ async function openFromUrl(how){
   }
 }
 window.addEventListener('popstate', () => { if(!controller) openFromUrl('none'); });
+
+// --- Mode switch: Chat / Code -----------------------------------------------------------------
+let currentMode = 'chat';
+
+function setMode(mode) {
+  currentMode = mode;
+  document.querySelectorAll('.mode-btn').forEach(btn => {
+    btn.classList.toggle('active', btn.dataset.mode === mode);
+  });
+  const convs = document.getElementById('convs');
+  const sessions = document.getElementById('sessions');
+  const title = document.getElementById('sideTitle');
+  if (mode === 'chat') {
+    convs.hidden = false;
+    sessions.hidden = true;
+    title.textContent = 'Conversations';
+    document.getElementById('newChat').style.display = '';
+  } else {
+    convs.hidden = true;
+    sessions.hidden = false;
+    title.textContent = 'Sessions';
+    document.getElementById('newChat').style.display = 'none';
+    loadSessions();
+  }
+}
+
+async function loadSessions() {
+  try {
+    const resp = await api('/chat/sessions');
+    const list = document.getElementById('sessionList');
+    list.innerHTML = resp.map(s => {
+      const branch = s.branch_name ? `<span class="session-branch">${esc(s.branch_name)}</span>` : '';
+      const pr = s.pr_url ? `<a href="${esc(s.pr_url)}" target="_blank" class="session-pr">PR</a>` : '';
+      return `<li class="session-item" data-session-id="${esc(s.session_id)}">
+        <span class="session-status ${s.status}"></span>
+        <span class="session-title">${esc(s.title)}</span>
+        <span class="session-pc">${esc(s.pc_name)}</span>
+        ${branch}${pr}
+      </li>`;
+    }).join('');
+    list.querySelectorAll('.session-item').forEach(li => {
+      li.addEventListener('click', () => selectSession(li.dataset.sessionId));
+    });
+  } catch (e) {
+    const list = document.getElementById('sessionList');
+    list.innerHTML = '<li class="session-item"><span class="muted">No active sessions</span></li>';
+  }
+}
+
+function selectSession(sessionId) {
+  // For now: scroll to top and show session info in the main panel
+  // TODO: integrate with session backend for live chat
+  console.log('Selected session:', sessionId);
+}
+
+// Mode switch click handlers
+document.querySelectorAll('.mode-btn').forEach(btn => {
+  btn.addEventListener('click', () => setMode(btn.dataset.mode));
+});
+
+// --- Share conversation -----------------------------------------------------------------------
+const shareBtn = document.getElementById('shareBtn');
+let shareRow = document.getElementById('shareRow');
+if (!shareRow) {
+  shareRow = document.createElement('div');
+  shareRow.id = 'shareRow';
+  shareRow.style.cssText = 'display:flex;gap:.3rem;margin:.5rem 0;align-items:center';
+  const input = document.createElement('input');
+  input.id = 'shareUrl';
+  input.style.cssText = 'flex:1;padding:.3rem;font-size:.8rem;border:1px solid var(--border);border-radius:4px';
+  const copyBtn = document.createElement('button');
+  copyBtn.className = 'linkish';
+  copyBtn.textContent = 'Copy';
+  copyBtn.addEventListener('click', () => {
+    const url = document.getElementById('shareUrl').value;
+    navigator.clipboard.writeText(url);
+    copyBtn.textContent = 'Copied!';
+    setTimeout(() => { copyBtn.textContent = 'Copy'; }, 1500);
+  });
+  const closeBtn = document.createElement('button');
+  closeBtn.className = 'linkish';
+  closeBtn.textContent = '✕';
+  closeBtn.addEventListener('click', () => { shareRow.hidden = true; });
+  shareRow.appendChild(input);
+  shareRow.appendChild(copyBtn);
+  shareRow.appendChild(closeBtn);
+  document.querySelector('.side .group').appendChild(shareRow);
+}
+
+if (shareBtn) {
+  shareBtn.addEventListener('click', () => {
+    if (currentId) {
+      shareConversation(currentId);
+    }
+  });
+}
+
+async function shareConversation(convId) {
+  try {
+    const result = await api.post('/chat/share-conversation', { conversation_id: convId });
+    const input = document.getElementById('shareUrl');
+    input.value = location.origin + result.path;
+    shareRow.hidden = false;
+    shareRow.style.display = 'flex';
+  } catch (e) {
+    showError('Could not create share link: ' + errorText(e));
+  }
+}
+
+// Show/hide share button based on whether we have a conversation
+const origOpenConversation = openConversation;
+if (origOpenConversation) {
+  window.openConversation = async function(id, how) {
+    await origOpenConversation(id, how);
+    if (currentId) {
+      shareBtn.hidden = false;
+    } else {
+      shareBtn.hidden = true;
+    }
+  };
+}
 
 fitComposer();
 // The conversation in the address opens once the models are known, whatever becomes of the list

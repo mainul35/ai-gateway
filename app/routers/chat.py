@@ -10,11 +10,13 @@ import logging
 import os
 import re
 import shutil
+import hashlib
+import secrets
 import time
 from datetime import timedelta
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, Response, UploadFile, status
-from fastapi.responses import StreamingResponse
+from fastapi.responses import HTMLResponse, StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -23,7 +25,7 @@ from sqlalchemy.orm import selectinload
 from app import access, backends, feedback, limits, settings, usage as usage_log
 from app.auth import Principal, authenticate
 from app.db import get_session, session_factory
-from app.models import AnswerFeedback, ChatFile, Conversation, ConversationMessage, MemoryEntry, utcnow
+from app.models import AnswerFeedback, CCDSessions, ChatFile, Conversation, ConversationMessage, SharedConversation, SharedAccessRequest, MemoryEntry, utcnow
 from app.engine.supervisor import supervisor
 from app.routers.openai_v1 import PROXY_PATHS, forward
 from app.tools import (agent, chooser, documents, image_prompt, images, jobs, map_plan,
@@ -68,6 +70,35 @@ class MessageIn(BaseModel):
     stats: dict | None = None
     # {"images": [{"file_id"}], "sources": [{"title", "url"}], "generated": {"file_id", "prompt"}}
     attachments: dict | None = None
+
+
+class SessionItem(BaseModel):
+    session_id: str
+    title: str = "Untitled"
+    pinned: bool = False
+    linked: bool = False
+    workspace_path: str | None = None
+    status: str = "idle"
+    model: str | None = None
+    effort: str | None = None
+    branch_name: str | None = None
+    pr_url: str | None = None
+    parent_session_id: str | None = None
+
+
+class SessionRegister(BaseModel):
+    pc_name: str
+    sessions: list[SessionItem]
+
+
+class ShareConversationIn(BaseModel):
+    conversation_id: int
+    allow_edit_requests: bool = False
+
+
+class AccessRequestIn(BaseModel):
+    user_name: str
+    action: str = Field(pattern="^(approve|reject)$")
 
 
 def _require_user(principal):
@@ -236,6 +267,272 @@ async def delete_conversation(conversation_id: int, principal: Principal = Depen
     await session.delete(conversation)
     await session.commit()
     return {"deleted": conversation_id}
+
+
+@router.post("/sessions/register")
+async def register_sessions(payload: SessionRegister, principal: Principal = Depends(authenticate),
+                            session: AsyncSession = Depends(get_session)):
+    """Register or update Claude Code sessions from a PC."""
+    user = _require_user(principal)
+    now = utcnow()
+    stale = now - timedelta(minutes=10)
+    # Prune stale sessions from this PC
+    await session.execute(
+        select(CCDSessions).where(
+            CCDSessions.user_id == user.id,
+            CCDSessions.pc_name == payload.pc_name,
+            CCDSessions.last_active < stale
+        ))
+    upserted = []
+    for s in payload.sessions:
+        existing = await session.get(CCDSessions, s.session_id)
+        if existing:
+            existing.title = s.title
+            existing.pinned = s.pinned
+            existing.linked = s.linked
+            existing.workspace_path = s.workspace_path
+            existing.status = s.status
+            existing.model = s.model
+            existing.effort = s.effort
+            existing.branch_name = s.branch_name
+            existing.pr_url = s.pr_url
+            existing.parent_session_id = s.parent_session_id
+            existing.last_active = now
+        else:
+            existing = CCDSessions(
+                session_id=s.session_id, title=s.title, pinned=s.pinned, linked=s.linked,
+                workspace_path=s.workspace_path, pc_name=payload.pc_name, status=s.status,
+                model=s.model, effort=s.effort, branch_name=s.branch_name, pr_url=s.pr_url,
+                parent_session_id=s.parent_session_id, user_id=user.id, last_active=now)
+            session.add(existing)
+        upserted.append(existing.session_id)
+    await session.commit()
+    return {"registered": upserted}
+
+
+@router.get("/sessions")
+async def list_sessions(principal: Principal = Depends(authenticate),
+                        session: AsyncSession = Depends(get_session)):
+    """List active Claude Code sessions for the user."""
+    user = _require_user(principal)
+    stale = utcnow() - timedelta(minutes=10)
+    rows = await session.execute(
+        select(CCDSessions).where(
+            CCDSessions.user_id == user.id,
+            CCDSessions.last_active >= stale
+        ).order_by(CCDSessions.last_active.desc()))
+    return [
+        {"session_id": s.session_id, "title": s.title, "pinned": s.pinned, "linked": s.linked,
+         "workspace_path": s.workspace_path, "pc_name": s.pc_name, "status": s.status,
+         "model": s.model, "effort": s.effort, "branch_name": s.branch_name,
+         "pr_url": s.pr_url, "parent_session_id": s.parent_session_id,
+         "last_active": s.last_active.isoformat()}
+        for s in rows.scalars().all()]
+
+
+@router.get("/sessions/{session_id}")
+async def get_session_detail(session_id: str, principal: Principal = Depends(authenticate),
+                             session: AsyncSession = Depends(get_session)):
+    """Get detail for a specific session."""
+    user = _require_user(principal)
+    s = await session.execute(
+        select(CCDSessions).where(
+            CCDSessions.user_id == user.id, CCDSessions.session_id == session_id))
+    s = s.scalar_one_or_none()
+    if not s:
+        raise HTTPException(404, "Session not found")
+    return {
+        "session_id": s.session_id, "title": s.title, "pinned": s.pinned, "linked": s.linked,
+        "workspace_path": s.workspace_path, "pc_name": s.pc_name, "status": s.status,
+        "model": s.model, "effort": s.effort, "branch_name": s.branch_name,
+        "pr_url": s.pr_url, "parent_session_id": s.parent_session_id,
+        "last_active": s.last_active.isoformat()}
+
+
+# --- shared conversations -------------------------------------------------------------
+
+SHARED_CONVERSATION_HEADERS = {
+    "Content-Security-Policy": "sandbox allow-scripts allow-modals allow-popups allow-forms; frame-ancestors 'none'",
+    "X-Frame-Options": "DENY",
+    "Referrer-Policy": "no-referrer",
+    "Cache-Control": "no-store",
+    "X-Robots-Tag": "noindex, nofollow",
+}
+
+
+@router.post("/share-conversation")
+async def share_conversation(payload: ShareConversationIn,
+                             principal: Principal = Depends(authenticate),
+                             session: AsyncSession = Depends(get_session)):
+    """Create a share link for a conversation. Invite-only."""
+    user = _require_user(principal)
+    conv = await _owned(session, payload.conversation_id, user)
+    if not conv:
+        raise HTTPException(404, "Conversation not found")
+
+    # Check if already shared
+    existing = await session.execute(
+        select(SharedConversation).where(
+            SharedConversation.owner_id == user.id,
+            SharedConversation.conversation_id == conv.id,
+            SharedConversation.status == "active"))
+    existing = existing.scalar_one_or_none()
+    if existing:
+        existing.allow_edit_requests = payload.allow_edit_requests
+        await session.commit()
+        return {"token": existing.token, "path": f"/s/{existing.token}", "title": conv.title,
+                "created_at": existing.created_at.isoformat(), "existing": True}
+
+    token = secrets.token_urlsafe(18)
+    shared = SharedConversation(
+        token=token, conversation_id=conv.id, owner_id=user.id,
+        allow_edit_requests=payload.allow_edit_requests)
+    session.add(shared)
+    await session.commit()
+    return {"token": shared.token, "path": f"/s/{shared.token}", "title": conv.title,
+            "created_at": shared.created_at.isoformat(), "existing": False}
+
+
+@router.get("/share-conversation/{token}", include_in_schema=False)
+async def view_shared_conversation(token: str,
+                                    principal: Principal = Depends(authenticate),
+                                    session: AsyncSession = Depends(get_session)):
+    """View a shared conversation. Requires login and access permission."""
+    user = _require_user(principal)
+    if not (16 <= len(token) <= 64):
+        raise HTTPException(404, "Invalid link")
+
+    shared = await session.execute(
+        select(SharedConversation).where(SharedConversation.token == token))
+    shared = shared.scalar_one_or_none()
+    if not shared or shared.status != "active":
+        raise HTTPException(404, "Link not found")
+
+    # Check access: owner, listed editor, or approved requester
+    is_owner = shared.owner_id == user.id
+    is_editor = user.name in shared.editors if shared.editors else False
+    is_approved_requester = await session.execute(
+        select(SharedAccessRequest).where(
+            SharedAccessRequest.shared_id == shared.id,
+            SharedAccessRequest.requester_id == user.id,
+            SharedAccessRequest.status == "approved"))
+    is_approved_requester = is_approved_requester.scalar_one_or_none()
+
+    if not (is_owner or is_editor or is_approved_requester):
+        raise HTTPException(404, "Link not found")
+
+    # Load conversation with messages
+    conv = await _owned(session, shared.conversation_id, user)
+    if not conv:
+        raise HTTPException(404, "Conversation not found")
+
+    # Build a map of user names for tagging
+    users = {u.id: u.name for u in (await session.execute(select(User))).scalars().all()}
+    messages = []
+    for msg in conv.messages:
+        mj = _message_json(msg)
+        # Tag messages by contributor for multi-user editing
+        # (author_id would be stored in a future schema extension)
+        messages.append(mj)
+
+    return {
+        "conversation": {"id": conv.id, "uid": conv.uid, "title": conv.title,
+                         "model": conv.model, "system_prompt": conv.system_prompt,
+                         "created_at": conv.created_at.isoformat(),
+                         "updated_at": conv.updated_at.isoformat()},
+        "shared_by": conv.user.name,
+        "messages": messages,
+        "can_edit": is_owner or is_editor or is_approved_requester}
+
+
+@router.post("/share-conversation/{token}/request-edit")
+async def request_edit_access(token: str,
+                               principal: Principal = Depends(authenticate),
+                               session: AsyncSession = Depends(get_session)):
+    """Request edit access to a shared conversation."""
+    user = _require_user(principal)
+    shared = await session.execute(
+        select(SharedConversation).where(SharedConversation.token == token))
+    shared = shared.scalar_one_or_none()
+    if not shared or shared.status != "active":
+        raise HTTPException(404, "Link not found")
+
+    # Check if already requested
+    existing = await session.execute(
+        select(SharedAccessRequest).where(
+            SharedAccessRequest.shared_id == shared.id,
+            SharedAccessRequest.requester_id == user.id))
+    existing = existing.scalar_one_or_none()
+    if existing and existing.status == "pending":
+        return {"status": "already_pending"}
+
+    if shared.status == "revoked":
+        raise HTTPException(404, "Link not found")
+
+    req = SharedAccessRequest(shared_id=shared.id, requester_id=user.id)
+    session.add(req)
+    await session.commit()
+    return {"status": "pending"}
+
+
+@router.patch("/share-conversation/{token}/access")
+async def manage_access(token: str, payload: AccessRequestIn,
+                         principal: Principal = Depends(authenticate),
+                         session: AsyncSession = Depends(get_session)):
+    """Approve or reject an edit access request."""
+    user = _require_user(principal)
+    shared = await session.execute(
+        select(SharedConversation).where(SharedConversation.token == token))
+    shared = shared.scalar_one_or_none()
+    if not shared or shared.status != "active" or shared.owner_id != user.id:
+        raise HTTPException(403, "Forbidden")
+
+    # Look up the requester by name
+    requester = (await session.execute(
+        select(User).where(User.name == payload.user_name))).scalar_one_or_none()
+    if not requester:
+        raise HTTPException(404, "User not found")
+
+    # Find and update the pending request
+    req = (await session.execute(select(SharedAccessRequest).where(
+        SharedAccessRequest.shared_id == shared.id,
+        SharedAccessRequest.requester_id == requester.id,
+        SharedAccessRequest.status == "pending"))).scalar_one_or_none()
+
+    if payload.action == "approve":
+        if req:
+            req.status = "approved"
+        # Add user to editors list
+        editors = set(shared.editors.split(",") if shared.editors else set())
+        editors.add(payload.user_name)
+        shared.editors = ",".join(sorted(editors))
+    elif payload.action == "reject":
+        if req:
+            req.status = "rejected"
+        # Remove from editors if already added
+        editors = set(shared.editors.split(",") if shared.editors else set())
+        editors.discard(payload.user_name)
+        shared.editors = ",".join(sorted(editors))
+
+    await session.commit()
+    return {"status": payload.action}
+
+
+@router.delete("/share-conversation/{token}")
+async def revoke_share(token: str,
+                        principal: Principal = Depends(authenticate),
+                        session: AsyncSession = Depends(get_session)):
+    """Revoke a shared conversation link."""
+    user = _require_user(principal)
+    shared = await session.execute(
+        select(SharedConversation).where(SharedConversation.token == token))
+    shared = shared.scalar_one_or_none()
+    if not shared or not (shared.owner_id == user.id or principal.is_admin):
+        raise HTTPException(404, "Link not found")
+
+    shared.status = "revoked"
+    await session.commit()
+    return {"deleted": token}
 
 
 @router.post("/conversations/{conversation_id}/messages", status_code=status.HTTP_201_CREATED)

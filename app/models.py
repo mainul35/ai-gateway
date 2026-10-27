@@ -314,3 +314,52 @@ class SharedPage(Base):
     sha256: Mapped[str] = mapped_column(String(64), index=True)
     views: Mapped[int] = mapped_column(Integer, default=0)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class CCDSessions(Base):
+    """Claude Code sessions reported by PCs."""
+    __tablename__ = "ccd_sessions"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    session_id: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    title: Mapped[str] = mapped_column(String(200), default="Untitled")
+    pinned: Mapped[bool] = mapped_column(Boolean, default=False)
+    linked: Mapped[bool] = mapped_column(Boolean, default=False)
+    workspace_path: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    pc_name: Mapped[str] = mapped_column(String(100))
+    status: Mapped[str] = mapped_column(String(20), default="idle")
+    model: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    effort: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    branch_name: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    pr_url: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    parent_session_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    last_active: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+
+
+class SharedConversation(Base):
+    """Shared conversation with invite-only access."""
+    __tablename__ = "shared_conversations"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    token: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    conversation_id: Mapped[int] = mapped_column(
+        ForeignKey("conversations.id", ondelete="CASCADE"), unique=True, index=True)
+    owner_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    editors: Mapped[str] = mapped_column(String(512), default="")
+    status: Mapped[str] = mapped_column(String(16), default="active")
+    allow_edit_requests: Mapped[bool] = mapped_column(Boolean, default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class SharedAccessRequest(Base):
+    """Edit access request for a shared conversation."""
+    __tablename__ = "shared_access_requests"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    shared_id: Mapped[int] = mapped_column(
+        ForeignKey("shared_conversations.id", ondelete="CASCADE"), index=True)
+    requester_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    status: Mapped[str] = mapped_column(String(16), default="pending")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
