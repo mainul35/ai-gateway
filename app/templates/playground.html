@@ -4346,7 +4346,17 @@ async function loadSessions() {
   try {
     const resp = await api('/chat/sessions');
     const list = document.getElementById('sessionList');
-    list.innerHTML = resp.map(s => {
+    // Filter out stale sessions (last active more than 5 min ago)
+    const now = new Date();
+    const active = resp.filter(s => {
+      const last = new Date(s.last_active);
+      return (now - last) < 5 * 60 * 1000;
+    });
+    if (active.length === 0) {
+      list.innerHTML = '<li class="session-item"><span class="muted">No active sessions. Open Claude Code on your PC to connect.</span></li>';
+      return;
+    }
+    list.innerHTML = active.map(s => {
       const branch = s.branch_name ? `<span class="session-branch">${esc(s.branch_name)}</span>` : '';
       const pr = s.pr_url ? `<a href="${esc(s.pr_url)}" target="_blank" class="session-pr">PR</a>` : '';
       return `<li class="session-item" data-session-id="${esc(s.session_id)}">
@@ -4361,9 +4371,26 @@ async function loadSessions() {
     });
   } catch (e) {
     const list = document.getElementById('sessionList');
-    list.innerHTML = '<li class="session-item"><span class="muted">No active sessions</span></li>';
+    list.innerHTML = '<li class="session-item"><span class="muted">Failed to load sessions</span></li>';
   }
 }
+
+// Send a heartbeat every 60s so the gateway knows this PC is alive
+setInterval(() => {
+  const mySession = {
+    session_id: 'local_' + (currentUid || 'unknown'),
+    title: (document.getElementById('chatTitle')?.textContent || 'Untitled') || 'New conversation',
+    status: controller ? 'running' : 'idle',
+    pc_name: navigator.userAgent.includes('Windows') ? 'Windows PC' : navigator.userAgent.includes('Mac') ? 'Mac' : 'Unknown PC',
+  };
+  try {
+    fetch('/chat/sessions/register', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ pc_name: mySession.pc_name, sessions: [mySession] })
+    }).catch(() => {});
+  } catch(e) {}
+}, 60000);
 
 function selectSession(sessionId) {
   // For now: scroll to top and show session info in the main panel
