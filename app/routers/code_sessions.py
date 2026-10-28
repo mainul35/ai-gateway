@@ -64,10 +64,13 @@ def _user(principal):
 
 
 # The coding tools the launcher connects, by what their requests say they are
-TOOLS = {"claude-code": "Claude Code", "opencode": "OpenCode", "qwen-code": "Qwen Code", "codex": "Codex",
+TOOLS = {"claude-code": "Claude Code", "claude-desktop": "Claude desktop", "opencode": "OpenCode", "qwen-code": "Qwen Code", "codex": "Codex",
          "hermes": "Hermes", "openclaw": "OpenClaw"}
-_AGENTS_BY_NAME = (("claude-cli", "claude-code"), ("opencode", "opencode"), ("qwencode", "qwen-code"),
+# The desktop app's Code tab is Claude Code too, and says so in its User-Agent: looked for first
+_AGENTS_BY_NAME = (("claude-desktop", "claude-desktop"), ("claude-cli", "claude-code"), ("opencode", "opencode"), ("qwencode", "qwen-code"),
                    ("qwen-code", "qwen-code"), ("codex", "codex"), ("hermes", "hermes"), ("openclaw", "openclaw"))
+# Sessions a computer's agent can send a message to: Claude Code's, from a terminal or the desktop app
+SENDABLE = ("claude-code", "claude-desktop")
 RUNNING_SECONDS = 90         # a session that asked for a reply this recently is working
 
 
@@ -95,8 +98,9 @@ def _json(row, transcript=False):
             "status": "running" if row.last_active and (utcnow() - row.last_active).total_seconds() < RUNNING_SECONDS
             else "idle",
             "last_active": row.last_active.isoformat() if row.last_active else None,
-            # Its computer's agent is there: what makes a session one to send messages to (Claude Code, for now)
-            "online": agent is not None, "can_send": agent is not None and client == "claude-code",
+            # Its computer's agent is there: what makes a session one to send messages to (Claude Code's)
+            "sendable": client in SENDABLE, "online": agent is not None,
+            "can_send": agent is not None and client in SENDABLE,
             "allow_commands": bool(agent and agent.get("allow_commands"))}
     if transcript:
         try:
@@ -124,6 +128,9 @@ class Reported(BaseModel):
     last_active: datetime | None = None
     # Its latest messages; left out when they have not changed since the last report
     transcript: list[Said] | None = Field(default=None, max_length=KEPT_MESSAGES)
+    # "claude-desktop": a session of the desktop app's Code tab, only its id and folder - the gateway
+    # knows the rest from its requests, and lists it only once it has seen them
+    app: str | None = Field(default=None, pattern="^(claude-code|claude-desktop)$")
 
 
 class Report(BaseModel):
@@ -147,13 +154,21 @@ async def register(payload: Report, principal: Principal = Depends(authenticate)
         row = existing.get(sid)
         if row is not None and row.user_id != user.id:
             continue
+        if s.app == "claude-desktop":
+            # The desktop app keeps sessions that never came here (signed in to Claude itself): only the
+            # ones the gateway has seen are this computer's to send to
+            if row is not None:
+                row.pc_name, row.client, row.seen_at = payload.pc_name, "claude-desktop", now
+                row.workspace_path = s.workspace_path or row.workspace_path
+            continue
         if row is None:
             row = CCDSessions(session_id=sid, user_id=user.id, pc_name=payload.pc_name)
             session.add(row)
         # What the agent leaves out stays as the gateway knows it from the session's own requests
         row.pc_name, row.title = payload.pc_name, s.title or row.title or "Untitled"
         row.workspace_path, row.branch_name = s.workspace_path or row.workspace_path, s.branch_name or row.branch_name
-        row.model, row.status, row.client = s.model or row.model, s.status, "claude-code"
+        row.model, row.status = s.model or row.model, s.status
+        row.client = row.client if row.client in SENDABLE else "claude-code"
         row.last_active = max(filter(None, [row.last_active, s.last_active])) if row.last_active else (s.last_active or now)
         row.seen_at = now
         if s.transcript is not None:
@@ -245,7 +260,7 @@ async def send_message(session_id: str, payload: SessionMessage, principal: Prin
     """A message for a session, run on its computer; its events streamed back as they come."""
     user = _user(principal)
     row = await _session_row(session, user, session_id)
-    if (row.client or "claude-code") != "claude-code":
+    if (row.client or "claude-code") not in SENDABLE:
         raise HTTPException(status.HTTP_409_CONFLICT, f"Messages can be sent to Claude Code sessions only, for now; "
                                                       f"this one is {TOOLS.get(row.client, row.client)}'s")
     agent = _agent(user.id, row.pc_name)
@@ -582,7 +597,9 @@ async def _note(user_id, session_id, update):
                 row = CCDSessions(session_id=session_id, user_id=user_id, pc_name=update["computer"] or "",
                                   title="Untitled")
                 db.add(row)
-            row.client = update["client"]
+            # A desktop app's session stays one when a message sent from the playground runs it in Claude Code
+            if not (row.client == "claude-desktop" and update["client"] == "claude-code"):
+                row.client = update["client"]
             if update["computer"]:
                 row.pc_name = update["computer"]
             if update.get("model"):

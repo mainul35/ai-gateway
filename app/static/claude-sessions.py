@@ -160,11 +160,72 @@ def read_session(path):
             "transcript": said[-KEPT_MESSAGES:]}, modified
 
 
+# --- the Claude desktop app's Code tab -----------------------------------------------------------
+# Its sessions are Claude Code's, kept in Claude Code's usual folder (~/.claude); the app keeps a record
+# of each beside its settings, saying which Claude Code session it is and in which folder. It brings
+# its own Claude Code, so `claude` need not be on the PATH.
+
+def desktop_folders():
+    """The desktop app's settings folders on this computer (Windows, a Store install, macOS, Linux and
+    its Flatpak and Snap installs), each where its session records are."""
+    home = os.path.expanduser("~")
+    bases = [os.environ.get("LOCALAPPDATA"), os.environ.get("APPDATA"),
+             os.path.join(home, "Library", "Application Support"),
+             os.environ.get("XDG_CONFIG_HOME") or os.path.join(home, ".config")]
+    if os.environ.get("LOCALAPPDATA"):
+        bases += glob.glob(os.path.join(os.environ["LOCALAPPDATA"], "Packages", "Claude_*", "LocalCache", "*"))
+    bases += glob.glob(os.path.join(home, ".var", "app", "*", "config"))
+    bases += glob.glob(os.path.join(home, "snap", "*", "current", ".config"))
+    found = []
+    for base in filter(None, bases):
+        for name in ("Claude-3p", "Claude", "Claude Nest"):
+            folder = os.path.join(base, name)
+            if os.path.isdir(os.path.join(folder, "claude-code-sessions")) and folder not in found:
+                found.append(folder)
+    return found
+
+
+def desktop_claude(folder):
+    """The newest Claude Code the desktop app brought along, else the one on the PATH."""
+    names = ("claude.exe",) if os.name == "nt" else ("claude",)
+    found = [path for pattern in ("*/*/%s", "*/%s", "*/*/*/%s") for name in names
+             for path in glob.glob(os.path.join(folder, "claude-code", pattern % name)) if os.path.isfile(path)]
+    found.sort(key=os.path.getmtime, reverse=True)
+    return found[0] if found else shutil.which("claude")
+
+
+def desktop_sessions(days):
+    """{Claude Code session id: (its folder, the config folder its file is in, the Claude Code to run)}
+    of the desktop app's sessions used within `days`, not archived, whose file is on this computer."""
+    since = (time.time() - days * 86400) * 1000
+    config = os.environ.get("CLAUDE_CONFIG_DIR") or os.path.join(os.path.expanduser("~"), ".claude")
+    sessions = {}
+    for folder in desktop_folders():
+        claude = None
+        for record in glob.glob(os.path.join(folder, "claude-code-sessions", "*", "*", "local_*.json")):
+            try:
+                if os.path.getmtime(record) * 1000 < since:
+                    continue
+                with open(record, encoding="utf-8") as f:
+                    info = json.load(f)
+            except (OSError, ValueError):
+                continue
+            sid, cwd = info.get("cliSessionId"), info.get("cwd")
+            if not sid or not cwd or info.get("isArchived") or (info.get("lastActivityAt") or 0) < since:
+                continue
+            if not glob.glob(os.path.join(config, "projects", "*", glob.escape(sid) + ".jsonl")):
+                continue                                 # nothing said in it yet, or kept elsewhere
+            claude = claude or desktop_claude(folder)
+            sessions[sid] = (cwd, config, claude)
+    return sessions
+
+
 class Sessions:
     def __init__(self, config_dir, days):
         self.config_dir, self.days = config_dir, days
         self.sent = {}          # session -> the file time last reported with its messages
         self.where = {}         # session -> its folder, for running a message there
+        self.desktop = {}       # the desktop app's sessions: id -> (folder, config folder, its Claude Code)
 
     def report(self, gateway, name, allow_commands):
         since = time.time() - self.days * 86400
@@ -184,6 +245,10 @@ class Sessions:
                 info.pop("transcript")                   # unchanged: the gateway has it
             stamps[info["session_id"]] = modified
             sessions.append(info)
+        # The desktop app's: their id and folder only, so the gateway knows they are on this computer
+        self.desktop = desktop_sessions(self.days)
+        sessions += [{"session_id": sid, "workspace_path": cwd, "app": "claude-desktop"}
+                     for sid, (cwd, _config, _claude) in list(self.desktop.items())[:150]]
         status, answer = gateway.call("POST", "/chat/sessions/register",
                                       {"pc_name": name, "sessions": sessions, "allow_commands": allow_commands})
         if status == 200:
@@ -233,6 +298,8 @@ def run(gateway, job, sessions, config_dir, allow_commands):
     job_id = job["job_id"]
     claude = shutil.which("claude")
     folder = job.get("workspace_path") or sessions.where.get(job["session_id"])
+    if job["session_id"] in sessions.desktop:            # the desktop app's: its folder, files and Claude Code
+        folder, config_dir, claude = sessions.desktop[job["session_id"]]
     if not claude:
         gateway.call("POST", "/chat/sessions/agent/events", {"job_id": job_id, "done": True,
                      "error": "Claude Code (claude) is not on this computer's PATH"})
@@ -373,7 +440,22 @@ def main():
                         help="let a message from the playground run commands too, not only edit files")
     parser.add_argument("--background", action="store_true",
                         help="started by `ai-gateway launch`: nothing to do when an agent already runs here")
+    parser.add_argument("--key-file", help="a file holding the key, read and then deleted (not left on the command line)")
+    parser.add_argument("--log", help="write what it says to this file instead")
     args = parser.parse_args()
+    if args.key_file:
+        try:
+            with open(args.key_file, encoding="utf-8") as f:
+                args.key = f.read().strip() or args.key
+        except OSError:
+            pass
+        finally:
+            try:
+                os.remove(args.key_file)
+            except OSError:
+                pass
+    if args.log:
+        sys.stdout = sys.stderr = open(args.log, "a", encoding="utf-8", buffering=1)
     if not args.key:
         sys.exit("No API key: give --key, or set GATEWAY_KEY")
     listener = _only_one(take_over=not args.background)

@@ -158,6 +158,27 @@ function Get-SessionsAgent {
     return @{ Python = $python.Source; Agent = $agent }
 }
 
+# In the background, so the playground can send this computer's Claude Code sessions a message; without
+# Python they are still listed there, only not sent to. Started through WMI, outside this shell's job,
+# hidden: it outlives a terminal closed with the app it runs in (the desktop app restarts below). The
+# key goes in a file in ~\.ai-gateway, which the agent reads and deletes - not on its command line.
+function Start-SessionsAgent {
+    $found = Get-SessionsAgent
+    if ($found.Problem) {
+        Write-Host "(the playground cannot send messages to these sessions: $($found.Problem))" -ForegroundColor DarkGray
+        return
+    }
+    $folder = Join-Path $HOME ".ai-gateway"
+    $keyFile = Join-Path $folder "sessions-agent.key"
+    [System.IO.File]::WriteAllText($keyFile, $Key)
+    $line = "`"$($found.Python)`" `"$($found.Agent)`" --gateway `"$Gateway`" --background --key-file `"$keyFile`"" +
+            " --log `"$(Join-Path $folder 'sessions-agent.log')`""
+    $hidden = New-CimInstance -ClassName Win32_ProcessStartup -ClientOnly -Property @{ ShowWindow = [uint16]0 }
+    $started = Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{
+        CommandLine = $line; ProcessStartupInformation = $hidden }
+    if ($started.ReturnValue -ne 0) { Remove-Item $keyFile -ErrorAction SilentlyContinue }
+}
+
 if ($Command -eq "sessions") {
     $found = Get-SessionsAgent
     if ($found.Problem) { Fail $found.Problem }
@@ -249,6 +270,7 @@ if ($App -eq "claude-desktop") {
     Write-Json $profilePath $p
     Write-Json $metaPath $meta
     $chose = (Set-DesktopModel $Model) -and $Model
+    Start-SessionsAgent         # its Code tab's sessions, sent to from the playground
     if (Restart-ClaudeDesktop) { Write-Host "The Claude desktop app now uses $Gateway (profile `"AI Gateway`"), and is restarting." -ForegroundColor Cyan }
     else { Write-Host "The Claude desktop app now uses $Gateway (profile `"AI Gateway`"): quit it (also from the tray) and open it again." -ForegroundColor Cyan }
     if ($chose) { Write-Host "It runs $Model, whichever of Claude's names it shows (Sonnet 4.6 stays Auto)." -ForegroundColor Cyan }
@@ -334,18 +356,7 @@ switch ($App) {
         Write-Utf8 $mcp (@{ mcpServers = @{ "ai-gateway" = @{ type = "http"; url = $McpUrl
             headers = @{ Authorization = "Bearer $Key"; "X-Workspace" = $Workspace } } } } | ConvertTo-Json -Depth 6 -Compress)
         Write-Utf8 $allow '{"permissions":{"allow":["mcp__ai-gateway"]}}'
-        # The sessions agent, in the background, so the playground can send this session a message;
-        # without Python the session is still listed there, only not sent to
-        $found = Get-SessionsAgent
-        if ($found.Problem) {
-            Write-Host "(the playground cannot send messages to this session: $($found.Problem))" -ForegroundColor DarkGray
-        } else {
-            $env:GATEWAY_KEY = $Key
-            $log = Join-Path $HOME ".ai-gateway\sessions-agent.log"
-            Start-Process -FilePath $found.Python -WindowStyle Hidden -RedirectStandardOutput $log `
-                -RedirectStandardError "$log.err" -ArgumentList @("`"$($found.Agent)`"", "--gateway", $Gateway, "--background")
-            Remove-Item Env:GATEWAY_KEY
-        }
+        Start-SessionsAgent
         Start-App "claude" ($Extra + @("--settings", $allow, "--mcp-config", $mcp)); exit $script:ExitCode
     }
     "opencode" {
