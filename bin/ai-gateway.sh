@@ -148,6 +148,22 @@ fetch_agent() {   # into $agent; on failure, what is missing in $agent_problem
     fi
     mv "$agent.new" "$agent"
 }
+# In the background, so the playground can send this computer's Claude Code sessions a message; without
+# Python they are still listed there, only not sent to. In a session of its own (setsid, where there is
+# one): it outlives a terminal closed with the app it runs in - the desktop app restarts below.
+start_agent() {
+    if ! fetch_agent; then
+        echo "(the playground cannot send messages to these sessions: $agent_problem)" >&2
+        return 0
+    fi
+    if command -v setsid >/dev/null; then
+        GATEWAY_KEY=$KEY setsid nohup python3 "$agent" --gateway "$GATEWAY" --background \
+            --log "$HOME/.ai-gateway/sessions-agent.log" >/dev/null 2>&1 </dev/null &
+    else
+        GATEWAY_KEY=$KEY nohup python3 "$agent" --gateway "$GATEWAY" --background \
+            --log "$HOME/.ai-gateway/sessions-agent.log" >/dev/null 2>&1 </dev/null &
+    fi
+}
 if [ "$command" = sessions ]; then
     fetch_agent || die "$agent_problem"
     GATEWAY_KEY=$KEY exec python3 "$agent" --gateway "$GATEWAY" ${extra[@]+"${extra[@]}"}
@@ -283,6 +299,7 @@ EOF
     else
         then=" It is not running: it uses the profile when it is next opened."
     fi
+    [ "$RESTORE" = 1 ] || start_agent          # its Code tab's sessions, sent to from the playground
     if [ "$RESTORE" = 1 ]; then
         echo "The Claude desktop app is set back to your Claude account.$then"
     else
@@ -354,6 +371,7 @@ if [ "$APP" = claude-desktop ]; then
                      open -a Claude' >/dev/null 2>&1 &
         then=" It is restarting."
     fi
+    [ "$RESTORE" = 1 ] || start_agent          # its Code tab's sessions, sent to from the playground
     if [ "$RESTORE" = 1 ]; then
         echo "The Claude desktop app is set back to your Claude account.$then"
     else
@@ -418,14 +436,7 @@ FOLDER=""; printf '%s' "$PWD" | LC_ALL=C grep -q '[^ -~]' || FOLDER=$PWD
 case "$APP" in
 claude)
     need claude "Claude Code" "curl -fsSL https://claude.ai/install.sh | bash"
-    # The sessions agent, in the background, so the playground can send this session a message;
-    # without Python the session is still listed there, only not sent to
-    if fetch_agent; then
-        GATEWAY_KEY=$KEY nohup python3 "$agent" --gateway "$GATEWAY" --background \
-            >"$HOME/.ai-gateway/sessions-agent.log" 2>&1 </dev/null &
-    else
-        echo "(the playground cannot send messages to this session: $agent_problem)" >&2
-    fi
+    start_agent
     compact=$((CONTEXT * 85 / 100)); [ "$compact" -ge 100000 ] || compact=100000
     # Its own config folder: signed in to claude.ai in the usual one, Claude Code sends that login's
     # token instead of ANTHROPIC_AUTH_TOKEN. Every role on one model, so the GPU never swaps mid-task.

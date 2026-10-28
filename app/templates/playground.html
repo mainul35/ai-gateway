@@ -4479,13 +4479,15 @@ async function showSession(id){
   permission.querySelector('option[value="commands"]').disabled = !s.allow_commands;
   if(!s.allow_commands) permission.value = 'edits';
   permission.title = s.allow_commands ? '' : `${s.pc_name}'s agent was started without --allow-commands`;
-  // Messages go to a Claude Code session through its computer's agent; the others can be read
+  // Messages go to a Claude Code session - a terminal's or the desktop app's - through its computer's
+  // agent; the others can be read
   const prompt = document.getElementById('codePrompt');
   document.getElementById('codeSend').disabled = !s.can_send;
   prompt.disabled = !s.can_send;
   prompt.placeholder = s.can_send ? `Message this session on ${s.pc_name}…`
-    : s.client !== 'claude-code' ? `Sending to ${s.tool} sessions from here is not supported yet; you can read this one`
-    : `To send it a message, run "ai-gateway sessions" on ${s.pc_name || 'its computer'}`;
+    : !s.sendable ? `Sending to ${s.tool} sessions from here is not supported yet; you can read this one`
+    : `To send it a message, run "ai-gateway sessions" on ${s.pc_name || 'its computer'}`
+      + (s.pc_name ? '' : ' (the one where this session runs)');
   loadSessions();
 }
 
