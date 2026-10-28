@@ -618,116 +618,78 @@ async function record(card, i){
   limit = setTimeout(() => recorder?.stop(), 120000);   // two minutes is far more than one line needs
 }
 
-async function useReading(i, lang, blob){
-  const recording = await new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => resolve(reader.result);
-    reader.onerror = () => reject(reader.error);
-    reader.readAsDataURL(blob);
-  });
+// A reading recorded here, or an audio file, kept as one scene's voice in one language
+function useReading(i, lang, blob){ return storeVoice(i, lang, blob, 'Your reading'); }
+function uploadVoiceover(i, lang, file){ return storeVoice(i, lang, file, 'The voiceover'); }
+
+async function storeVoice(i, lang, audio, what){
   showError('');
   busy = true;
-  showProgress({stage: 'Saving recording', fraction: 0});
-  let trouble = '';
+  updateSave();
+  showProgress({stage: `Saving the voice of scene ${i + 1}`, fraction: 0});
   try{
-    const response = await fetch(`/chat/video/${current.message_id}/store-voice`, {method: 'POST', headers: JSON_HEADERS,
-                                                                           body: JSON.stringify({recording, lang, index: i})});
-    if(!response.ok){
-      const err = await response.json().catch(() => ({}));
-      throw new Error((typeof err.detail === 'string' && err.detail) || `HTTP ${response.status}`);
-    }
-    await readEvents(response, chunk => {
-      if(chunk.error) throw new Error(chunk.error.message);
-      if(chunk.gateway?.type === 'progress') showProgress(chunk.gateway);
-    });
-  }catch(e){
-    trouble = 'Your reading was not used: ' + e.message;
-  }
-  busy = false;
-  document.getElementById('progress').hidden = true;
-  edits = {};
-  previews = {};
-  showing = lang;
-  ({videos: stories} = await api('/chat/videos').catch(() => ({videos: stories})));
-  await openStory(current.message_id);
-  if(trouble) showError(trouble);
-}
-
-async function saveLanguage(lang, sceneIndex){
-  const told = story();
-  const editor = document.getElementById('editor');
-  const textarea = editor.querySelector(`.line[data-lang="${lang}"]`);
-  if (!textarea) return;
-  const newWords = clean(textarea.value);
-  const oldWords = clean((told[lang] || [])[sceneIndex]);
-  if (newWords === oldWords) return;  // nothing to save
-  showError('');
-  const button = editor.querySelector('.save-lang[data-lang="' + lang + '"]');
-  if (button) button.disabled = true;
-  try{
-    const response = await fetch(`/chat/video/${current.message_id}/save`, {
-      method: 'POST', headers: JSON_HEADERS,
-      body: JSON.stringify({lang, index: sceneIndex, text: newWords})});
-    if(!response.ok){
-      const err = await response.json().catch(() => ({}));
-      throw new Error((typeof err.detail === 'string' && err.detail) || `HTTP ${response.status}`);
-    }
-    const result = await response.json();
-    // Update local state
-    if (!edits[sceneIndex]) edits[sceneIndex] = {};
-    if (!edits[sceneIndex].text) edits[sceneIndex].text = {};
-    edits[sceneIndex].text[lang] = newWords;
-    // Update the story data
-    told[lang][sceneIndex] = newWords;
-    textarea.classList.remove('changed');
-    const stale = textarea.closest('.card').querySelector('.stale');
-    if (stale) stale.hidden = true;
-    // Refresh the page to get the updated data
-    ({videos: stories} = await api('/chat/videos').catch(() => ({videos: stories})));
-    await openStory(current.message_id);
-    if (button) button.disabled = false;
-  }catch(e){
-    showError('Save failed: ' + e.message);
-    if (button) button.disabled = false;
-  }
-}
-
-async function uploadVoiceover(scene, lang, file){
-  showError('');
-  busy = true;
-  showProgress({stage: 'Uploading voiceover', fraction: 0});
-  let trouble = '';
-  try{
-    const raw = await new Promise((resolve, reject) => {
+    const recording = await new Promise((resolve, reject) => {
       const reader = new FileReader();
       reader.onload = () => resolve(reader.result);
       reader.onerror = () => reject(reader.error);
-      reader.readAsDataURL(file);
+      reader.readAsDataURL(audio);
     });
-    const response = await fetch(`/chat/video/${current.message_id}/store-voice`, {method: 'POST', headers: JSON_HEADERS,
-                                                                             body: JSON.stringify({recording: raw, lang, index: scene})});
-    if(!response.ok){
-      const err = await response.json().catch(() => ({}));
-      throw new Error((typeof err.detail === 'string' && err.detail) || `HTTP ${response.status}`);
-    }
-    const result = await response.json();
+    await api(`/chat/video/${current.message_id}/store-voice`, {method: 'POST', headers: JSON_HEADERS,
+                                                               body: JSON.stringify({recording, lang, index: i})});
+    showing = lang;
+    await refreshStory();
   }catch(e){
-    trouble = 'Voiceover upload failed: ' + e.message;
+    showError(`Scene ${i + 1}: ${what.toLowerCase()} was not saved: ${e.message}`);
+  }finally{
+    busy = false;
+    document.getElementById('progress').hidden = true;
+    updateSave();
   }
-  busy = false;
-  document.getElementById('progress').hidden = true;
-  if(trouble){
-    showError(trouble);
-  }else{
-    ({videos: stories} = await api('/chat/videos').catch(() => ({videos: stories})));
-    const updated = await api(`/chat/videos/${current.message_id}`).catch(() => null);
-    if(updated){
-      current = updated;
-      showing = lang;
-      renderRows();
-      renderEditor();
-      updateSave();
-    }
+}
+
+// One scene's line in one language saved as it is typed now. Several can be saving at once: each
+// keeps the others', and what is typed meanwhile, in this scene or another, stays
+async function saveLanguage(lang, sceneIndex){
+  const textarea = document.getElementById('editor').querySelector(`.line[data-lang="${lang}"]`);
+  if(!textarea) return;
+  const newWords = clean(textarea.value);
+  if(!newWords || newWords === clean((story()[lang] || [])[sceneIndex])) return;   // nothing to save
+  showError('');
+  const button = textarea.closest('.card').querySelector('.save-lang');
+  if(button){ button.disabled = true; button.textContent = 'Saving…'; }
+  try{
+    await api(`/chat/video/${current.message_id}/save`, {method: 'POST', headers: JSON_HEADERS,
+                                                        body: JSON.stringify({lang, index: sceneIndex, text: newWords})});
+    await refreshStory();
+  }catch(e){
+    showError(`Scene ${sceneIndex + 1}: the ${IN_ENGLISH[lang] || lang} line was not saved: ${e.message}`);
+    if(button?.isConnected){ button.disabled = false; button.textContent = '💾 Save'; }
+  }
+}
+
+// The story as it is saved now, shown without losing anything not saved yet: the changes of every
+// scene stay (a line just saved is no longer one), so does the scene open and the cursor in it
+async function refreshStory(){
+  const id = current.message_id;
+  const fresh = await api(`/chat/videos/${id}`);
+  if(current?.message_id !== id) return;              // another story was opened meanwhile
+  current = fresh;
+  const told = story();
+  for(const [k, change] of Object.entries(edits)){
+    for(const [l, words] of Object.entries(change.text || {}))
+      if(clean(words) === clean((told[l] || [])[k])) delete change.text[l];
+    if(!Object.keys(change.text || {}).length && !change.redraw) delete edits[k];
+  }
+  const typing = document.activeElement?.closest?.('#editor') ? document.activeElement : null;
+  const at = typing && {lang: typing.dataset?.lang, id: typing.id, start: typing.selectionStart, end: typing.selectionEnd};
+  renderRows();
+  renderEditor();
+  updateSave();
+  if(at){
+    const editor = document.getElementById('editor');
+    const back = at.lang ? editor.querySelector(`.line[data-lang="${at.lang}"]`) : at.id ? document.getElementById(at.id) : null;
+    back?.focus();
+    try{ back?.setSelectionRange(at.start, at.end); }catch(e){}
   }
 }
 
@@ -762,11 +724,16 @@ function keep(){
   updateSave();
 }
 
+// Languages whose video is older than what is saved for them: lines or voices saved since it was made
+function behind(){ return current?.video?.behind || []; }
+
 function updateSave(){
   const count = Object.keys(edits).length;
   const pending = Object.keys(drawing).length;
-  document.getElementById('save').disabled = !count || busy || pending > 0 || current?.being_made;
-  document.getElementById('changes').textContent = (count ? `${count} scene${count === 1 ? '' : 's'} changed` : 'Nothing changed yet.') +
+  const waiting = behind().map(l => IN_ENGLISH[l] || l);
+  document.getElementById('save').disabled = !(count || waiting.length) || busy || pending > 0 || current?.being_made;
+  document.getElementById('changes').textContent = (count ? `${count} scene${count === 1 ? '' : 's'} changed`
+      : waiting.length ? `Saved changes wait to go into the ${waiting.join(' and ')} video` : 'Nothing changed yet.') +
     (pending ? ` · ${pending} picture${pending === 1 ? '' : 's'} being drawn` : '');
 }
 
@@ -785,7 +752,7 @@ function showProgress(event){
 }
 
 async function remake(list, add = [], gone = []){
-  if(list && !list.length && !add.length && !gone.length) return;
+  if(list && !list.length && !add.length && !gone.length && !behind().length) return;
   showError('');
   busy = true;
   updateSave();

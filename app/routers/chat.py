@@ -4,6 +4,7 @@ Every user only ever sees their own conversations and files.
 """
 import asyncio
 import base64
+import binascii
 import io
 import json
 import logging
@@ -2617,6 +2618,8 @@ async def edit_video(message_id: int, payload: VideoEditIn, principal: Principal
                      if i not in gone]
         remake.update(languages)
     video["languages"] = languages
+    # Lines and voices saved since a language's video was made: it is made again with them
+    remake.update(lang for lang in video.get("behind") or [] if lang in languages)
     if not remake:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "Nothing was changed")
     for lang in remake:
@@ -2659,69 +2662,111 @@ class StoreVoiceIn(BaseModel):
     index: int = Field(ge=0)
 
 
-@router.post("/video/{message_id}/store-voice")
-async def store_voiceover(message_id: int, payload: StoreVoiceIn, principal: Principal = Depends(authenticate),
-                          session: AsyncSession = Depends(get_session)):
-    """Store one scene's recording without rebuilding the video. The voice is used when the video is remade."""
-    user = _require_user(principal)
-    message = (await session.execute(
-        select(ConversationMessage).join(Conversation).where(
-            ConversationMessage.id == message_id, Conversation.user_id == user.id))).scalar_one_or_none()
-    if message is None:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "Video story not found")
-    filed = json.loads(message.attachments or "{}")
-    video = filed.get("video") or {}
+# One story's saved state is changed by one request at a time: read, changed and written together
+_story_locks: dict[int, asyncio.Lock] = {}
+
+
+async def _change_story(message_id, user_id, change):
+    """`change(video)` applied to the video story as it is saved now - read under a lock and its row
+    locked, written straight after - so two saves at once each keep the other's change: a line saved
+    while another scene's is, or while a voiceover is being cleaned. What `change` returns; it may
+    raise an HTTPException, and then nothing is written."""
+    async with _story_locks.setdefault(message_id, asyncio.Lock()):
+        async with session_factory()() as db:
+            row = (await db.execute(
+                select(ConversationMessage).join(Conversation).where(
+                    ConversationMessage.id == message_id, Conversation.user_id == user_id)
+                .with_for_update(of=ConversationMessage))).scalar_one_or_none()
+            if row is None:
+                raise HTTPException(status.HTTP_404_NOT_FOUND, "Video story not found")
+            filed = json.loads(row.attachments or "{}")
+            video = filed.get("video") or {}
+            result = change(video)
+            filed["video"] = video
+            row.attachments = json.dumps(filed)
+            await db.commit()
+            return result
+
+
+def _scene_line(video, lang, index):
+    """The story, and its line in `lang` for scene `index`, or the reason it cannot be changed."""
     story = video.get("story")
     if not story:
         raise HTTPException(status.HTTP_409_CONFLICT,
-                            "This video was made before stories were kept; make it again to read it yourself")
-    count = len(story["pictures"])
-    lang = payload.lang
-    word = video_story.language_name(lang)
+                            "This video was made before stories were kept; make it again to change it")
     if lang not in story:
-        raise HTTPException(status.HTTP_409_CONFLICT, f"This story has no {word}")
-    if payload.index < 0 or payload.index >= count:
+        raise HTTPException(status.HTTP_409_CONFLICT, f"This story has no {video_story.language_name(lang)}")
+    count = len(story["pictures"])
+    if index >= count:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, f"This story has {count} scenes (0–{count - 1})")
-    # A scene that is all Arabic - a verse - is recited by the qari, not read by the person
-    line = story[lang][payload.index]
-    if video_story.needs_reading(line, lang):
-        raise HTTPException(status.HTTP_409_CONFLICT, "This scene is a verse recited by the qari")
-    user_id = user.id
+    return story, story[lang][index]
+
+
+def _behind(video, lang):
+    """A language whose video no longer says what is saved - a line or a voice saved since it was
+    made - kept on the story, so "Save and remake" makes it again with nothing else changed."""
+    if lang in (video.get("videos") or {}):
+        behind = video.setdefault("behind", [])
+        if lang not in behind:
+            behind.append(lang)
+
+
+def _not_being_made(user_id, message):
+    # Making the video writes the whole story when it is done: a change saved meanwhile would be lost
+    running = jobs.running_for(user_id, message.conversation_id)
+    if running is not None and running.kind == "video":
+        raise HTTPException(status.HTTP_409_CONFLICT, "This video is being made; save when it is done")
+
+
+@router.post("/video/{message_id}/store-voice")
+async def store_voiceover(message_id: int, payload: StoreVoiceIn, principal: Principal = Depends(authenticate),
+                          session: AsyncSession = Depends(get_session)):
+    """One scene's reading in one language - recorded in the page, or an audio file - cleaned and kept
+    as that line's voice, without making the video again: it is used when the video is made again."""
+    user = _require_user(principal)
+    message, video = await _owned_video(session, user, message_id)
+    _not_being_made(user.id, message)
+    _story, line = _scene_line(video, payload.lang, payload.index)
+    # A line that is only a verse is the qari's recitation, never the person's reading
+    if not video_story.needs_reading(line, payload.lang):
+        raise HTTPException(status.HTTP_409_CONFLICT, "This scene is a verse: the qari recites it")
+    # As the browser sends it, a data: URL; the base64 after its comma is the audio
+    encoded = payload.recording.split(",", 1)[1] if payload.recording.startswith("data:") else payload.recording
+    try:
+        raw = base64.b64decode(encoded, validate=True)
+    except (ValueError, binascii.Error):
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "The audio did not arrive whole; try again")
+    if len(raw) < 100:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "The recording is empty or too short")
     folder = video_story.workspace()
     try:
-        # Decode base64 recording and clean it
-        raw = base64.b64decode(payload.recording)
-        if not raw or len(raw) < 100:
-            raise video_story.VideoError("The recording is empty or too short")
         cleaned, seconds = await video_story.clean_recording(raw, folder, payload.index)
-        # Store the cleaned recording
-        async with session_factory()() as db:
-            kept = ChatFile(user_id=user_id, kind="voice", mime_type="audio/mp4",
-                            name=f"scene {payload.index + 1} ({word}).m4a",
-                            data=cleaned)
-            db.add(kept)
-            await db.commit()
-        # Update the stored narration entry for this scene
-        old_narration = story.setdefault("narration", {})
-        old_entries = (old_narration.get(lang) or [])
-        # Ensure array is long enough
-        while len(old_entries) < count:
-            old_entries.append(None)
-        old_narration[lang] = old_entries
-        old_entries[payload.index] = {"file_id": kept.id, "seconds": round(seconds, 2), "by": "recorded"}
-        video["story"] = story
-        filed["video"] = video
-        async with session_factory()() as db:
-            row = await db.get(ConversationMessage, message_id)
-            row.attachments = json.dumps(filed)
-            await db.commit()
-    except video_story.VideoError:
-        raise
-    except Exception:
-        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "Could not process the recording")
+    except video_story.VideoError as e:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, f"The audio could not be used: {e}")
     finally:
         shutil.rmtree(folder, ignore_errors=True)
-    return {"ok": True, "file_id": kept.id, "seconds": round(seconds, 2)}
+    word = video_story.language_name(payload.lang)
+    file_id = await _store_file(user.id, "voice", "audio/mp4", f"scene {payload.index + 1} ({word}).m4a", cleaned)
+
+    def keep_voice(video):
+        story, line = _scene_line(video, payload.lang, payload.index)
+        if not video_story.needs_reading(line, payload.lang):
+            raise HTTPException(status.HTTP_409_CONFLICT, "This scene is a verse: the qari recites it")
+        entries = story.setdefault("narration", {}).setdefault(payload.lang, [])
+        entries.extend([None] * (len(story["pictures"]) - len(entries)))
+        replaced = (entries[payload.index] or {}).get("file_id")
+        entries[payload.index] = {"file_id": file_id, "seconds": round(seconds, 2), "by": "recorded"}
+        _behind(video, payload.lang)
+        return replaced
+
+    try:
+        replaced = await _change_story(message_id, user.id, keep_voice)
+    except HTTPException:
+        await _drop_file(user.id, file_id)
+        raise
+    if replaced and replaced != file_id:
+        await _drop_file(user.id, replaced)
+    return {"ok": True, "file_id": file_id, "seconds": round(seconds, 2)}
 
 
 @router.post("/video/{message_id}/save")
@@ -2729,31 +2774,16 @@ async def save_scene_text(message_id: int, payload: SaveIn, principal: Principal
                           session: AsyncSession = Depends(get_session)):
     """Save a scene's text in one language without rebuilding the video."""
     user = _require_user(principal)
-    message = (await session.execute(
-        select(ConversationMessage).join(Conversation).where(
-            ConversationMessage.id == message_id, Conversation.user_id == user.id))).scalar_one_or_none()
-    if message is None:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "Video story not found")
-    filed = json.loads(message.attachments or "{}")
-    video = filed.get("video") or {}
-    story = video.get("story")
-    if not story:
-        raise HTTPException(status.HTTP_409_CONFLICT,
-                            "This video was made before stories were kept; make it again")
-    word = video_story.language_name(payload.lang)
-    if payload.lang not in story:
-        raise HTTPException(status.HTTP_409_CONFLICT, f"This story has no {word}")
-    count = len(story["pictures"])
-    if payload.index < 0 or payload.index >= count:
-        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, f"This story has {count} scenes (0–{count - 1})")
-    # Save the text
-    _set_line(story, payload.lang, payload.index, payload.text)
-    video["story"] = story
-    filed["video"] = video
-    async with session_factory()() as db:
-        row = await db.get(ConversationMessage, message_id)
-        row.attachments = json.dumps(filed)
-        await db.commit()
+    message, _video = await _owned_video(session, user, message_id)
+    _not_being_made(user.id, message)
+
+    def set_text(video):
+        story, line = _scene_line(video, payload.lang, payload.index)
+        if " ".join(payload.text.split()) != " ".join((line or "").split()):
+            _set_line(story, payload.lang, payload.index, payload.text)
+            _behind(video, payload.lang)
+
+    await _change_story(message_id, user.id, set_text)
     return {"ok": True}
 
 
@@ -2873,17 +2903,21 @@ async def save_pending_picture(message_id: int, payload: PendingPictureIn, princ
     running = jobs.running_for(user.id, message.conversation_id)
     if running is not None and running.kind == "video":
         raise HTTPException(status.HTTP_409_CONFLICT, "This video is still being made")
-    pending = story.setdefault("pending", {})
-    if payload.file_id is None:
-        pending.pop(str(payload.index), None)
-    else:
+    if payload.file_id is not None:
         found = await _load_files(session, user, [payload.file_id])
         if payload.file_id not in found or found[payload.file_id].kind != "video-scene":
             raise HTTPException(status.HTTP_404_NOT_FOUND, "That picture is gone; draw it again")
-        pending[str(payload.index)] = {"file_id": payload.file_id, "drawn": payload.drawn, "people": payload.people}
-    video["story"] = story
-    await _save_video(message.id, video)
-    return {"pending": pending}
+
+    def keep_picture(video):
+        pending = (video.get("story") or {}).setdefault("pending", {})
+        if payload.file_id is None:
+            pending.pop(str(payload.index), None)
+        else:
+            pending[str(payload.index)] = {"file_id": payload.file_id, "drawn": payload.drawn, "people": payload.people}
+        return pending
+
+    # Read and written with the story as it is saved now: not over a line saved meanwhile
+    return {"pending": await _change_story(message.id, user.id, keep_picture)}
 
 
 class DraftPart(BaseModel):
@@ -3461,6 +3495,8 @@ async def _video_pipeline(principal, user_id, ctx):
             stored = await _store_file(user_id, "video", "video/mp4", f"{video['title'][:80]} ({word}).mp4", data,
                                        prompt=title)
             videos[lang] = {"file_id": stored, "url": f"/chat/files/{stored}", "seconds": seconds}
+            if lang in (video.get("behind") or []):         # it says what is saved again
+                video["behind"].remove(lang)
             read = [entry.get("by") == "recorded" for entry in entries if entry.get("by") != "qari"]
             if read and all(read):
                 videos[lang]["voice"] = "recorded"
@@ -3695,7 +3731,7 @@ async def upload_voiceover(message_id: int, audio: UploadFile = File(...), lang:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, f"This story has {count} scenes (0–{count - 1})")
     # A scene that is all Arabic - a verse - is recited by the qari, not uploaded
     line = story[lang][index]
-    if video_story.needs_reading(line, lang):
+    if not video_story.needs_reading(line, lang):
         raise HTTPException(status.HTTP_409_CONFLICT, "This scene is a verse recited by the qari; only qari recitation is allowed")
     user_id = user.id
     folder = video_story.workspace()
