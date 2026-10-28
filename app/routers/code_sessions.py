@@ -1,12 +1,19 @@
-"""The playground's Code mode: the Claude Code sessions on the person's own computers.
+"""The playground's Code mode: the coding sessions on the person's own computers.
 
-Each computer that should show its sessions runs the sessions agent (app/static/claude-sessions.py,
-started by `ai-gateway sessions`). It reads the sessions Claude Code keeps for the launcher
-(~/.claude-gateway/projects) and reports them here every half minute: their titles, folders, branches
-and latest messages. Nothing connects in to the computer: the agent asks here for work (a long poll),
-and a message sent to a session from the playground is handed to it that way. It runs
-`claude --resume <session> -p` in the session's folder and sends each event back, which the playground
-shows as it comes.
+Every coding tool the launcher connects - Claude Code, OpenCode, Qwen Code, Codex, Hermes, OpenClaw -
+sends its model requests here, and each request carries its conversation so far. So the sessions are
+known from that traffic (observe), nothing to install: which tool (the launcher's X-AI-Gateway-Client
+header, else the tool's own User-Agent), which session (the tool's own id - Claude Code's
+X-Claude-Code-Session-Id, OpenCode's x-session-id, Codex's session_id - else the conversation's first
+question), and its folder, title, model and latest messages. Requests that come from no coding tool -
+the playground, an API script - are not sessions.
+
+Talking to a session from the playground needs its computer's sessions agent (app/static/claude-sessions.py,
+started by `ai-gateway sessions`), and for now Claude Code: the agent also reports the sessions Claude
+Code keeps for the launcher (~/.claude-gateway/projects). Nothing connects in to the computer: the agent
+asks here for work (a long poll), and a message sent to a session from the playground is handed to it
+that way. It runs `claude --resume <session> -p` in the session's folder and sends each event back,
+which the playground shows as it comes.
 
 Only the person's own sessions, from computers that report with their key. A message makes Claude Code
 act on that computer as if it were typed there: file edits are allowed, and commands only where the
@@ -16,20 +23,25 @@ The jobs live in memory: a restart of the gateway ends the ones in flight, and t
 next message as before.
 """
 import asyncio
+import hashlib
 import itertools
 import json
+import logging
+import re
 import time
 from datetime import datetime, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
-from sqlalchemy import delete, select
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth import Principal, authenticate
-from app.db import get_session
+from app.db import get_session, session_factory
 from app.models import CCDSessions, utcnow
+
+log = logging.getLogger("gateway")
 
 router = APIRouter(prefix="/chat/sessions", tags=["code sessions"])
 
@@ -51,20 +63,41 @@ def _user(principal):
     return principal.user
 
 
+# The coding tools the launcher connects, by what their requests say they are
+TOOLS = {"claude-code": "Claude Code", "opencode": "OpenCode", "qwen-code": "Qwen Code", "codex": "Codex",
+         "hermes": "Hermes", "openclaw": "OpenClaw"}
+_AGENTS_BY_NAME = (("claude-cli", "claude-code"), ("opencode", "opencode"), ("qwencode", "qwen-code"),
+                   ("qwen-code", "qwen-code"), ("codex", "codex"), ("hermes", "hermes"), ("openclaw", "openclaw"))
+RUNNING_SECONDS = 90         # a session that asked for a reply this recently is working
+
+
+def _computer(name):
+    """A computer's name as both the launcher's header and its agent give it: case aside."""
+    return (name or "").strip().lower()
+
+
 def _inbox(user_id, computer):
-    return _waiting.setdefault((user_id, computer), asyncio.Queue())
+    return _waiting.setdefault((user_id, _computer(computer)), asyncio.Queue())
 
 
-def _online(row):
-    return bool(row.seen_at and (utcnow() - row.seen_at).total_seconds() < ONLINE_SECONDS)
+def _agent(user_id, computer):
+    """The computer's sessions agent, when it has asked for work or reported lately; else None."""
+    agent = _agents.get((user_id, _computer(computer)))
+    return agent if agent and time.monotonic() - agent.get("seen", 0) < ONLINE_SECONDS else None
 
 
 def _json(row, transcript=False):
-    agent = _agents.get((row.user_id, row.pc_name)) or {}
+    agent = _agent(row.user_id, row.pc_name)
+    client = row.client or "claude-code"
     data = {"session_id": row.session_id, "title": row.title, "workspace_path": row.workspace_path,
-            "pc_name": row.pc_name, "status": row.status, "model": row.model, "branch_name": row.branch_name,
+            "pc_name": row.pc_name, "model": row.model, "branch_name": row.branch_name,
+            "client": client, "tool": TOOLS.get(client, client),
+            "status": "running" if row.last_active and (utcnow() - row.last_active).total_seconds() < RUNNING_SECONDS
+            else "idle",
             "last_active": row.last_active.isoformat() if row.last_active else None,
-            "online": _online(row), "allow_commands": bool(agent.get("allow_commands"))}
+            # Its computer's agent is there: what makes a session one to send messages to (Claude Code, for now)
+            "online": agent is not None, "can_send": agent is not None and client == "claude-code",
+            "allow_commands": bool(agent and agent.get("allow_commands"))}
     if transcript:
         try:
             data["transcript"] = json.loads(row.transcript or "[]")
@@ -83,7 +116,7 @@ class Said(BaseModel):
 
 class Reported(BaseModel):
     session_id: str = Field(pattern=r"^[A-Za-z0-9_-]{8,64}$")
-    title: str = Field(default="Untitled", max_length=200)
+    title: str | None = Field(default=None, max_length=200)
     workspace_path: str | None = Field(default=None, max_length=500)
     branch_name: str | None = Field(default=None, max_length=128)
     model: str | None = Field(default=None, max_length=100)
@@ -102,11 +135,11 @@ class Report(BaseModel):
 @router.post("/register")
 async def register(payload: Report, principal: Principal = Depends(authenticate),
                    session: AsyncSession = Depends(get_session)):
-    """A computer's sessions as its agent sees them now: added, brought up to date, and the ones it no
-    longer reports taken out. A session id another person's computer reported is never touched."""
+    """A computer's sessions as its agent sees them now: added or brought up to date. A session id
+    another person has is never touched."""
     user = _user(principal)
     now = utcnow()
-    _agents[(user.id, payload.pc_name)] = {"allow_commands": payload.allow_commands, "seen": time.monotonic()}
+    _agents[(user.id, _computer(payload.pc_name))] = {"allow_commands": payload.allow_commands, "seen": time.monotonic()}
     reported = {s.session_id: s for s in payload.sessions}
     existing = {row.session_id: row for row in (await session.execute(
         select(CCDSessions).where(CCDSessions.session_id.in_(list(reported))))).scalars()} if reported else {}
@@ -117,16 +150,14 @@ async def register(payload: Report, principal: Principal = Depends(authenticate)
         if row is None:
             row = CCDSessions(session_id=sid, user_id=user.id, pc_name=payload.pc_name)
             session.add(row)
-        row.pc_name, row.title, row.workspace_path = payload.pc_name, s.title or "Untitled", s.workspace_path
-        row.branch_name, row.model, row.status = s.branch_name, s.model, s.status
-        row.last_active, row.seen_at = s.last_active or now, now
+        # What the agent leaves out stays as the gateway knows it from the session's own requests
+        row.pc_name, row.title = payload.pc_name, s.title or row.title or "Untitled"
+        row.workspace_path, row.branch_name = s.workspace_path or row.workspace_path, s.branch_name or row.branch_name
+        row.model, row.status, row.client = s.model or row.model, s.status, "claude-code"
+        row.last_active = max(filter(None, [row.last_active, s.last_active])) if row.last_active else (s.last_active or now)
+        row.seen_at = now
         if s.transcript is not None:
             row.transcript = json.dumps([m.model_dump() for m in s.transcript])
-    # What this computer no longer has (deleted, or older than it reports) goes from the list
-    gone = delete(CCDSessions).where(CCDSessions.user_id == user.id, CCDSessions.pc_name == payload.pc_name)
-    if reported:
-        gone = gone.where(CCDSessions.session_id.not_in(list(reported)))
-    await session.execute(gone)
     await session.commit()
     return {"registered": len(reported)}
 
@@ -135,7 +166,7 @@ async def register(payload: Report, principal: Principal = Depends(authenticate)
 async def next_message(pc: str = Query(min_length=1, max_length=100), principal: Principal = Depends(authenticate)):
     """The agent asks for work: a message for one of its sessions, or nothing after a while (204)."""
     user = _user(principal)
-    agent = _agents.setdefault((user.id, pc), {"allow_commands": False})
+    agent = _agents.setdefault((user.id, _computer(pc)), {"allow_commands": False})
     agent["seen"] = time.monotonic()
     try:
         job_id = await asyncio.wait_for(_inbox(user.id, pc).get(), timeout=POLL_SECONDS)
@@ -214,10 +245,13 @@ async def send_message(session_id: str, payload: SessionMessage, principal: Prin
     """A message for a session, run on its computer; its events streamed back as they come."""
     user = _user(principal)
     row = await _session_row(session, user, session_id)
-    if not _online(row):
+    if (row.client or "claude-code") != "claude-code":
+        raise HTTPException(status.HTTP_409_CONFLICT, f"Messages can be sent to Claude Code sessions only, for now; "
+                                                      f"this one is {TOOLS.get(row.client, row.client)}'s")
+    agent = _agent(user.id, row.pc_name)
+    if agent is None:
         raise HTTPException(status.HTTP_409_CONFLICT,
-                            f"{row.pc_name} is not reporting its sessions now: start `ai-gateway sessions` there")
-    agent = _agents.get((user.id, row.pc_name)) or {}
+                            f"{row.pc_name or 'Its computer'} is not connected: run `ai-gateway sessions` there")
     if payload.permission == "commands" and not agent.get("allow_commands"):
         raise HTTPException(status.HTTP_403_FORBIDDEN, f"{row.pc_name} does not let commands be run from here: "
                                                        "its agent was started without --allow-commands")
@@ -263,3 +297,176 @@ async def send_message(session_id: str, payload: SessionMessage, principal: Prin
 
     return StreamingResponse(stream(), media_type="text/event-stream",
                              headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+
+# --- the sessions, from the coding tools' own requests ---------------------------------------------
+
+def _tool(headers):
+    named = (headers.get("x-ai-gateway-client") or "").strip().lower()
+    if named in TOOLS:
+        return named
+    said = " ".join((headers.get(h) or "").lower() for h in ("user-agent", "originator"))
+    return next((tool for mark, tool in _AGENTS_BY_NAME if mark in said), None)
+
+
+def _words(content):
+    """A message's words, from any of the three APIs' shapes; a tool call as one short line."""
+    if isinstance(content, str):
+        return content
+    out = []
+    for part in content or []:
+        if not isinstance(part, dict):
+            continue
+        kind = part.get("type")
+        if kind in ("text", "input_text", "output_text") and part.get("text"):
+            out.append(part["text"])
+        elif kind == "tool_use":
+            target = part.get("input") or {}
+            hint = target.get("file_path") or target.get("command") or target.get("pattern") or ""
+            out.append(f"[{part.get('name')}{': ' + str(hint)[:120] if hint else ''}]")
+    return "\n".join(out)
+
+
+def _conversation(body, api):
+    """[(role, text)] in order, and the system prompt's text."""
+    said, system = [], ""
+    if api == "responses":
+        system = body.get("instructions") or ""
+        items = body.get("input")
+        items = [{"role": "user", "content": items}] if isinstance(items, str) else items or []
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            if item.get("type") == "function_call":
+                said.append(("tool", f"[{item.get('name')}: {str(item.get('arguments') or '')[:120]}]"))
+            elif item.get("role") in ("user", "assistant", "system", "developer"):
+                role = "system" if item["role"] in ("system", "developer") else item["role"]
+                said.append((role, _words(item.get("content"))))
+    else:
+        system = body.get("system") or ""
+        if isinstance(system, list):
+            system = _words(system)
+        for m in body.get("messages") or []:
+            if not isinstance(m, dict):
+                continue
+            role = m.get("role")
+            if role == "system":
+                system += "\n" + _words(m.get("content"))
+                continue
+            if role == "tool":
+                continue                                    # a tool's output: too much to keep
+            if role == "user" and isinstance(m.get("content"), list) and all(
+                    isinstance(p, dict) and p.get("type") == "tool_result" for p in m["content"]):
+                continue
+            text = _words(m.get("content"))
+            for call in m.get("tool_calls") or []:
+                function = (call or {}).get("function") or {}
+                text += f"\n[{function.get('name')}: {str(function.get('arguments') or '')[:120]}]"
+            if role in ("user", "assistant") and text.strip():
+                said.append((role, text.strip()))
+    return said, system
+
+
+_INJECTED = re.compile(r"<(system-reminder|command-[a-z-]+|local-command-[a-z-]+|task-notification)[^>]*>.*?</\1>", re.S)
+_FOLDER = [re.compile(p, re.I) for p in (r"Primary working directory:\s*(\S[^\n]*)", r"<cwd>\s*([^<\n]+)</cwd>",
+                                          r"Working directory:\s*(\S[^\n]*)", r"working in the directory:?\s*(\S[^\n]*)",
+                                          r"\bcwd:\s*(\S[^\n]*)")]
+
+
+def _question(text):
+    """What a person typed, without what a tool puts into the same message (reminders, set-up)."""
+    text = _INJECTED.sub("", text or "").strip()
+    if not text or text.startswith("<") or "setting up the context" in text.lower():
+        return ""
+    return text
+
+
+def _folder(*texts):
+    for text in texts:
+        for pattern in _FOLDER:
+            found = pattern.search(text or "")
+            if found:
+                return found.group(1).strip().strip("`'\".,")[:500]
+    return None
+
+
+_recent: dict[tuple[int, str], tuple[float, int]] = {}      # (user, session) -> when last written, messages
+
+
+def observe(headers, principal, body, api):
+    """Notes a coding tool's model request as its session's latest step: off the request's path, never
+    failing it. headers: the request's (case-insensitive) headers; api: "messages", "chat" or "responses"."""
+    try:
+        user = principal.user
+        tool = _tool(headers) if user is not None and isinstance(body, dict) else None
+        if tool is None:
+            return
+        said, system = _conversation(body, api)
+        questions = [_question(text) for role, text in said if role == "user"]
+        first = next((q for q in questions if q), "")
+        session_id = None
+        for name in ("x-claude-code-session-id", "x-session-id", "session_id", "session-id", "conversation_id"):
+            value = (headers.get(name) or "").strip()
+            if re.fullmatch(r"[A-Za-z0-9_.:-]{6,64}", value):
+                session_id = value
+                break
+        folder = (headers.get("x-ai-gateway-workspace") or "").strip()[:500] or _folder(
+            system, *[text for role, text in said if role == "user"][:3])
+        if session_id is None:
+            if not first:
+                return                                  # nothing to know the conversation by yet
+            digest = hashlib.sha1(f"{user.id}|{tool}|{folder}|{first[:4000]}".encode()).hexdigest()[:24]
+            session_id = f"{tool}-{digest}"
+        computer = (headers.get("x-ai-gateway-computer") or "").strip()[:100]
+        # The tool's own work - choosing a title, summing up - goes with the session too, but only its
+        # main loop (the request that offers tools) says what the conversation is
+        main = bool(body.get("tools"))
+        key = (user.id, session_id)
+        last, count = _recent.get(key, (0.0, -1))
+        if time.monotonic() - last < 5 and (not main or count == len(said)):
+            return
+        _recent[key] = (time.monotonic(), len(said) if main else count)
+        update = {"client": tool, "computer": computer, "model": body.get("model")}
+        if main:
+            # What the person asked and the answers to it: a set-up message and the reply to it are left out
+            kept, asked = [], False
+            for role, text in said:
+                if role == "user":
+                    asked = bool(_question(text))
+                    if asked:
+                        kept.append({"role": "user", "text": _question(text)[:4000]})
+                elif role == "assistant" and asked:
+                    kept.append({"role": "assistant", "text": text[:4000]})
+            kept = kept[-KEPT_MESSAGES:]
+            update.update(title=(first.splitlines()[0][:200] if first else None), folder=folder, transcript=kept)
+        asyncio.get_running_loop().create_task(_note(user.id, session_id, update))
+    except Exception:                                   # never a reason for the request to fail
+        log.exception("could not note a coding session")
+
+
+async def _note(user_id, session_id, update):
+    try:
+        async with session_factory()() as db:
+            row = (await db.execute(select(CCDSessions).where(CCDSessions.session_id == session_id))).scalar_one_or_none()
+            if row is not None and row.user_id != user_id:
+                return
+            if row is None:
+                row = CCDSessions(session_id=session_id, user_id=user_id, pc_name=update["computer"] or "",
+                                  title="Untitled")
+                db.add(row)
+            row.client = update["client"]
+            if update["computer"]:
+                row.pc_name = update["computer"]
+            if update.get("model"):
+                row.model = str(update["model"])[:100]
+            if update.get("title") and (row.title in (None, "", "Untitled") or row.client != "claude-code"
+                                        or not row.seen_at):
+                row.title = update["title"]
+            if update.get("folder"):
+                row.workspace_path = update["folder"]
+            if update.get("transcript"):
+                row.transcript = json.dumps(update["transcript"])
+            row.last_active = utcnow()
+            await db.commit()
+    except Exception:
+        log.exception("could not note a coding session")

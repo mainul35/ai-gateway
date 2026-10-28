@@ -116,6 +116,7 @@ dialog.aside::backdrop{background:rgba(0,0,0,.55)}
 .session-where{display:block;font-size:.74rem;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .session-status.gone{background:transparent;border:1px solid var(--border)}
 .session-note{padding:.4rem .5rem;font-size:.82rem;line-height:1.45;list-style:none}
+.session-tool{color:var(--text);opacity:.8}
 /* Mode switch */
 .mode-switch{display:flex;gap:.3rem;margin-bottom:.3rem}
 .mode-btn{flex:1;padding:.3rem .5rem;border:1px solid var(--border);border-radius:6px;
@@ -4376,9 +4377,10 @@ async function openFromUrl(how){
 window.addEventListener('popstate', () => { if(!controller) openFromUrl('none'); });
 
 // --- Chat and Code -----------------------------------------------------------------------------
-// Chat is this page as it always was. Code lists the Claude Code sessions on your own computers -
-// the ones each computer's sessions agent reports (`ai-gateway sessions`) - and talks to one of them:
-// a message is run on that computer, in the session (app/routers/code_sessions.py).
+// Chat is this page as it always was. Code lists the coding sessions on your own computers - every
+// tool the launcher connects (Claude Code, OpenCode, Qwen Code, Codex...), known from their own
+// requests - and talks to a Claude Code one through its computer's sessions agent (`ai-gateway
+// sessions`): the message is run on that computer, in the session (app/routers/code_sessions.py).
 let currentMode = 'chat';
 let openSession = null;          // the session open in the Code pane
 let sessionsTimer = null;
@@ -4391,13 +4393,13 @@ function setMode(mode){
   document.getElementById('convs').hidden = code;
   document.getElementById('sharedWithMe').hidden = code || !document.getElementById('sharedWithMe').innerHTML;
   document.getElementById('sessions').hidden = !code;
-  document.getElementById('sideTitle').textContent = code ? 'Claude Code sessions' : 'Conversations';
+  document.getElementById('sideTitle').textContent = code ? 'Coding sessions' : 'Conversations';
   document.getElementById('newChat').hidden = code;
   document.getElementById('codePane').hidden = !code;
   document.getElementById('transcript').hidden = code;
   document.querySelector('.composer-wrap').hidden = code;
   document.getElementById('shareBtn').hidden = code || !shareable();
-  document.getElementById('chatTitle').textContent = code ? (openSession ? openSession.title : 'Claude Code')
+  document.getElementById('chatTitle').textContent = code ? (openSession ? openSession.title : 'Coding sessions')
                                                           : (document.getElementById('chatTitle').dataset.chat || 'New conversation');
   clearInterval(sessionsTimer);
   if(code){
@@ -4417,17 +4419,18 @@ async function loadSessions(){
   try{ sessions = await api('/chat/sessions'); }
   catch(e){ list.innerHTML = `<li class="muted session-note">Could not load the sessions: ${escapeHtml(errorText(e))}</li>`; return; }
   if(!sessions.length){
-    list.innerHTML = `<li class="muted session-note">No sessions yet. On a computer where you use Claude Code through
-      <code>ai-gateway launch claude</code>, run <code>ai-gateway sessions</code>: its sessions appear here.</li>`;
+    list.innerHTML = `<li class="muted session-note">No sessions yet. A coding tool started with
+      <code>ai-gateway launch</code> (Claude Code, OpenCode, Qwen Code, Codex...) shows its sessions here once it
+      has sent a message. Run <code>ai-gateway update</code> first if your launcher is older than today.</li>`;
     return;
   }
   list.innerHTML = sessions.map(s => `
-    <li class="session-item ${s.online ? '' : 'offline'} ${openSession && openSession.session_id === s.session_id ? 'active' : ''}"
+    <li class="session-item ${openSession && openSession.session_id === s.session_id ? 'active' : ''}"
         data-session="${escapeHtml(s.session_id)}" title="${escapeHtml(s.workspace_path || '')}">
-      <span class="session-status ${s.online ? s.status : 'gone'}"></span>
+      <span class="session-status ${s.status}"></span>
       <span class="session-title">${escapeHtml(s.title)}</span>
       <span class="session-where">${escapeHtml(sessionWhere(s))}</span>
-      <span class="session-pc">${escapeHtml(s.pc_name)}${s.online ? '' : ' · not connected'} · ${relativeTime(s.last_active)}</span>
+      <span class="session-pc"><span class="session-tool">${escapeHtml(s.tool)}</span>${s.pc_name ? ' · ' + escapeHtml(s.pc_name) : ''} · ${relativeTime(s.last_active)}</span>
     </li>`).join('');
   list.querySelectorAll('[data-session]').forEach(li => li.addEventListener('click', () => {
     showSession(li.dataset.session);
@@ -4446,7 +4449,7 @@ function renderSessionMessage(m){
   if(m.role === 'tool') return sessionLine('tool', m.text);
   const box = document.createElement('div');
   box.className = `msg ${m.role === 'user' ? 'user' : 'assistant'}`;
-  box.innerHTML = `<div class="who">${m.role === 'user' ? 'You' : 'Claude Code'}</div><div class="body"></div>`;
+  box.innerHTML = `<div class="who">${m.role === 'user' ? 'You' : escapeHtml(openSession?.tool || 'Claude Code')}</div><div class="body"></div>`;
   box.querySelector('.body').textContent = m.text;
   return box;
 }
@@ -4458,10 +4461,10 @@ async function showSession(id){
   openSession = s;
   document.getElementById('chatTitle').textContent = s.title;
   document.getElementById('codeAbout').innerHTML =
-    `<b>${escapeHtml(s.pc_name)}</b> · <code>${escapeHtml(s.workspace_path || '')}</code>`
+    `<b>${escapeHtml(s.tool)}</b>` + (s.pc_name ? ` on <b>${escapeHtml(s.pc_name)}</b>` : '')
+    + (s.workspace_path ? ` · <code>${escapeHtml(s.workspace_path)}</code>` : '')
     + (s.branch_name && s.branch_name !== 'HEAD' ? ` · ${escapeHtml(s.branch_name)}` : '')
-    + (s.model ? ` · ${escapeHtml(s.model)}` : '')
-    + (s.online ? '' : ' · <span style="color:var(--danger)">its computer is not connected now</span>');
+    + (s.model ? ` · ${escapeHtml(s.model)}` : '');
   const log = document.getElementById('codeLog');
   log.innerHTML = '';
   (s.transcript || []).forEach(m => log.appendChild(renderSessionMessage(m)));
@@ -4471,9 +4474,13 @@ async function showSession(id){
   permission.querySelector('option[value="commands"]').disabled = !s.allow_commands;
   if(!s.allow_commands) permission.value = 'edits';
   permission.title = s.allow_commands ? '' : `${s.pc_name}'s agent was started without --allow-commands`;
-  document.getElementById('codeSend').disabled = !s.online;
-  document.getElementById('codePrompt').placeholder = s.online
-    ? `Message this session on ${s.pc_name}…` : `${s.pc_name} is not connected: run "ai-gateway sessions" there`;
+  // Messages go to a Claude Code session through its computer's agent; the others can be read
+  const prompt = document.getElementById('codePrompt');
+  document.getElementById('codeSend').disabled = !s.can_send;
+  prompt.disabled = !s.can_send;
+  prompt.placeholder = s.can_send ? `Message this session on ${s.pc_name}…`
+    : s.client !== 'claude-code' ? `Sending to ${s.tool} sessions from here is not supported yet; you can read this one`
+    : `To send it a message, run "ai-gateway sessions" on ${s.pc_name || 'its computer'}`;
   loadSessions();
 }
 
@@ -4515,7 +4522,7 @@ async function sendToSession(){
     status.textContent = 'It did not run: ' + errorText(e);
     status.classList.add('failed');
   }
-  button.disabled = !(openSession && openSession.online);
+  button.disabled = !(openSession && openSession.can_send);
 }
 
 document.querySelectorAll('.mode-btn').forEach(b => b.addEventListener('click', () => setMode(b.dataset.mode)));

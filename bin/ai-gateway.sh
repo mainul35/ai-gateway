@@ -405,6 +405,11 @@ run() {
 }
 
 # --- the apps ------------------------------------------------------------------------------------
+# Every app's model requests say which app and which computer they come from (X-AI-Gateway-Client,
+# -Computer), so the playground's Code mode lists its sessions; the folder too where a header can
+# carry it as it is (plain ASCII)
+COMPUTER=$(hostname 2>/dev/null || uname -n)
+FOLDER=""; printf '%s' "$PWD" | LC_ALL=C grep -q '[^ -~]' || FOLDER=$PWD
 case "$APP" in
 claude)
     need claude "Claude Code" "curl -fsSL https://claude.ai/install.sh | bash"
@@ -418,7 +423,9 @@ claude)
         CLAUDE_CODE_MAX_OUTPUT_TOKENS="$MAX_OUTPUT" CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS=1 \
         CLAUDE_CODE_DISABLE_THINKING=1 CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 CLAUDE_CODE_ATTRIBUTION_HEADER=0 \
         CLAUDE_CODE_AUTO_MODE_SERVER=0 DISABLE_ERROR_REPORTING=1 DISABLE_FEEDBACK_COMMAND=1 \
-        CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY=1 ENABLE_CLAUDEAI_MCP_SERVERS=false
+        CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY=1 ENABLE_CLAUDEAI_MCP_SERVERS=false \
+        ANTHROPIC_CUSTOM_HEADERS="X-AI-Gateway-Client: claude-code
+X-AI-Gateway-Computer: $COMPUTER"
     unset ANTHROPIC_API_KEY
     # The project tools, for this run: one file per workspace (it holds the key, so only you may read
     # it), and the tools allowed without asking - they read your own projects and notes. Given after
@@ -436,7 +443,7 @@ opencode)
     modalities=""; [ "$VISION" = 1 ] && modalities=',"modalities":{"input":["text","image"],"output":["text"]}'
     m=$(json_str "$MODEL")
     # Inline: nothing in opencode.json changes, and this run alone sees the gateway
-    export OPENCODE_CONFIG_CONTENT="{\"\$schema\":\"https://opencode.ai/config.json\",\"provider\":{\"ai-gateway\":{\"npm\":\"@ai-sdk/openai-compatible\",\"name\":\"AI Gateway\",\"options\":{\"baseURL\":\"$(json_str "$GATEWAY")/v1\",\"apiKey\":\"$(json_str "$KEY")\"},\"models\":{\"$m\":{\"name\":\"$m\",\"tool_call\":true,\"limit\":{\"context\":$CONTEXT,\"output\":$MAX_OUTPUT}$modalities}}}},\"model\":\"ai-gateway/$m\",\"mcp\":{\"ai-gateway\":{\"type\":\"remote\",\"enabled\":true,\"url\":\"$(json_str "$MCP_URL")\",\"headers\":{\"Authorization\":\"Bearer $(json_str "$KEY")\",\"X-Workspace\":\"$(json_str "$WORKSPACE")\"}}}}"
+    export OPENCODE_CONFIG_CONTENT="{\"\$schema\":\"https://opencode.ai/config.json\",\"provider\":{\"ai-gateway\":{\"npm\":\"@ai-sdk/openai-compatible\",\"name\":\"AI Gateway\",\"options\":{\"baseURL\":\"$(json_str "$GATEWAY")/v1\",\"apiKey\":\"$(json_str "$KEY")\",\"headers\":{\"X-AI-Gateway-Client\":\"opencode\",\"X-AI-Gateway-Computer\":\"$(json_str "$COMPUTER")\",\"X-AI-Gateway-Workspace\":\"$(json_str "$FOLDER")\"}},\"models\":{\"$m\":{\"name\":\"$m\",\"tool_call\":true,\"limit\":{\"context\":$CONTEXT,\"output\":$MAX_OUTPUT}$modalities}}}},\"model\":\"ai-gateway/$m\",\"mcp\":{\"ai-gateway\":{\"type\":\"remote\",\"enabled\":true,\"url\":\"$(json_str "$MCP_URL")\",\"headers\":{\"Authorization\":\"Bearer $(json_str "$KEY")\",\"X-Workspace\":\"$(json_str "$WORKSPACE")\"}}}}"
     run opencode ${extra[@]+"${extra[@]}"}
     ;;
 qwen)
@@ -452,6 +459,7 @@ codex)
     run codex -c model_provider='"ai-gateway"' -c model_providers.ai-gateway.name='"AI Gateway"' \
         -c model_providers.ai-gateway.base_url="\"$GATEWAY/v1/\"" -c model_providers.ai-gateway.wire_api='"responses"' \
         -c model_providers.ai-gateway.env_key='"AI_GATEWAY_API_KEY"' -c model_context_window="$CONTEXT" \
+        -c "model_providers.ai-gateway.http_headers={\"X-AI-Gateway-Client\"=\"codex\",\"X-AI-Gateway-Computer\"=\"$COMPUTER\"}" \
         -c mcp_servers.ai-gateway.url="\"$MCP_URL\"" -c mcp_servers.ai-gateway.bearer_token_env_var='"AI_GATEWAY_API_KEY"' \
         -c "mcp_servers.ai-gateway.http_headers={\"X-Workspace\"=\"$WORKSPACE\"}" \
         -m "$MODEL" ${extra[@]+"${extra[@]}"}

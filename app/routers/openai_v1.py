@@ -11,6 +11,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from app import access, api_images, anthropic_compat as compat, backends, context_fit, limits, settings, usage as usage_log
 from app.engine.supervisor import supervisor
 from app.auth import Principal, authenticate
+from app.routers import code_sessions
 from app.tools import auto_model, images
 
 router = APIRouter(prefix="/v1", tags=["openai"])
@@ -50,6 +51,9 @@ async def _proxy(request: Request, principal: Principal, endpoint: str, path: st
         body = await request.json()
     except ValueError:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Request body must be JSON")
+    if endpoint == "chat_completions":
+        # A coding tool's request is its session's latest step (the playground's Code mode)
+        code_sessions.observe(request.headers, principal, body, "chat")
     return await forward(principal, endpoint, path, body)
 
 

@@ -24,6 +24,7 @@ from fastapi.responses import JSONResponse, Response, StreamingResponse
 
 from app import access, anthropic_compat as compat, api_images, backends, context_fit, limits, settings, usage as usage_log
 from app.auth import Principal, authenticate
+from app.routers import code_sessions
 from app.engine.supervisor import supervisor
 from app import claude_desktop
 from app.tools import auto_model
@@ -292,6 +293,8 @@ async def messages(request: Request, principal: Principal = Depends(authenticate
         body = await request.json()
     except ValueError:
         return _error(400, "Request body must be JSON", "invalid_request_error")
+    # A coding tool's request is its session's latest step (the playground's Code mode)
+    code_sessions.observe(request.headers, principal, body, "messages")
 
     body["messages"] = compat.fold_system_messages(body.get("messages"))
 
