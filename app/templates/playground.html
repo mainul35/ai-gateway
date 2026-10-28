@@ -14,7 +14,7 @@
 /* One reading column, the same width for the conversation and the composer under it */
 .column{width:min(52rem, 100%);margin:0 auto;padding:0 1.25rem}
 .transcript{flex:1;min-height:0;overflow-y:auto;padding:1.25rem 0 .5rem}
-.composer-wrap{flex:none;border-top:1px solid var(--border);background:var(--bg);padding:.85rem 0 1rem}
+.composer-wrap,.code-composer-wrap{flex:none;border-top:1px solid var(--border);background:var(--bg);padding:.85rem 0 1rem}
 
 /* --- sidebar ------------------------------------------------------------------------- */
 .side h2{font-size:.72rem;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);margin:0}
@@ -101,11 +101,11 @@ dialog.aside::backdrop{background:rgba(0,0,0,.55)}
 .shared-bar{font-size:.85rem;color:var(--muted);margin:0 0 .4rem;display:flex;gap:.6rem;align-items:center;flex-wrap:wrap}
 .shared-head{font-size:.72rem;letter-spacing:.05em;text-transform:uppercase;color:var(--muted);padding:.6rem .5rem .2rem}
 /* Code mode */
-.code-pane{flex:1;display:flex;flex-direction:column;min-height:0;overflow:hidden;padding-bottom:.6rem}
+.code-pane{flex:1;display:flex;flex-direction:column;min-height:0;overflow:hidden}
 /* The log scrolls across the whole pane, as Chat's transcript does, so its scrollbar is at the window's
-   edge; what is in it, the line above and the message box below stay in the reading column */
-.code-pane .column{display:flex;flex-direction:column;min-height:0;height:100%;width:100%;padding:0}
-.code-pane .column > :not(.code-log){width:min(49.5rem, calc(100% - 2.5rem));margin-left:auto;margin-right:auto}
+   edge; what is in it and the line above stay in the reading column */
+.code-main{flex:1;display:flex;flex-direction:column;min-height:0}
+.code-main > :not(.code-log){width:min(49.5rem, calc(100% - 2.5rem));margin-left:auto;margin-right:auto}
 .code-about{font-size:.82rem;padding:.4rem 0;overflow-wrap:anywhere}
 .code-log{flex:1;overflow-y:auto;min-height:0;display:flex;flex-direction:column;gap:.3rem;
   padding:.3rem max(1.25rem, calc((100% - 49.5rem) / 2))}
@@ -535,7 +535,8 @@ a.paper{color:var(--text);text-decoration:none}
   .topbar .column{display:flex;align-items:center;gap:.55rem}
   .chatTitle{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
   body.reading header.nav,
-  body.reading .composer-wrap{display:none}
+  body.reading .composer-wrap,
+  body.reading .code-composer-wrap{display:none}
   /* Room under the last line, so the end of an answer is not read through the Write button */
   body.reading .transcript{padding-bottom:4.5rem}
   .topbar{padding:.2rem 0}
@@ -613,9 +614,12 @@ a.paper{color:var(--text);text-decoration:none}
 
     <!-- Code mode: a Claude Code session on one of your computers, and a message for it -->
     <div class="code-pane" id="codePane" hidden>
-      <div class="column">
+      <div class="code-main">
         <div class="code-about muted" id="codeAbout">Pick a session on the left.</div>
         <div class="code-log" id="codeLog"></div>
+      </div>
+      <div class="code-composer-wrap">
+       <div class="column">
         <div class="composer code-composer">
           <textarea id="codePrompt" rows="2" placeholder="Pick a session first"></textarea>
           <div class="tools">
@@ -627,6 +631,7 @@ a.paper{color:var(--text);text-decoration:none}
             <button class="btn btn-sm" id="codeSend" disabled>Send</button>
           </div>
         </div>
+       </div>
       </div>
     </div>
 
