@@ -39,6 +39,7 @@ _ADDED_COLUMNS = (
     ("conversation_messages", "author_id", "INTEGER REFERENCES users(id) ON DELETE SET NULL"),
     ("ccd_sessions", "seen_at", "TIMESTAMPTZ"),
     ("ccd_sessions", "transcript", "TEXT"),
+    ("ccd_sessions", "client", "VARCHAR(32)"),
 )
 
 

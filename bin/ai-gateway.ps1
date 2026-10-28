@@ -310,6 +310,8 @@ switch ($App) {
             CLAUDE_CODE_DISABLE_THINKING = "1"; CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC = "1"
             CLAUDE_CODE_ATTRIBUTION_HEADER = "0"; CLAUDE_CODE_AUTO_MODE_SERVER = "0"; DISABLE_ERROR_REPORTING = "1"
             DISABLE_FEEDBACK_COMMAND = "1"; CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY = "1"; ENABLE_CLAUDEAI_MCP_SERVERS = "false"
+            # Which app and computer, for the playground's Code mode
+            ANTHROPIC_CUSTOM_HEADERS = "X-AI-Gateway-Client: claude-code`nX-AI-Gateway-Computer: $env:COMPUTERNAME"
         }
         # The project tools, for this run: one file per workspace (it holds the key), and the tools allowed
         # without asking - they read your own projects and notes. Given after the app's own arguments,
@@ -330,7 +332,11 @@ switch ($App) {
         # Inline: nothing in opencode.json changes, and this run alone sees the gateway
         $config = @{ '$schema' = "https://opencode.ai/config.json"; model = "ai-gateway/$Model"
             provider = @{ "ai-gateway" = @{ npm = "@ai-sdk/openai-compatible"; name = "AI Gateway"
-                options = @{ baseURL = "$Gateway/v1"; apiKey = $Key }; models = @{ $Model = $entry } } }
+                options = @{ baseURL = "$Gateway/v1"; apiKey = $Key
+                    # Which app, computer and folder, for the playground's Code mode
+                    headers = @{ "X-AI-Gateway-Client" = "opencode"; "X-AI-Gateway-Computer" = $env:COMPUTERNAME
+                                 "X-AI-Gateway-Workspace" = $(if ((Get-Location).Path -match '^[\x20-\x7e]*$') { (Get-Location).Path } else { "" }) } }
+                models = @{ $Model = $entry } } }
             mcp = @{ "ai-gateway" = @{ type = "remote"; enabled = $true; url = $McpUrl
                 headers = @{ Authorization = "Bearer $Key"; "X-Workspace" = $Workspace } } } }
         Set-ForRun @{ OPENCODE_CONFIG_CONTENT = ($config | ConvertTo-Json -Depth 10 -Compress) }
@@ -348,8 +354,11 @@ switch ($App) {
         $codexArgs = @("-c", 'model_provider="ai-gateway"', "-c", 'model_providers.ai-gateway.name="AI Gateway"',
             "-c", "model_providers.ai-gateway.base_url=`"$Gateway/v1/`"", "-c", 'model_providers.ai-gateway.wire_api="responses"',
             "-c", 'model_providers.ai-gateway.env_key="AI_GATEWAY_API_KEY"', "-c", "model_context_window=$Context",
+            # TOML's single-quoted strings: PowerShell strips double quotes from an argument on its way
+            # through codex.cmd, and what is left is not TOML (the X-Workspace header went that way too)
+            "-c", "model_providers.ai-gateway.http_headers={'X-AI-Gateway-Client'='codex','X-AI-Gateway-Computer'='$env:COMPUTERNAME'}",
             "-c", "mcp_servers.ai-gateway.url=`"$McpUrl`"", "-c", 'mcp_servers.ai-gateway.bearer_token_env_var="AI_GATEWAY_API_KEY"',
-            "-c", "mcp_servers.ai-gateway.http_headers={`"X-Workspace`"=`"$Workspace`"}", "-m", $Model)
+            "-c", "mcp_servers.ai-gateway.http_headers={'X-Workspace'='$Workspace'}", "-m", $Model)
         Start-App "codex" ($codexArgs + $Extra); exit $script:ExitCode
     }
     "hermes" {

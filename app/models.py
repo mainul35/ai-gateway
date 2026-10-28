@@ -320,8 +320,9 @@ class SharedPage(Base):
 
 
 class CCDSessions(Base):
-    """A Claude Code session on one of the person's computers, as its sessions agent reports it
-    (app/static/claude-sessions.py): the playground's Code mode lists them and talks to them through it."""
+    """A coding session on one of the person's computers - Claude Code, OpenCode, Qwen Code... - known
+    from the tool's own requests, and for Claude Code from its computer's sessions agent too
+    (app/routers/code_sessions.py): the playground's Code mode lists them."""
     __tablename__ = "ccd_sessions"
 
     id: Mapped[int] = mapped_column(primary_key=True)
@@ -340,6 +341,8 @@ class CCDSessions(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     last_active: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    # The coding tool it belongs to: claude-code, opencode, qwen-code, codex, hermes, openclaw
+    client: Mapped[str | None] = mapped_column(String(32), nullable=True)
     # When its computer last reported it: the session can be talked to while that is recent
     seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     # JSON: its latest messages, as the agent read them from the session's file

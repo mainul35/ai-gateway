@@ -15,6 +15,7 @@ from fastapi.responses import JSONResponse, Response, StreamingResponse
 
 from app import access, anthropic_compat as compat, backends, context_fit, limits, settings, usage as usage_log
 from app.auth import Principal, authenticate
+from app.routers import code_sessions
 from app.routers.anthropic_v1 import _target
 
 router = APIRouter(prefix="/v1", tags=["responses"])
@@ -80,6 +81,8 @@ async def responses(request: Request, principal: Principal = Depends(authenticat
         body = await request.json()
     except ValueError:
         return _error(400, "Request body must be JSON")
+    # A coding tool's request is its session's latest step (the playground's Code mode)
+    code_sessions.observe(request.headers, principal, body, "responses")
     model = (body.get("model") or "").strip()
     if not model:
         return _error(400, "Field 'model' is required")
