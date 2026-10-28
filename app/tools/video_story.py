@@ -36,6 +36,11 @@ from app.tools import child, quran, voices
 log = logging.getLogger("tools.video_story")
 
 WIDTH, HEIGHT, FPS = 1280, 720, 25
+# A video uploaded to Facebook, YouTube, Instagram, TikTok or X as it is: H.264 High in 4:2:0, a
+# keyframe every 2 s and at most 4 Mbit/s - the longest story stays well under X's 512 MB - with
+# AAC at 48 kHz (adding the narration) and the index at the front
+SHAREABLE = ["-pix_fmt", "yuv420p", "-profile:v", "high", "-level:v", "4.0", "-r", str(FPS), "-g", str(FPS * 2),
+             "-maxrate", "4M", "-bufsize", "8M"]
 SCENE_MIN = 8.0                       # seconds a scene stays at least: slow enough for a child to take it in
 FADE = 1.5                            # seconds two scenes overlap
 LEAD_IN = 0.6                         # silence before a scene's narration starts
@@ -1325,8 +1330,8 @@ async def assemble(pictures, narration, texts, title, lang, folder, recorded=Fal
         last = out
     joined = os.path.join(folder, f"joined-{lang}.mp4")
     await _run([binary, "-y", *inputs, "-filter_complex", ";".join(chain) or "[0:v]null[v0]",
-                "-map", last if chain else "[v0]", "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", joined],
-               "joining the scenes")
+                "-map", last if chain else "[v0]", "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", *SHAREABLE,
+                joined], "joining the scenes")
 
     # The narration, each line where its scene begins
     audio_inputs, delays = [], []
@@ -1343,7 +1348,8 @@ async def assemble(pictures, narration, texts, title, lang, folder, recorded=Fal
     # The words are already in the pictures: the video is copied as it is, with the narration added
     final = os.path.join(folder, f"story-{lang}.mp4")
     await _run([binary, "-y", "-i", joined, *audio_inputs, "-filter_complex", mix, "-map", "0:v", "-map", "[aout]",
-                "-c:v", "copy", "-c:a", "aac", "-b:a", "128k", "-t", f"{total:.3f}", "-movflags", "+faststart", final],
+                "-c:v", "copy", "-c:a", "aac", "-b:a", "128k", "-ar", "48000", "-t", f"{total:.3f}",
+                "-movflags", "+faststart", final],
                "adding the narration")
     with open(final, "rb") as f:
         return f.read(), round(total, 1)
