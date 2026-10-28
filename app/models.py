@@ -165,6 +165,27 @@ class ChatFile(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
+class IstoryExport(Base):
+    """A video story sent, or being sent, to the person's istory studio (app/istory.py).
+
+    One per video file: the file id is also istory's externalId, so a send that is retried - here
+    or after a restart - never makes a second draft there.
+    """
+    __tablename__ = "istory_exports"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    file_id: Mapped[int] = mapped_column(ForeignKey("chat_files.id", ondelete="CASCADE"), unique=True)
+    # "sending", "sent", "not_linked" (no istory account yet), "disabled" (turned off at istory), "failed"
+    status: Mapped[str] = mapped_column(String(16), default="sending")
+    istory_video_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    studio_url: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
 class Project(Base):
     """A repository the gateway may change: cloned on this server, worked on in a worktree per task.
 

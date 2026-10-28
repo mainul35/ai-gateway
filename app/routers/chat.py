@@ -24,7 +24,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from app import access, backends, feedback, limits, settings, usage as usage_log
+from app import access, backends, feedback, istory, limits, settings, usage as usage_log
 from app.auth import Principal, authenticate
 from app.db import get_session, session_factory
 from app.models import (AnswerFeedback, ChatFile, Conversation, ConversationMessage, MemoryEntry, SharedAccessRequest,
@@ -763,6 +763,16 @@ def _attachment(name):
     link's download attribute. The plain name for old browsers, the whole one (Bangla too) for the rest."""
     plain = re.sub(r'[^\w .,()-]+', "_", name.encode("ascii", "ignore").decode()).strip() or "download"
     return f"attachment; filename=\"{plain}\"; filename*=UTF-8''{urllib.parse.quote(name)}"
+
+
+@router.get("/files/{file_id}/istory")
+async def file_istory_status(file_id: int, principal: Principal = Depends(authenticate)):
+    """Whether a video story reached the person's istory studio (app/istory.py)."""
+    user = _require_user(principal)
+    found = await istory.status_of(user.id, file_id)
+    if found is None:
+        return {"status": "not_sent" if settings.istory_enabled() else "off"}
+    return found
 
 
 async def _load_files(session, user, file_ids):
@@ -3684,6 +3694,8 @@ async def _video_pipeline(principal, user_id, ctx):
             stored = await _store_file(user_id, "video", "video/mp4", f"{video['title'][:80]} ({word}).mp4", data,
                                        prompt=title)
             videos[lang] = {"file_id": stored, "url": f"/chat/files/{stored}", "seconds": seconds}
+            # To the person's istory studio as a private draft, when both accounts are theirs
+            istory.send_soon(user_id, stored, title, lang)
             if lang in (video.get("behind") or []):         # it says what is saved again
                 video["behind"].remove(lang)
             read = [entry.get("by") == "recorded" for entry in entries if entry.get("by") != "qari"]
@@ -3861,6 +3873,8 @@ async def video_voice(message_id: int, payload: VoiceIn, principal: Principal = 
                 db.add(stored)
                 await db.commit()
             created.append(stored.id)
+            # To the person's istory studio as a private draft, when both accounts are theirs
+            istory.send_soon(user_id, stored.id, f"{title} (your voice)", lang)
             # The video it replaces is kept as an earlier version, not removed
             _keep_version(video, lang)
             video.setdefault("videos", {})[lang] = {"file_id": stored.id, "url": f"/chat/files/{stored.id}",

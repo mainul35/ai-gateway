@@ -108,6 +108,11 @@ DEFAULTS = {
     # model's text encoder and VAE. Without the file, stories are drawn by Flux.
     "images.story.model": "qwen_image_2512_fp8_e4m3fn.safetensors",
     "images.story.lora": "Qwen-Image-2512-Lightning-8steps-V1.0-bf16.safetensors",
+    # Sending finished video stories to istory (app/istory.py). Off until istory.url and the
+    # backend client below are set; the token URL defaults to sso.token.url.
+    "istory.enabled": "false",
+    "istory.resource": "urn:istory:api",
+    "istory.scope": "istory:ingest",
 }
 
 # Generated once per process when no master key is configured, so a fresh install still works
@@ -214,6 +219,38 @@ def sso_claim_name():
 
 def sso_admin_emails():
     return get("sso.admin.emails", "SSO_ADMIN_EMAILS")
+
+
+# --- istory: finished video stories go to the person's istory studio as private drafts ---
+
+def istory_enabled():
+    return get_bool("istory.enabled", "ISTORY_ENABLED") and bool(istory_url()) and bool(istory_client_id())
+
+
+def istory_url():
+    return (get("istory.url", "ISTORY_URL") or "").rstrip("/")
+
+
+def istory_token_url():
+    return get("istory.token.url", "ISTORY_TOKEN_URL") or sso_token_url()
+
+
+def istory_client_id():
+    # A BACKEND_SERVICE client of the gateway's application at vsd-auth-server: the SSO client
+    # signs people in and cannot use client_credentials
+    return get("istory.client.id", "ISTORY_CLIENT_ID")
+
+
+def istory_client_secret():
+    return get("istory.client.secret", "ISTORY_CLIENT_SECRET")
+
+
+def istory_resource():
+    return get("istory.resource", "ISTORY_RESOURCE")
+
+
+def istory_scope():
+    return get("istory.scope", "ISTORY_SCOPE")
 
 
 # --- Playground tools: web search, image understanding, image generation ---
