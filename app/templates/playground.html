@@ -104,7 +104,11 @@ dialog.aside::backdrop{background:rgba(0,0,0,.55)}
 .code-pane{flex:1;display:flex;flex-direction:column;min-height:0;overflow:hidden;padding-bottom:.6rem}
 .code-pane .column{display:flex;flex-direction:column;min-height:0;height:100%}
 .code-about{font-size:.82rem;padding:.4rem 0;overflow-wrap:anywhere}
-.code-log{flex:1;overflow-y:auto;min-height:0;padding:.3rem 0}
+.code-log{flex:1;overflow-y:auto;min-height:0;padding:.3rem 0;display:flex;flex-direction:column;gap:.3rem}
+.code-log .msg{background:none;border:none;padding:0;margin:.15rem 0}
+.code-log .msg .who{display:block;font-size:.72rem;color:var(--muted);margin-bottom:.2rem;font-weight:600}
+.code-log .msg .body{font-size:.9rem;color:var(--text);white-space:pre-wrap;line-height:1.45}
+.code-log .msg.user{background:var(--input);border-radius:12px;padding:.6rem .9rem;max-width:85%;align-self:flex-end}
 .code-line{font-family:ui-monospace,monospace;font-size:.78rem;color:var(--muted);margin:.15rem 0 .15rem .4rem;
            white-space:pre-wrap;overflow-wrap:anywhere}
 .code-line.result{opacity:.75}
@@ -137,6 +141,8 @@ dialog.aside::backdrop{background:rgba(0,0,0,.55)}
 .session-branch{font-size:.72rem;color:#6366f1;margin-left:.3rem}
 .session-pr{font-size:.72rem;color:#6366f1;margin-left:.3rem;text-decoration:none}
 .session-pr:hover{text-decoration:underline}
+.session-meta{display:block;font-size:.72rem;color:var(--text);opacity:.7}
+.session-time{display:block;font-size:.68rem;color:var(--muted)}
 /* white-space:normal is the important one. The body is pre-wrap so that a streaming answer keeps
    its line breaks before anything has rendered it; once the Markdown is in, the newlines between
    </p> and <p> are still being honoured as real line breaks, which lands a blank line on top of
@@ -4429,8 +4435,9 @@ async function loadSessions(){
         data-session="${escapeHtml(s.session_id)}" title="${escapeHtml(s.workspace_path || '')}">
       <span class="session-status ${s.status}"></span>
       <span class="session-title">${escapeHtml(s.title)}</span>
-      <span class="session-where">${escapeHtml(sessionWhere(s))}</span>
-      <span class="session-pc"><span class="session-tool">${escapeHtml(s.tool)}</span>${s.pc_name ? ' · ' + escapeHtml(s.pc_name) : ''} · ${relativeTime(s.last_active)}</span>
+      <span class="session-meta">${escapeHtml(s.tool)}${s.pc_name ? ' on ' + escapeHtml(s.pc_name) : ''}</span>
+      ${sessionWhere(s) ? `<span class="session-where" title="${escapeHtml(sessionWhere(s))}">${escapeHtml(sessionWhere(s))}</span>` : ''}
+      <span class="session-time">${relativeTime(s.last_active)}</span>
     </li>`).join('');
   list.querySelectorAll('[data-session]').forEach(li => li.addEventListener('click', () => {
     showSession(li.dataset.session);
@@ -4454,7 +4461,8 @@ function renderSessionMessage(m){
   if(m.role === 'tool') return sessionLine('tool', m.text);
   const box = document.createElement('div');
   box.className = `msg ${m.role === 'user' ? 'user' : 'assistant'}`;
-  box.innerHTML = `<div class="who">${m.role === 'user' ? 'You' : escapeHtml(openSession?.tool || 'Claude Code')}</div><div class="body"></div>`;
+  const who = m.role === 'user' ? 'You' : escapeHtml(openSession?.tool || 'Claude Code');
+  box.innerHTML = `<div class="who">${who}</div><div class="body"></div>`;
   box.querySelector('.body').textContent = m.text;
   return box;
 }
