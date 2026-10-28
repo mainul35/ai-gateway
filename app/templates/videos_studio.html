@@ -89,6 +89,20 @@ body.videos-studio main{max-width:none;padding:0}
 dialog.zoom{border:none;background:none;padding:0;max-width:96vw}
 dialog.zoom img{max-width:96vw;max-height:90vh;border-radius:8px}
 dialog.zoom::backdrop{background:rgba(0,0,0,.8)}
+.gap{display:flex;align-items:center;gap:.5rem;width:100%;padding:.15rem .8rem;border:0;background:none;cursor:pointer;
+     color:var(--muted);font:inherit;font-size:.72rem;opacity:.35;border-bottom:1px solid var(--card)}
+.gap::before,.gap::after{content:"";flex:1;border-top:1px dashed var(--border)}
+.gap:hover,.gap:focus-visible{opacity:1;color:var(--primary)}
+.gap:hover::before,.gap:hover::after{border-color:var(--primary)}
+dialog.addScene{width:min(36rem,calc(100vw - 2rem));border:1px solid var(--border);border-radius:12px;
+  background:var(--card);color:var(--text);padding:1.1rem 1.2rem}
+dialog.addScene::backdrop{background:rgba(0,0,0,.6)}
+dialog.addScene h3{margin:0 0 .8rem;font-size:1.05rem}
+dialog.addScene .field{display:flex;align-items:center;justify-content:space-between;gap:.6rem;margin:.6rem 0 .3rem}
+dialog.addScene select{width:auto}
+dialog.addScene textarea{width:100%;min-height:7rem;font:inherit;font-size:.92rem}
+dialog.addScene textarea.short{min-height:4.5rem}
+dialog.addScene .actions{display:flex;justify-content:flex-end;gap:.5rem;margin-top:.8rem}
 </style>
 
 <div class="studio">
@@ -112,6 +126,20 @@ dialog.zoom::backdrop{background:rgba(0,0,0,.8)}
   </div>
 </div>
 <dialog class="zoom" id="zoom"><img alt=""></dialog>
+<dialog class="addScene" id="addScene">
+  <form method="dialog">
+    <h3></h3>
+    <label class="field" for="newWords">Its words, as they are read
+      <select id="newLang" aria-label="The language they are written in"></select></label>
+    <textarea id="newWords" dir="auto" required placeholder="What is read while this scene shows"></textarea>
+    <label class="field" for="newPicture">What its picture shows <span class="muted">(optional)</span></label>
+    <textarea id="newPicture" dir="auto" class="short"
+      placeholder="Without it, the picture is drawn from the words, in the look of the scene before"></textarea>
+    <p class="hint" id="newHow"></p>
+    <div class="actions"><button type="button" class="btn btn-secondary" value="cancel" id="newCancel">Cancel</button>
+      <button type="submit" class="btn" id="newAdd">Add the scene</button></div>
+  </form>
+</dialog>
 
 <script src="{{ static_url('video_draft.js') }}"></script>
 <script src="{{ static_url('video_downloads.js') }}"></script>
@@ -317,7 +345,11 @@ function renderRows(){
   const langs = languages();
   const first = langs[0];
   const at = starts(showing);
-  document.getElementById('rows').innerHTML = (told.pictures || []).map((picture, i) => {
+  // Between the scenes of a made video, a place to put a new one
+  const addable = !current.being_made && Object.keys(current.video.videos || {}).length > 0;
+  const gap = after => addable ? `<button type="button" class="gap" data-after="${after}"
+    title="${after < 0 ? 'Add a scene before the first' : `Add a scene after scene ${after + 1}`}">＋ Add a scene here</button>` : '';
+  document.getElementById('rows').innerHTML = gap(-1) + (told.pictures || []).map((picture, i) => {
     const displayPic = previews[i]?.file_id || picture;
     const words = edits[i]?.text?.[first] ?? (told[first] || [])[i] ?? '';
     const voices = langs.map(l => ((told.narration || {})[l] || [])[i]?.by).filter(by => by && by !== 'machine');
@@ -326,10 +358,50 @@ function renderRows(){
       <span><span class="t" dir="auto">${i + 1} · ${escapeHtml(words)}</span>
         <span class="s">${at[i] !== undefined ? clock(at[i]) + ' · ' : ''}${voices.length ? [...new Set(voices)].map(v => BY[v]).join(', ') : 'machine voice'}${
           edits[i] ? ' · <span class="edited">changed</span>' : ''}<span class="drawing" data-drawing="${i}">${
-          drawing[i] ? ' · ' + drawingLabel(drawing[i]) : ''}</span></span></span></button>`;
+          drawing[i] ? ' · ' + drawingLabel(drawing[i]) : ''}</span></span></span></button>${gap(i)}`;
   }).join('');
   document.querySelectorAll('.row').forEach(row => row.addEventListener('click', () => select(Number(row.dataset.i))));
+  document.querySelectorAll('.gap').forEach(button => button.addEventListener('click', () => openAddScene(Number(button.dataset.after))));
 }
+
+// A new scene put in after scene `after` (-1: before the first): its words in one of the story's
+// languages, and what its picture shows if the person says. It goes in with "Save and remake"'s
+// changes, and every language's video is made again
+function openAddScene(after){
+  if(busy) return;
+  const dialog = document.getElementById('addScene');
+  const langs = languages();
+  const others = langs.slice(1).map(l => IN_ENGLISH[l] || l);
+  dialog.dataset.after = after;
+  dialog.querySelector('h3').textContent = after < 0 ? 'A new scene before the first' : `A new scene after scene ${after + 1}`;
+  const select = dialog.querySelector('#newLang');
+  select.innerHTML = langs.map(l => `<option value="${l}">${NAMES[l] || l}${
+    IN_ENGLISH[l] && IN_ENGLISH[l] !== NAMES[l] ? ' · ' + IN_ENGLISH[l] : ''}</option>`).join('');
+  const words = dialog.querySelector('#newWords');
+  words.value = '';
+  words.lang = select.value;
+  dialog.querySelector('#newPicture').value = '';
+  const howOthers = () => {
+    const rest = langs.filter(l => l !== select.value).map(l => IN_ENGLISH[l] || l);
+    dialog.querySelector('#newHow').textContent = (rest.length ? `It is translated into ${rest.join(' and ')}, ` : 'It is ') +
+      'drawn and voiced, and every language\'s video is made again' +
+      (Object.keys(edits).length ? ', with your other changes.' : '.');
+  };
+  select.onchange = () => { words.lang = select.value; howOthers(); };
+  howOthers();
+  dialog.showModal();
+  words.focus();
+}
+
+document.getElementById('newCancel').addEventListener('click', () => document.getElementById('addScene').close());
+document.getElementById('addScene').querySelector('form').addEventListener('submit', e => {
+  const dialog = document.getElementById('addScene');
+  const text = clean(dialog.querySelector('#newWords').value);
+  if(!text){ e.preventDefault(); dialog.querySelector('#newWords').focus(); return; }
+  const scene = {after: Number(dialog.dataset.after), lang: dialog.querySelector('#newLang').value, text,
+                 picture: dialog.querySelector('#newPicture').value.trim() || null};
+  remake(Object.entries(edits).map(([i, {ask, ...change}]) => ({index: Number(i), ...change})), [], [], [scene]);
+});
 
 function select(i){
   selected = i;
@@ -759,8 +831,8 @@ function showProgress(event){
   document.getElementById('wholeBar').style.width = whole + '%';
 }
 
-async function remake(list, add = [], gone = []){
-  if(list && !list.length && !add.length && !gone.length && !behind().length) return;
+async function remake(list, add = [], gone = [], insert = []){
+  if(list && !list.length && !add.length && !gone.length && !insert.length && !behind().length) return;
   showError('');
   busy = true;
   updateSave();
@@ -769,7 +841,7 @@ async function remake(list, add = [], gone = []){
   try{
     const response = list
       ? await fetch(`/chat/video/${current.message_id}/edit`, {method: 'POST', headers: JSON_HEADERS,
-                                                             body: JSON.stringify({scenes: list, add_languages: add, delete: gone})})
+                                                             body: JSON.stringify({scenes: list, add_languages: add, delete: gone, insert})})
       : await fetch(`/chat/video/${current.message_id}/continue`, {method: 'POST'});
     if(!response.ok){
       const err = await response.json().catch(() => ({}));

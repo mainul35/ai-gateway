@@ -2487,10 +2487,44 @@ class VideoEditIn(BaseModel):
     # Scenes to take out (their numbers as they are now, from 0); every language is made again from
     # the pictures and narration kept, nothing drawn
     delete: list[int] = Field(default_factory=list, max_length=video_story.GIVEN_MAX_SCENES)
+    # New scenes, each put in after a scene (its number as it is now, from 0; -1 before the first):
+    # translated into the story's other languages, drawn, voiced, and every language's video made again
+    insert: list["SceneNew"] = Field(default_factory=list, max_length=video_story.GIVEN_MAX_SCENES)
 
+
+class SceneNew(BaseModel):
+    after: int = Field(ge=-1)
+    lang: str = Field(pattern="^[a-z]{2}$")             # the language its words are written in
+    text: str = Field(min_length=1, max_length=4000)
+    # What its picture should show, in the person's words; without it, drawn from the scene's words
+    picture: str | None = Field(default=None, max_length=1500)
+
+
+VideoEditIn.model_rebuild()
 
 # Everything kept for each scene, in scene order: taken out together when a scene is
 PER_SCENE = ("pictures", "drawn", "people", "parts", "notes") + tuple(video_story.LANGUAGES)
+# Asked of the story model for a new scene's picture when the person did not say what it shows
+NEW_SCENE_PICTURE = ("This is a new scene put in after the one described. Draw what its words tell, with the same "
+                     "people, place and look as the current description where they still fit.")
+
+
+def _add_scene(story, i, lang, text):
+    """A scene put in at `i` with its words in `lang`: every per-scene list given its place, and the
+    lines of its other languages, its picture and its voices left to be made."""
+    empty = {"pictures": None, "drawn": "", "people": "from_behind", "notes": [],
+             "parts": [{"speaker": "narrator", "text": {lang: text}}]}
+    for key in PER_SCENE:
+        if isinstance(story.get(key), list) and i <= len(story[key]):
+            story[key].insert(i, text if key == lang else empty.get(key, ""))
+    for entries in (story.get("narration") or {}).values():
+        if i <= len(entries):
+            entries.insert(i, None)
+    for key in [k for k in story if k.startswith("voice_")]:
+        if isinstance(story[key], list) and i <= len(story[key]):
+            story[key].insert(i, None)
+    if story.get("pending"):
+        story["pending"] = {str(int(k) + (int(k) >= i)): v for k, v in story["pending"].items()}
 
 
 def _set_line(story, lang, i, text):
@@ -2617,7 +2651,7 @@ async def edit_video(message_id: int, payload: VideoEditIn, principal: Principal
             video["make"].append(lang)
     # Scenes taken out last, so the numbers above are the ones the person saw
     gone = sorted({i for i in payload.delete if 0 <= i < count}, reverse=True)
-    if len(gone) >= count:
+    if len(gone) >= count and not payload.insert:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "A video needs at least one scene")
     for i in gone:
         _drop_scene(story, i)
@@ -2625,6 +2659,28 @@ async def edit_video(message_id: int, payload: VideoEditIn, principal: Principal
         video["scenes"] = len(story["pictures"])
         translate = [(i - sum(1 for g in gone if g < i), source, target) for i, source, target in translate
                      if i not in gone]
+        remake.update(languages)
+    # New scenes then, each where the person put it among the scenes they saw (after one taken out:
+    # where that one was); several after the same scene keep the order they were given in
+    added = 0
+    for new in sorted(payload.insert, key=lambda n: n.after):
+        words = " ".join(new.text.split())
+        if new.after >= count:
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, f"This story has {count} scenes")
+        if new.lang not in languages or new.lang not in story:
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY,
+                                f"This story has no {video_story.language_name(new.lang)}")
+        if not words:
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "A new scene needs its words")
+        at = new.after + 1 - sum(1 for g in gone if g <= new.after) + added
+        _add_scene(story, at, new.lang, words)
+        translate = [(i + (i >= at), source, target) for i, source, target in translate]
+        translate += [(at, new.lang, other) for other in languages if other != new.lang and other in story]
+        describe = [[i + (i >= at), asked] for i, asked in video.get("describe") or []]
+        video["describe"] = describe + [[at, (new.picture or "").strip() or NEW_SCENE_PICTURE]]
+        added += 1
+    if added:
+        video["scenes"] = len(story["pictures"])
         remake.update(languages)
     video["languages"] = languages
     # Lines and voices saved since a language's video was made: it is made again with them
@@ -3400,6 +3456,20 @@ async def _video_pipeline(principal, user_id, ctx):
                     raise video_story.VideoError(f"Scene {i + 1} could not be translated; try again")
                 _set_line(video["story"], target, i, done)
             if video.pop("translate", None) is not None:
+                await _save_video(message_id, video)
+            # A new scene's picture described for the image model - from what the person asked, or
+            # its words - in the look of the scene before it
+            told = video["story"]
+            for i, asked in video.get("describe") or []:
+                yield step(1, 1.0, f"Describing the picture of the new scene {i + 1}")
+                words = next((told[lang][i] for lang in languages if (told.get(lang) or [""] * (i + 1))[i]), "")
+                near = told["drawn"][i - 1] if i > 0 else (told["drawn"][i + 1] if i + 1 < len(told["drawn"]) else "")
+                picture, people, _note = video_story.parse_redraw(await _ask_helper(
+                    principal, video_story.redraw_request(story_model, words, near, asked)))
+                told["drawn"][i] = picture
+                if isinstance(told.get("people"), list):
+                    told["people"][i] = people
+            if video.pop("describe", None) is not None:
                 await _save_video(message_id, video)
         for lang in languages:
             if lang in video["story"]:
