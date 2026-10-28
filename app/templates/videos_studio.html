@@ -304,7 +304,10 @@ function renderHead(){
 function renderPlayer(){
   const now = showing && (current.video.videos || {})[showing];
   document.getElementById('player').innerHTML = now
-    ? `<video id="video" controls preload="metadata" playsinline src="${escapeHtml(now.url)}"></video>`
+    ? `<video id="video" controls preload="metadata" playsinline src="${escapeHtml(now.url)}"></video>
+       <div style="display:flex;justify-content:flex-end;margin-top:.4rem">
+         <a class="btn btn-secondary btn-small" href="${escapeHtml(now.url)}?download=1"
+           title="An MP4 ready to upload to Facebook, YouTube and other sites">⬇ Download video</a></div>`
     : '<div class="note">No video made yet.</div>';
 }
 

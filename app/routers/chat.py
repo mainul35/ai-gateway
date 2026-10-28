@@ -13,6 +13,7 @@ import re
 import shutil
 import secrets
 import time
+import urllib.parse
 from datetime import timedelta
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, Response, UploadFile, status
@@ -728,7 +729,7 @@ async def upload_file(file: UploadFile = File(...), principal: Principal = Depen
 
 
 @router.get("/files/{file_id}")
-async def get_file(file_id: int, request: Request, principal: Principal = Depends(authenticate),
+async def get_file(file_id: int, request: Request, download: bool = False, principal: Principal = Depends(authenticate),
                    session: AsyncSession = Depends(get_session)):
     user = _require_user(principal)
     stored = (await session.execute(
@@ -737,6 +738,11 @@ async def get_file(file_id: int, request: Request, principal: Principal = Depend
         raise HTTPException(status.HTTP_404_NOT_FOUND, "File not found")
     headers = {"Cache-Control": "private, max-age=86400", "X-Content-Type-Options": "nosniff",
                "Accept-Ranges": "bytes"}
+    if download:
+        # Saved as a file under its own name - a phone's browser ignores a link's download attribute
+        name = stored.name or f"file-{stored.id}"
+        plain = re.sub(r'[^\w .()-]+', "_", name.encode("ascii", "ignore").decode()).strip() or f"file-{stored.id}"
+        headers["Content-Disposition"] = f"attachment; filename=\"{plain}\"; filename*=UTF-8''{urllib.parse.quote(name)}"
     # A video is played in pieces: Safari will not play one at all without byte ranges, and seeking
     # anywhere needs them
     wanted = re.match(r"bytes=(\d*)-(\d*)$", request.headers.get("range") or "")
