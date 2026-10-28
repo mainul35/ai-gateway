@@ -12,12 +12,13 @@ import os
 import re
 import shutil
 import secrets
+import tempfile
 import time
 import urllib.parse
 from datetime import timedelta
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, Response, UploadFile, status
-from fastapi.responses import StreamingResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -739,10 +740,7 @@ async def get_file(file_id: int, request: Request, download: bool = False, princ
     headers = {"Cache-Control": "private, max-age=86400", "X-Content-Type-Options": "nosniff",
                "Accept-Ranges": "bytes"}
     if download:
-        # Saved as a file under its own name - a phone's browser ignores a link's download attribute
-        name = stored.name or f"file-{stored.id}"
-        plain = re.sub(r'[^\w .()-]+', "_", name.encode("ascii", "ignore").decode()).strip() or f"file-{stored.id}"
-        headers["Content-Disposition"] = f"attachment; filename=\"{plain}\"; filename*=UTF-8''{urllib.parse.quote(name)}"
+        headers["Content-Disposition"] = _attachment(stored.name or f"file-{stored.id}")
     # A video is played in pieces: Safari will not play one at all without byte ranges, and seeking
     # anywhere needs them
     wanted = re.match(r"bytes=(\d*)-(\d*)$", request.headers.get("range") or "")
@@ -758,6 +756,13 @@ async def get_file(file_id: int, request: Request, download: bool = False, princ
         return Response(stored.data[start:end + 1], status_code=206, media_type=stored.mime_type,
                         headers={**headers, "Content-Range": f"bytes {start}-{end}/{size}"})
     return Response(stored.data, media_type=stored.mime_type, headers=headers)
+
+
+def _attachment(name):
+    """Content-Disposition saving a response as a file under `name` - a phone's browser ignores a
+    link's download attribute. The plain name for old browsers, the whole one (Bangla too) for the rest."""
+    plain = re.sub(r'[^\w .,()-]+', "_", name.encode("ascii", "ignore").decode()).strip() or "download"
+    return f"attachment; filename=\"{plain}\"; filename*=UTF-8''{urllib.parse.quote(name)}"
 
 
 async def _load_files(session, user, file_ids):
@@ -2778,6 +2783,109 @@ async def store_voiceover(message_id: int, payload: StoreVoiceIn, principal: Pri
     if replaced and replaced != file_id:
         await _drop_file(user.id, replaced)
     return {"ok": True, "file_id": file_id, "seconds": round(seconds, 2)}
+
+
+# A made video in another size (video_story.EXPORTS), converted on the server when first asked for and
+# kept on disk for a day after it was last asked for: not in the database, as it can be made again
+class ExportIn(BaseModel):
+    lang: str = Field(pattern="^[a-z]{2}$")
+    preset: str = Field(pattern="^[a-z0-9]{1,16}$")
+
+
+EXPORT_DIR = os.path.join(tempfile.gettempdir(), "video-exports")
+EXPORT_KEEP = 24 * 3600
+_exports: dict[tuple[int, str], dict] = {}     # (video file, preset) -> {task, fraction, waiting, error}
+_one_export = asyncio.Semaphore(1)             # one conversion at a time: each takes every CPU core it gets
+
+
+def _export_path(file_id, preset):
+    return os.path.join(EXPORT_DIR, f"{file_id}-{preset}.mp4")
+
+
+def _clear_old_exports():
+    now = time.time()
+    for name in os.listdir(EXPORT_DIR):
+        path = os.path.join(EXPORT_DIR, name)
+        try:
+            if now - os.path.getmtime(path) > EXPORT_KEEP:
+                os.remove(path)
+        except OSError:
+            pass
+
+
+async def _made_video(session, user, message_id, lang, preset):
+    if preset not in video_story.EXPORTS:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "No such size")
+    _message, video = await _owned_video(session, user, message_id)
+    made = (video.get("videos") or {}).get(lang)
+    if not made:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "This language has no video yet")
+    return video, made
+
+
+async def _make_export(job, data, path, preset, seconds):
+    try:
+        async with _one_export:
+            job["waiting"] = False
+            os.makedirs(EXPORT_DIR, exist_ok=True)
+            _clear_old_exports()
+            folder = video_story.workspace()
+            try:
+                source = os.path.join(folder, "source.mp4")
+                await asyncio.to_thread(lambda: open(source, "wb").write(data))
+                await video_story.export(source, path, preset, seconds,
+                                         lambda fraction: job.update(fraction=round(fraction, 3)))
+            finally:
+                shutil.rmtree(folder, ignore_errors=True)
+    except video_story.VideoError as e:
+        job["error"] = str(e)
+    except Exception:
+        log.exception("converting a video to %s failed", preset)
+        job["error"] = "The video could not be converted; try again"
+
+
+@router.post("/video/{message_id}/export")
+async def export_video(message_id: int, payload: ExportIn, principal: Principal = Depends(authenticate),
+                       session: AsyncSession = Depends(get_session)):
+    """One language's video in another size: ready to download, or started (or still being made) and
+    how far along. Asked again until it is ready; a conversion that failed says why once, and the next
+    ask tries again."""
+    user = _require_user(principal)
+    _video, made = await _made_video(session, user, message_id, payload.lang, payload.preset)
+    path = _export_path(made["file_id"], payload.preset)
+    if os.path.exists(path):
+        os.utime(path)                    # kept a day from now
+        return {"ready": True, "url": f"/chat/video/{message_id}/export/{payload.lang}/{payload.preset}"}
+    key = (made["file_id"], payload.preset)
+    job = _exports.get(key)
+    if job and job["task"].done():
+        del _exports[key]
+        if job.get("error"):
+            return {"ready": False, "error": job["error"]}
+        job = None                        # made, and since cleared away: made again
+    if job is None:
+        stored = (await session.execute(select(ChatFile).where(
+            ChatFile.id == made["file_id"], ChatFile.user_id == user.id))).scalar_one_or_none()
+        if stored is None:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "The video file is gone; make the video again")
+        job = {"fraction": 0.0, "waiting": True}
+        job["task"] = asyncio.create_task(_make_export(job, stored.data, path, payload.preset, made.get("seconds")))
+        _exports[key] = job
+    return {"ready": False, "fraction": job["fraction"], "waiting": job["waiting"]}
+
+
+@router.get("/video/{message_id}/export/{lang}/{preset}")
+async def download_export(message_id: int, lang: str, preset: str, principal: Principal = Depends(authenticate),
+                          session: AsyncSession = Depends(get_session)):
+    """A converted video (POST .../export made it), saved as a file named for the story, language and size."""
+    user = _require_user(principal)
+    video, made = await _made_video(session, user, message_id, lang, preset)
+    path = _export_path(made["file_id"], preset)
+    if not os.path.exists(path):
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "This size is not ready; ask for it again")
+    name = f"{(video.get('title') or 'Video story')[:80]} ({video_story.language_name(lang)}, {preset}).mp4"
+    return FileResponse(path, media_type="video/mp4",
+                        headers={"Content-Disposition": _attachment(name), "Cache-Control": "private, no-store"})
 
 
 @router.post("/video/{message_id}/save")
