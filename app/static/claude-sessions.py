@@ -64,6 +64,8 @@ class Gateway:
         data = json.dumps(body).encode() if body is not None else None
         request = urllib.request.Request(self.url + path, data=data, method=method)
         request.add_header("Authorization", f"Bearer {self.key}")
+        # Cloudflare turns Python's own User-Agent (Python-urllib) away with a 403 before the gateway sees it
+        request.add_header("User-Agent", "ai-gateway-sessions-agent/1")
         if data is not None:
             request.add_header("Content-Type", "application/json")
         try:
