@@ -102,14 +102,13 @@ dialog.aside::backdrop{background:rgba(0,0,0,.55)}
 .shared-head{font-size:.72rem;letter-spacing:.05em;text-transform:uppercase;color:var(--muted);padding:.6rem .5rem .2rem}
 /* Code mode */
 .code-pane{flex:1;display:flex;flex-direction:column;min-height:0;overflow:hidden;padding-bottom:.6rem}
-.code-pane .column{display:flex;flex-direction:column;min-height:0;height:100%}
+/* The log scrolls across the whole pane, as Chat's transcript does, so its scrollbar is at the window's
+   edge; what is in it, the line above and the message box below stay in the reading column */
+.code-pane .column{display:flex;flex-direction:column;min-height:0;height:100%;width:100%;padding:0}
+.code-pane .column > :not(.code-log){width:min(49.5rem, calc(100% - 2.5rem));margin-left:auto;margin-right:auto}
 .code-about{font-size:.82rem;padding:.4rem 0;overflow-wrap:anywhere}
-.code-log{flex:1;overflow-y:auto;min-height:0;width:min(52rem,100%);margin:0 auto;padding:.3rem 0;display:flex;flex-direction:column;gap:.3rem;
-          scrollbar-width:thin;scrollbar-color:transparent transparent}
-.code-log::-webkit-scrollbar{width:6px}
-.code-log::-webkit-scrollbar-track{background:transparent}
-.code-log::-webkit-scrollbar-thumb{background:transparent}
-.code-log:hover::-webkit-scrollbar-thumb{background:var(--border)}
+.code-log{flex:1;overflow-y:auto;min-height:0;display:flex;flex-direction:column;gap:.3rem;
+  padding:.3rem max(1.25rem, calc((100% - 49.5rem) / 2))}
 .code-log .msg{background:none;border:none;padding:0;margin:.15rem 0}
 .code-log .msg .who{display:block;font-size:.72rem;color:var(--muted);margin-bottom:.2rem;font-weight:600}
 .code-log .msg .body{font-size:.9rem;color:var(--text);white-space:pre-wrap;line-height:1.45}
