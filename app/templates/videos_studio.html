@@ -394,8 +394,8 @@ function renderEditor(){
           entry ? `<span class="badge ${entry.by}">${BY[entry.by] || entry.by}</span>` : ''}</label>
         <textarea class="line ${change.text?.[l] !== undefined ? 'changed' : ''}" data-lang="${l}" lang="${l}" dir="auto"
           ${editable ? '' : 'readonly'}>${escapeHtml(words)}</textarea>
-        <div class="stale" ${change.text?.[l] !== undefined && entry?.by === 'recorded' ? '' : 'hidden'}>Your reading of this
-          line no longer fits; the machine voice reads it until you read it again.</div>
+        <div class="stale" ${change.text?.[l] !== undefined && entry?.by === 'recorded' ? '' : 'hidden'}>Your recorded voice
+          is kept as it is. Record again if it should say the new words.</div>
         <div class="voice">
           ${entry ? `<audio controls preload="none" src="/chat/files/${entry.file_id}" title="As it is read now"></audio>` : ''}
           ${entry?.by === 'qari' ? '<span>A verse: the qari recites it.</span>'
@@ -634,8 +634,12 @@ async function storeVoice(i, lang, audio, what){
       reader.onerror = () => reject(reader.error);
       reader.readAsDataURL(audio);
     });
+    // Words changed and not saved yet are what was read: they are saved with the voice
+    const area = selected === i ? document.querySelector(`#editor .line[data-lang="${lang}"]`) : null;
+    const typed = clean(area ? area.value : edits[i]?.text?.[lang] ?? '');
+    const text = typed && typed !== clean((story()[lang] || [])[i]) ? typed : undefined;
     await api(`/chat/video/${current.message_id}/store-voice`, {method: 'POST', headers: JSON_HEADERS,
-                                                               body: JSON.stringify({recording, lang, index: i})});
+                                                               body: JSON.stringify({recording, lang, index: i, text})});
     showing = lang;
     await refreshStory();
   }catch(e){

@@ -2528,13 +2528,11 @@ def _drop_scene(story, i):
 
 
 def _forget_voice(story, lang, i):
-    """A line's narration and the person's reading of it no longer fit its changed words."""
+    """A line's machine narration no longer fits its changed words. What the person recorded stays:
+    it is theirs to keep or record again, never thrown away by an edit."""
     entries = (story.get("narration") or {}).get(lang)
-    if entries and i < len(entries):
+    if entries and i < len(entries) and (entries[i] or {}).get("by") != "recorded":
         entries[i] = None
-    readings = story.get(f"voice_{lang}")
-    if readings and i < len(readings):
-        readings[i] = None
 
 
 async def _owned_video(session, user, message_id):
@@ -2660,6 +2658,8 @@ class StoreVoiceIn(BaseModel):
     recording: str = Field(min_length=100)
     lang: str = Field(pattern="^[a-z]{2}$")
     index: int = Field(ge=0)
+    # The line's words as the page shows them, when changed and not saved yet: what was read
+    text: str | None = None
 
 
 # One story's saved state is changed by one request at a time: read, changed and written together
@@ -2727,8 +2727,9 @@ async def store_voiceover(message_id: int, payload: StoreVoiceIn, principal: Pri
     message, video = await _owned_video(session, user, message_id)
     _not_being_made(user.id, message)
     _story, line = _scene_line(video, payload.lang, payload.index)
+    words = " ".join((payload.text or "").split())
     # A line that is only a verse is the qari's recitation, never the person's reading
-    if not video_story.needs_reading(line, payload.lang):
+    if not video_story.needs_reading(words or line, payload.lang):
         raise HTTPException(status.HTTP_409_CONFLICT, "This scene is a verse: the qari recites it")
     # As the browser sends it, a data: URL; the base64 after its comma is the audio
     encoded = payload.recording.split(",", 1)[1] if payload.recording.startswith("data:") else payload.recording
@@ -2750,6 +2751,10 @@ async def store_voiceover(message_id: int, payload: StoreVoiceIn, principal: Pri
 
     def keep_voice(video):
         story, line = _scene_line(video, payload.lang, payload.index)
+        # Read from words changed in the page: they are saved with it, so the voice and the line agree
+        if words and words != " ".join((line or "").split()):
+            _set_line(story, payload.lang, payload.index, words)
+            line = words
         if not video_story.needs_reading(line, payload.lang):
             raise HTTPException(status.HTTP_409_CONFLICT, "This scene is a verse: the qari recites it")
         entries = story.setdefault("narration", {}).setdefault(payload.lang, [])
