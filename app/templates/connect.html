@@ -41,10 +41,11 @@
     Claude Code, OpenCode and Codex also get <em>Your projects</em> as tools: they can search and read
     your other repositories and share notes across workspaces. Qwen Code does not yet.</p>
   <p class="muted" style="font-size:.85rem;margin-top:.6rem">The playground's <em>Code</em> mode lists the sessions
-    of every app started this way, from the requests they send here: nothing to install. To send a Claude
-    Code session a message from there, leave <code>ai-gateway sessions</code> running on its computer: the
-    message runs there, in the session. File edits only, unless you start it with
-    <code>--allow-commands</code>. It needs Python.</p>
+    of every app started this way, with their messages and answers, from the requests they send here.
+    A Claude Code session can be sent a message from there too: <code>ai-gateway launch claude</code> starts
+    a small agent in the background (it needs Python) that runs the message on that computer, in the
+    session. File edits only; to allow commands as well, run <code>ai-gateway sessions --allow-commands</code>
+    there, which takes over from the background one.</p>
 </div>
 
 <div class="card" style="margin-top:1.5rem">

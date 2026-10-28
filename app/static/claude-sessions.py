@@ -5,6 +5,9 @@ be talked to from there.
     ai-gateway sessions                     # started by the launcher, which gives it the key
     python claude-sessions.py --gateway https://ai-gateway.example.com --key sk-...
 
+`ai-gateway launch claude` starts it in the background (--background) when it is not already running;
+one runs per computer, and one started in the foreground takes over from it.
+
 It reads the sessions Claude Code keeps for the launcher (~/.claude-gateway/projects, or --config-dir)
 and reports them to the gateway every half minute: title, folder, branch, model and latest messages.
 Nothing connects in to this computer: it asks the gateway for work. A message sent to a session from
@@ -38,6 +41,9 @@ KEPT_MESSAGES = 40          # of each session, sent when it changes
 TEXT_LIMIT = 4000           # of one message
 TAIL_BYTES = 1_500_000      # of a session's file read for its latest messages
 RUNNING_SECONDS = 60        # a session written to this recently is working
+# The one agent running on a computer listens locally on the port it writes here, and greets with this
+PORT_FILE = os.path.join(os.path.expanduser("~"), ".ai-gateway", "sessions-agent.port")
+GREETING = b"ai-gateway sessions agent\n"
 # What the launcher gives Claude Code (bin/ai-gateway.sh): the same for a session run from here
 CLAUDE_ENV = {"CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS": "1", "CLAUDE_CODE_DISABLE_THINKING": "1",
               "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1", "CLAUDE_CODE_ATTRIBUTION_HEADER": "0",
@@ -290,6 +296,68 @@ def reporting(gateway, sessions, name, allow_commands, stop):
         stop.wait(REPORT_SECONDS)
 
 
+def _other_agent():
+    """A connection to the agent already running on this computer, or None. It is known by the port it
+    wrote down and by its greeting there: a stale file, or another program on that port, is not it."""
+    try:
+        with open(PORT_FILE, encoding="utf-8") as f:
+            port = int(f.read().strip())
+    except (OSError, ValueError):
+        return None
+    try:
+        other = socket.create_connection(("127.0.0.1", port), timeout=2)
+    except OSError:
+        return None
+    try:
+        other.settimeout(2)
+        if other.recv(len(GREETING)) == GREETING:
+            return other
+    except OSError:
+        pass
+    other.close()
+    return None
+
+
+def _only_one(take_over):
+    """A local listener that makes this the computer's one agent: None when another runs and this one
+    is not to take over. Taking over asks the other one to stop, and waits until it has."""
+    for _ in range(50):
+        other = _other_agent()
+        if other is None:
+            break
+        with other:
+            if not take_over:
+                return None
+            other.sendall(b"stop\n")
+        time.sleep(0.2)
+    else:
+        return None
+    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    listener.bind(("127.0.0.1", 0))                 # any free port: fixed ones can be reserved
+    listener.listen(4)
+    os.makedirs(os.path.dirname(PORT_FILE), exist_ok=True)
+    with open(PORT_FILE, "w", encoding="utf-8") as f:
+        f.write(str(listener.getsockname()[1]))
+    return listener
+
+
+def _stop_when_asked(listener):
+    """Another agent started here in the foreground (`ai-gateway sessions`) asks this one to make way."""
+    while True:
+        connection, _ = listener.accept()
+        with connection:
+            connection.settimeout(2)
+            try:
+                connection.sendall(GREETING)
+                asked = connection.recv(16).startswith(b"stop")
+            except OSError:
+                asked = False
+        if asked:
+            log("another sessions agent started on this computer; this one stops")
+            listener.close()
+            os._exit(0)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--gateway", required=True, help="the gateway's address")
@@ -301,9 +369,17 @@ def main():
     parser.add_argument("--days", type=int, default=14, help="sessions used within this many days are listed")
     parser.add_argument("--allow-commands", action="store_true",
                         help="let a message from the playground run commands too, not only edit files")
+    parser.add_argument("--background", action="store_true",
+                        help="started by `ai-gateway launch`: nothing to do when an agent already runs here")
     args = parser.parse_args()
     if not args.key:
         sys.exit("No API key: give --key, or set GATEWAY_KEY")
+    listener = _only_one(take_over=not args.background)
+    if listener is None:
+        if args.background:
+            return
+        sys.exit("Another sessions agent is running on this computer and did not stop")
+    threading.Thread(target=_stop_when_asked, args=(listener,), daemon=True).start()
     gateway, sessions, stop = Gateway(args.gateway, args.key), Sessions(args.config_dir, args.days), threading.Event()
     log(f"reporting {args.config_dir} to {gateway.url} as {args.name}"
         + (" (commands allowed)" if args.allow_commands else " (file edits only)"))

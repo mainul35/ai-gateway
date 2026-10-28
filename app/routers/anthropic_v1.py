@@ -294,7 +294,7 @@ async def messages(request: Request, principal: Principal = Depends(authenticate
     except ValueError:
         return _error(400, "Request body must be JSON", "invalid_request_error")
     # A coding tool's request is its session's latest step (the playground's Code mode)
-    code_sessions.observe(request.headers, principal, body, "messages")
+    reply = code_sessions.observe(request.headers, principal, body, "messages")
 
     body["messages"] = compat.fold_system_messages(body.get("messages"))
 
@@ -345,9 +345,10 @@ async def messages(request: Request, principal: Principal = Depends(authenticate
                       + ". In the Claude desktop app, name one as claude-<model>, e.g. claude-gemma4-31b.",
                       "invalid_request_error")
 
+    # ...and its answer the session's newest message
     if body.get("stream"):
-        return _streamed(request, principal, body, model, backend)
-    return await _whole(request, principal, body, model, backend)
+        return code_sessions.answered(_streamed(request, principal, body, model, backend), reply)
+    return code_sessions.answered(await _whole(request, principal, body, model, backend), reply)
 
 
 async def _whole(request, principal, body, model, backend):

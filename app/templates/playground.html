@@ -4404,7 +4404,7 @@ function setMode(mode){
   clearInterval(sessionsTimer);
   if(code){
     loadSessions();
-    sessionsTimer = setInterval(loadSessions, 30000);   // computers come and go
+    sessionsTimer = setInterval(loadSessions, 10000);   // sessions move on, computers come and go
   }
 }
 
@@ -4436,6 +4436,11 @@ async function loadSessions(){
     showSession(li.dataset.session);
     if(window.innerWidth < 900) document.getElementById('pg').classList.remove('open');
   }));
+  // The open session as it is now: its newest messages, and whether it can be sent to - not while a
+  // message sent from here is still being answered
+  const now = openSession && sessions.find(s => s.session_id === openSession.session_id);
+  if(now && !sessionSending && (now.last_active !== openSession.last_active || now.can_send !== openSession.can_send))
+    showSession(now.session_id);
 }
 
 function sessionLine(role, text, extra = ''){
@@ -4484,10 +4489,13 @@ async function showSession(id){
   loadSessions();
 }
 
+let sessionSending = false;
+
 async function sendToSession(){
   const box = document.getElementById('codePrompt');
   const text = box.value.trim();
   if(!text || !openSession) return;
+  sessionSending = true;
   const log = document.getElementById('codeLog');
   log.querySelector('p.muted')?.remove();
   log.appendChild(renderSessionMessage({role: 'user', text}));
@@ -4522,6 +4530,7 @@ async function sendToSession(){
     status.textContent = 'It did not run: ' + errorText(e);
     status.classList.add('failed');
   }
+  sessionSending = false;
   button.disabled = !(openSession && openSession.can_send);
 }
 

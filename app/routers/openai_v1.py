@@ -51,10 +51,12 @@ async def _proxy(request: Request, principal: Principal, endpoint: str, path: st
         body = await request.json()
     except ValueError:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Request body must be JSON")
+    reply = None
     if endpoint == "chat_completions":
-        # A coding tool's request is its session's latest step (the playground's Code mode)
-        code_sessions.observe(request.headers, principal, body, "chat")
-    return await forward(principal, endpoint, path, body)
+        # A coding tool's request is its session's latest step (the playground's Code mode), and its
+        # answer the session's newest message
+        reply = code_sessions.observe(request.headers, principal, body, "chat")
+    return code_sessions.answered(await forward(principal, endpoint, path, body), reply)
 
 
 async def _fitted(body, backend, endpoint, force=False):
