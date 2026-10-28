@@ -4462,8 +4462,19 @@ function renderSessionMessage(m){
   const box = document.createElement('div');
   box.className = `msg ${m.role === 'user' ? 'user' : 'assistant'}`;
   const who = m.role === 'user' ? 'You' : escapeHtml(openSession?.tool || 'Claude Code');
-  box.innerHTML = `<div class="who">${who}</div><div class="body"></div>`;
-  box.querySelector('.body').textContent = m.text;
+  box.innerHTML = `<div class="who">${who}</div><div class="body md"></div>`;
+  // Render markdown via the same /render endpoint the Chat tab uses
+  (async () => {
+    try {
+      const rendered = await api('/chat/render', {
+        method: 'POST', headers: JSON_HEADERS,
+        body: JSON.stringify({ text: m.text })
+      });
+      box.querySelector('.body').innerHTML = rendered.html;
+    } catch(e) {
+      box.querySelector('.body').textContent = m.text;
+    }
+  })();
   return box;
 }
 
