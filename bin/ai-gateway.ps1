@@ -135,23 +135,34 @@ if ($Command -eq "update") {
 # --- this computer's Claude Code sessions, in the playground ---------------------------------------
 # The sessions agent (served by the gateway: app/static/claude-sessions.py) reports the sessions Claude
 # Code keeps for this launcher (~\.claude-gateway) to the playground's Code mode, and runs a message sent
-# to one of them there, in its folder. It stays in the foreground: Ctrl+C stops it. Fetched anew each
-# time, so it is the gateway's own version; checked to be Python before it is run.
-if ($Command -eq "sessions") {
+# to one of them there, in its folder. `ai-gateway sessions` runs it in the foreground (Ctrl+C stops it);
+# `ai-gateway launch claude` starts it in the background when none runs. Fetched anew each time, so it
+# is the gateway's own version; checked to be Python before it is run.
+function Get-SessionsAgent {
+    # @{ Python; Agent } ready to run, or @{ Problem } saying what is missing
     $python = Get-Command python, py -ErrorAction SilentlyContinue | Select-Object -First 1
-    if (-not $python) { Fail "Python is needed for the sessions agent (https://www.python.org/downloads/)" }
+    if (-not $python) { return @{ Problem = "Python is needed for the sessions agent (https://www.python.org/downloads/)" } }
     $folder = Join-Path $HOME ".ai-gateway"
     New-Item -ItemType Directory -Force -Path $folder | Out-Null
     $agent = Join-Path $folder "claude-sessions.py"; $new = "$agent.new"
     try { Invoke-Gateway "/static/claude-sessions.py" $new }
-    catch { Remove-Item $new -ErrorAction SilentlyContinue; Fail "could not download the sessions agent from ${Gateway}: $($_.Exception.Message)" }
+    catch {
+        Remove-Item $new -ErrorAction SilentlyContinue
+        return @{ Problem = "could not download the sessions agent from ${Gateway}: $($_.Exception.Message)" }
+    }
     & $python.Source -c "import ast, sys; ast.parse(open(sys.argv[1], encoding='utf-8').read())" $new 2>$null
     if ($LASTEXITCODE -ne 0 -or -not (Select-String -Path $new -Pattern "def read_session" -Quiet)) {
-        Remove-Item $new; Fail "what the gateway sent is not the sessions agent"
+        Remove-Item $new; return @{ Problem = "what the gateway sent is not the sessions agent" }
     }
     Move-Item $new $agent -Force
+    return @{ Python = $python.Source; Agent = $agent }
+}
+
+if ($Command -eq "sessions") {
+    $found = Get-SessionsAgent
+    if ($found.Problem) { Fail $found.Problem }
     $env:GATEWAY_KEY = $Key
-    & $python.Source $agent --gateway $Gateway @Extra
+    & $found.Python $found.Agent --gateway $Gateway @Extra
     exit $LASTEXITCODE
 }
 
@@ -323,6 +334,18 @@ switch ($App) {
         Write-Utf8 $mcp (@{ mcpServers = @{ "ai-gateway" = @{ type = "http"; url = $McpUrl
             headers = @{ Authorization = "Bearer $Key"; "X-Workspace" = $Workspace } } } } | ConvertTo-Json -Depth 6 -Compress)
         Write-Utf8 $allow '{"permissions":{"allow":["mcp__ai-gateway"]}}'
+        # The sessions agent, in the background, so the playground can send this session a message;
+        # without Python the session is still listed there, only not sent to
+        $found = Get-SessionsAgent
+        if ($found.Problem) {
+            Write-Host "(the playground cannot send messages to this session: $($found.Problem))" -ForegroundColor DarkGray
+        } else {
+            $env:GATEWAY_KEY = $Key
+            $log = Join-Path $HOME ".ai-gateway\sessions-agent.log"
+            Start-Process -FilePath $found.Python -WindowStyle Hidden -RedirectStandardOutput $log `
+                -RedirectStandardError "$log.err" -ArgumentList @("`"$($found.Agent)`"", "--gateway", $Gateway, "--background")
+            Remove-Item Env:GATEWAY_KEY
+        }
         Start-App "claude" ($Extra + @("--settings", $allow, "--mcp-config", $mcp)); exit $script:ExitCode
     }
     "opencode" {

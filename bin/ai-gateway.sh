@@ -132,19 +132,24 @@ fi
 # --- this computer's Claude Code sessions, in the playground ---------------------------------------
 # The sessions agent (served by the gateway: app/static/claude-sessions.py) reports the sessions Claude
 # Code keeps for this launcher (~/.claude-gateway) to the playground's Code mode, and runs a message sent
-# to one of them there, in its folder. It stays in the foreground: Ctrl+C stops it. Fetched anew each
-# time, so it is the gateway's own version; checked to be Python before it is run.
-if [ "$command" = sessions ]; then
-    command -v python3 >/dev/null || die "python3 is needed for the sessions agent"
-    agent="$HOME/.ai-gateway/claude-sessions.py"
+# to one of them there, in its folder. `ai-gateway sessions` runs it in the foreground (Ctrl+C stops it);
+# `ai-gateway launch claude` starts it in the background when none runs. Fetched anew each time, so it
+# is the gateway's own version; checked to be Python before it is run.
+agent="$HOME/.ai-gateway/claude-sessions.py"
+fetch_agent() {   # into $agent; on failure, what is missing in $agent_problem
+    agent_problem=""
+    command -v python3 >/dev/null || { agent_problem="python3 is needed for the sessions agent"; return 1; }
     (umask 077; mkdir -p "$HOME/.ai-gateway")
     gateway_get /static/claude-sessions.py "$agent.new" \
-        || { rm -f "$agent.new"; die "could not download the sessions agent from $GATEWAY"; }
+        || { rm -f "$agent.new"; agent_problem="could not download the sessions agent from $GATEWAY"; return 1; }
     if ! python3 -c 'import ast, sys; ast.parse(open(sys.argv[1], encoding="utf-8").read())' "$agent.new" 2>/dev/null \
         || ! grep -q 'def read_session' "$agent.new"; then
-        rm -f "$agent.new"; die "what the gateway sent is not the sessions agent"
+        rm -f "$agent.new"; agent_problem="what the gateway sent is not the sessions agent"; return 1
     fi
     mv "$agent.new" "$agent"
+}
+if [ "$command" = sessions ]; then
+    fetch_agent || die "$agent_problem"
     GATEWAY_KEY=$KEY exec python3 "$agent" --gateway "$GATEWAY" ${extra[@]+"${extra[@]}"}
 fi
 
@@ -413,6 +418,14 @@ FOLDER=""; printf '%s' "$PWD" | LC_ALL=C grep -q '[^ -~]' || FOLDER=$PWD
 case "$APP" in
 claude)
     need claude "Claude Code" "curl -fsSL https://claude.ai/install.sh | bash"
+    # The sessions agent, in the background, so the playground can send this session a message;
+    # without Python the session is still listed there, only not sent to
+    if fetch_agent; then
+        GATEWAY_KEY=$KEY nohup python3 "$agent" --gateway "$GATEWAY" --background \
+            >"$HOME/.ai-gateway/sessions-agent.log" 2>&1 </dev/null &
+    else
+        echo "(the playground cannot send messages to this session: $agent_problem)" >&2
+    fi
     compact=$((CONTEXT * 85 / 100)); [ "$compact" -ge 100000 ] || compact=100000
     # Its own config folder: signed in to claude.ai in the usual one, Claude Code sends that login's
     # token instead of ANTHROPIC_AUTH_TOKEN. Every role on one model, so the GPU never swaps mid-task.

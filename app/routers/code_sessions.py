@@ -395,12 +395,13 @@ _recent: dict[tuple[int, str], tuple[float, int]] = {}      # (user, session) ->
 
 def observe(headers, principal, body, api):
     """Notes a coding tool's model request as its session's latest step: off the request's path, never
-    failing it. headers: the request's (case-insensitive) headers; api: "messages", "chat" or "responses"."""
+    failing it. headers: the request's (case-insensitive) headers; api: "messages", "chat" or "responses".
+    For the tool's main request, what answered() needs to add the reply to the session; else None."""
     try:
         user = principal.user
         tool = _tool(headers) if user is not None and isinstance(body, dict) else None
         if tool is None:
-            return
+            return None
         said, system = _conversation(body, api)
         questions = [_question(text) for role, text in said if role == "user"]
         first = next((q for q in questions if q), "")
@@ -414,7 +415,7 @@ def observe(headers, principal, body, api):
             system, *[text for role, text in said if role == "user"][:3])
         if session_id is None:
             if not first:
-                return                                  # nothing to know the conversation by yet
+                return None                             # nothing to know the conversation by yet
             digest = hashlib.sha1(f"{user.id}|{tool}|{folder}|{first[:4000]}".encode()).hexdigest()[:24]
             session_id = f"{tool}-{digest}"
         computer = (headers.get("x-ai-gateway-computer") or "").strip()[:100]
@@ -422,9 +423,10 @@ def observe(headers, principal, body, api):
         # main loop (the request that offers tools) says what the conversation is
         main = bool(body.get("tools"))
         key = (user.id, session_id)
+        reply = (user.id, session_id, api) if main else None
         last, count = _recent.get(key, (0.0, -1))
         if time.monotonic() - last < 5 and (not main or count == len(said)):
-            return
+            return reply
         _recent[key] = (time.monotonic(), len(said) if main else count)
         update = {"client": tool, "computer": computer, "model": body.get("model")}
         if main:
@@ -439,9 +441,135 @@ def observe(headers, principal, body, api):
                     kept.append({"role": "assistant", "text": text[:4000]})
             kept = kept[-KEPT_MESSAGES:]
             update.update(title=(first.splitlines()[0][:200] if first else None), folder=folder, transcript=kept)
-        asyncio.get_running_loop().create_task(_note(user.id, session_id, update))
+        _later(_note(user.id, session_id, update))
+        return reply
     except Exception:                                   # never a reason for the request to fail
         log.exception("could not note a coding session")
+        return None
+
+
+_tasks: set = set()                                     # kept until done: the loop holds tasks weakly
+
+
+def _later(work):
+    task = asyncio.get_running_loop().create_task(work)
+    _tasks.add(task)
+    task.add_done_callback(_tasks.discard)
+
+
+def answered(response, reply):
+    """The response to a coding tool's main request, unchanged; its words are added to the session
+    when it has been sent. reply: what observe() gave, or None (then nothing is done)."""
+    if reply is None:
+        return response
+    try:
+        if isinstance(response, StreamingResponse):
+            original = response.body_iterator
+
+            async def teed():
+                reader = _ReplyReader()
+                try:
+                    async for chunk in original:
+                        reader.feed(chunk)
+                        yield chunk
+                finally:
+                    if reader.status_ok:
+                        _later(_add_reply(reply, reader.text()))
+            response.body_iterator = teed()
+        elif 200 <= response.status_code < 300 and getattr(response, "body", None):
+            _later(_add_reply(reply, _reply_of(json.loads(response.body))))
+    except Exception:
+        log.exception("could not note a coding session's reply")
+    return response
+
+
+def _reply_of(answer):
+    """The words of a whole answer, in any of the three APIs' shapes."""
+    if not isinstance(answer, dict):
+        return ""
+    if isinstance(answer.get("content"), list):                                  # Messages
+        return _words(answer["content"])
+    if answer.get("choices"):                                                    # chat completions
+        message = (answer["choices"][0] or {}).get("message") or {}
+        text = message.get("content") or ""
+        for call in message.get("tool_calls") or []:
+            text += f"\n[{((call or {}).get('function') or {}).get('name')}]"
+        return text
+    out = []                                                                     # Responses
+    for item in answer.get("output") or []:
+        if not isinstance(item, dict):
+            continue
+        if item.get("type") == "message":
+            out.append(_words(item.get("content")))
+        elif item.get("type") == "function_call":
+            out.append(f"[{item.get('name')}]")
+    return "\n".join(x for x in out if x)
+
+
+class _ReplyReader:
+    """The words of a streamed answer, from its events as they pass: text, and each tool it calls."""
+
+    def __init__(self):
+        self.parts, self.buffer, self.status_ok = [], "", True
+
+    def feed(self, chunk):
+        if len(self.buffer) > 1_000_000:                    # not an event stream after all
+            return
+        self.buffer += chunk.decode("utf-8", "replace") if isinstance(chunk, bytes) else chunk
+        *lines, self.buffer = self.buffer.split("\n")
+        for line in lines:
+            if line.startswith("data:"):
+                self._event(line[5:].strip())
+
+    def _event(self, payload):
+        try:
+            event = json.loads(payload)
+        except ValueError:
+            return
+        if not isinstance(event, dict):
+            return
+        kind = event.get("type")
+        if kind == "error" or "error" in event and not event.get("choices"):
+            self.status_ok = False
+        elif kind == "content_block_delta" and (event.get("delta") or {}).get("type") == "text_delta":
+            self.parts.append(event["delta"].get("text") or "")
+        elif kind == "content_block_start" and (event.get("content_block") or {}).get("type") == "tool_use":
+            self.parts.append(f"\n[{event['content_block'].get('name')}]\n")
+        elif kind == "response.output_text.delta":
+            self.parts.append(event.get("delta") or "")
+        elif kind == "response.output_item.added" and (event.get("item") or {}).get("type") == "function_call":
+            self.parts.append(f"\n[{event['item'].get('name')}]\n")
+        elif event.get("choices"):
+            delta = (event["choices"][0] or {}).get("delta") or {}
+            self.parts.append(delta.get("content") or "")
+            for call in delta.get("tool_calls") or []:
+                name = ((call or {}).get("function") or {}).get("name")
+                if name:
+                    self.parts.append(f"\n[{name}]\n")
+
+    def text(self):
+        return re.sub(r"\n{2,}", "\n", "".join(self.parts)).strip()
+
+
+async def _add_reply(reply, text):
+    """The model's answer as the session's newest message, until the tool's next request says it all."""
+    user_id, session_id, _api = reply
+    if not text:
+        return
+    try:
+        async with session_factory()() as db:
+            row = (await db.execute(select(CCDSessions).where(CCDSessions.session_id == session_id))).scalar_one_or_none()
+            if row is None or row.user_id != user_id:
+                return
+            said = json.loads(row.transcript or "[]")
+            entry = {"role": "assistant", "text": text[:4000]}
+            if not said or said[-1] != entry:
+                said.append(entry)
+            row.transcript = json.dumps(said[-KEPT_MESSAGES:])
+            row.last_active = utcnow()
+            await db.commit()
+    except Exception:
+        log.exception("could not note a coding session's reply")
 
 
 async def _note(user_id, session_id, update):

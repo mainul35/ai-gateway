@@ -82,7 +82,7 @@ async def responses(request: Request, principal: Principal = Depends(authenticat
     except ValueError:
         return _error(400, "Request body must be JSON")
     # A coding tool's request is its session's latest step (the playground's Code mode)
-    code_sessions.observe(request.headers, principal, body, "responses")
+    reply = code_sessions.observe(request.headers, principal, body, "responses")
     model = (body.get("model") or "").strip()
     if not model:
         return _error(400, "Field 'model' is required")
@@ -103,9 +103,10 @@ async def responses(request: Request, principal: Principal = Depends(authenticat
     if body.get("tools") and backend.capabilities and "tools" not in backend.capabilities:
         return _error(400, f"Model '{model}' cannot call tools; choose one listed with 'tools'")
     body = dict(body, model=backend.upstream_model)
+    # ...and its answer the session's newest message
     if body.get("stream"):
-        return _streamed(principal, body, model, backend)
-    return await _whole(principal, body, model, backend)
+        return code_sessions.answered(_streamed(principal, body, model, backend), reply)
+    return code_sessions.answered(await _whole(principal, body, model, backend), reply)
 
 
 async def _whole(principal, body, model, backend):
