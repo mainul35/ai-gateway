@@ -18,6 +18,7 @@ screen, drawn with libraqm so the Bangla script is shaped right.
 """
 import asyncio
 import base64
+import contextlib
 import hashlib
 import io
 import json
@@ -1353,6 +1354,64 @@ async def assemble(pictures, narration, texts, title, lang, folder, recorded=Fal
                "adding the narration")
     with open(final, "rb") as f:
         return f.read(), round(total, 1)
+
+
+# A made video in other sizes, for a site that wants one: (width, height, top video bitrate, audio
+# bitrate). The 720p video as made is the original and needs none. Upscaled to 1080p, YouTube and
+# Facebook keep it at a higher bitrate than a 720p upload; vertical (Reels, Shorts, TikTok) and square
+# (a feed post) show the whole 16:9 picture - its words are drawn into it - over a blurred, darkened
+# copy of itself filling the frame, not cropped
+EXPORTS = {
+    "1080p": (1920, 1080, "8M", "192k"),
+    "vertical": (1080, 1920, "6M", "160k"),
+    "square": (1080, 1080, "5M", "160k"),
+    "480p": (854, 480, "1200k", "96k"),
+    "360p": (640, 360, "700k", "96k"),
+}
+
+
+async def export(source, out, preset, seconds, progress=lambda fraction: None):
+    """The video at `source` made again in an EXPORTS size at `out`, H.264 and AAC as SHAREABLE,
+    `progress(fraction)` told as it goes. `out` appears only when it is whole."""
+    binary = ffmpeg()
+    if not binary:
+        raise VideoError("No ffmpeg on this server to convert the video")
+    width, height, rate, audio = EXPORTS[preset]
+    if width / height == WIDTH / HEIGHT:
+        picture = f"[0:v]scale={width}:{height}:flags=lanczos,setsar=1[v]"
+    else:
+        picture = (f"[0:v]split[a][b];[a]scale={width}:{height}:force_original_aspect_ratio=increase,"
+                   f"crop={width}:{height},gblur=sigma=30,eq=brightness=-0.12[back];"
+                   f"[b]scale={width}:-2:flags=lanczos[front];[back][front]overlay=(W-w)/2:(H-h)/2,setsar=1[v]")
+    shareable = [*SHAREABLE]
+    shareable[shareable.index("-maxrate") + 1] = rate
+    shareable[shareable.index("-bufsize") + 1] = f"{int(rate[:-1]) * 2}{rate[-1]}"
+    if height >= 1080 or width >= 1080:
+        shareable[shareable.index("-level:v") + 1] = "4.1"
+    part = out + ".part"
+    process = await asyncio.create_subprocess_exec(
+        binary, "-y", "-nostats", "-progress", "pipe:1", "-i", source, "-filter_complex", picture,
+        "-map", "[v]", "-map", "0:a?", "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", *shareable,
+        "-c:a", "aac", "-b:a", audio, "-ar", "48000", "-ac", "2", "-movflags", "+faststart", "-f", "mp4", part,
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, preexec_fn=child._die_with_parent)
+    errors = asyncio.ensure_future(process.stderr.read())
+    try:
+        async for line in process.stdout:
+            key, _, value = line.decode(errors="replace").strip().partition("=")
+            if key == "out_time_us" and value.isdigit() and seconds:
+                progress(min(1.0, int(value) / 1e6 / seconds))
+        code = await process.wait()
+    except asyncio.CancelledError:
+        process.kill()
+        raise
+    finally:
+        err = await errors
+    if code != 0:
+        log.warning("ffmpeg converting to %s failed: %s", preset, err.decode(errors="replace")[-1200:])
+        with contextlib.suppress(OSError):
+            os.remove(part)
+        raise VideoError(f"The video could not be converted to {preset}")
+    os.replace(part, out)
 
 
 def workspace():

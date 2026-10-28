@@ -114,6 +114,7 @@ dialog.zoom::backdrop{background:rgba(0,0,0,.8)}
 <dialog class="zoom" id="zoom"><img alt=""></dialog>
 
 <script src="{{ static_url('video_draft.js') }}"></script>
+<script src="{{ static_url('video_downloads.js') }}"></script>
 <script>
 const NAMES = {en: 'English', bn: 'বাংলা', es: 'Español', fr: 'Français', zh: '中文', ja: '日本語', ko: '한국어',
                th: 'ไทย', ar: 'العربية', ur: 'اردو', hi: 'हिन्दी'};
@@ -305,10 +306,10 @@ function renderPlayer(){
   const now = showing && (current.video.videos || {})[showing];
   document.getElementById('player').innerHTML = now
     ? `<video id="video" controls preload="metadata" playsinline src="${escapeHtml(now.url)}"></video>
-       <div style="display:flex;justify-content:flex-end;margin-top:.4rem">
-         <a class="btn btn-secondary btn-small" href="${escapeHtml(now.url)}?download=1"
-           title="An MP4 ready to upload to Facebook, YouTube and other sites">⬇ Download video</a></div>`
+       <div id="downloads" style="display:flex;justify-content:flex-end;margin-top:.4rem"></div>`
     : '<div class="note">No video made yet.</div>';
+  if(now) videoDownloads(document.getElementById('downloads'),
+                         {messageId: current.message_id, lang: showing, url: now.url, seconds: now.seconds});
 }
 
 function renderRows(){

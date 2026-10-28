@@ -4,6 +4,7 @@
 {% block content %}
 <link rel="stylesheet" href="/static/leaflet/leaflet.css">
 <script src="/static/leaflet/leaflet.js"></script>
+<script src="{{ static_url('video_downloads.js') }}"></script>
 <style>
 /* The window is the frame: the sidebar scrolls if it must, the conversation scrolls, and nothing
    else does. The composer stays where the hands are. */
@@ -213,8 +214,7 @@ a.cite{font-size:.75em;vertical-align:super;text-decoration:none;padding:0 .1rem
   color:var(--text);padding:.35rem .8rem;cursor:pointer;margin-top:.5rem}
 .video-story .voice-opens{display:flex;flex-wrap:wrap;gap:.5rem}
 .video-story .video-download{margin:.4rem 0}
-.video-story .video-download a{text-decoration:none}
-.video-story .video-download a[hidden]{display:none}
+.video-story .video-download > div[hidden]{display:none}
 .voice-panel{margin-top:.6rem;border-top:1px solid var(--border);padding-top:.4rem}
 .voice-scene{display:flex;gap:.7rem;align-items:flex-start;padding:.6rem 0;border-bottom:1px solid var(--border)}
 .voice-scene img{width:160px;aspect-ratio:16/9;object-fit:cover;border-radius:6px;flex:none}
@@ -4136,10 +4136,7 @@ function renderVideo(box, video, messageId, showLang){
           video.videos[l].voice === 'recorded' ? ' · your voice' : ''}</button>`).join('')}</div>` : ''}
       ${langs.map(l => `<video controls preload="metadata" playsinline data-lang="${l}" ${l === first ? '' : 'hidden'}
         src="${escapeHtml(video.videos[l].url)}"></video>`).join('')}
-      <div class="video-download">${langs.map(l => `<a class="btn btn-sm btn-secondary" data-lang="${l}"
-        ${l === first ? '' : 'hidden'} href="${escapeHtml(video.videos[l].url)}?download=1"
-        title="An MP4 ready to upload to Facebook, YouTube and other sites">⬇ Download${
-          langs.length > 1 ? ' the ' + escapeHtml(words[l] || l) : ''} video</a>`).join('')}</div>
+      <div class="video-download">${langs.map(l => `<div data-lang="${l}" ${l === first ? '' : 'hidden'}></div>`).join('')}</div>
       ${readable.length ? `<div class="voice-opens">${readable.map(l => `<button type="button" class="voice-open"
           data-lang="${l}">${video.videos[l].voice === 'recorded' ? `Read the ${words[l]} again`
           : `Read the ${words[l]} in your own voice`}</button>`).join('')}</div>` : ''}
@@ -4156,8 +4153,11 @@ function renderVideo(box, video, messageId, showLang){
       if(!shown) v.pause();
       v.hidden = !shown;
     });
-    body.querySelectorAll('.video-download a').forEach(a => { a.hidden = a.dataset.lang !== button.dataset.lang; });
+    body.querySelectorAll('.video-download > div').forEach(d => { d.hidden = d.dataset.lang !== button.dataset.lang; });
   }));
+  body.querySelectorAll('.video-download > div').forEach(d => videoDownloads(d, {messageId, lang: d.dataset.lang,
+    url: video.videos[d.dataset.lang].url, seconds: video.videos[d.dataset.lang].seconds,
+    label: langs.length > 1 ? words[d.dataset.lang] || d.dataset.lang : ''}));
   body.querySelectorAll('.voice-open').forEach(button => button.addEventListener('click', () => {
     if(body.querySelector('.voice-panel')) return;      // one language read at a time
     body.querySelector('.voice-opens').hidden = true;
