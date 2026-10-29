@@ -75,6 +75,8 @@ DEFAULTS = {
     "video.bangla.model": "gemma-4-31b-it-ud-q8_k_xl",
     "video.tts.python": "~/tts-venv/bin/python",
     "video.fonts.dir": "~/fonts",
+    # kNN-VC's source (scripts/voice_convert_worker.py): a person's reading said in the machine voice
+    "video.voice_convert.source": "~/knn-vc-src/knn-vc-master",
     "video.check.attempts": "3",
     # A verse quoted in a story is recited by a qari, never by the narration voice: the Tanzil text
     # to find its sura and ayah, and everyayah.com's recordings, both kept here once fetched

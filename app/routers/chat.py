@@ -2583,10 +2583,10 @@ def _drop_scene(story, i):
 
 
 def _forget_voice(story, lang, i):
-    """A line's machine narration no longer fits its changed words. What the person recorded stays:
-    it is theirs to keep or record again, never thrown away by an edit."""
+    """A line's machine narration no longer fits its changed words. What the person recorded stays,
+    in their voice or the machine's: it is theirs to keep or record again, never thrown away by an edit."""
     entries = (story.get("narration") or {}).get(lang)
-    if entries and i < len(entries) and (entries[i] or {}).get("by") != "recorded":
+    if entries and i < len(entries) and (entries[i] or {}).get("by") not in ("recorded", "converted"):
         entries[i] = None
 
 
@@ -2737,6 +2737,14 @@ class StoreVoiceIn(BaseModel):
     index: int = Field(ge=0)
     # The line's words as the page shows them, when changed and not saved yet: what was read
     text: str | None = None
+    # Said again in the machine voice, as it was read: the person's pronunciation, the narrator's voice
+    machine: bool = False
+
+
+class ReadingVoiceIn(BaseModel):
+    lang: str = Field(pattern="^[a-z]{2}$")
+    index: int = Field(ge=0)
+    machine: bool
 
 
 # One story's saved state is changed by one request at a time: read, changed and written together
@@ -2817,14 +2825,20 @@ async def store_voiceover(message_id: int, payload: StoreVoiceIn, principal: Pri
     if len(raw) < 100:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "The recording is empty or too short")
     folder = video_story.workspace()
+    machine = None
     try:
         cleaned, seconds = await video_story.clean_recording(raw, folder, payload.index)
+        if payload.machine:
+            machine = await _machine_reading(video, payload.lang, payload.index, cleaned, words, folder)
     except video_story.VideoError as e:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, f"The audio could not be used: {e}")
     finally:
         shutil.rmtree(folder, ignore_errors=True)
     word = video_story.language_name(payload.lang)
     file_id = await _store_file(user.id, "voice", "audio/mp4", f"scene {payload.index + 1} ({word}).m4a", cleaned)
+    entry = {"file_id": file_id, "seconds": round(seconds, 2), "by": "recorded"}
+    if machine:
+        entry = await _converted_entry(user.id, payload.lang, payload.index, machine, entry)
 
     def keep_voice(video):
         story, line = _scene_line(video, payload.lang, payload.index)
@@ -2836,19 +2850,96 @@ async def store_voiceover(message_id: int, payload: StoreVoiceIn, principal: Pri
             raise HTTPException(status.HTTP_409_CONFLICT, "This scene is a verse: the qari recites it")
         entries = story.setdefault("narration", {}).setdefault(payload.lang, [])
         entries.extend([None] * (len(story["pictures"]) - len(entries)))
-        replaced = (entries[payload.index] or {}).get("file_id")
-        entries[payload.index] = {"file_id": file_id, "seconds": round(seconds, 2), "by": "recorded"}
+        replaced = _voice_files(entries[payload.index])
+        entries[payload.index] = entry
         _behind(video, payload.lang)
         return replaced
 
     try:
         replaced = await _change_story(message_id, user.id, keep_voice)
     except HTTPException:
-        await _drop_file(user.id, file_id)
+        for kept in _voice_files(entry):
+            await _drop_file(user.id, kept)
         raise
-    if replaced and replaced != file_id:
-        await _drop_file(user.id, replaced)
-    return {"ok": True, "file_id": file_id, "seconds": round(seconds, 2)}
+    for gone in replaced - _voice_files(entry):
+        await _drop_file(user.id, gone)
+    return {"ok": True, "file_id": entry["file_id"], "seconds": entry["seconds"]}
+
+
+def _voice_files(entry):
+    """The files a line's voice keeps: its audio, and for a reading said in the machine voice, the
+    reading itself."""
+    return {f for f in ((entry or {}).get("file_id"), (entry or {}).get("reading")) if f}
+
+
+async def _machine_reading(video, lang, index, cleaned, words, folder):
+    """(m4a bytes, seconds) of a cleaned reading said again in the language's narrator voice."""
+    path = os.path.join(folder, f"reading-{index:02d}.m4a")
+    with open(path, "wb") as f:
+        f.write(cleaned)
+    lines = list((video.get("story") or {}).get(lang) or []) + ([words] if words else [])
+    return await video_story.machine_reading(path, lang, lines, folder, index)
+
+
+async def _converted_entry(user_id, lang, index, machine, reading):
+    """A line's voice that is the person's reading said in the machine voice: the reading kept with it,
+    to go back to."""
+    audio, seconds = machine
+    word = video_story.language_name(lang)
+    file_id = await _store_file(user_id, "voice", "audio/mp4", f"scene {index + 1} ({word}, machine voice).m4a", audio)
+    return {"file_id": file_id, "seconds": seconds, "by": "converted",
+            "reading": reading["file_id"], "reading_seconds": reading["seconds"]}
+
+
+@router.post("/video/{message_id}/reading-voice")
+async def reading_voice(message_id: int, payload: ReadingVoiceIn, principal: Principal = Depends(authenticate),
+                        session: AsyncSession = Depends(get_session)):
+    """A line the person read, heard in the machine voice with their pronunciation, or in their own
+    voice again. Their reading is kept either way; used when the video is made again."""
+    user = _require_user(principal)
+    message, video = await _owned_video(session, user, message_id)
+    _not_being_made(user.id, message)
+    story, _line = _scene_line(video, payload.lang, payload.index)
+    entry = (((story.get("narration") or {}).get(payload.lang) or []) + [None] * (payload.index + 1))[payload.index]
+    by = (entry or {}).get("by")
+    if by not in ("recorded", "converted"):
+        raise HTTPException(status.HTTP_409_CONFLICT, "This line has no reading of yours; record it first")
+    if (by == "converted") == payload.machine:
+        return {"ok": True, "file_id": entry["file_id"], "seconds": entry["seconds"]}
+    if payload.machine:
+        reading = (await _load_files(session, user, [entry["file_id"]])).get(entry["file_id"])
+        if reading is None:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "Your reading of this line is gone; record it again")
+        folder = video_story.workspace()
+        try:
+            machine = await _machine_reading(video, payload.lang, payload.index, reading.data, "", folder)
+        except video_story.VideoError as e:
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(e))
+        finally:
+            shutil.rmtree(folder, ignore_errors=True)
+        new = await _converted_entry(user.id, payload.lang, payload.index, machine, entry)
+    else:
+        new = {"file_id": entry["reading"], "seconds": entry["reading_seconds"], "by": "recorded"}
+
+    def switch(video):
+        story, _line = _scene_line(video, payload.lang, payload.index)
+        entries = (story.get("narration") or {}).get(payload.lang) or []
+        now = entries[payload.index] if payload.index < len(entries) else None
+        # Changed meanwhile (recorded again, or switched in another tab): that one stands
+        if (now or {}).get("file_id") != entry["file_id"]:
+            raise HTTPException(status.HTTP_409_CONFLICT, "This line's voice changed meanwhile; look again")
+        entries[payload.index] = new
+        _behind(video, payload.lang)
+
+    try:
+        await _change_story(message_id, user.id, switch)
+    except HTTPException:
+        if payload.machine:
+            await _drop_file(user.id, new["file_id"])
+        raise
+    if not payload.machine:
+        await _drop_file(user.id, entry["file_id"])          # the machine voice; the reading stays
+    return {"ok": True, "file_id": new["file_id"], "seconds": new["seconds"]}
 
 
 # A made video in another size (video_story.EXPORTS), converted on the server when first asked for and

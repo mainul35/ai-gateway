@@ -77,6 +77,8 @@ body.videos-studio main{max-width:none;padding:0}
 .row .s .edited{color:#f59e0b;font-weight:600}
 .badge{font-size:.7rem;border-radius:999px;padding:.05rem .45rem;border:1px solid var(--border);color:var(--muted);white-space:nowrap}
 .badge.recorded{border-color:#22c55e;color:#4ade80}
+.badge.converted{border-color:#38bdf8;color:#7dd3fc}
+.editor .machine-choice{font-size:.78rem;color:var(--muted);margin-top:.4rem}
 .badge.qari{border-color:#8b5cf6;color:#c4b5fd}
 .savebar{border-top:1px solid var(--border);padding:.7rem .8rem;display:flex;gap:.7rem;align-items:center;background:var(--bg)}
 .savebar .spacer{flex:1}
@@ -148,7 +150,12 @@ const NAMES = {en: 'English', bn: 'বাংলা', es: 'Español', fr: 'Franç
                th: 'ไทย', ar: 'العربية', ur: 'اردو', hi: 'हिन्दी'};
 const IN_ENGLISH = {en: 'English', bn: 'Bangla', es: 'Spanish', fr: 'French', zh: 'Chinese', ja: 'Japanese',
                     ko: 'Korean', th: 'Thai', ar: 'Arabic', ur: 'Urdu', hi: 'Hindi'};
-const BY = {machine: 'machine voice', recorded: 'your voice', qari: 'qari', uploaded: 'uploaded audio'};
+const BY = {machine: 'machine voice', recorded: 'your voice', converted: 'machine voice, your pronunciation',
+            qari: 'qari', uploaded: 'uploaded audio'};
+const READ = ['recorded', 'converted'];        // a line the person read, in their voice or the machine's
+// What the person reads or uploads is said in the machine voice: their choice, kept in this browser
+let machineVoice = false;
+try{ machineVoice = localStorage.getItem('studio.machineVoice') === '1'; }catch(e){}
 const JSON_HEADERS = {'Content-Type': 'application/json'};
 // How long a scene stays on screen, as app/tools/video_story.py scene_lengths: to find where it starts
 const SCENE_MIN = 8, LEAD_IN = 0.6, FADE = 1.5;
@@ -470,7 +477,7 @@ function renderEditor(){
           entry ? `<span class="badge ${entry.by}">${BY[entry.by] || entry.by}</span>` : ''}</label>
         <textarea class="line ${change.text?.[l] !== undefined ? 'changed' : ''}" data-lang="${l}" lang="${l}" dir="auto"
           ${editable ? '' : 'readonly'}>${escapeHtml(words)}</textarea>
-        <div class="stale" ${change.text?.[l] !== undefined && entry?.by === 'recorded' ? '' : 'hidden'}>Your recorded voice
+        <div class="stale" ${change.text?.[l] !== undefined && READ.includes(entry?.by) ? '' : 'hidden'}>Your recorded voice
           is kept as it is. Record again if it should say the new words.</div>
         <div class="voice">
           ${entry ? `<audio controls preload="none" src="/chat/files/${entry.file_id}" title="As it is read now"></audio>` : ''}
@@ -478,10 +485,15 @@ function renderEditor(){
             : !made[l] ? `<span>Once the ${IN_ENGLISH[l] || l} video is made, this line can be read in your voice.</span>`
             : editable ? `<div style="display:flex;gap:.4rem;flex-wrap:wrap;align-items:center">
                 ${change.text?.[l] !== undefined ? '<button type="button" class="btn btn-small save-lang" data-lang="' + l + '">💾 Save</button>' : ''}
-                <button type="button" class="btn btn-secondary record">🎙 ${entry?.by === 'recorded' ? 'Record again' : 'Record voiceover'}</button>
+                <button type="button" class="btn btn-secondary record">🎙 ${READ.includes(entry?.by) ? 'Record again' : 'Record voiceover'}</button>
                 <button type="button" class="btn btn-secondary upload-voice">📁 Upload audio</button>
                 <input type="file" accept="audio/*" hidden data-scene="${i}" data-lang="${l}">
-                <span class="said"></span></div>` : ''}
+                ${entry?.by === 'recorded' ? '<button type="button" class="btn btn-secondary btn-small as-machine">🤖 Say it in the machine voice</button>' : ''}
+                ${entry?.by === 'converted' ? `<button type="button" class="btn btn-secondary btn-small as-mine">🗣 Use my own voice</button>
+                  <audio controls preload="none" src="/chat/files/${entry.reading}" title="Your reading"></audio>` : ''}
+                <span class="said"></span></div>
+              <label class="check machine-choice"><input type="checkbox" class="machine" ${machineVoice ? 'checked' : ''}>
+                Say what I read or upload in the machine voice, with my pronunciation</label>` : ''}
         </div></div>`;
     }).join('')}
     ${langs.length > 1 ? `<label class="check"><input type="checkbox" id="retranslate"
@@ -533,6 +545,13 @@ function renderEditor(){
       await saveLanguage(button.dataset.lang, i);
     });
   });
+  editor.querySelectorAll('input.machine').forEach(box => box.addEventListener('change', () => {
+    machineVoice = box.checked;
+    editor.querySelectorAll('input.machine').forEach(other => { other.checked = machineVoice; });
+    try{ localStorage.setItem('studio.machineVoice', machineVoice ? '1' : '0'); }catch(e){}
+  }));
+  editor.querySelectorAll('.as-machine, .as-mine').forEach(button => button.addEventListener('click', () =>
+    readingVoice(i, button.closest('[data-card]').dataset.card, button.classList.contains('as-machine'))));
   paintDrawing(i);
 }
 
@@ -702,7 +721,9 @@ async function storeVoice(i, lang, audio, what){
   showError('');
   busy = true;
   updateSave();
-  showProgress({stage: `Saving the voice of scene ${i + 1}`, fraction: 0});
+  const machine = machineVoice;
+  showProgress({stage: machine ? `Saying scene ${i + 1} in the machine voice, as you read it`
+                               : `Saving the voice of scene ${i + 1}`, fraction: 0});
   try{
     const recording = await new Promise((resolve, reject) => {
       const reader = new FileReader();
@@ -715,11 +736,32 @@ async function storeVoice(i, lang, audio, what){
     const typed = clean(area ? area.value : edits[i]?.text?.[lang] ?? '');
     const text = typed && typed !== clean((story()[lang] || [])[i]) ? typed : undefined;
     await api(`/chat/video/${current.message_id}/store-voice`, {method: 'POST', headers: JSON_HEADERS,
-                                                               body: JSON.stringify({recording, lang, index: i, text})});
+                                                               body: JSON.stringify({recording, lang, index: i, text, machine})});
     showing = lang;
     await refreshStory();
   }catch(e){
     showError(`Scene ${i + 1}: ${what.toLowerCase()} was not saved: ${e.message}`);
+  }finally{
+    busy = false;
+    document.getElementById('progress').hidden = true;
+    updateSave();
+  }
+}
+
+// A line the person read, said in the machine voice with their pronunciation, or in their own again
+async function readingVoice(i, lang, machine){
+  showError('');
+  busy = true;
+  updateSave();
+  showProgress({stage: machine ? `Saying scene ${i + 1} in the machine voice, as you read it`
+                               : `Using your own voice for scene ${i + 1}`, fraction: 0});
+  try{
+    await api(`/chat/video/${current.message_id}/reading-voice`, {method: 'POST', headers: JSON_HEADERS,
+                                                                  body: JSON.stringify({lang, index: i, machine})});
+    showing = lang;
+    await refreshStory();
+  }catch(e){
+    showError(`Scene ${i + 1}: the voice was not changed: ${e.message}`);
   }finally{
     busy = false;
     document.getElementById('progress').hidden = true;
@@ -784,7 +826,7 @@ function keep(){
     area.classList.toggle('changed', !!edited);
     const stale = area.closest('.card').querySelector('.stale');
     const entry = ((told.narration || {})[area.dataset.lang] || [])[i];
-    if(stale) stale.hidden = !(edited && entry?.by === 'recorded');
+    if(stale) stale.hidden = !(edited && READ.includes(entry?.by));
     if(edited) change.text[area.dataset.lang] = clean(area.value);
   });
   change.retranslate = !!editor.querySelector('#retranslate')?.checked && Object.keys(change.text).length > 0;
