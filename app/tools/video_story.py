@@ -1180,6 +1180,103 @@ async def clean_recording(raw, folder, n):
         return f.read(), round(seconds, 2)
 
 
+# A reading said again in the machine voice (scripts/voice_convert_worker.py): the person's words,
+# pronunciation and pace, in the voice of the language's narrator. The narrator's voice to match against
+# is made from the story's own lines, spoken by it, and kept for every story after it until there is
+# enough of it (a few minutes: more matches more closely).
+VOICE_MATCH_SECONDS = 300
+# The most of the story's lines spoken for it in one request: in Bangla about three minutes of voice,
+# made in some 40 s, so the first conversion stays well inside Cloudflare's 100 s; the rest comes with
+# the next reading converted
+VOICE_MATCH_CHARACTERS = 1500
+_one_conversion = asyncio.Lock()        # one at a time: each takes half the CPU
+
+
+def _convert_worker():
+    return os.path.join(settings.PROJECT_ROOT, "scripts", "voice_convert_worker.py")
+
+
+def _convert_source():
+    return os.path.expanduser(settings.get("video.voice_convert.source", "VIDEO_VOICE_CONVERT_SOURCE") or "")
+
+
+def can_convert():
+    return is_available() and os.path.isdir(os.path.join(_convert_source(), "wavlm"))
+
+
+def _voice_match_file(lang):
+    narrator = LANGUAGES.get(lang, LANGUAGES["en"])["voice"]
+    key = hashlib.sha1(json.dumps(narrator).encode()).hexdigest()[:12]
+    folder = os.path.join(settings.PROJECT_ROOT, "state", "voice-match")
+    os.makedirs(folder, exist_ok=True)
+    return os.path.join(folder, f"{lang}-{key}.pt")
+
+
+async def _to_16k(source, out, what):
+    await _run([ffmpeg(), "-y", "-i", source, "-ar", "16000", "-ac", "1", out], what)
+    return out
+
+
+async def machine_reading(recording, lang, lines, folder, n):
+    """(m4a bytes, seconds) of a cleaned recording (a path; clean_recording) said again in `lang`'s
+    narrator voice. `lines` are the story's lines in `lang`: what the narrator says, while there is
+    too little of its voice to match against."""
+    if not can_convert():
+        raise VideoError("This server cannot change a voice yet")
+    language = LANGUAGES.get(lang) or LANGUAGES["en"]
+    voice = _voice_match_file(lang)
+    known_file = voice + ".json"
+    async with _one_conversion:
+        known = {"seconds": 0, "lines": []}
+        if os.path.isfile(known_file) and os.path.isfile(voice):
+            with open(known_file, encoding="utf-8") as f:
+                known = json.load(f)
+        add = []
+        if known["seconds"] < VOICE_MATCH_SECONDS:
+            new = {}
+            for line in lines:
+                words = spoken(" ".join(str(line or "").split()), lang)[0]
+                key = hashlib.sha1(words.encode()).hexdigest()[:16]
+                if re.search(r"\w", words) and key not in known["lines"]:
+                    if new and sum(map(len, new.values())) + len(words) > VOICE_MATCH_CHARACTERS:
+                        break
+                    new[key] = words
+            if new:
+                items = [{"text": words, "out": os.path.join(folder, f"match-{k:03d}.wav")}
+                         for k, words in enumerate(new.values())]
+                job = {"lang": lang, "voice": language["voice"], "speed": language["speed"], "items": items}
+                _, err, code = await child.run(_python(), _worker(), stdin=json.dumps(job).encode(),
+                                               stdout=asyncio.subprocess.PIPE)
+                if code != 0:
+                    log.warning("narrator voice for matching in %s failed: %s", lang, err.decode(errors="replace")[-800:])
+                    raise VideoError(f"The {language_name(lang)} machine voice could not be made")
+                for item in items:
+                    add.append(await _to_16k(item["out"], item["out"][:-4] + "-16k.wav", "the machine voice"))
+                known["lines"] += list(new)
+        if not add and not known["seconds"]:
+            raise VideoError("This story has no lines for the machine voice to say")
+        source = await _to_16k(recording, os.path.join(folder, f"reading-{n:02d}-16k.wav"), "the reading")
+        converted = os.path.join(folder, f"reading-{n:02d}-machine.wav")
+        job = {"source": source, "out": converted, "voice": voice, "add": add, "knnvc": _convert_source()}
+        out, err, code = await child.run(_python(), _convert_worker(), stdin=json.dumps(job).encode(),
+                                         stdout=asyncio.subprocess.PIPE)
+        if code != 0:
+            log.warning("voice conversion failed: %s", err.decode(errors="replace")[-800:])
+            raise VideoError("The reading could not be said in the machine voice")
+        known["seconds"] = json.loads(out.decode().strip().splitlines()[-1])["voice_seconds"]
+        with open(known_file, "w", encoding="utf-8") as f:
+            json.dump(known, f)
+    # As loud as a recording, at the narration's rate
+    wav, m4a = converted[:-4] + "-24k.wav", converted[:-4] + ".m4a"
+    await _run([ffmpeg(), "-y", "-i", converted, "-af", "loudnorm=I=-18:TP=-2:LRA=9", "-ar", "24000", "-ac", "1", wav],
+               "evening the machine voice")
+    with wave.open(wav, "rb") as w:
+        seconds = w.getnframes() / w.getframerate()
+    await _run([ffmpeg(), "-y", "-i", wav, "-c:a", "aac", "-b:a", "96k", m4a], "keeping the machine voice")
+    with open(m4a, "rb") as f:
+        return f.read(), round(seconds, 2)
+
+
 async def audio_to_m4a(raw, out):
     """Convert raw audio bytes to m4a and return the duration in seconds."""
     source = out + ".in"
