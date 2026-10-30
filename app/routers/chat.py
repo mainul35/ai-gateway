@@ -562,31 +562,44 @@ async def edit_question(conversation_id: int, message_id: int, payload: EditedQu
     return {"removed": len(doomed)}
 
 
+def _require_feature(principal, feature):
+    """403 for a feature this person has not been granted (app/access.py FEATURES)."""
+    if not access.can_use_feature(principal, feature):
+        raise HTTPException(status.HTTP_403_FORBIDDEN,
+                            f"{access.FEATURES[feature]} is not turned on for your account; ask an admin")
+
+
+async def _video_user(principal: Principal = Depends(authenticate)) -> Principal:
+    """Every video story route: for the people granted video stories only."""
+    _require_feature(principal, "video")
+    return principal
+
+
 @router.get("/capabilities")
 async def capabilities(principal: Principal = Depends(authenticate)):
     """Which tools this server offers; the playground only shows toggles for these."""
     return {
-        "web_search": web_search.is_available(),
+        "web_search": web_search.is_available() and access.can_use_feature(principal, "web_search"),
         # Finding a real photograph of a real thing, rather than drawing one. It rides on the same
         # search service, so it is offered exactly when web search is.
-        "media_search": web_search.is_available() and media.is_available(),
-        "vision": settings.feature_enabled("vision"),
+        "media_search": web_search.is_available() and media.is_available() and access.can_use_feature(principal, "web_search"),
+        "vision": settings.feature_enabled("vision") and access.can_use_feature(principal, "vision"),
         "image_generation": images.is_available() and access.can_generate_images(principal),
         # A narrated, illustrated story video: pictures, narration and ffmpeg all needed
-        "video": images.is_available() and video_story.is_available() and access.can_generate_images(principal),
+        "video": images.is_available() and video_story.is_available() and access.can_use_feature(principal, "video"),
         "image_sizes": list(images.SIZES),
         # "qwen" follows edit instructions and takes up to 3 images; "flux" re-renders one image
         "edit_engine": await images.edit_engine() if images.is_available() else None,
         "max_edit_images": images.MAX_EDIT_IMAGES,
-        "photo_clean": images.is_available(),
-        "photo_blur": images.is_available() and photo.is_depth_available(),
-        "photo_backdrop": images.is_available() and portrait.is_available(),
+        "photo_clean": images.is_available() and access.can_generate_images(principal),
+        "photo_blur": images.is_available() and photo.is_depth_available() and access.can_generate_images(principal),
+        "photo_backdrop": images.is_available() and portrait.is_available() and access.can_generate_images(principal),
         # A YouTube link's subtitles, transcribed from its sound on this server
-        "subtitles": subtitles.is_available(),
-        "maps": settings.feature_enabled("maps"),
+        "subtitles": subtitles.is_available() and access.can_use_feature(principal, "subtitles"),
+        "maps": settings.feature_enabled("maps") and access.can_use_feature(principal, "maps"),
         # Whether there is anything to be agentic with: the feature on, and a tool server
         # that this host could actually run
-        "agent": agent.is_available_to(principal),
+        "agent": agent.is_available_to(principal) and access.can_use_feature(principal, "agent"),
         # Which map the browser must draw on, and the browser key for it when that is Google's.
         # The two are never mixed: Google's terms forbid their places on anybody else's tiles.
         "maps_tiles": places.tiles() if settings.feature_enabled("maps") else "osm",
@@ -912,7 +925,7 @@ async def complete(payload: CompleteIn, principal: Principal = Depends(authentic
 
     if payload.conversation_id is not None:
         await _writable(session, payload.conversation_id, user)
-    use_vision = payload.vision and settings.feature_enabled("vision")
+    use_vision = payload.vision and settings.feature_enabled("vision") and access.can_use_feature(principal, "vision")
     latest_user = next((m for m in reversed(payload.messages) if m.role == "user"), None)
     # Pictures from earlier turns are dropped for a text-only model rather than failing the chat
     use_vision = use_vision and "vision" in backend.capabilities
@@ -991,7 +1004,7 @@ async def complete(payload: CompleteIn, principal: Principal = Depends(authentic
         body["max_tokens"] = payload.max_tokens
     if payload.thinking is not None and backend.kind == "llamacpp":
         body["chat_template_kwargs"] = {"enable_thinking": payload.thinking}
-    do_search = payload.web_search and web_search.is_available()
+    do_search = payload.web_search and web_search.is_available() and access.can_use_feature(principal, "web_search")
 
     answer = _Answer()
 
@@ -1478,6 +1491,7 @@ async def find_media(payload: MediaIn, principal: Principal = Depends(authentica
     a link to the page that carried it.
     """
     user = _require_user(principal)
+    _require_feature(principal, "web_search")
     if not (web_search.is_available() and media.is_available()):
         raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE,
                             "Searching the web is turned off on this server, so there is nowhere "
@@ -1678,6 +1692,7 @@ async def video_subtitles(payload: SubtitlesIn, principal: Principal = Depends(a
     summarise it, translate it, ask what was said - and the .srt and .vtt files are saved beside it.
     """
     user = _require_user(principal)
+    _require_feature(principal, "subtitles")
     if not await asyncio.to_thread(subtitles.is_available):
         raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "Subtitles are not set up on this server")
     video = subtitles.video_id(payload.message)
@@ -1882,6 +1897,7 @@ async def find_on_map(payload: MapIn, principal: Principal = Depends(authenticat
     looks entirely plausible and is wrong, and nobody would notice until they drove there.
     """
     _require_user(principal)
+    _require_feature(principal, "maps")
     if not settings.feature_enabled("maps"):
         raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "Maps are turned off on this server")
 
@@ -2142,12 +2158,13 @@ async def route(payload: RouteIn, principal: Principal = Depends(authenticate),
     action answer as good as it was - putting both in one prompt made it worse.
     """
     tools = {
-        "web_search": payload.web_search and web_search.is_available(),
+        "web_search": (payload.web_search and web_search.is_available()
+                       and access.can_use_feature(principal, "web_search")),
         "image_generation": (payload.image_generation and images.is_available()
                              and access.can_generate_images(principal)),
-        "maps": payload.maps and settings.feature_enabled("maps"),
+        "maps": payload.maps and settings.feature_enabled("maps") and access.can_use_feature(principal, "maps"),
         # Without the depth model the blur endpoint refuses, so it is no choice to offer either
-        "photo_blur": (payload.photo_blur and payload.has_images
+        "photo_blur": (payload.photo_blur and payload.has_images and access.can_generate_images(principal)
                        and await asyncio.to_thread(photo.is_depth_available)),
     }
     allowed = intent_router.candidates(tools, payload.has_images)
@@ -2410,7 +2427,7 @@ async def _video_facts(prompt):
 
 
 @router.post("/video")
-async def make_video(payload: VideoIn, principal: Principal = Depends(authenticate),
+async def make_video(payload: VideoIn, principal: Principal = Depends(_video_user),
                      session: AsyncSession = Depends(get_session)):
     """A factual story as a narrated, illustrated video, in English and Bangla (app/tools/video_story.py).
     Streams progress - the facts, the story, each scene drawn and checked, the narration - then the
@@ -2418,8 +2435,6 @@ async def make_video(payload: VideoIn, principal: Principal = Depends(authentica
     user = _require_user(principal)
     if not images.is_available() or not video_story.is_available():
         raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "Video stories are not set up on this server")
-    if not access.can_generate_images(principal):
-        raise HTTPException(status.HTTP_403_FORBIDDEN, "You do not have access to image generation")
     # What the person wrote before in this conversation: "the story above" points at one of these.
     # Sent alone, such a request was searched for as it stood, and made a video of a news item.
     earlier = []
@@ -2449,7 +2464,7 @@ async def make_video(payload: VideoIn, principal: Principal = Depends(authentica
 
 
 @router.post("/video/{message_id}/continue")
-async def continue_video(message_id: int, principal: Principal = Depends(authenticate),
+async def continue_video(message_id: int, principal: Principal = Depends(_video_user),
                          session: AsyncSession = Depends(get_session)):
     """Carries on with a video story that stopped partway - an error, a restart, the server going to
     sleep, Stop - from what it had saved: the plan, every picture that passed, every video made."""
@@ -2601,7 +2616,7 @@ async def _owned_video(session, user, message_id):
 
 
 @router.post("/video/{message_id}/edit")
-async def edit_video(message_id: int, payload: VideoEditIn, principal: Principal = Depends(authenticate),
+async def edit_video(message_id: int, payload: VideoEditIn, principal: Principal = Depends(_video_user),
                      session: AsyncSession = Depends(get_session)):
     """Changes some scenes of a video story and makes again only what they change: a scene's words in
     a language (re-voiced, that language's video remade), its other languages translated again, or its
@@ -2804,7 +2819,7 @@ def _not_being_made(user_id, message):
 
 
 @router.post("/video/{message_id}/store-voice")
-async def store_voiceover(message_id: int, payload: StoreVoiceIn, principal: Principal = Depends(authenticate),
+async def store_voiceover(message_id: int, payload: StoreVoiceIn, principal: Principal = Depends(_video_user),
                           session: AsyncSession = Depends(get_session)):
     """One scene's reading in one language - recorded in the page, or an audio file - cleaned and kept
     as that line's voice, without making the video again: it is used when the video is made again."""
@@ -2892,7 +2907,7 @@ async def _converted_entry(user_id, lang, index, machine, reading):
 
 
 @router.post("/video/{message_id}/reading-voice")
-async def reading_voice(message_id: int, payload: ReadingVoiceIn, principal: Principal = Depends(authenticate),
+async def reading_voice(message_id: int, payload: ReadingVoiceIn, principal: Principal = Depends(_video_user),
                         session: AsyncSession = Depends(get_session)):
     """A line the person read, heard in the machine voice with their pronunciation, or in their own
     voice again. Their reading is kept either way; used when the video is made again."""
@@ -3002,7 +3017,7 @@ async def _make_export(job, data, path, preset, seconds):
 
 
 @router.post("/video/{message_id}/export")
-async def export_video(message_id: int, payload: ExportIn, principal: Principal = Depends(authenticate),
+async def export_video(message_id: int, payload: ExportIn, principal: Principal = Depends(_video_user),
                        session: AsyncSession = Depends(get_session)):
     """One language's video in another size: ready to download, or started (or still being made) and
     how far along. Asked again until it is ready; a conversion that failed says why once, and the next
@@ -3032,7 +3047,7 @@ async def export_video(message_id: int, payload: ExportIn, principal: Principal 
 
 
 @router.get("/video/{message_id}/export/{lang}/{preset}")
-async def download_export(message_id: int, lang: str, preset: str, principal: Principal = Depends(authenticate),
+async def download_export(message_id: int, lang: str, preset: str, principal: Principal = Depends(_video_user),
                           session: AsyncSession = Depends(get_session)):
     """A converted video (POST .../export made it), saved as a file named for the story, language and size."""
     user = _require_user(principal)
@@ -3046,7 +3061,7 @@ async def download_export(message_id: int, lang: str, preset: str, principal: Pr
 
 
 @router.post("/video/{message_id}/save")
-async def save_scene_text(message_id: int, payload: SaveIn, principal: Principal = Depends(authenticate),
+async def save_scene_text(message_id: int, payload: SaveIn, principal: Principal = Depends(_video_user),
                           session: AsyncSession = Depends(get_session)):
     """Save a scene's text in one language without rebuilding the video."""
     user = _require_user(principal)
@@ -3064,7 +3079,7 @@ async def save_scene_text(message_id: int, payload: SaveIn, principal: Principal
 
 
 @router.post("/video/{message_id}/redraw")
-async def redraw_picture(message_id: int, payload: RedrawIn, principal: Principal = Depends(authenticate),
+async def redraw_picture(message_id: int, payload: RedrawIn, principal: Principal = Depends(_video_user),
                          session: AsyncSession = Depends(get_session)):
     """One scene's picture drawn again, to look at before the video is made again with it. The story
     model rewrites the scene's description from the person's request (REDRAW_PROMPT: the request
@@ -3166,7 +3181,7 @@ class PendingPictureIn(BaseModel):
 
 
 @router.put("/video/{message_id}/pending-picture")
-async def save_pending_picture(message_id: int, payload: PendingPictureIn, principal: Principal = Depends(authenticate),
+async def save_pending_picture(message_id: int, payload: PendingPictureIn, principal: Principal = Depends(_video_user),
                                session: AsyncSession = Depends(get_session)):
     """A picture drawn again for a scene (redraw_picture), kept with the story until the video is made
     again with it: it survives the page being closed, and the next edit puts it in. The video itself
@@ -3232,7 +3247,7 @@ async def _draft_of(session, user, message_id):
 
 
 @router.put("/video/{message_id}/draft")
-async def save_draft(message_id: int, payload: DraftIn, principal: Principal = Depends(authenticate),
+async def save_draft(message_id: int, payload: DraftIn, principal: Principal = Depends(_video_user),
                      session: AsyncSession = Depends(get_session)):
     """The scenes of a story not yet made into a video, as the person has corrected them: their order,
     each part's speaker and words in every language, what each picture should show, and the cast.
@@ -3267,7 +3282,7 @@ async def save_draft(message_id: int, payload: DraftIn, principal: Principal = D
 
 
 @router.post("/video/{message_id}/prepare")
-async def prepare_draft(message_id: int, principal: Principal = Depends(authenticate),
+async def prepare_draft(message_id: int, principal: Principal = Depends(_video_user),
                         session: AsyncSession = Depends(get_session)):
     """Fills in what a draft is missing - the words of a part in a language it was not written in, the
     speakers of a story that has none - and leaves it a draft."""
@@ -3288,7 +3303,7 @@ class ProduceIn(BaseModel):
 
 
 @router.post("/video/{message_id}/produce")
-async def produce_video(message_id: int, payload: ProduceIn | None = None, principal: Principal = Depends(authenticate),
+async def produce_video(message_id: int, payload: ProduceIn | None = None, principal: Principal = Depends(_video_user),
                         session: AsyncSession = Depends(get_session)):
     """Makes the video of a story the person has read and corrected: every picture drawn and checked,
     every part voiced, a video in each language asked for. Only now is the GPUs' time spent."""
@@ -3319,7 +3334,7 @@ class VersionIn(BaseModel):
 
 
 @router.post("/video/{message_id}/version")
-async def restore_version(message_id: int, payload: VersionIn, principal: Principal = Depends(authenticate),
+async def restore_version(message_id: int, payload: VersionIn, principal: Principal = Depends(_video_user),
                           session: AsyncSession = Depends(get_session)):
     """Brings back an earlier version of a language's video; the one it replaces becomes a version."""
     user = _require_user(principal)
@@ -3336,7 +3351,7 @@ async def restore_version(message_id: int, payload: VersionIn, principal: Princi
 
 
 @router.get("/videos")
-async def list_videos(principal: Principal = Depends(authenticate), session: AsyncSession = Depends(get_session)):
+async def list_videos(principal: Principal = Depends(_video_user), session: AsyncSession = Depends(get_session)):
     """The person's video stories, newest first, for the Videos page."""
     user = _require_user(principal)
     rows = (await session.execute(
@@ -3361,7 +3376,7 @@ async def list_videos(principal: Principal = Depends(authenticate), session: Asy
 
 
 @router.get("/videos/{message_id}")
-async def get_video(message_id: int, principal: Principal = Depends(authenticate),
+async def get_video(message_id: int, principal: Principal = Depends(_video_user),
                     session: AsyncSession = Depends(get_session)):
     user = _require_user(principal)
     message, video = await _owned_video(session, user, message_id)
@@ -3841,7 +3856,7 @@ class VoiceIn(BaseModel):
 
 
 @router.post("/video/{message_id}/voice")
-async def video_voice(message_id: int, payload: VoiceIn, principal: Principal = Depends(authenticate),
+async def video_voice(message_id: int, payload: VoiceIn, principal: Principal = Depends(_video_user),
                       session: AsyncSession = Depends(get_session)):
     """A language's video made again with the person's own voice: each scene's line as they read it.
     The recordings are kept, per language, so one scene can be read again later without the others."""
@@ -4001,7 +4016,7 @@ async def video_voice(message_id: int, payload: VoiceIn, principal: Principal = 
 
 @router.post("/video/{message_id}/upload-voice")
 async def upload_voiceover(message_id: int, audio: UploadFile = File(...), lang: str = Form(...),
-                           index: int = Form(...), principal: Principal = Depends(authenticate),
+                           index: int = Form(...), principal: Principal = Depends(_video_user),
                            session: AsyncSession = Depends(get_session)):
     """Upload a voiceover for one scene of one language: convert the audio, store it, update the narration.
     The user clicks "Save and remake" to rebuild the video with the uploaded voice."""
@@ -4153,6 +4168,7 @@ async def run_agent(payload: AgentIn, principal: Principal = Depends(authenticat
     be read again later.
     """
     user = _require_user(principal)
+    _require_feature(principal, "agent")
     if not agent.is_available_to(principal):
         raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE,
                             "You have no tool servers to use. Either none are switched on, or none "

@@ -40,12 +40,15 @@ class UserIn(BaseModel):
     role: str = Field(default="user", pattern="^(user|manager|admin)$")
     model_access: str | None = Field(default=None, pattern="^(all|selected|public|none)$")
     allowed_models: list[str] | None = None
+    # The features granted (app/access.py FEATURES); left out, the defaults of its model access
+    features: list[str] | None = None
 
 
 class UserPatch(BaseModel):
     role: str | None = Field(default=None, pattern="^(user|manager|admin)$")
     model_access: str | None = Field(default=None, pattern="^(all|selected|public|none)$")
     allowed_models: list[str] | None = None
+    features: list[str] | None = None
     is_active: bool | None = None
 
 
@@ -60,6 +63,9 @@ def _user_json(user):
         "is_active": user.is_active, "created_at": user.created_at.isoformat(),
         "model_access": user.model_access or "all",
         "allowed_models": access.parse_patterns(user.allowed_models),
+        "features": access.features_of(user),
+        # False while the account has the defaults of its model access, not features chosen for it
+        "features_chosen": user.features is not None,
         "sign_in": "local password" if user.password_hash else "single sign-on",
         # "pending": a first SSO sign-in waiting for an admin to approve it
         "approval": user.approval,
@@ -100,6 +106,17 @@ def _check_can_manage(principal, target):
         raise HTTPException(status.HTTP_403_FORBIDDEN, "Only an admin can act on a sign-in request")
 
 
+def _check_features(principal, features):
+    """Known features only, and a manager hands out only those they have themselves."""
+    unknown = [f for f in features if f not in access.FEATURES]
+    if unknown:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, f"No such feature: {', '.join(unknown)}")
+    for feature in features:
+        if not access.can_use_feature(principal, feature):
+            raise HTTPException(status.HTTP_403_FORBIDDEN,
+                                f"You cannot grant {access.FEATURES[feature]}: you do not have it yourself")
+
+
 def _check_grant_allowed(principal, model_access, allowed_models):
     """A manager can only hand out access they have themselves, so the role cannot escalate privileges."""
     if principal.is_admin:
@@ -132,8 +149,11 @@ async def create_user(payload: UserIn, principal: Principal = Depends(require_ma
         raise HTTPException(status.HTTP_409_CONFLICT, f"User {payload.name} already exists")
     model_access = payload.model_access or access.default_access()
     _check_grant_allowed(principal, model_access, payload.allowed_models)
+    if payload.features is not None:
+        _check_features(principal, payload.features)
     user = User(name=payload.name, email=payload.email, role=payload.role, model_access=model_access,
-                allowed_models=access.serialize_patterns(payload.allowed_models))
+                allowed_models=access.serialize_patterns(payload.allowed_models),
+                features=access.serialize_features(payload.features) if payload.features is not None else None)
     session.add(user)
     await session.commit()
     await session.refresh(user, attribute_names=["api_keys"])
@@ -162,6 +182,11 @@ async def update_user(name: str, payload: UserPatch, principal: Principal = Depe
         _check_grant_allowed(principal, model_access, allowed)
         user.model_access = model_access
         user.allowed_models = access.serialize_patterns(allowed)
+
+    if payload.features is not None:
+        # Only what is added is checked: a manager may keep a feature they lack themselves
+        _check_features(principal, [f for f in payload.features if f not in access.features_of(user)])
+        user.features = access.serialize_features(payload.features)
 
     if payload.is_active and user.approval == "pending":
         raise HTTPException(status.HTTP_409_CONFLICT, "This is a sign-in request: approve it instead")

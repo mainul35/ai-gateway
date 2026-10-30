@@ -27,6 +27,9 @@ class User(Base):
     model_access: Mapped[str] = mapped_column(String(16), default="all")
     # JSON list of model names or patterns, used when model_access is "selected"
     allowed_models: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # JSON list of the playground features granted (app/access.py FEATURES); None for the defaults
+    # that follow from model_access, until an admin or manager chooses
+    features: Mapped[str | None] = mapped_column(Text, nullable=True)
     # The model this person's Claude desktop app runs, whichever of Claude's names it asks for
     # (app/claude_desktop.py); set by `ai-gateway launch claude-desktop -Model`, None for the defaults
     desktop_model: Mapped[str | None] = mapped_column(String(256), nullable=True)

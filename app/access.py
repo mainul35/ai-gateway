@@ -67,14 +67,61 @@ def can_use_model(principal, model):
     return any(fnmatch.fnmatchcase(model, pattern) for pattern in patterns)
 
 
-def can_generate_images(principal):
-    """Image generation is not a model in the list; anyone granted models by hand may use it.
+# --- features ---------------------------------------------------------------------------------
 
-    Not "public" accounts: a picture holds the whole GPU for a minute, and that is a grant for an
-    admin to make, not something anyone the auth server lets in gets by default."""
-    if principal.is_admin:
+# What a person may do beyond talking to a model, each granted or not per account by an admin (a
+# manager, for plain users, only what they have themselves). Admins have every one. The server
+# refuses a feature not granted; the playground and the menu only hide it.
+FEATURES = {
+    "web_search": "Web search",
+    "vision": "Image understanding",
+    "maps": "Maps",
+    "image_generation": "Image generation and photo editing",
+    "video": "Video stories",
+    "subtitles": "YouTube subtitles",
+    "agent": "Agent (tool servers)",
+}
+# A picture or a video holds the whole GPU for a minute or more: not given by default to an account
+# that has only the public models, which is what an approved SSO sign-up gets
+GPU_FEATURES = ("image_generation", "video")
+
+
+def default_features(user):
+    """An account's features until someone chooses them: what it could do before features were
+    granted one by one - everything, less the GPU's with public models, nothing with none."""
+    mode = (user.model_access if user else None) or "all"
+    if mode == "none":
+        return []
+    return [f for f in FEATURES if mode != "public" or f not in GPU_FEATURES]
+
+
+def features_of(user):
+    if user is None:
+        return []
+    if user.role == "admin":
+        return list(FEATURES)
+    if user.features is None:
+        return default_features(user)
+    try:
+        chosen = json.loads(user.features)
+    except ValueError:
+        return []
+    return [f for f in FEATURES if isinstance(chosen, list) and f in chosen]
+
+
+def serialize_features(features):
+    return json.dumps([f for f in FEATURES if f in set(features or [])])
+
+
+def can_use_feature(principal, feature):
+    if principal.is_master or principal.is_admin:
         return True
-    return principal.user is not None and (principal.user.model_access or "all") not in ("none", "public")
+    user = principal.user
+    return user is not None and user.is_active and feature in features_of(user)
+
+
+def can_generate_images(principal):
+    return can_use_feature(principal, "image_generation")
 
 
 def can_manage(principal, target):
