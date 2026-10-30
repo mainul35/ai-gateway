@@ -8,7 +8,7 @@ from fastapi.templating import Jinja2Templates
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app import settings, sso, throttle
+from app import access, settings, sso, throttle
 from app.coding import runner as coding_runner
 from app.db import get_session
 from app.models import User
@@ -32,6 +32,9 @@ def static_url(name):
 
 
 templates.env.globals["static_url"] = static_url
+# What a signed-in person may use, for the links and tools a page shows (app/access.py FEATURES)
+templates.env.globals["features_of"] = access.features_of
+templates.env.globals["FEATURES"] = access.FEATURES
 
 
 async def signed_in_user(session: AsyncSession, cookie_value):
@@ -217,6 +220,8 @@ async def shared_conversation_page(token: str, user: User | None = Depends(curre
 async def videos_page(request: Request, user: User | None = Depends(current_user)):
     """The video stories: the list of stories, the player, the scenes and the editor ("Studio" layout,
     chosen over the other one tried beside it, 2026-10-26)."""
+    if user is not None and "video" not in access.features_of(user):
+        return RedirectResponse("/playground", status_code=303)
     return _require_login(user, "/videos") or _page(request, "videos_studio.html", user)
 
 

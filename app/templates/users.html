@@ -77,7 +77,8 @@ details.keys .key-row{display:flex;align-items:center;gap:.6rem;flex-wrap:wrap;m
 </div>
 
 <div class="card" id="accessEditor" hidden style="margin-bottom:1.5rem;border:1px solid var(--primary)">
-  <h2>Model access for <span id="editName"></span></h2>
+  <h2>Access for <span id="editName"></span></h2>
+  <h3 style="font-size:.95rem;margin:.2rem 0 .5rem">Models</h3>
   <div class="row" style="gap:1.25rem;margin-bottom:1rem">
     <label style="margin:0"><input type="radio" name="mode" value="all" style="width:auto"> All models</label>
     <label style="margin:0"><input type="radio" name="mode" value="selected" style="width:auto"> Selected models</label>
@@ -96,6 +97,10 @@ details.keys .key-row{display:flex;align-items:center;gap:.6rem;flex-wrap:wrap;m
       <span class="hint">Patterns also cover models added later that match. Admins only, or managers who have every model.</span>
     </label>
   </div>
+  <h3 style="font-size:.95rem;margin:.6rem 0 .3rem">Features</h3>
+  <p class="muted" style="margin:0 0 .5rem;font-size:.85rem">What they may use besides the models. A feature
+    not ticked is hidden from them and refused by the server.<span id="featuresDefault"></span></p>
+  <div id="featureChecks" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(16rem,1fr));gap:.3rem .9rem;margin-bottom:1rem"></div>
   <div class="row">
     <button class="btn" id="saveAccess">Save access</button>
     <button class="btn btn-secondary" id="cancelAccess">Cancel</button>
@@ -111,6 +116,9 @@ details.keys .key-row{display:flex;align-items:center;gap:.6rem;flex-wrap:wrap;m
 {% block scripts %}
 <script>
 const me = {name: {{ user.name | tojson }}, role: {{ user.role | tojson }}};
+// Every feature there is, and those this person may hand out (a manager: only their own)
+const FEATURES = {{ FEATURES | tojson }};
+const MY_FEATURES = {{ features_of(user) | tojson }};
 let users = [];
 let models = [];
 let editing = null;
@@ -167,6 +175,14 @@ function accessSummary(u){
   return shown + (list.length > 3 ? ` <span class="muted">+${list.length - 3} more</span>` : '');
 }
 
+function featuresSummary(u){
+  if(u.role === 'admin') return '<span class="muted">all (admin)</span>';
+  const on = Object.keys(FEATURES).filter(f => u.features.includes(f));
+  if(!on.length) return '<span class="pill err">none</span>';
+  if(on.length === Object.keys(FEATURES).length) return 'all';
+  return on.map(f => escapeHtml(FEATURES[f])).join(', ');
+}
+
 function roleCell(u){
   if(me.role !== 'admin') return escapeHtml(u.role);
   return `<select data-role="${escapeHtml(u.name)}" style="width:auto;padding:.3rem .5rem">
@@ -181,7 +197,7 @@ async function loadUsers(){
     showRequests(users.filter(u => u.approval === 'pending'));
     const listed = users.filter(u => u.approval !== 'pending');
     target.innerHTML = `<div style="overflow-x:auto"><table>
-      <tr><th>User</th><th>Role</th><th>Model access</th><th>Keys</th><th>Status</th><th></th></tr>` + listed.map(u => {
+      <tr><th>User</th><th>Role</th><th>Model access</th><th>Features</th><th>Keys</th><th>Status</th><th></th></tr>` + listed.map(u => {
         const manageable = canManage(u);
         const keys = u.keys.filter(k => k.is_active);
         return `<tr>
@@ -190,6 +206,8 @@ async function loadUsers(){
               ${saidByAuthServer(u)}</td>
           <td>${roleCell(u)}</td>
           <td>${accessSummary(u)}</td>
+          <td style="white-space:normal;max-width:16rem;font-size:.84rem">${featuresSummary(u)}${
+            u.role !== 'admin' && !u.features_chosen ? '<br><span class="muted" style="font-size:.76rem">defaults</span>' : ''}</td>
           <td>${keysCell(keys, manageable)}</td>
           <td>${u.is_active ? '<span class="pill on">active</span>' : '<span class="pill off">disabled</span>'}</td>
           <td style="text-align:right;white-space:nowrap">${manageable ? `
@@ -276,6 +294,15 @@ function openEditor(name){
     : '<span class="muted">No models visible to you.</span>';
   document.getElementById('patterns').value = patterns.join(', ');
   document.querySelector(`input[name=mode][value=${editing.model_access}]`).checked = true;
+  document.getElementById('featureChecks').innerHTML = Object.entries(FEATURES).map(([key, label]) => {
+    const grantable = MY_FEATURES.includes(key);
+    return `<label style="margin:0;font-size:.88rem;display:flex;gap:.4rem;align-items:center${grantable ? '' : ';opacity:.5'}"
+        ${grantable ? '' : 'title="You do not have this yourself"'}>
+      <input type="checkbox" value="${key}" ${editing.features.includes(key) ? 'checked' : ''} ${grantable ? '' : 'disabled'} style="width:auto">
+      ${escapeHtml(label)}</label>`;
+  }).join('');
+  document.getElementById('featuresDefault').textContent = editing.features_chosen ? ''
+    : ' These are the defaults of their model access until you save.';
   syncMode();
   const editor = document.getElementById('accessEditor');
   editor.hidden = false;
@@ -303,8 +330,9 @@ document.getElementById('saveAccess').addEventListener('click', async () => {
   try{
     await api(`/admin/users/${encodeURIComponent(editing.name)}`, {method:'PATCH',
       headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({model_access: mode, allowed_models: mode === 'selected' ? [...chosen, ...patterns] : []})});
-    showCreated(`Model access for <strong>${escapeHtml(editing.name)}</strong> saved.`);
+      body: JSON.stringify({model_access: mode, allowed_models: mode === 'selected' ? [...chosen, ...patterns] : [],
+                            features: [...document.querySelectorAll('#featureChecks input:checked')].map(c => c.value)})});
+    showCreated(`Access for <strong>${escapeHtml(editing.name)}</strong> saved.`);
     document.getElementById('error').hidden = true;
     document.getElementById('accessEditor').hidden = true;
     editing = null;
