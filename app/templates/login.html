@@ -24,7 +24,7 @@
 
     {% if sso_configured %}
     <div style="text-align:center;margin:1rem 0 .5rem;color:var(--muted);font-size:.85rem">or</div>
-    <a class="btn btn-secondary" href="/auth/login"
+    <a class="btn btn-secondary" href="/auth/login?next={{ next|urlencode }}"
        style="display:block;text-align:center;text-decoration:none">Sign in with {{ sso_name }}</a>
     {% else %}
     <p class="hint muted" style="margin:1rem 0 0;font-size:.82rem">
