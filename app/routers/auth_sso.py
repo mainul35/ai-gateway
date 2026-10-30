@@ -51,13 +51,16 @@ async def current_user(session: AsyncSession = Depends(get_session),
 
 
 @router.get("/login")
-async def login(request: Request):
+async def login(request: Request, next: str = "/dashboard"):
     if not sso.is_configured():
         raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE,
                             "SSO is not configured: set sso.client.id, sso.authorize.url and sso.token.url")
     verifier, challenge = sso.make_pkce()
     redirect_uri = _redirect_uri(request)
-    state_token = sso.sign_state({"verifier": verifier, "redirect_uri": redirect_uri})
+    # The page the person was on when asked to sign in, kept in the signed state so the callback
+    # can take them back there
+    state_token = sso.sign_state({"verifier": verifier, "redirect_uri": redirect_uri,
+                                  "next": sso.safe_next(next)})
     response = RedirectResponse(sso.authorize_url(redirect_uri, state_token, challenge))
     # The state travels in a cookie as well, so a replayed or forged callback is rejected
     response.set_cookie(sso.STATE_COOKIE, state_token, max_age=sso.STATE_MAX_AGE,
@@ -123,7 +126,7 @@ async def callback(request: Request, code: str | None = None, state: str | None 
         await session.commit()
         await session.refresh(user)
 
-    response = RedirectResponse("/dashboard")
+    response = RedirectResponse(sso.safe_next(state_data.get("next")), status_code=303)
     response.set_cookie(sso.SESSION_COOKIE, sso.issue_session(user), max_age=sso.SESSION_MAX_AGE,
                         httponly=True, samesite="lax", secure=sso.cookie_secure(request), path="/")
     response.delete_cookie(sso.STATE_COOKIE, path="/auth")
