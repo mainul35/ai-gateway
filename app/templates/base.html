@@ -131,6 +131,16 @@ function formatBytes(bytes){
   const i = Math.min(Math.floor(Math.log(bytes)/Math.log(1024)), units.length-1);
   return parseFloat((bytes/Math.pow(1024,i)).toFixed(1)) + ' ' + units[i];
 }
+/* What a person is shown when something fails: the server's words when they are a sentence for them,
+   a plain message when they are an engine's own - JSON, an exception, a traceback - or nothing but a
+   status. The original goes to the browser's console, and the server's log has it too. */
+const SERVER_TROUBLE = 'Something went wrong on the server. Please try again in a moment.';
+function plainError(message, plain = SERVER_TROUBLE){
+  const text = typeof message === 'string' ? message : String(message?.message ?? message ?? '');
+  if(text && text.length <= 400 && !/[{}]|Traceback|Exception|\\n|\bline \d+|errno|^HTTP \d+$/i.test(text)) return text;
+  if(text) console.warn('Error not shown as it came:', text);
+  return plain;
+}
 async function api(path, options){
   const response = await fetch(path, options);
   if(response.status === 401){ location.href = '/login'; throw new Error('signed out'); }
@@ -139,7 +149,7 @@ async function api(path, options){
     // FastAPI's detail is a string, or a list for a request that failed validation; /v1 answers
     // in OpenAI's shape, {error: {message}}
     const detail = Array.isArray(body?.detail) ? body.detail.map(d => d.msg).join('; ') : body?.detail;
-    throw new Error(detail || body?.error?.message || body?.error || `HTTP ${response.status}`);
+    throw new Error(plainError(detail || body?.error?.message || body?.error || `HTTP ${response.status}`));
   }
   return body;
 }

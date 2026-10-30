@@ -832,8 +832,9 @@ function showError(message){
   }, 12000);
 }
 
+const MODEL_TROUBLE = 'The model could not answer this time. Please try again, or pick another model.';
 function errorText(e){
-  return typeof e === 'string' ? e : (e && e.message) || 'something went wrong';
+  return plainError(typeof e === 'string' ? e : (e && e.message) || '');
 }
 
 function relativeTime(iso){
@@ -2098,7 +2099,7 @@ async function answerAside(dialog){
     }else answer.textContent = text || '(no answer)';
   }catch(e){
     answer.textContent = e.name === 'AbortError' ? (text ? text + '\n\n(stopped)' : '(stopped)')
-                                                 : 'That did not go through: ' + errorText(e);
+                                                 : 'That did not go through. ' + errorText(e);
   }finally{
     asideController = null;
     ask.disabled = false;
@@ -3384,7 +3385,7 @@ async function readEvents(response, onData){
       if(!data || data === '[DONE]') continue;
       let chunk;
       try{ chunk = JSON.parse(data); }catch(e){ continue; }
-      if(chunk.error) throw new Error(chunk.error.message || 'model error');
+      if(chunk.error) throw new Error(plainError(chunk.error.message, MODEL_TROUBLE));
       onData(chunk);
     }
   }
@@ -3398,7 +3399,7 @@ async function postStream(path, payload){
   if(!response.ok){
     const err = await response.json().catch(() => ({}));
     const detail = Array.isArray(err.detail) ? err.detail.map(d => d.msg).join('; ') : err.detail;
-    throw new Error(detail || err.error?.message || `HTTP ${response.status}`);
+    throw new Error(plainError(detail || err.error?.message || `HTTP ${response.status}`));
   }
   return response;
 }
@@ -3761,7 +3762,7 @@ function failedTurn(box, trouble){
   box.dataset.failed = '1';
   body.className = 'body failed';
   body.textContent = trouble
-    ? `That did not go through: ${trouble}`
+    ? `That did not go through. ${plainError(trouble)}`
     : 'That did not go through, and nothing came back to show.';
   const again = document.createElement('div');
   again.className = 'turn-tools stay';
