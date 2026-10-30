@@ -800,8 +800,42 @@ def _event(kind, **data):
     return f"data: {json.dumps({'gateway': {'type': kind, **data}})}\n\n".encode()
 
 
-def _error(message):
-    return f"data: {json.dumps({'error': {'message': message}})}\n\n".encode()
+# What a person is shown when something fails is a sentence for them: an engine's own error - JSON,
+# a template's exception, a traceback - is written to the log and replaced by a plain message
+TECHNICAL = re.compile(r"[{}]|Traceback|Exception|\\n|\bline \d+|errno", re.IGNORECASE)
+SERVER_TROUBLE = "Something went wrong on the server. Please try again in a moment."
+MODEL_TROUBLE = "The model could not answer this time. Please try again, or pick another model."
+
+
+def for_people(message, plain=SERVER_TROUBLE):
+    """`message` when a person can read it, else `plain`, with the message logged for whoever looks."""
+    message = str(message or "")
+    if message and len(message) <= 400 and not TECHNICAL.search(message):
+        return message
+    log.warning("an error not shown as it came: %s", message[:3000])
+    return plain
+
+
+def _error(message, plain=SERVER_TROUBLE):
+    return f"data: {json.dumps({'error': {'message': for_people(message, plain)}})}\n\n".encode()
+
+
+def _one_system(messages):
+    """The conversation as the strictest chat templates take it (Mistral Small 4's raises on anything
+    else): the system messages - the person's instructions, search results, memory, documents - as
+    one at the start, and two turns of the same side in a row - a question whose answer failed, then
+    the next - as one."""
+    said = [m["content"] for m in messages if m["role"] == "system" and isinstance(m["content"], str) and m["content"]]
+    turns = []
+    for m in messages:
+        if m["role"] == "system":
+            continue
+        if turns and turns[-1]["role"] == m["role"] and isinstance(turns[-1]["content"], str) \
+                and isinstance(m["content"], str):
+            turns[-1] = {"role": m["role"], "content": turns[-1]["content"] + "\n\n" + m["content"]}
+        else:
+            turns.append(m)
+    return ([{"role": "system", "content": "\n\n".join(said)}] if said else []) + turns
 
 
 class _Answer:
@@ -1033,10 +1067,11 @@ async def complete(payload: CompleteIn, principal: Principal = Depends(authentic
                 position = 1 if messages and messages[0]["role"] == "system" else 0
                 messages.insert(position, {"role": "system", "content": web_search.sources_prompt(results, query)})
             yield _event("status", text="Writing the answer")
+        body["messages"] = _one_system(messages)
         try:
             response = await forward(principal, "chat_completions", PROXY_PATHS["chat_completions"], body)
         except HTTPException as e:
-            yield _error(str(e.detail))
+            yield _error(str(e.detail), MODEL_TROUBLE)
             return
         async for chunk in response.body_iterator:
             answer.feed(chunk)
