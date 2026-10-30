@@ -27,7 +27,7 @@ from utils.ollama_client import (StreamCancellation, check_ollama_status, ollama
                                  stream_create_model, stream_pull_model)
 from utils.system_info import get_system_info, measure_hardware
 from app.db import get_session
-from app.models import ApiKey, UsageRecord, User, utcnow
+from app.models import ApiKey, UsageRecord, User, UserGroup, UserGroupMember, utcnow
 
 log = logging.getLogger("admin")
 
@@ -63,7 +63,10 @@ def _user_json(user):
         "is_active": user.is_active, "created_at": user.created_at.isoformat(),
         "model_access": user.model_access or "all",
         "allowed_models": access.parse_patterns(user.allowed_models),
+        # Everything they may use; what was granted to them as a person; the groups they are in
         "features": access.features_of(user),
+        "own_features": access.own_features(user),
+        "groups": access.groups_of(user),
         # False while the account has the defaults of its model access, not features chosen for it
         "features_chosen": user.features is not None,
         "sign_in": "local password" if user.password_hash else "single sign-on",
@@ -185,7 +188,7 @@ async def update_user(name: str, payload: UserPatch, principal: Principal = Depe
 
     if payload.features is not None:
         # Only what is added is checked: a manager may keep a feature they lack themselves
-        _check_features(principal, [f for f in payload.features if f not in access.features_of(user)])
+        _check_features(principal, [f for f in payload.features if f not in access.own_features(user)])
         user.features = access.serialize_features(payload.features)
 
     if payload.is_active and user.approval == "pending":
@@ -204,6 +207,102 @@ async def update_user(name: str, payload: UserPatch, principal: Principal = Depe
     await session.commit()
     await session.refresh(user, attribute_names=["api_keys"])
     return _user_json(user)
+
+
+# --- groups: features given to several people at once (admins only) ------------------------------
+
+class GroupIn(BaseModel):
+    name: str = Field(min_length=1, max_length=128)
+    description: str | None = Field(default=None, max_length=1000)
+    features: list[str] = []
+    members: list[str] = []          # user names
+
+
+class GroupPatch(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=128)
+    description: str | None = Field(default=None, max_length=1000)
+    features: list[str] | None = None
+    members: list[str] | None = None
+
+
+async def _group_json(session, group):
+    members = (await session.execute(
+        select(User.name).join(UserGroupMember, UserGroupMember.user_id == User.id)
+        .where(UserGroupMember.group_id == group.id).order_by(User.name))).scalars().all()
+    return {"id": group.id, "name": group.name, "description": group.description,
+            "features": access.parse_features(group.features), "members": list(members)}
+
+
+async def _set_members(session, group, names):
+    found = {u.name: u.id for u in (await session.execute(select(User).where(User.name.in_(set(names))))).scalars()}
+    missing = sorted(set(names) - set(found))
+    if missing:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, f"No such user: {', '.join(missing)}")
+    await session.execute(UserGroupMember.__table__.delete().where(UserGroupMember.group_id == group.id))
+    for user_id in sorted(set(found.values())):
+        session.add(UserGroupMember(group_id=group.id, user_id=user_id))
+
+
+async def _check_group_name(session, name, group_id=None):
+    taken = (await session.execute(select(UserGroup).where(UserGroup.name == name))).scalar_one_or_none()
+    if taken is not None and taken.id != group_id:
+        raise HTTPException(status.HTTP_409_CONFLICT, f"There is a group {name} already")
+
+
+@router.get("/groups")
+async def list_groups(_: Principal = Depends(require_manager), session: AsyncSession = Depends(get_session)):
+    groups = (await session.execute(select(UserGroup).order_by(UserGroup.name))).scalars().all()
+    return [await _group_json(session, g) for g in groups]
+
+
+@router.post("/groups", status_code=status.HTTP_201_CREATED)
+async def create_group(payload: GroupIn, principal: Principal = Depends(require_admin),
+                       session: AsyncSession = Depends(get_session)):
+    name = payload.name.strip()
+    await _check_group_name(session, name)
+    _check_features(principal, payload.features)
+    group = UserGroup(name=name, description=(payload.description or "").strip() or None,
+                      features=access.serialize_features(payload.features))
+    session.add(group)
+    await session.flush()
+    await _set_members(session, group, payload.members)
+    await session.commit()
+    await access.load_groups(session)
+    return await _group_json(session, group)
+
+
+@router.patch("/groups/{group_id}")
+async def update_group(group_id: int, payload: GroupPatch, principal: Principal = Depends(require_admin),
+                       session: AsyncSession = Depends(get_session)):
+    group = await session.get(UserGroup, group_id)
+    if group is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "No such group")
+    if payload.name is not None:
+        await _check_group_name(session, payload.name.strip(), group.id)
+        group.name = payload.name.strip()
+    if payload.description is not None:
+        group.description = payload.description.strip() or None
+    if payload.features is not None:
+        _check_features(principal, payload.features)
+        group.features = access.serialize_features(payload.features)
+    if payload.members is not None:
+        await _set_members(session, group, payload.members)
+    await session.commit()
+    await access.load_groups(session)
+    return await _group_json(session, group)
+
+
+@router.delete("/groups/{group_id}")
+async def delete_group(group_id: int, _: Principal = Depends(require_admin),
+                       session: AsyncSession = Depends(get_session)):
+    group = await session.get(UserGroup, group_id)
+    if group is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "No such group")
+    await session.execute(UserGroupMember.__table__.delete().where(UserGroupMember.group_id == group.id))
+    await session.delete(group)
+    await session.commit()
+    await access.load_groups(session)
+    return {"deleted": group_id}
 
 
 @router.post("/users/{name}/approve")

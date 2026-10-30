@@ -54,6 +54,25 @@ class User(Base):
     api_keys: Mapped[list["ApiKey"]] = relationship(back_populates="user", cascade="all, delete-orphan")
 
 
+class UserGroup(Base):
+    """People given the same features at once (app/access.py FEATURES): a member has the features of
+    each of their groups, and any granted to them as a person besides."""
+    __tablename__ = "user_groups"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    name: Mapped[str] = mapped_column(String(128), unique=True)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    features: Mapped[str] = mapped_column(Text, default="[]")       # JSON list
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class UserGroupMember(Base):
+    __tablename__ = "user_group_members"
+
+    group_id: Mapped[int] = mapped_column(ForeignKey("user_groups.id", ondelete="CASCADE"), primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), primary_key=True, index=True)
+
+
 class ApiKey(Base):
     __tablename__ = "api_keys"
 
