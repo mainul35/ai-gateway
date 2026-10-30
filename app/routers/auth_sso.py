@@ -71,7 +71,16 @@ async def login(request: Request, next: str = "/dashboard"):
 @router.get("/callback", name="sso_callback")
 async def callback(request: Request, code: str | None = None, state: str | None = None,
                    error: str | None = None, session: AsyncSession = Depends(get_session),
-                   gateway_oauth_state: str | None = Cookie(default=None, alias=sso.STATE_COOKIE)):
+                   gateway_oauth_state: str | None = Cookie(default=None, alias=sso.STATE_COOKIE),
+                   gateway_session: str | None = Cookie(default=None, alias=sso.SESSION_COOKIE)):
+    signed_in = sso.read_session(gateway_session)
+    if signed_in and (not gateway_oauth_state or state != gateway_oauth_state):
+        # A second return from the auth server for a sign-in that already finished here - its
+        # page pressed twice, say. The first one used up the state; the person is signed in, so
+        # they go on rather than to an error about a sign-in they did not start.
+        await current_user(session, gateway_session)
+        state_data = sso.read_state(state) or {}
+        return RedirectResponse(sso.safe_next(state_data.get("next")), status_code=303)
     if error:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, f"Sign-in failed: {error}")
     if not code or not state:
