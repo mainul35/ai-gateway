@@ -32,6 +32,34 @@ details.keys .key-row{display:flex;align-items:center;gap:.6rem;flex-wrap:wrap;m
 </div>
 {% endif %}
 
+{% if user.role == 'admin' %}
+<div class="card" style="margin-bottom:1.5rem">
+  <h2>Groups</h2>
+  <p class="muted" style="margin-top:0;font-size:.88rem">Features given to several people at once. A member has
+    the features of each of their groups, and any granted to them as a person besides.</p>
+  <div id="groups" class="muted">Loading&hellip;</div>
+  <button class="btn" id="newGroup" style="margin-top:.8rem">New group</button>
+</div>
+
+<div class="card" id="groupEditor" hidden style="margin-bottom:1.5rem;border:1px solid var(--primary)">
+  <h2 id="groupTitle">New group</h2>
+  <div class="row">
+    <label style="flex:1;min-width:11rem;margin:0"><span class="lbl">Name</span><input id="groupName" placeholder="Video makers"></label>
+    <label style="flex:2;min-width:14rem;margin:0"><span class="lbl">Description (optional)</span><input id="groupDescription"></label>
+  </div>
+  <h3 style="font-size:.95rem;margin:.9rem 0 .3rem">Features</h3>
+  <div id="groupFeatures" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(16rem,1fr));gap:.3rem .9rem"></div>
+  <h3 style="font-size:.95rem;margin:.9rem 0 .3rem">Members</h3>
+  <div id="groupMembers" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(14rem,1fr));gap:.3rem .9rem;margin-bottom:1rem"></div>
+  <div class="row">
+    <button class="btn" id="saveGroup">Save group</button>
+    <button class="btn btn-secondary" id="cancelGroup">Cancel</button>
+    <span style="flex:1"></span>
+    <button class="btn btn-danger" id="deleteGroup" hidden>Delete group</button>
+  </div>
+</div>
+{% endif %}
+
 <div class="card" style="margin-bottom:1.5rem">
   <h2>Roles</h2>
   <table>
@@ -98,8 +126,9 @@ details.keys .key-row{display:flex;align-items:center;gap:.6rem;flex-wrap:wrap;m
     </label>
   </div>
   <h3 style="font-size:.95rem;margin:.6rem 0 .3rem">Features</h3>
-  <p class="muted" style="margin:0 0 .5rem;font-size:.85rem">What they may use besides the models. A feature
-    not ticked is hidden from them and refused by the server.<span id="featuresDefault"></span></p>
+  <p class="muted" style="margin:0 0 .5rem;font-size:.85rem">What they may use besides the models, granted to
+    them as a person. A feature they have neither here nor from a group is hidden from them and refused by
+    the server.<span id="featuresDefault"></span></p>
   <div id="featureChecks" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(16rem,1fr));gap:.3rem .9rem;margin-bottom:1rem"></div>
   <div class="row">
     <button class="btn" id="saveAccess">Save access</button>
@@ -178,9 +207,11 @@ function accessSummary(u){
 function featuresSummary(u){
   if(u.role === 'admin') return '<span class="muted">all (admin)</span>';
   const on = Object.keys(FEATURES).filter(f => u.features.includes(f));
-  if(!on.length) return '<span class="pill err">none</span>';
-  if(on.length === Object.keys(FEATURES).length) return 'all';
-  return on.map(f => escapeHtml(FEATURES[f])).join(', ');
+  const groups = u.groups.length ? `<br><span class="muted" style="font-size:.76rem">groups: ${
+    u.groups.map(escapeHtml).join(', ')}</span>` : '';
+  if(!on.length) return '<span class="pill err">none</span>' + groups;
+  if(on.length === Object.keys(FEATURES).length) return 'all' + groups;
+  return on.map(f => escapeHtml(FEATURES[f])).join(', ') + groups;
 }
 
 function roleCell(u){
@@ -207,7 +238,7 @@ async function loadUsers(){
           <td>${roleCell(u)}</td>
           <td>${accessSummary(u)}</td>
           <td style="white-space:normal;max-width:16rem;font-size:.84rem">${featuresSummary(u)}${
-            u.role !== 'admin' && !u.features_chosen ? '<br><span class="muted" style="font-size:.76rem">defaults</span>' : ''}</td>
+            u.role !== 'admin' && !u.features_chosen && !u.groups.length ? '<br><span class="muted" style="font-size:.76rem">defaults</span>' : ''}</td>
           <td>${keysCell(keys, manageable)}</td>
           <td>${u.is_active ? '<span class="pill on">active</span>' : '<span class="pill off">disabled</span>'}</td>
           <td style="text-align:right;white-space:nowrap">${manageable ? `
@@ -296,13 +327,16 @@ function openEditor(name){
   document.querySelector(`input[name=mode][value=${editing.model_access}]`).checked = true;
   document.getElementById('featureChecks').innerHTML = Object.entries(FEATURES).map(([key, label]) => {
     const grantable = MY_FEATURES.includes(key);
+    const fromGroup = editing.features.includes(key) && !editing.own_features.includes(key);
     return `<label style="margin:0;font-size:.88rem;display:flex;gap:.4rem;align-items:center${grantable ? '' : ';opacity:.5'}"
         ${grantable ? '' : 'title="You do not have this yourself"'}>
-      <input type="checkbox" value="${key}" ${editing.features.includes(key) ? 'checked' : ''} ${grantable ? '' : 'disabled'} style="width:auto">
-      ${escapeHtml(label)}</label>`;
+      <input type="checkbox" value="${key}" ${editing.own_features.includes(key) ? 'checked' : ''} ${grantable ? '' : 'disabled'} style="width:auto">
+      ${escapeHtml(label)}${fromGroup ? ' <span class="muted" style="font-size:.76rem">(has it from a group)</span>' : ''}</label>`;
   }).join('');
-  document.getElementById('featuresDefault').textContent = editing.features_chosen ? ''
-    : ' These are the defaults of their model access until you save.';
+  document.getElementById('featuresDefault').textContent =
+    (editing.groups.length ? ` In: ${editing.groups.join(', ')}.` : '') +
+    (editing.features_chosen ? '' : editing.groups.length ? ' Nothing granted to them as a person yet.'
+                                  : ' These are the defaults of their model access until you save.');
   syncMode();
   const editor = document.getElementById('accessEditor');
   editor.hidden = false;
@@ -421,6 +455,83 @@ document.addEventListener('click', async e => {
   }catch(err){ showError(err.message); }
 });
 
-loadModels().then(() => { loadUsers(); loadPublic(); });
+// Groups, for admins: each with its features and members, edited in the card that opens below the list
+let groups = [], group = null;
+async function loadGroups(){
+  const box = document.getElementById('groups');
+  if(!box) return;
+  try{
+    groups = await api('/admin/groups');
+    box.innerHTML = groups.length ? `<div style="overflow-x:auto"><table>
+      <tr><th>Group</th><th>Features</th><th>Members</th><th></th></tr>` + groups.map(g => `<tr>
+        <td>${escapeHtml(g.name)}${g.description ? `<br><span class="muted" style="font-size:.8rem">${escapeHtml(g.description)}</span>` : ''}</td>
+        <td style="white-space:normal;max-width:18rem;font-size:.84rem">${
+          g.features.length ? g.features.map(f => escapeHtml(FEATURES[f])).join(', ') : '<span class="muted">none</span>'}</td>
+        <td style="white-space:normal;max-width:18rem;font-size:.84rem">${
+          g.members.length ? g.members.map(escapeHtml).join(', ') : '<span class="muted">nobody</span>'}</td>
+        <td style="text-align:right"><button class="btn btn-sm btn-secondary" data-group="${g.id}">Edit</button></td>
+      </tr>`).join('') + '</table></div>' : 'No groups yet.';
+  }catch(e){ box.textContent = 'Could not load the groups: ' + e.message; }
+}
+
+function openGroup(id){
+  group = groups.find(g => g.id === id) || null;
+  document.getElementById('groupTitle').textContent = group ? `Group ${group.name}` : 'New group';
+  document.getElementById('groupName').value = group?.name || '';
+  document.getElementById('groupDescription').value = group?.description || '';
+  document.getElementById('groupFeatures').innerHTML = Object.entries(FEATURES).map(([key, label]) =>
+    `<label style="margin:0;font-size:.88rem;display:flex;gap:.4rem;align-items:center">
+      <input type="checkbox" value="${key}" ${group?.features.includes(key) ? 'checked' : ''} style="width:auto">
+      ${escapeHtml(label)}</label>`).join('');
+  // Admins have every feature anyway: only the others are offered
+  const people = users.filter(u => u.role !== 'admin' && u.approval !== 'pending');
+  document.getElementById('groupMembers').innerHTML = people.length ? people.map(u =>
+    `<label style="margin:0;font-size:.88rem;display:flex;gap:.4rem;align-items:center">
+      <input type="checkbox" value="${escapeHtml(u.name)}" ${group?.members.includes(u.name) ? 'checked' : ''} style="width:auto">
+      ${escapeHtml(u.name)}</label>`).join('') : '<span class="muted">No accounts to add.</span>';
+  document.getElementById('deleteGroup').hidden = !group;
+  const editor = document.getElementById('groupEditor');
+  editor.hidden = false;
+  editor.scrollIntoView({behavior: 'smooth', block: 'start'});
+}
+
+document.getElementById('newGroup')?.addEventListener('click', () => openGroup(null));
+document.getElementById('cancelGroup')?.addEventListener('click', () => {
+  document.getElementById('groupEditor').hidden = true; group = null;
+});
+document.getElementById('saveGroup')?.addEventListener('click', async () => {
+  const name = document.getElementById('groupName').value.trim();
+  if(!name) return showError('A group needs a name');
+  // Members not offered here (an admin, a sign-in request) are kept as they are
+  const offered = new Set([...document.querySelectorAll('#groupMembers input')].map(c => c.value));
+  const body = {name, description: document.getElementById('groupDescription').value.trim(),
+                features: [...document.querySelectorAll('#groupFeatures input:checked')].map(c => c.value),
+                members: [...(group?.members || []).filter(m => !offered.has(m)),
+                          ...[...document.querySelectorAll('#groupMembers input:checked')].map(c => c.value)]};
+  try{
+    await api(group ? `/admin/groups/${group.id}` : '/admin/groups',
+              {method: group ? 'PATCH' : 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)});
+    showCreated(`Group <strong>${escapeHtml(name)}</strong> saved.`);
+    document.getElementById('error').hidden = true;
+    document.getElementById('groupEditor').hidden = true;
+    group = null;
+    loadGroups(); loadUsers();
+  }catch(e){ showError(e.message); }
+});
+document.getElementById('deleteGroup')?.addEventListener('click', async () => {
+  if(!group || !confirm(`Delete the group ${group.name}? Its members lose the features they had only from it.`)) return;
+  try{
+    await api(`/admin/groups/${group.id}`, {method: 'DELETE'});
+    document.getElementById('groupEditor').hidden = true;
+    group = null;
+    loadGroups(); loadUsers();
+  }catch(e){ showError(e.message); }
+});
+document.getElementById('groups')?.addEventListener('click', e => {
+  const button = e.target.closest('[data-group]');
+  if(button) openGroup(Number(button.dataset.group));
+});
+
+loadModels().then(async () => { await loadUsers(); loadPublic(); loadGroups(); });
 </script>
 {% endblock %}

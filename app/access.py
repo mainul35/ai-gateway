@@ -81,32 +81,70 @@ FEATURES = {
     "subtitles": "YouTube subtitles",
     "agent": "Agent (tool servers)",
 }
-# A picture or a video holds the whole GPU for a minute or more: not given by default to an account
-# that has only the public models, which is what an approved SSO sign-up gets
-GPU_FEATURES = ("image_generation", "video")
+# Never given by default: an admin grants it, to a person or a group
+GRANTED_ONLY = ("video",)
+# A picture holds the whole GPU for a minute: not given by default to an account that has only the
+# public models, which is what an approved SSO sign-up gets
+GPU_FEATURES = ("image_generation",)
+
+# Each person's groups, as {user id: {"groups": [names], "features": set}}: read from the database at
+# start and after every change to a group (load_groups), so a feature check needs no query. The
+# gateway is one process.
+_groups: dict[int, dict] = {}
+
+
+async def load_groups(session):
+    from sqlalchemy import select
+    from app.models import UserGroup, UserGroupMember
+    rows = await session.execute(select(UserGroupMember.user_id, UserGroup.name, UserGroup.features)
+                                 .join(UserGroup, UserGroup.id == UserGroupMember.group_id))
+    found = {}
+    for user_id, name, features in rows:
+        mine = found.setdefault(user_id, {"groups": [], "features": set()})
+        mine["groups"].append(name)
+        mine["features"].update(parse_features(features))
+    _groups.clear()
+    _groups.update(found)
+
+
+def groups_of(user):
+    return sorted((_groups.get(user.id) or {}).get("groups", [])) if user else []
+
+
+def parse_features(raw):
+    try:
+        chosen = json.loads(raw) if raw else []
+    except ValueError:
+        return []
+    return [f for f in FEATURES if isinstance(chosen, list) and f in chosen]
 
 
 def default_features(user):
-    """An account's features until someone chooses them: what it could do before features were
-    granted one by one - everything, less the GPU's with public models, nothing with none."""
+    """An account's features while nobody has chosen them, for it or for a group of it: everything
+    but video stories, less pictures with public models, nothing with no models."""
     mode = (user.model_access if user else None) or "all"
     if mode == "none":
         return []
-    return [f for f in FEATURES if mode != "public" or f not in GPU_FEATURES]
+    return [f for f in FEATURES if f not in GRANTED_ONLY and (mode != "public" or f not in GPU_FEATURES)]
+
+
+def own_features(user):
+    """What was granted to the person, without their groups. While nothing was chosen for them: the
+    defaults, or nothing at all once they are in a group - the group is what decides then."""
+    if user.features is not None:
+        return parse_features(user.features)
+    return [] if user.id in _groups else default_features(user)
 
 
 def features_of(user):
+    """Everything a person may use: what was granted to them and to each of their groups."""
     if user is None:
         return []
     if user.role == "admin":
         return list(FEATURES)
-    if user.features is None:
-        return default_features(user)
-    try:
-        chosen = json.loads(user.features)
-    except ValueError:
-        return []
-    return [f for f in FEATURES if isinstance(chosen, list) and f in chosen]
+    mine = own_features(user)
+    group = (_groups.get(user.id) or {}).get("features", set())
+    return [f for f in FEATURES if f in mine or f in group]
 
 
 def serialize_features(features):
