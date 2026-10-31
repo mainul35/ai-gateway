@@ -2,7 +2,7 @@
 import uuid
 from datetime import datetime, timezone
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, LargeBinary, String, Text, UniqueConstraint, func
+from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, LargeBinary, String, Text, UniqueConstraint, func
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 
@@ -105,6 +105,11 @@ class UsageRecord(Base):
     completion_tokens: Mapped[int] = mapped_column(Integer, default=0)
     total_tokens: Mapped[int] = mapped_column(Integer, default=0)
     latency_ms: Mapped[int] = mapped_column(Integer, default=0)
+    # How fast it was answered (usage.Pace): empty where the backend or the request type cannot say
+    ttft_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    decode_tps: Mapped[float | None] = mapped_column(Float, nullable=True)
+    prefill_tps: Mapped[float | None] = mapped_column(Float, nullable=True)
+    cached_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 

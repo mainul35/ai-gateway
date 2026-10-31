@@ -159,9 +159,12 @@ async def forward(principal: Principal, endpoint: str, path: str, body: dict, sk
             running.in_flight = max(0, running.in_flight - 1)
         await client.aclose()
     payload = response.json() if response.headers.get("content-type", "").startswith("application/json") else None
+    pace = usage_log.Pace(started)
+    if isinstance(payload, dict):
+        pace.saw_payload(payload)
     await usage_log.record(principal, model, backend.name, endpoint, False, response.status_code,
                            (payload or {}).get("usage"), (time.monotonic() - started) * 1000,
-                           None if response.is_success else response.text[:500])
+                           None if response.is_success else response.text[:500], pace=pace)
     # The Cloudflare tunnel swaps a 502 or 504 for a page of its own, so the upstream's reason
     # would never reach the client; 503 says the same thing and passes through. OpenAI's SDKs
     # retry any 5xx alike, so nothing a client does changes with it.
@@ -195,6 +198,7 @@ def _streamed(principal, endpoint, path, body, model, backend):
     queue: asyncio.Queue = asyncio.Queue()
     state = {"running": None, "status": 200, "error": None, "usage": None}
     started = time.monotonic()
+    pace = usage_log.Pace(started)
 
     async def produce():
         client = None
@@ -247,6 +251,7 @@ def _streamed(principal, endpoint, path, body, model, backend):
                     async for line in response.aiter_lines():
                         if line:
                             state["usage"] = usage_log.usage_from_sse_line(line) or state["usage"]
+                            pace.saw(line)
                         # aiter_lines strips newlines; SSE needs them back
                         await queue.put((line + "\n").encode())
                     return
@@ -281,7 +286,8 @@ def _streamed(principal, endpoint, path, body, model, backend):
             if running:
                 running.in_flight = max(0, running.in_flight - 1)
             await usage_log.record(principal, model, backend.name, endpoint, True, state["status"],
-                                   state["usage"], (time.monotonic() - started) * 1000, state["error"])
+                                   state["usage"], (time.monotonic() - started) * 1000, state["error"],
+                                   pace=pace)
 
     return StreamingResponse(stream(), media_type="text/event-stream",
                              headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})

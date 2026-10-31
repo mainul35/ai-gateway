@@ -408,8 +408,10 @@ async def _whole(request, principal, body, model, backend):
                                         status_code=400)
                 return _error(503 if response.status_code >= 500 else response.status_code, response.text[:500])
             payload = response.json()
+            pace = usage_log.Pace(started)
+            pace.saw_payload(payload)
             await usage_log.record(principal, model, backend.name, ENDPOINT, False, 200, payload.get("usage"),
-                                   (time.monotonic() - started) * 1000)
+                                   (time.monotonic() - started) * 1000, pace=pace)
             answer = compat.from_openai_response(payload, model)
             _scaled_usage(answer.get("usage"), _scale(original, body))
             return JSONResponse(answer)
@@ -434,6 +436,7 @@ def _streamed(request, principal, body, model, backend):
     queue: asyncio.Queue = asyncio.Queue()
     state = {"running": None, "status": 200, "error": None, "usage": {}, "scale": 1.0}
     started = time.monotonic()
+    pace = usage_log.Pace(started)
     headers = _upstream_headers(request, backend)
 
     async def relay(client, base, sending, retried=False):
@@ -466,6 +469,7 @@ def _streamed(request, principal, body, model, backend):
             async for line in response.aiter_lines():
                 if line:
                     state["usage"] = compat.usage_from_event(line, state["usage"])
+                    pace.saw(line)
                 await queue.put((_reported(line, state["scale"]) + "\n").encode())
             return True
 
@@ -496,6 +500,7 @@ def _streamed(request, principal, body, model, backend):
                 except ValueError:
                     continue
                 state["usage"] = usage_log.usage_from_sse_line(line) or state["usage"]
+                pace.saw_payload(chunk, streamed=True)
                 events = translator.feed(chunk)
                 if events:
                     await queue.put(_reported(events.decode(), state["scale"]).encode())
@@ -555,7 +560,8 @@ def _streamed(request, principal, body, model, backend):
             if running:
                 running.in_flight = max(0, running.in_flight - 1)
             await usage_log.record(principal, model, backend.name, ENDPOINT, True, state["status"],
-                                   state["usage"] or None, (time.monotonic() - started) * 1000, state["error"])
+                                   state["usage"] or None, (time.monotonic() - started) * 1000, state["error"],
+                                   pace=pace)
 
     return StreamingResponse(stream(), media_type="text/event-stream",
                              headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
