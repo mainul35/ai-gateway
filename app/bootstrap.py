@@ -36,6 +36,11 @@ _ADDED_COLUMNS = (
     ("users", "approval", "VARCHAR(16)"),
     ("users", "session_epoch", "INTEGER DEFAULT 0"),
     ("users", "features", "TEXT"),
+    # How fast each request was answered, for comparing engines and models
+    ("usage_records", "ttft_ms", "INTEGER"),
+    ("usage_records", "decode_tps", "DOUBLE PRECISION"),
+    ("usage_records", "prefill_tps", "DOUBLE PRECISION"),
+    ("usage_records", "cached_tokens", "INTEGER"),
     # Who wrote a message in a shared conversation; what the Code mode needs of a Claude Code session
     ("conversation_messages", "author_id", "INTEGER REFERENCES users(id) ON DELETE SET NULL"),
     ("ccd_sessions", "seen_at", "TIMESTAMPTZ"),
