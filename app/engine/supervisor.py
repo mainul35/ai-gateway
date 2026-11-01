@@ -31,8 +31,10 @@ SMALL_OLLAMA_MODEL = 4 * 1024**3  # below this an Ollama model never makes a lla
 LOG_DIR = os.path.join(PROJECT_ROOT, "logs")
 LOG_CAP = 20 * 1024 * 1024       # per engine; the one before is kept as .1
 
-# (build, model file) pairs that would not start with MTP: started without it from then on, until the
-# gateway restarts or either file changes (the key carries their modification times)
+# Engine setups that would not start with MTP: started without it from then on, until the gateway
+# restarts or the setup changes. The key is the whole command line, not just build and model file: the
+# draft's cache often fails only for want of room, so a profile tried with less room (a bigger batch,
+# a bigger fit target) must not leave MTP off once it is put back (2026-11-01)
 _mtp_refused = set()
 
 
@@ -42,7 +44,7 @@ def _mtp_key(profile, binary):
             return int(os.path.getmtime(path))
         except OSError:
             return 0
-    return (binary, stamp(binary), profile.model_path, stamp(profile.model_path))
+    return (tuple(profile.command(binary)), stamp(binary), stamp(profile.model_path))
 
 
 def engine_log(name):
