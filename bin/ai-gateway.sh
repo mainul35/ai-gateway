@@ -439,8 +439,10 @@ claude)
     start_agent
     compact=$((CONTEXT * 85 / 100)); [ "$compact" -ge 100000 ] || compact=100000
     # Its own config folder: signed in to claude.ai in the usual one, Claude Code sends that login's
-    # token instead of ANTHROPIC_AUTH_TOKEN. Every role on one model, so the GPU never swaps mid-task.
-    export CLAUDE_CONFIG_DIR="$HOME/.claude-gateway" ANTHROPIC_BASE_URL="$GATEWAY" ANTHROPIC_AUTH_TOKEN="$KEY" \
+    # token instead of ANTHROPIC_AUTH_TOKEN. Every role on one model, so the GPU never swaps mid-task;
+    # /model also lists the gateway's other models (claude/<model>), asked of it at each start.
+    export CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1 \
+        CLAUDE_CONFIG_DIR="$HOME/.claude-gateway" ANTHROPIC_BASE_URL="$GATEWAY" ANTHROPIC_AUTH_TOKEN="$KEY" \
         ANTHROPIC_MODEL="$MODEL" ANTHROPIC_DEFAULT_OPUS_MODEL="$MODEL" ANTHROPIC_DEFAULT_SONNET_MODEL="$MODEL" \
         ANTHROPIC_DEFAULT_HAIKU_MODEL="$MODEL" CLAUDE_CODE_SUBAGENT_MODEL="$MODEL" \
         CLAUDE_CODE_MAX_CONTEXT_TOKENS="$CONTEXT" CLAUDE_CODE_AUTO_COMPACT_WINDOW="$compact" \

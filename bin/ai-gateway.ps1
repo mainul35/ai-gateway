@@ -332,8 +332,10 @@ switch ($App) {
     "claude" {
         Need "claude" "Claude Code" "irm https://claude.ai/install.ps1 | iex"
         # Its own config folder: signed in to claude.ai in the usual one, Claude Code sends that login's
-        # token instead of ANTHROPIC_AUTH_TOKEN. Every role on one model, so the GPU never swaps mid-task.
+        # token instead of ANTHROPIC_AUTH_TOKEN. Every role on one model, so the GPU never swaps mid-task;
+        # /model also lists the gateway's other models (claude/<model>), asked of it at each start.
         Set-ForRun @{
+            CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY = "1"
             CLAUDE_CONFIG_DIR = (Join-Path $HOME ".claude-gateway"); ANTHROPIC_BASE_URL = $Gateway; ANTHROPIC_AUTH_TOKEN = $Key
             ANTHROPIC_API_KEY = $null; ANTHROPIC_MODEL = $Model; ANTHROPIC_DEFAULT_OPUS_MODEL = $Model
             ANTHROPIC_DEFAULT_SONNET_MODEL = $Model; ANTHROPIC_DEFAULT_HAIKU_MODEL = $Model; CLAUDE_CODE_SUBAGENT_MODEL = $Model
