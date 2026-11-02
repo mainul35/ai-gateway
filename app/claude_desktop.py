@@ -3,8 +3,8 @@
 The desktop app, set to a third-party gateway, asks it for its models (GET /v1/models, with an
 anthropic-version header) and takes only IDs that are Claude's. So, as Ollama's own Claude Desktop
 proxy does, a few of Claude's real IDs are offered, each mapped to a gateway model, and the picker
-shows the gateway model's name: "Sonnet 5" in a request means qwen3.6-vllm here, and the person
-choosing sees "qwen3.6-vllm". Requests naming one of these IDs are sent to the model it stands for.
+shows both names: "Sonnet 5" in a request means qwen3.6-vllm here, and the person choosing sees
+"Sonnet 5 · qwen3.6-vllm". Requests naming one of these IDs are sent to the model it stands for.
 
 The mapping is anthropic.desktop.models, "claude-sonnet-5=qwen3.6-vllm, claude-opus-5=gemma4:31b";
 an ID left out gets a default from the models there are, each a different one while there are
@@ -20,15 +20,15 @@ from app import access, backends, settings
 # Claude's IDs that the app accepts, in the order it prefers them (from Ollama's own proxy), and more
 # of Claude's real IDs after them, so more than four gateway models fit in the picker
 SLOTS = (
-    {"id": "claude-sonnet-5", "family": "sonnet", "created_at": "2026-06-30T00:00:00Z", "default": True},
-    {"id": "claude-opus-5", "family": "opus", "created_at": "2026-07-24T00:00:00Z", "default": True},
-    {"id": "claude-haiku-4-5-20251001", "family": "haiku", "created_at": "2025-10-01T00:00:00Z", "default": True},
-    {"id": "claude-fable-5", "family": "fable", "created_at": "2026-06-09T00:00:00Z", "default": True},
-    {"id": "claude-sonnet-4-6", "family": "sonnet", "created_at": "2025-11-18T00:00:00Z", "default": False},
-    {"id": "claude-opus-5-5", "family": "opus", "created_at": "2026-10-01T00:00:00Z", "default": False},
-    {"id": "claude-sonnet-5-5", "family": "sonnet", "created_at": "2026-10-08T00:00:00Z", "default": False},
-    {"id": "claude-fable-5-1", "family": "fable", "created_at": "2026-09-01T00:00:00Z", "default": False},
-    {"id": "claude-opus-4-8", "family": "opus", "created_at": "2026-05-01T00:00:00Z", "default": False},
+    {"id": "claude-sonnet-5", "name": "Sonnet 5", "family": "sonnet", "created_at": "2026-06-30T00:00:00Z", "default": True},
+    {"id": "claude-opus-5", "name": "Opus 5", "family": "opus", "created_at": "2026-07-24T00:00:00Z", "default": True},
+    {"id": "claude-haiku-4-5-20251001", "name": "Haiku 4.5", "family": "haiku", "created_at": "2025-10-01T00:00:00Z", "default": True},
+    {"id": "claude-fable-5", "name": "Fable 5", "family": "fable", "created_at": "2026-06-09T00:00:00Z", "default": True},
+    {"id": "claude-sonnet-4-6", "name": "Sonnet 4.6", "family": "sonnet", "created_at": "2025-11-18T00:00:00Z", "default": False},
+    {"id": "claude-opus-5-5", "name": "Opus 5.5", "family": "opus", "created_at": "2026-10-01T00:00:00Z", "default": False},
+    {"id": "claude-sonnet-5-5", "name": "Sonnet 5.5", "family": "sonnet", "created_at": "2026-10-08T00:00:00Z", "default": False},
+    {"id": "claude-fable-5-1", "name": "Fable 5.1", "family": "fable", "created_at": "2026-09-01T00:00:00Z", "default": False},
+    {"id": "claude-opus-4-8", "name": "Opus 4.8", "family": "opus", "created_at": "2026-05-01T00:00:00Z", "default": False},
 )
 SLOT_IDS = {slot["id"] for slot in SLOTS}
 # The slots each given the next model not yet shown, in this order
@@ -153,7 +153,9 @@ async def catalogue(principal, claude_code=False):
             shown, context = target, models[target].context_length or 32768
         else:
             continue     # not a model this person may use, or not one there is: not offered
-        data.append({"id": slot["id"], "type": "model", "display_name": shown, "created_at": slot["created_at"],
+        # Both names: the one the app knows the row by, and the model that answers
+        data.append({"id": slot["id"], "type": "model", "display_name": f"{slot['name']} · {shown}",
+                     "created_at": slot["created_at"],
                      "max_tokens": context, "anthropic_family_tier": slot["family"],
                      "is_family_default": slot["default"]})
     return {"data": data, "first_id": data[0]["id"] if data else "", "last_id": data[-1]["id"] if data else "",
