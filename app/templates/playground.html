@@ -45,8 +45,9 @@ details.tuning label{margin-bottom:.85rem}
 .chat{display:flex;flex-direction:column;gap:1.5rem}
 .msg{line-height:1.6}
 /* The same line height the rendered answer uses, so the text does not reflow the moment the
-   answer finishes and the Markdown takes over from the streamed plain text */
-.msg .body{white-space:pre-wrap;line-height:1.25}
+   answer finishes and the Markdown takes over from the streamed plain text. A word longer than the
+   line - a token, a URL - breaks rather than running out of the message */
+.msg .body{white-space:pre-wrap;line-height:1.25;overflow-wrap:anywhere}
 /* The answer is the page, not a card on it; only the question is set apart */
 .msg.assistant{background:none;border:none;padding:0}
 .msg.user{background:var(--input);border-radius:12px;padding:.6rem .9rem;align-self:flex-end;max-width:85%}
