@@ -53,7 +53,9 @@
   <h2>Claude Code</h2>
   <p class="muted">Settings for one project, any system.</p>
   <p>Put this in the project's <code>.claude/settings.local.json</code> (never the committed
-    <code>settings.json</code>: it holds your key), with your key in place of the placeholder:</p>
+    <code>settings.json</code>: it holds your key), with your key in place of the placeholder. It is what
+    <code>ai-gateway launch claude</code> sets, for the model chosen above; <code>/model</code> then lists
+    the gateway's other models too, as <code>claude/&lt;model&gt;</code>:</p>
   <pre><code class="copyable" id="settingsJson"></code></pre>
   <p class="note warn" style="font-size:.88rem;margin-top:.5rem">
     <strong>Does not affect Claude Desktop.</strong> This config is for the <strong>Claude Code CLI</strong>
@@ -125,8 +127,10 @@
 document.querySelectorAll('.agent-guide .origin').forEach(e => e.textContent = location.origin);
 document.querySelectorAll('.agent-guide .origin-v1').forEach(e => e.textContent = location.origin + '/v1');
 const APPS = [
-  {id: 'claude', name: 'Claude Code', about: "Anthropic's coding agent, on the Messages API"},
-  {id: 'claude-desktop', name: 'Claude desktop app', about: 'every desktop session, macOS, Windows and Linux; it runs the model chosen above under every Claude name; either command closes the app and opens it again',
+  {id: 'claude', name: 'Claude Code', about: "Anthropic's coding agent, on the Messages API; it starts on the model chosen above, and its /model lists every other model you may use"},
+  {id: 'claude-desktop', name: 'Claude desktop app', noModel: true,
+   about: "every desktop session, macOS, Windows and Linux; its model picker lists the gateway's models under Claude's names, as Opus 5 · &lt;model&gt;; each command closes the app and opens it again",
+   pin: 'Or the model chosen above behind every Claude name the app starts on',
    undo: {label: 'Back to your Claude account', windows: '-Restore', unix: '--restore'}},
   {id: 'opencode', name: 'OpenCode', about: 'Open-source coding agent'},
   {id: 'codex', name: 'Codex CLI', about: "OpenAI's coding agent, on the Responses API"},
@@ -143,8 +147,11 @@ function renderApps(){
   document.getElementById('appList').innerHTML = APPS.map(a => `
     <div class="app-row"><div><strong>${a.name}</strong> <span class="muted">&middot; ${a.about}</span>
       <pre><code class="copyable">ai-gateway launch ${a.id}${a.noModel ? '' : ` ${flag} ${escapeHtml(model)}`}</code></pre>
+      ${a.pin ? `<div class="muted" style="margin-top:.4rem">${a.pin}</div>
+      <pre><code class="copyable">ai-gateway launch ${a.id} ${flag} ${escapeHtml(model)}</code></pre>` : ''}
       ${a.undo ? `<div class="muted" style="margin-top:.4rem">${a.undo.label}</div>
       <pre><code class="copyable">ai-gateway launch ${a.id} ${windows ? a.undo.windows : a.undo.unix}</code></pre>` : ''}</div></div>`).join('');
+  renderSettings(model);
   document.getElementById('appInstallNote').textContent = windows
     ? 'ai-gateway then works in this window straight away, and in every PowerShell window opened after.'
     : 'If ai-gateway is then not found, ~/.local/bin is not on your PATH: add export PATH="$HOME/.local/bin:$PATH" to ~/.bashrc (or ~/.zshrc) and open a new terminal.';
@@ -161,9 +168,12 @@ function renderApps(){
 }
 appOs.addEventListener('change', renderApps);
 document.getElementById('appModel').addEventListener('change', renderApps);
+// Each model's context window, from the list below, for the Claude Code settings
+const contexts = {};
 async function loadAppModels(){
   try{
     const models = (await api('/v1/models')).data.filter(m => m.id !== 'auto' && (m.capabilities || []).includes('tools'));
+    models.forEach(m => { if(m.context_length) contexts[m.id] = m.context_length; });
     const select = document.getElementById('appModel');
     select.innerHTML = models.map(m => `<option value="${escapeHtml(m.id)}">${escapeHtml(m.id)}${
       m.context_length ? ` &middot; ${m.context_length >= 1048576 ? Math.round(m.context_length / 1048576) + 'M' : Math.round(m.context_length / 1024) + 'K'} context` : ''}</option>`).join('')
@@ -174,16 +184,23 @@ async function loadAppModels(){
   renderApps();
 }
 setTimeout(loadAppModels, 0);
-document.getElementById('settingsJson').textContent = JSON.stringify({env: {
-  ANTHROPIC_BASE_URL: location.origin,
-  ANTHROPIC_AUTH_TOKEN: '<your gateway API key>',
-  ANTHROPIC_MODEL: 'qwen3.6-vllm',
-  ANTHROPIC_DEFAULT_HAIKU_MODEL: 'qwen3.6-vllm',
-  // /model also lists the gateway's other models, as claude/<model>
-  CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY: '1',
-  CLAUDE_CODE_MAX_CONTEXT_TOKENS: '131072',
-  CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS: '1',
-  CLAUDE_CODE_DISABLE_THINKING: '1',
-}}, null, 2);
+// What the launcher sets for Claude Code, for the model chosen above: every role on it, so the GPU
+// never swaps mid-task, and /model listing the gateway's other models (as claude/<model>)
+function renderSettings(model){
+  document.getElementById('settingsJson').textContent = JSON.stringify({env: {
+    ANTHROPIC_BASE_URL: location.origin,
+    ANTHROPIC_AUTH_TOKEN: '<your gateway API key>',
+    ANTHROPIC_MODEL: model,
+    ANTHROPIC_DEFAULT_OPUS_MODEL: model,
+    ANTHROPIC_DEFAULT_SONNET_MODEL: model,
+    ANTHROPIC_DEFAULT_HAIKU_MODEL: model,
+    CLAUDE_CODE_SUBAGENT_MODEL: model,
+    CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY: '1',
+    CLAUDE_CODE_MAX_CONTEXT_TOKENS: String(contexts[model] || 131072),
+    CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS: '1',
+    CLAUDE_CODE_DISABLE_THINKING: '1',
+  }}, null, 2);
+}
+renderSettings('qwen3.6-vllm');
 </script>
 {% endblock %}
