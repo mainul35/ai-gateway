@@ -73,6 +73,8 @@ $set = @{
     ANTHROPIC_DEFAULT_SONNET_MODEL              = $Model
     ANTHROPIC_DEFAULT_HAIKU_MODEL               = $Model
     CLAUDE_CODE_SUBAGENT_MODEL                  = $Model
+    # /model also lists the gateway's other models (claude/<model>), asked of it at each start
+    CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY  = "1"
     CLAUDE_CODE_MAX_CONTEXT_TOKENS              = "$Context"
     # Compaction starts before the window is full; Claude Code will not set it below 100k
     CLAUDE_CODE_AUTO_COMPACT_WINDOW             = "$([Math]::Max(100000, [int]($Context * 0.85)))"
