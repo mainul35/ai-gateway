@@ -23,7 +23,7 @@ from app.backends import Backend
 from app.engine.supervisor import RunningModel, Supervisor, supervisor
 from app.routers import anthropic_v1
 
-MAIN = "qwen3.6-256k"
+MAIN = "qwen3.6-vllm"
 OLLAMA_MODEL = "gemma4:31b"
 
 

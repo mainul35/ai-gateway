@@ -3,10 +3,10 @@
 The desktop app, set to a third-party gateway, asks it for its models (GET /v1/models, with an
 anthropic-version header) and takes only IDs that are Claude's. So, as Ollama's own Claude Desktop
 proxy does, a few of Claude's real IDs are offered, each mapped to a gateway model, and the picker
-shows the gateway model's name: "Sonnet 5" in a request means qwen3.6-256k here, and the person
-choosing sees "qwen3.6-256k". Requests naming one of these IDs are sent to the model it stands for.
+shows the gateway model's name: "Sonnet 5" in a request means qwen3.6-vllm here, and the person
+choosing sees "qwen3.6-vllm". Requests naming one of these IDs are sent to the model it stands for.
 
-The mapping is anthropic.desktop.models, "claude-sonnet-5=qwen3.6-256k, claude-opus-5=gemma4:31b";
+The mapping is anthropic.desktop.models, "claude-sonnet-5=qwen3.6-vllm, claude-opus-5=gemma4:31b";
 an ID left out gets a default from the models there are. "auto" is a target too: the gateway then
 picks the model per request (app/tools/auto_model.py).
 """
@@ -38,7 +38,7 @@ def _defaults(models):
     """A model per ID when none is configured: the main model for Sonnet, one that can see for Opus,
     the small (or main) one for Haiku, a coder for Fable, and the gateway's own choice for Sonnet 4.6."""
     can = lambda name, *caps: name in models and all(c in models[name].capabilities for c in caps)
-    main = settings.get("anthropic.model.default", "ANTHROPIC_MODEL_DEFAULT") or "qwen3.6-256k"
+    main = settings.get("anthropic.model.default", "ANTHROPIC_MODEL_DEFAULT") or "qwen3.6-vllm"
     if not can(main, "tools"):
         main = next((n for n in sorted(models) if can(n, "tools")), main)
     small = settings.get("anthropic.model.small", "ANTHROPIC_MODEL_SMALL") or main
@@ -73,11 +73,11 @@ async def route(asked, principal=None):
 
     A name ending in [1m] is how the desktop app's "Offer 1M-context variant" and Claude Code's
     sonnet[1m] ask for a million-token window: it goes to the gateway's 1M model (anthropic.model.long,
-    qwen3.6-1m) when there is one, and otherwise to whatever the name without it means.
+    qwen3.6-sglang-1m) when there is one, and otherwise to whatever the name without it means.
     """
     name = (asked or "").strip()
     if name.lower().endswith(LONG_SUFFIX):
-        long = settings.get("anthropic.model.long", "ANTHROPIC_MODEL_LONG") or "qwen3.6-1m"
+        long = settings.get("anthropic.model.long", "ANTHROPIC_MODEL_LONG") or "qwen3.6-sglang-1m"
         if long in await backends.available_models():
             return long
         name = name[:-len(LONG_SUFFIX)]

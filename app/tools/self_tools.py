@@ -351,7 +351,7 @@ TOOLS = {
 
 # --- coding tasks ------------------------------------------------------------------------------
 
-DEFAULT_TASK_MODEL = "qwen3.6-256k"
+DEFAULT_TASK_MODEL = "qwen3.6-vllm"
 
 
 async def coding_projects():
