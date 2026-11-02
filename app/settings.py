@@ -67,8 +67,8 @@ DEFAULTS = {
     # checks every picture against the content rules (it must see images); the Python that narrates
     # (scripts/tts_worker.py, a 3.12 environment with Kokoro and MMS-TTS) and where fonts for the
     # subtitles are (Noto Sans Bengali for Bangla)
-    "video.story.model": "qwen3.6-256k",
-    "video.check.model": "qwen3.6-256k",
+    "video.story.model": "qwen3.6-vllm",
+    "video.check.model": "qwen3.6-vllm",
     # The Bangla told again for children: Gemma 4 wrote it plainest and closest to the English of the
     # three tried (2026-10-24); Qwen 3.6 kept bookish words, and with thinking on invented sentences.
     # Not there, the storyboard's own Bangla is used.
