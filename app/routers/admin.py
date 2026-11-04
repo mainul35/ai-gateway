@@ -867,10 +867,12 @@ def _look_up(model_id):
     system = get_system_info()
     recommendations = fitting.recommend(system, param_count, cache["kv_cache_recommended_bytes"],
                                         gguf_files, details)
+    sharded = hf_client.has_shards(info)
     for row in recommendations:
         entry = details.get(row["quantization"]) or {}
-        # Ollama pulls one file by its tag; a model in parts, or an unnamed file beside others, it cannot
-        row["ollama"] = bool(entry) and row["parts"] == 1 and bool(
+        # Ollama pulls one file by its tag; a model in parts, or an unnamed file beside others, it cannot,
+        # nor anything from a repository with a model in parts (Hugging Face turns the pull away)
+        row["ollama"] = bool(entry) and row["parts"] == 1 and not sharded and bool(
             row["quantization"] in fitting.QUANTIZATION_LEVELS or entry.get("label") or len(details) == 1)
         row["label"] = entry.get("label", "")
     gguf = info.get("gguf") or {}
@@ -882,7 +884,7 @@ def _look_up(model_id):
     served = serving.assess(model_id, info, system)
     return {
         # Every way this machine runs a model, and whether this one can go that way - and why not
-        "providers": _provider_answers(gguf_files, recommendations, builds, served),
+        "providers": _provider_answers(gguf_files, recommendations, builds, served, sharded),
         "serving": served,
         "model_info": hf_client.public_model_info(info),
         # Ollama installs GGUF and nothing else, so a repository without it needs somewhere to go
@@ -904,13 +906,15 @@ def _look_up(model_id):
     }
 
 
-def _provider_answers(gguf_files, recommendations, builds, served):
+def _provider_answers(gguf_files, recommendations, builds, served, sharded=False):
     """[{"name", "supported", "why"}] for Ollama, llama.cpp, vLLM and SGLang."""
     fits = [r for r in recommendations if r.get("available")]
     if not gguf_files:
         ollama = (False, "it publishes no GGUF files, the only thing Ollama installs")
     elif not fits:
         ollama = (False, "none of its files fits in this machine's memory")
+    elif sharded:
+        ollama = (False, "the repository has files split in parts, and Hugging Face then lets Ollama pull none of it")
     elif not any(r.get("ollama") for r in fits):
         ollama = (False, "its files are split in parts, or named so Ollama cannot pull them")
     else:
