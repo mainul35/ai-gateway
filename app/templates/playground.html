@@ -4579,7 +4579,6 @@ async function sendToSession(){
   }
   sessionSending = false;
   button.disabled = !(openSession && openSession.can_send);
-  const stop = document.getElementById('codeStop');
   stop.hidden = true;
   stop.disabled = true;
 }
