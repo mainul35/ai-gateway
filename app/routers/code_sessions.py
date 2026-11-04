@@ -49,6 +49,7 @@ ONLINE_SECONDS = 90          # a computer that reported this recently is there t
 POLL_SECONDS = 25            # an agent's long poll: under the 100 s Cloudflare allows a silent request
 PICKUP_SECONDS = 40          # a message nobody picked up in this long: the computer is not there
 RUN_SECONDS = 1800           # one message's whole run
+STOP_SECONDS = 30            # a stopped run its agent has not ended in this long: the session is free anyway
 KEPT_MESSAGES = 60           # of a session's transcript
 
 _waiting: dict[tuple[int, str], asyncio.Queue] = {}      # (user, computer) -> messages for its agent
@@ -188,8 +189,9 @@ async def next_message(pc: str = Query(min_length=1, max_length=100), principal:
     except asyncio.TimeoutError:
         return Response(status_code=status.HTTP_204_NO_CONTENT)
     job = _jobs.get(job_id)
-    if job is None or job["done"]:
+    if job is None or job["done"] or job.get("stopped"):
         return Response(status_code=status.HTTP_204_NO_CONTENT)
+    job["handed"] = True
     job["picked"].set()
     return {"job_id": job_id, "session_id": job["session_id"], "text": job["text"],
             "workspace_path": job["workspace_path"], "model": job["model"], "permission": job["permission"]}
@@ -209,6 +211,12 @@ async def job_events(payload: Events, principal: Principal = Depends(authenticat
     job = _jobs.get(payload.job_id)
     if job is None or job["user_id"] != user.id:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "No such job")
+    if job.get("stopped"):
+        # Stopped from the page: the agent ends the run when it hears this, and says when it has
+        if payload.done:
+            _jobs.pop(payload.job_id, None)
+            return {"ok": True}
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Stopped")
     for event in payload.events:
         await job["events"].put(event)
     if payload.error:
@@ -270,8 +278,12 @@ async def send_message(session_id: str, payload: SessionMessage, principal: Prin
     if payload.permission == "commands" and not agent.get("allow_commands"):
         raise HTTPException(status.HTTP_403_FORBIDDEN, f"{row.pc_name} does not let commands be run from here: "
                                                        "its agent was started without --allow-commands")
-    if any(j["session_id"] == session_id and not j["done"] for j in _jobs.values()):
-        raise HTTPException(status.HTTP_409_CONFLICT, "This session is already answering a message")
+    for other, j in [(i, j) for i, j in _jobs.items() if j["session_id"] == session_id and not j["done"]]:
+        if not j.get("stopped"):
+            raise HTTPException(status.HTTP_409_CONFLICT, "This session is already answering a message")
+        if time.monotonic() - j["stopped"] < STOP_SECONDS:
+            raise HTTPException(status.HTTP_409_CONFLICT, f"{row.pc_name} is still stopping the last message")
+        _jobs.pop(other, None)                      # its agent never said it ended: not waited for longer
     job_id = next(_ids)
     job = {"user_id": user.id, "session_id": session_id, "text": payload.text, "workspace_path": row.workspace_path,
            "model": row.model, "permission": payload.permission, "events": asyncio.Queue(), "done": False,
@@ -291,6 +303,9 @@ async def send_message(session_id: str, payload: SessionMessage, principal: Prin
                 job["done"] = True
                 yield line({"kind": "error", "text": f"{computer} did not pick the message up: is its agent running?"})
                 return
+            if job.get("stopped") and not job.get("handed"):       # stopped before its agent took it
+                yield line({"kind": "status", "text": "Stopped"})
+                return
             yield line({"kind": "status", "text": f"Running on {computer}"})
             while True:
                 left = RUN_SECONDS - (time.monotonic() - job["started"])
@@ -307,8 +322,11 @@ async def send_message(session_id: str, payload: SessionMessage, principal: Prin
                     return
                 yield line(event)
         finally:
-            job["done"] = True
-            _jobs.pop(job_id, None)
+            # A stopped run is kept until its agent says it has ended it (job_events), so no second
+            # message runs in the session meanwhile; any other is over when nobody is reading it
+            if not (job.get("stopped") and job.get("handed")):
+                job["done"] = True
+                _jobs.pop(job_id, None)
 
     return StreamingResponse(stream(), media_type="text/event-stream",
                              headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
@@ -317,17 +335,20 @@ async def send_message(session_id: str, payload: SessionMessage, principal: Prin
 @router.post("/{session_id}/stop")
 async def stop_message(session_id: str, principal: Principal = Depends(authenticate),
                        session: AsyncSession = Depends(get_session)):
-    """Stop the current job for this session."""
+    """Stop the message this session is running: its computer's agent ends the run (claude and what it
+    started) the next time it reports, within a few seconds, and the page's stream ends now."""
     user = _user(principal)
-    # Verify session exists and belongs to user (same check as send_message)
-    row = await _session_row(session, user, session_id)
-    if row is None:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "Session not found")
+    await _session_row(session, user, session_id)
     for job in _jobs.values():
-        if job["session_id"] == session_id and not job["done"]:
-            job["done"] = True
+        if job["session_id"] == session_id and not job["done"] and not job.get("stopped"):
+            job["stopped"] = time.monotonic()
+            if not job.get("handed"):
+                job["done"] = True                  # not picked up yet: its agent will not be given it
+            job["picked"].set()                     # the page's stream stops waiting for a pickup
+            await job["events"].put({"kind": "status", "text": "Stopped"})
+            await job["events"].put(None)
             return {"stopped": True}
-    return {"stopped": False, "note": "No running job for this session"}
+    return {"stopped": False}
 
 
 # --- the sessions, from the coding tools' own requests ---------------------------------------------
