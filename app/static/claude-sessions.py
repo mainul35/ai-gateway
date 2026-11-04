@@ -27,6 +27,7 @@ import glob
 import json
 import os
 import shutil
+import signal
 import socket
 import subprocess
 import sys
@@ -41,6 +42,7 @@ KEPT_MESSAGES = 40          # of each session, sent when it changes
 TEXT_LIMIT = 4000           # of one message
 TAIL_BYTES = 1_500_000      # of a session's file read for its latest messages
 RUNNING_SECONDS = 60        # a session written to this recently is working
+BEAT_SECONDS = 2            # a run with nothing new to send still asks the gateway this often whether to stop
 # The one agent running on a computer listens locally on the port it writes here, and greets with this
 PORT_FILE = os.path.join(os.path.expanduser("~"), ".ai-gateway", "sessions-agent.port")
 GREETING = b"ai-gateway sessions agent\n"
@@ -318,25 +320,41 @@ def run(gateway, job, sessions, config_dir, allow_commands):
                      "ANTHROPIC_DEFAULT_HAIKU_MODEL", "CLAUDE_CODE_SUBAGENT_MODEL"):
             env[name] = job["model"]
     log(f"running a message in session {job['session_id'][:8]} ({folder}), {mode}")
+    # Its own process group, so that stopping it ends what it started too (a command, a server)
+    group = ({"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP} if os.name == "nt"
+             else {"start_new_session": True})
     process = subprocess.Popen([claude, "--resume", job["session_id"], "-p", "--output-format", "stream-json",
                                 "--verbose", "--permission-mode", mode],
                                cwd=folder, env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                               stderr=subprocess.PIPE, text=True, encoding="utf-8", errors="replace")
+                               stderr=subprocess.PIPE, text=True, encoding="utf-8", errors="replace", **group)
     process.stdin.write(job["text"])
     process.stdin.close()
     pending, last_sent, lock = [], time.monotonic(), threading.Lock()
+    stopped = threading.Event()
 
     def flush(done=False, error=None):
         nonlocal pending, last_sent
         with lock:
             batch, pending = pending, []
-        if batch or done:
+        last_sent = time.monotonic()
+        try:
             status, _ = gateway.call("POST", "/chat/sessions/agent/events",
                                      {"job_id": job_id, "events": batch, "done": done, "error": error})
-            if status == 404 and not done:
-                process.terminate()                     # nobody is waiting for it any more
-        last_sent = time.monotonic()
+        except (OSError, ValueError):
+            return
+        if status == 404 and not done and not stopped.is_set():
+            stopped.set()                               # stopped from the page, or nobody is waiting for it
+            log(f"stopping session {job['session_id'][:8]}")
+            end(process)
 
+    def beat():
+        # claude can be quiet for minutes (a long command, a slow model): the gateway is asked anyway
+        while process.poll() is None and not stopped.is_set():
+            time.sleep(0.5)
+            if time.monotonic() - last_sent > BEAT_SECONDS:
+                flush()
+
+    threading.Thread(target=beat, daemon=True).start()
     for line in process.stdout:
         with lock:
             pending.extend(events_of(line))
@@ -344,10 +362,23 @@ def run(gateway, job, sessions, config_dir, allow_commands):
             flush()
     process.wait()
     problem = None
-    if process.returncode:
+    if stopped.is_set():
+        problem = "Stopped"
+    elif process.returncode:
         problem = (process.stderr.read() or "").strip()[-1500:] or f"claude ended with code {process.returncode}"
     flush(done=True, error=problem)
     log(f"done with session {job['session_id'][:8]}" + (f": {problem}" if problem else ""))
+
+
+def end(process):
+    """Ends claude and everything it started."""
+    try:
+        if os.name == "nt":
+            subprocess.run(["taskkill", "/T", "/F", "/PID", str(process.pid)], capture_output=True)
+        else:
+            os.killpg(process.pid, signal.SIGTERM)
+    except OSError:
+        process.kill()
 
 
 # --- the two loops ------------------------------------------------------------------------------
