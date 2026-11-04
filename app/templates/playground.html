@@ -633,6 +633,7 @@ a.paper{color:var(--text);text-decoration:none}
             </select>
             <span class="spacer"></span>
             <button class="btn btn-sm" id="codeSend" disabled>Send</button>
+            <button class="btn btn-sm" id="codeStop" disabled hidden>Stop</button>
           </div>
         </div>
        </div>
@@ -4521,6 +4522,9 @@ async function showSession(id){
   // agent; the others can be read
   const prompt = document.getElementById('codePrompt');
   document.getElementById('codeSend').disabled = !s.can_send;
+  const stop = document.getElementById('codeStop');
+  stop.hidden = true;
+  stop.disabled = true;
   prompt.disabled = !s.can_send;
   prompt.placeholder = s.can_send ? `Message this session on ${s.pc_name}…`
     : !s.sendable ? `Sending to ${s.tool} sessions from here is not supported yet; you can read this one`
@@ -4544,7 +4548,10 @@ async function sendToSession(){
   log.scrollTop = log.scrollHeight;
   box.value = '';
   const button = document.getElementById('codeSend');
+  const stop = document.getElementById('codeStop');
   button.disabled = true;
+  stop.hidden = false;
+  stop.disabled = false;
   try{
     const response = await fetch(`/chat/sessions/${encodeURIComponent(openSession.session_id)}/message`, {
       method: 'POST', headers: JSON_HEADERS,
@@ -4572,10 +4579,30 @@ async function sendToSession(){
   }
   sessionSending = false;
   button.disabled = !(openSession && openSession.can_send);
+  const stop = document.getElementById('codeStop');
+  stop.hidden = true;
+  stop.disabled = true;
+}
+
+async function stopSession(){
+  if(!openSession) return;
+  const stop = document.getElementById('codeStop');
+  stop.hidden = true;
+  stop.disabled = true;
+  try{
+    const response = await fetch(`/chat/sessions/${encodeURIComponent(openSession.session_id)}/stop`, {
+      method: 'POST', headers: JSON_HEADERS});
+    if(!response.ok) console.error('Stop failed:', await response.text());
+  }catch(e){
+    console.error('Stop error:', e);
+  }
+  document.getElementById('codeSend').disabled = !(openSession && openSession.can_send);
+  sessionSending = false;
 }
 
 document.querySelectorAll('.mode-btn').forEach(b => b.addEventListener('click', () => setMode(b.dataset.mode)));
 document.getElementById('codeSend').addEventListener('click', sendToSession);
+document.getElementById('codeStop').addEventListener('click', stopSession);
 document.getElementById('codePrompt').addEventListener('keydown', e => {
   if(e.key === 'Enter' && !e.shiftKey && !e.isComposing){ e.preventDefault(); sendToSession(); }
 });

@@ -314,6 +314,22 @@ async def send_message(session_id: str, payload: SessionMessage, principal: Prin
                              headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
 
+@router.post("/{session_id}/stop")
+async def stop_message(session_id: str, principal: Principal = Depends(authenticate),
+                       session: AsyncSession = Depends(get_session)):
+    """Stop the current job for this session."""
+    user = _user(principal)
+    # Verify session exists and belongs to user (same check as send_message)
+    row = await _session_row(session, user, session_id)
+    if row is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Session not found")
+    for job in _jobs.values():
+        if job["session_id"] == session_id and not job["done"]:
+            job["done"] = True
+            return {"stopped": True}
+    return {"stopped": False, "note": "No running job for this session"}
+
+
 # --- the sessions, from the coding tools' own requests ---------------------------------------------
 
 def _tool(headers):

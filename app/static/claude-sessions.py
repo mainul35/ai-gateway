@@ -228,7 +228,7 @@ class Sessions:
         self.desktop = {}       # the desktop app's sessions: id -> (folder, config folder, its Claude Code)
 
     def report(self, gateway, name, allow_commands):
-        since = time.time() - self.days * 86400
+        since = time.time() - 900  # 15 minutes — finished sessions are not candidates
         files = [f for f in glob.glob(os.path.join(self.config_dir, "projects", "*", "*.jsonl"))
                  if os.path.getmtime(f) >= since]
         files.sort(key=os.path.getmtime, reverse=True)
