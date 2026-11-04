@@ -150,8 +150,15 @@ def get_parameter_count(info, model_sizes):
 FILE_KEY = "file:"
 _SHARD = re.compile(r"-\d{5}-of-\d{5}(?=\.gguf$)", re.I)
 _QUANT_LABEL = re.compile(r"(UD-)?([IT]?Q\d(_[A-Z0-9]+)*|BF16|F16|F32|(?:MX|NV)FP4(?:_[A-Z0-9]+)*)(?=[.\-/]|$)", re.I)
-# Helpers published beside a model, not models: speculative-decoding drafts and correctors
-_HELPER = re.compile(r"(^|/)(mtp|draft|lilicorr)[-_]", re.I)
+# Helpers published beside a model, not models: speculative-decoding drafts (DeepSeek's DSpark among
+# them) and correctors. Left in, a drafter of a few GB passed for a small quantization of the model
+_HELPER = re.compile(r"(^|/)(mtp|draft|dspark|dflash|lilicorr)[-_]", re.I)
+
+
+def has_shards(info):
+    """Whether any GGUF in the repository is split in parts. Hugging Face then refuses Ollama a pull of
+    every file in it, single ones too ("This repository only contains sharded GGUF files")."""
+    return any(_SHARD.search(s.get("rfilename") or "") for s in info.get("siblings", []))
 
 
 def gguf_files_detailed(info, quant_keys):
