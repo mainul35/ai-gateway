@@ -126,8 +126,9 @@ function elsewhere(data){
     `<button class="btn btn-sm btn-secondary" data-repo="${escapeHtml(o.id)}" style="margin:.2rem .3rem 0 0">
        ${escapeHtml(o.id)} <span class="muted">${Math.round(o.downloads / 1000)}k</span></button>`).join('');
   return `<div class="note warn" style="margin:0 0 .9rem">
-      This repository publishes no GGUF files, and GGUF is the only thing Ollama can install. The
-      sizes below are what a conversion of it would cost on this machine.
+      This repository publishes no GGUF files, and GGUF is the only thing Ollama and llama.cpp load.
+      The sizes below are what a conversion of it would cost on this machine; Convert makes one here
+      and adds a llama.cpp engine for it.
       ${others.length
         ? `<div style="margin-top:.5rem">Someone has already converted it:</div>${links}`
         : '<div style="margin-top:.5rem">No GGUF conversion of it was found.</div>'}
@@ -145,6 +146,8 @@ function convertedNote(data){
       <code>${escapeHtml(from.id)}</code> publishes no GGUF files, the only thing Ollama and llama.cpp
       load, so this is a GGUF conversion of it that somebody has made.
       ${links ? `<div style="margin-top:.5rem">Other conversions:</div>${links}` : ''}
+      <div style="margin-top:.5rem"><button class="btn btn-sm btn-secondary" data-original="${escapeHtml(from.id)}"
+        title="Shows ${escapeHtml(from.id)} itself, to make a GGUF of it here">Convert the original here instead</button></div>
     </div>`;
 }
 
@@ -204,7 +207,11 @@ function fitRows(data){
         ${engine ? `<button class="btn btn-sm btn-secondary" data-install="engine" data-quant="${escapeHtml(r.quantization)}"
                 title="Downloads it into ~/models (resumable) and adds a llama.cpp engine for it">llama.cpp</button>` : ''}
         ${!r.ollama && !engine ? '<span class="muted" style="font-size:.78rem">neither Ollama nor llama.cpp here</span>' : ''}
-      </td>` : '<td></td>'}
+      </td>` : !installable && r.convert ? `<td style="white-space:nowrap">
+        <button class="btn btn-sm" data-install="convert" data-quant="${escapeHtml(r.quantization)}"
+                title="Makes a ${escapeHtml(r.name)} GGUF of its own files here (download, convert, quantize) and adds a llama.cpp engine for it">Convert</button>
+      </td>` : !installable && r.convert_why ? `<td class="muted" style="font-size:.78rem">${escapeHtml(r.convert_why)}</td>`
+      : '<td></td>'}
     </tr>`).join('');
   const cache = data.kv_cache || {};
   return `
@@ -228,7 +235,8 @@ let found = null;
 // A repository of safetensors only has nothing to download here. When somebody has converted it, the
 // most downloaded conversion is checked straight away instead - its sizes are exact and its files
 // installable - and `original` (the repository asked for, and its other conversions) says so above it.
-async function check(original){
+// `stay` keeps to the repository asked for, to convert it here.
+async function check(original, stay){
   const repo = document.getElementById('repo').value.trim();
   if(!repo) return;
   showError('');
@@ -239,7 +247,7 @@ async function check(original){
     found = await api('/admin/models/check', {method: 'POST', headers: {'Content-Type': 'application/json'},
                                               body: JSON.stringify({model_id: repo})});
     const others = found.gguf_alternatives || [];
-    if(!original && !found.is_gguf_repo && others.length){
+    if(!original && !stay && !found.is_gguf_repo && others.length){
       document.getElementById('repo').value = others[0].id;
       return await check({id: repo, conversions: others});
     }
@@ -322,7 +330,7 @@ function installEnded(finished){
   const heading = document.getElementById('installHeading');
   if(finished && finished.success){
     heading.textContent = 'Installed';
-    const engineName = {engine: 'llama.cpp', vllm: 'vLLM', sglang: 'SGLang'}[installMode];
+    const engineName = {engine: 'llama.cpp', convert: 'llama.cpp', vllm: 'vLLM', sglang: 'SGLang'}[installMode];
     document.getElementById('installStage').textContent = engineName
       ? `Ready to use as ${finished.model_name} (a ${engineName} engine: its settings are in config/engines.local.yaml)`
       : `Ready to use as ${finished.model_name}`;
@@ -402,6 +410,11 @@ async function install(mode, quantization, source){
 document.getElementById('fit').addEventListener('click', e => {
   const wanted = e.target.closest('[data-install]');
   if(wanted) return install(wanted.dataset.install, wanted.dataset.quant, wanted.dataset.source);
+  const original = e.target.closest('[data-original]');
+  if(original){
+    document.getElementById('repo').value = original.dataset.original;
+    return check(null, true);
+  }
   const conversion = e.target.closest('[data-repo]');
   if(conversion){
     document.getElementById('repo').value = conversion.dataset.repo;
