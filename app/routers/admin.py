@@ -921,6 +921,8 @@ def _provider_answers(gguf_files, recommendations, builds, served, sharded=False
         ollama = (True, "")
     if not gguf_files:
         llama = (False, "it publishes no GGUF files, the only thing llama.cpp loads")
+    elif not fits:
+        llama = (False, "none of its files fits in this machine's memory")
     elif any(b.get("supported") for b in builds):
         llama = (True, "")
     else:
