@@ -21,7 +21,7 @@ from app.tools import jobs, mcp_client, mcp_config
 from app.auth import Principal, generate_key, hash_key, require_admin, require_manager
 from app import config_writer
 from app.engine.supervisor import supervisor
-from app.engine import builds as engine_builds, gguf_meta, profiles as engine_profiles, serving
+from app.engine import builds as engine_builds, convert, gguf_meta, profiles as engine_profiles, serving
 from utils import hf_client, hf_download
 from utils.ollama_client import (StreamCancellation, check_ollama_status, ollama_host,
                                  stream_create_model, stream_pull_model)
@@ -826,8 +826,9 @@ class ModelInstall(BaseModel):
     quantization: str = Field(min_length=1, max_length=300)
     # "pull" takes the published GGUF as it is; "create" builds a local model with a context length;
     # "engine" downloads it for llama.cpp and adds an engine profile (config/engines.local.yaml);
-    # "vllm" and "sglang" download the model's own files (safetensors) and add a profile that runs them
-    mode: str = Field(default="pull", pattern="^(pull|create|engine|vllm|sglang)$")
+    # "vllm" and "sglang" download the model's own files (safetensors) and add a profile that runs them;
+    # "convert" makes a GGUF of them in that quantization (app/engine/convert.py) and adds a llama.cpp engine
+    mode: str = Field(default="pull", pattern="^(pull|create|engine|vllm|sglang|convert)$")
     context_length: int = fitting.DEFAULT_CONTEXT_LENGTH
 
 
@@ -882,9 +883,21 @@ def _look_up(model_id):
     tried = (details.get(pick["quantization"]) or {}).get("files") or [] if pick else []
     builds = _build_answers(model_id, info, tried, gguf.get("architecture")) if gguf_files else []
     served = serving.assess(model_id, info, system)
+    # No GGUF: each quantization that would run here can be made of its own files (Convert)
+    conversion = None if gguf_files else convert.survey(model_id, info)
+    for row in recommendations if conversion else ():
+        verdict = convert.check(conversion, row["quantization"], system)
+        row["convert"], row["convert_why"] = verdict["ok"], verdict["why"]
+    providers = _provider_answers(gguf_files, recommendations, builds, served, sharded)
+    if conversion:
+        able = any(r.get("convert") for r in recommendations)
+        why = conversion["why"] or next((r["convert_why"] for r in recommendations if r.get("convert_why")),
+                                        "none of its quantizations fits in this machine's memory")
+        providers.insert(2, {"name": "llama.cpp, converted to GGUF", "supported": able, "why": "" if able else why})
     return {
         # Every way this machine runs a model, and whether this one can go that way - and why not
-        "providers": _provider_answers(gguf_files, recommendations, builds, served, sharded),
+        "providers": providers,
+        "conversion": {k: (conversion or {}).get(k) for k in ("ok", "why", "source", "architecture")},
         "serving": served,
         "model_info": hf_client.public_model_info(info),
         # Ollama installs GGUF and nothing else, so a repository without it needs somewhere to go
@@ -1045,21 +1058,43 @@ def _engine_rows(entry, name, cancellation):
         yield event
         if "error" in event or event.get("cancelled"):
             return
-    profile = {"name": name, "model_path": os.path.join(folder, os.path.basename(files[0])),
-               "ctx_size": min(int(gguf.get("context_length") or ENGINE_CONTEXT_MAX), ENGINE_CONTEXT_MAX),
+    _add_llama_engine(name, os.path.join(folder, os.path.basename(files[0])), gguf.get("context_length"),
+                      gguf.get("total"), os.path.join(folder, os.path.basename(readers[0])) if readers else None, build)
+    yield {"status": "success"}
+
+
+def _add_llama_engine(name, model_path, context, params, reader, build):
+    """A llama.cpp engine profile for a GGUF on this machine, run by `build`."""
+    profile = {"name": name, "model_path": model_path,
+               "ctx_size": min(int(context or ENGINE_CONTEXT_MAX), ENGINE_CONTEXT_MAX),
                "parallel": 1,
                # --fit places what fits on the GPU and the rest in RAM; room kept for an image reader
-               "extra_args": ["--fit", "on"] + (["--fit-target", "1536"] if readers else []) + ["--cache-ram", "24576"]}
-    if gguf.get("total"):
-        profile["parameter_size"] = f"{round(gguf['total'] / 1e9)}B"
-    if readers:
-        profile["mmproj"] = os.path.join(folder, os.path.basename(readers[0]))
+               "extra_args": ["--fit", "on"] + (["--fit-target", "1536"] if reader else []) + ["--cache-ram", "24576"]}
+    if params:
+        profile["parameter_size"] = f"{round(params / 1e9)}B"
+    if reader:
+        profile["mmproj"] = reader
     if not build["default"]:
         profile["binary"] = build["binary"]
         profile["env"] = next((b["env"] for b in engine_builds.builds() if b["binary"] == build["binary"]), {})
     engine_profiles.add_local_profile(profile)
-    log.info("engine %s added (%s, %s)", name, build["name"], profile["model_path"])
-    yield {"status": "success"}
+    log.info("engine %s added (%s, %s)", name, build["name"], model_path)
+
+
+def _convert_rows(entry, name, cancellation):
+    """A GGUF made of a model's own files, in the quantization chosen, then made an engine: progress
+    events, as an Ollama pull's. Started over after a restart; the download part resumes."""
+    folder = os.path.join(os.path.expanduser("~"), "models", name)
+    for event in convert.rows(entry["model_id"], entry["quantization"], folder, name, cancellation,
+                              get_system_info()):
+        if event.get("status") == "success":
+            _add_llama_engine(name, event["model_path"], event["context"], event["params"], event["mmproj"],
+                              event["build"])
+            yield {"status": "success"}
+            return
+        yield event
+        if "error" in event or event.get("cancelled"):
+            return
 
 
 def _serving_rows(entry, name, cancellation):
@@ -1107,6 +1142,9 @@ def _start_install(entry, who):
     if entry["mode"] == "engine":
         name = fitting.engine_name(entry["model_id"], entry["quantization"], label)
         rows = _engine_rows(entry, name, cancellation)
+    elif entry["mode"] == "convert":
+        name = fitting.engine_name(entry["model_id"], entry["quantization"])
+        rows = _convert_rows(entry, name, cancellation)
     elif entry["mode"] in serving.ENGINES:
         name = f"{fitting.short_name(entry['model_id'])}-{entry['mode']}"
         rows = _serving_rows(entry, name, cancellation)
