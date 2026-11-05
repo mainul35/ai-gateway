@@ -50,7 +50,8 @@ def builds():
     """[{"name", "binary", "env", "default"}]: the configured llama-server, then the others the
     profiles name (Ollama's), then every other release unpacked beside the configured one
     (~/llama.cpp/llama-b*), newest first - a release installed for a new architecture counts before
-    any profile names it - each once."""
+    any profile names it - each once. Only llama-server itself: the vLLM and SGLang profiles name their
+    own programs, which taken for builds answered yes to every architecture without loading anything."""
     found, seen = [], set()
     default = settings.get("engine.llama_server.path", "LLAMA_SERVER_PATH") or ""
     candidates = [(default, {})] + [(p.binary, p.env or {}) for p in load_profiles().values() if p.binary]
@@ -59,7 +60,7 @@ def builds():
         number = lambda path: int("".join(c for c in os.path.basename(os.path.dirname(path)) if c.isdigit()) or 0)
         candidates += [(path, {}) for path in sorted(releases, key=number, reverse=True)]
     for binary, env in candidates:
-        if not binary or binary in seen or not os.path.isfile(binary):
+        if not binary or binary in seen or os.path.basename(binary) != "llama-server" or not os.path.isfile(binary):
             continue
         seen.add(binary)
         folder = os.path.basename(os.path.dirname(binary))
