@@ -133,9 +133,32 @@ def get_model_sizes(info):
     }
 
 
+# Bytes a parameter of each safetensors type takes; anything else is counted as one byte
+_DTYPE_BYTES = {"F64": 8, "I64": 8, "U64": 8, "F32": 4, "I32": 4, "U32": 4, "BF16": 2, "F16": 2, "I16": 2, "U16": 2}
+BIG_FILE = 50 * 1024**2       # a file this size is weights, whatever it is named
+
+
+def _declared_bytes(safetensors):
+    return sum(count * _DTYPE_BYTES.get(dtype, 1) for dtype, count in (safetensors.get("parameters") or {}).items())
+
+
+def _undercounted(info):
+    """Whether the safetensors metadata covers much less than the repository's big files: weights kept
+    in a format of the author's own (sekkit's experts.bin beside an 11 GB model.safetensors), so the
+    count is of a small part of the model."""
+    big = sum(s.get("size") or 0 for s in info.get("siblings", [])
+              if (s.get("size") or 0) >= BIG_FILE and not (s.get("rfilename") or "").lower().endswith(".gguf"))
+    return big > 2 * _declared_bytes(info.get("safetensors") or {})
+
+
 def get_parameter_count(info, model_sizes):
     """Returns (parameter_count, source)."""
     if info.get("safetensors", {}).get("total"):
+        if _undercounted(info):
+            base = _base_model_id(info)
+            other = get_model_info(base) if base and base != info.get("id") else {}
+            if "error" not in other and (other.get("safetensors") or {}).get("total"):
+                return other["safetensors"]["total"], f"safetensors metadata of {base}, the model it was made from"
         return info["safetensors"]["total"], "safetensors metadata"
     if info.get("gguf", {}).get("total"):
         return info["gguf"]["total"], "gguf metadata"

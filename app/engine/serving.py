@@ -143,8 +143,10 @@ def source_of(model_id, info):
     return None, None
 
 
-def search_quantized(model_id, limit=4):
-    """4-bit safetensors versions of a model (AWQ, GPTQ): the ones that fit where the original does not."""
+def search_quantized(model_id, limit=4, room=None):
+    """4-bit safetensors versions of a model (AWQ, GPTQ): the ones that fit where the original does not.
+    room: the bytes the weights may take here; a version bigger than that, or one keeping weights in
+    files of its own format (vLLM and SGLang load safetensors only), is not offered."""
     name = model_id.split("/")[-1]
     try:
         response = requests.get(f"{hf_client.HF_API_BASE}/models", headers=hf_client._headers(),
@@ -156,9 +158,24 @@ def search_quantized(model_id, limit=4):
     except (requests.RequestException, ValueError):
         return []
     four_bit = re.compile(r"awq|gptq|int4|w4a16|4bit|4-bit", re.I)
-    return [{"id": m["id"], "downloads": m.get("downloads") or 0} for m in found
-            if isinstance(m, dict) and m.get("id") and m["id"] != model_id and four_bit.search(m["id"])
-            and not re.search(r"gguf|mlx|nvfp4|mxfp4", m["id"], re.I)][:limit]
+    named = [m for m in found if isinstance(m, dict) and m.get("id") and m["id"] != model_id
+             and four_bit.search(m["id"]) and not re.search(r"gguf|mlx|nvfp4|mxfp4", m["id"], re.I)]
+    out = []
+    for m in named[:limit * 2]:
+        if room:
+            info = hf_client.get_model_info(m["id"])
+            if "error" in info:
+                continue
+            weights = _weights(info)
+            other = sum(s.get("size") or 0 for s in info.get("siblings") or []
+                        if (s.get("size") or 0) >= hf_client.BIG_FILE
+                        and not (s.get("rfilename") or "").endswith((".safetensors", ".bin")))
+            if not weights or weights > room or other > weights:
+                continue
+        out.append({"id": m["id"], "downloads": m.get("downloads") or 0})
+        if len(out) == limit:
+            break
+    return out
 
 
 def assess(model_id, info, system):
@@ -202,7 +219,7 @@ def assess(model_id, info, system):
         engines[server] = {"supported": supported, "why": why, "label": label, "installed": have["installed"],
                            "parsers": parser_args(server, architecture) if supported else []}
     if not any(e["supported"] for e in engines.values()) and weights > vram * WEIGHTS_SHARE:
-        alternatives = search_quantized(repo)
+        alternatives = search_quantized(repo, room=vram * WEIGHTS_SHARE)
     return {"source": repo, "weights_bytes": weights, "architecture": architecture, "quantization": quant,
             "gpus": gpus, "engines": engines, "alternatives": alternatives}
 
