@@ -15,7 +15,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from app import access, activity, backends, catalogue, fitting, knowledge, power, settings, usage as usage_log
+from app import access, activity, backends, bootstrap, catalogue, fitting, knowledge, power, settings, usage as usage_log
 from app import live_metrics as live, proven
 from app.tools import jobs, mcp_client, mcp_config
 from app.auth import Principal, generate_key, hash_key, require_admin, require_manager
@@ -150,11 +150,15 @@ async def create_user(payload: UserIn, principal: Principal = Depends(require_ma
         raise HTTPException(status.HTTP_403_FORBIDDEN, "Only admins can create managers or admins")
     if await _get_user(session, payload.name):
         raise HTTPException(status.HTTP_409_CONFLICT, f"User {payload.name} already exists")
+    email = (payload.email or "").strip() or None
+    holder = await bootstrap.account_with_email(session, email)
+    if holder is not None:
+        raise HTTPException(status.HTTP_409_CONFLICT, f"{holder.name} already has the email {email}")
     model_access = payload.model_access or access.default_access()
     _check_grant_allowed(principal, model_access, payload.allowed_models)
     if payload.features is not None:
         _check_features(principal, payload.features)
-    user = User(name=payload.name, email=payload.email, role=payload.role, model_access=model_access,
+    user = User(name=payload.name, email=email, role=payload.role, model_access=model_access,
                 allowed_models=access.serialize_patterns(payload.allowed_models),
                 features=access.serialize_features(payload.features) if payload.features is not None else None)
     session.add(user)

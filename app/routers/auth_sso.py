@@ -11,7 +11,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from app import access, backends, claude_desktop, settings, sso
+from app import access, backends, bootstrap, claude_desktop, settings, sso
 from app.auth import Principal, authenticate, generate_key, hash_key
 from app.db import get_session
 from app.models import ApiKey, UsageRecord, User, utcnow
@@ -110,6 +110,8 @@ async def callback(request: Request, code: str | None = None, state: str | None 
         raise _auth_server_failed("Auth server returned no subject claim to know the person by")
 
     user = await _account_for(session, identity)
+    if user is _TAKEN:
+        return _back_to_login("taken")
     if user is None:
         user = await _new_account(session, identity)
         user.claims = json.dumps(claims) if claims else None
@@ -125,8 +127,14 @@ async def callback(request: Request, code: str | None = None, state: str | None 
         if not user.is_active:
             # Signing in again must not undo an admin disabling the account
             raise HTTPException(status.HTTP_403_FORBIDDEN, "This account has been disabled")
-        if identity["email_verified"]:
-            user.email = identity["email"]
+        # The auth server's email, unless another account here has it: then this one keeps its own
+        if identity["email_verified"] and identity["email"] != user.email:
+            holder = await bootstrap.account_with_email(session, identity["email"], but=user.id)
+            if holder is None:
+                user.email = identity["email"]
+            else:
+                log.warning("%s signed in with the email %s, which %s has; their email was left as it was",
+                            user.name, identity["email"], holder.name)
         # Listed, verified admin emails are always promoted; otherwise keep the role set in the UI
         if sso.role_for(identity["email"], identity["email_verified"]) == "admin":
             user.role = "admin"
@@ -148,14 +156,26 @@ def _back_to_login(notice):
     return response
 
 
+# What _account_for says when the email belongs to an account this sign-in must not become
+_TAKEN = object()
+
+
 async def _account_for(session, identity):
-    """The account this auth-server identity already has, or None.
+    """The account this auth-server identity already has; None for nobody; _TAKEN when its email
+    belongs to an account it cannot be given.
 
     By the auth server's own id. Before accounts carried it they were found by name - the email, or
     the display name - so one made that way is taken over once, by the person it was made for:
     only an account an SSO sign-in created (it has seen claims), with no password, not linked to
     anybody yet, and only on an email the auth server has verified. A manager's pre-made account,
     the built-in admin, and anyone merely calling themselves by somebody's name are never matched.
+
+    Then by email, verified by the auth server, because one email is one person here: an account an
+    admin made for that email (no password, no sign-in linked yet) is the one they meant for this
+    person, and is linked to them. An account with that email that is someone's - a password, or a
+    different sign-in already linked - is never taken over, and no second account is made beside
+    it either: two accounts with one email, one made by an admin and one by a first sign-in, was
+    how one person came to have two, each with different access.
     """
     key = sso.subject_key(identity["subject"])
     found = (await session.execute(select(User).where(User.sso_subject == key))).scalar_one_or_none()
@@ -167,7 +187,17 @@ async def _account_for(session, identity):
     if legacy is not None:
         log.info("SSO account %s now linked to the auth server's id", legacy.name)
         legacy.sso_subject = key
-    return legacy
+        return legacy
+    holder = await bootstrap.account_with_email(session, identity["email"])
+    if holder is None:
+        return None
+    if holder.sso_subject is None and holder.password_hash is None:
+        log.info("SSO sign-in linked to %s, the account made for %s", holder.name, identity["email"])
+        holder.sso_subject = key
+        return holder
+    log.warning("SSO sign-in as %s refused: %s already has that email and is %s", identity["email"],
+                holder.name, "linked to another sign-in" if holder.sso_subject else "a password account")
+    return _TAKEN
 
 
 async def _free_name(session, wanted, subject):
