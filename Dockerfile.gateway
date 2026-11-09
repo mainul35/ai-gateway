@@ -6,6 +6,12 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
+# Pango lays out the PDFs the playground writes (WeasyPrint, app/tools/written.py), and Noto covers
+# Bangla and the other scripts DejaVu has no letters for
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        libpango-1.0-0 libpangoft2-1.0-0 libharfbuzz-subset0 fonts-dejavu-core fonts-noto-core \
+    && rm -rf /var/lib/apt/lists/*
+
 COPY requirements.txt requirements-gateway.txt ./
 RUN pip install --no-cache-dir -r requirements.txt -r requirements-gateway.txt
 
