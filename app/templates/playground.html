@@ -256,6 +256,8 @@ a.cite{font-size:.75em;vertical-align:super;text-decoration:none;padding:0 .1rem
 .verdict button{background:none;border:1px solid var(--border);border-radius:999px;color:var(--muted);
                 font:inherit;padding:.05rem .55rem;cursor:pointer}
 .verdict button:hover{color:var(--text)}
+.verdict button[data-change]{border:none;padding:0;text-decoration:underline}
+.verdict button[hidden]{display:none}
 .verdict button[aria-pressed="true"]{color:#fff;background:var(--primary);border-color:var(--primary)}
 .verdict button[aria-pressed="true"][data-value="false"]{background:var(--danger);border-color:var(--danger)}
 .video-story video{width:100%;max-width:960px;border-radius:10px;background:#000;display:block;margin-top:.4rem}
@@ -3698,7 +3700,10 @@ function addVerdict(box, where, saved){
   const task = verdictTask(where);
   // What a plain Yes or No counts against: the router's reading, or the picture for one drawn
   const base = where.kind === 'image' ? 'image' : (where.category || null);
-  const state = {helpful: saved?.helpful ?? null, problem: saved?.category || null, reason: saved?.reason || ''};
+  const state = {helpful: saved?.helpful ?? null, problem: saved?.category || null, reason: saved?.reason || '',
+                 // What went wrong, once said, is put away: the box stayed open under the answer after
+                 // Save, as if nothing had been taken. "Change" opens it again.
+                 told: saved?.helpful === false && !!(saved?.reason || saved?.category)};
   row.innerHTML = `<span class="ask">${escapeHtml(VERDICT_QUESTIONS[task] || VERDICT_QUESTIONS.general)}
       <button type="button" data-value="true">Yes</button>
       <button type="button" data-value="false">No</button></span><span class="thanks"></span>`;
@@ -3722,8 +3727,11 @@ function addVerdict(box, where, saved){
       b.setAttribute('aria-pressed', String(state.helpful === (b.dataset.value === 'true'))));
     panel.querySelectorAll('[data-problem]').forEach(b =>
       b.setAttribute('aria-pressed', String(b.dataset.problem === state.problem)));
-    panel.hidden = state.helpful !== false;
+    panel.hidden = state.helpful !== false || state.told;
+    const change = row.querySelector('[data-change]');
+    if(change) change.hidden = !(state.helpful === false && state.told);
   };
+  row.insertAdjacentHTML('beforeend', '<button type="button" class="linkish" data-change hidden>Change</button>');
   show();
 
   const save = async withProblem => {
@@ -3753,11 +3761,18 @@ function addVerdict(box, where, saved){
   };
 
   row.addEventListener('click', async e => {
+    if(e.target.closest('[data-change]')){
+      state.told = false;
+      show();
+      note.focus();
+      return;
+    }
     const button = e.target.closest('.ask button');
     if(!button) return;
     const value = button.dataset.value === 'true';
     const before = {...state};
     state.helpful = state.helpful === value ? null : value;
+    state.told = false;
     show();
     if(!await save(false)){ Object.assign(state, before); show(); }
     if(state.helpful === false) panel.querySelector('[aria-pressed="true"]')?.focus();
@@ -3765,9 +3780,14 @@ function addVerdict(box, where, saved){
   panel.addEventListener('click', async e => {
     const choice = e.target.closest('[data-problem]');
     if(choice){ state.problem = choice.dataset.problem; show(); return; }
-    if(e.target.closest('[data-save]')) await save(true);
+    if(e.target.closest('[data-save]')) await saveWhy();
   });
-  note.addEventListener('keydown', e => { if(e.key === 'Enter'){ e.preventDefault(); save(true); } });
+  const saveWhy = async () => {
+    if(!await save(true)) return;
+    state.told = true;
+    show();
+  };
+  note.addEventListener('keydown', e => { if(e.key === 'Enter'){ e.preventDefault(); saveWhy(); } });
   box.appendChild(row);
   box.appendChild(panel);
 }
@@ -3987,28 +4007,15 @@ function refreshSendButton(){
    writes the document, which the gateway saves as that file (app/tools/written.py) and the side
    panel opens. */
 
-// Making a file, as opposed to asking about one: a verb that makes something, with a document, a
-// PDF or Markdown as what is made. Reading one ("summarise this document"), asking about the craft
-// ("how do I make a PDF in Java") or wanting code ("write a PDF parser") is not.
-const MAKES_DOCUMENT = /\b(generate|create|make|write|prepare|produce|export|draft|build|give|turn|convert|save|put|compile)\b(?:\s+(?:me|us|it|this|that|everything|all|the\s+[\p{L}\p{N}_-]+))?(?:\s+(?:up\s+)?(?:a|an|as|as\s+a|as\s+an|into|into\s+a|into\s+an|to\s+a|to\s+an|in\s+a|in\s+an|in))?(?:\s+(?!(?:of|from|about|this|the|that|my|your|attached)\b)[\p{L}\p{N}_-]+){0,3}?\s+(document|doc|pdf|markdown|md)\b(?!\s*(?:parser|reader|library|viewer|editor|generator|converter|uploads?|uploader|api|tool|app|component|plugin|module|class|function|script|service|feature|files?\s+(?:upload|reader|parser)))/iu;
-// The file's kind said at the end, whatever is made: "generate me a latest updated resume in pdf",
-// where the document is a resume and the PDF comes last. Missed by the rule above, that request went
-// to the router, which drew a portrait.
-const IN_A_FORMAT = /\b(generate|create|make|write|prepare|produce|export|draft|build|give|turn|convert|save|put|compile|update|redo|rewrite|format)\b[^.?!\n]{0,160}?\b(?:in|as|into|to)\s+(?:a\s+|an\s+)?(pdf|markdown|md)\b(?!\s*(?:parser|reader|library|viewer|editor|converter))/iu;
-// Code that makes or reads a file is code, not a document: "write code to save the report in pdf"
-const ABOUT_CODE = /\b(code|script|program|function|class|parser|library|api|regex|query|snippet)\b/i;
-const ASKS_ABOUT = /^\s*(how\s+(do|can|to|would|should|does|is)|what\s+(is|are|does|do)|why|explain|which\s+(library|tool|package))\b/i;
+// Whether a message asks for a document is the router's to read (app/tools/understand.py: what the
+// person wants back), from the meaning in any wording or language, not from sentence patterns here.
 const FORMAT_LABELS = {pdf: 'PDF', markdown: 'Markdown'};
 const IN_CHAT = 'Answer in the chat instead';
 
-function wantsDocument(text){
-  if(!text || text.length > 500 || ASKS_ABOUT.test(text) || ABOUT_CODE.test(text)) return false;
-  return MAKES_DOCUMENT.test(text) || IN_A_FORMAT.test(text);
-}
-
+// Which kind of file, once a document is wanted: only the name of the kind, in English or Bangla
 function formatIn(text){
-  if(/\bpdf\b/i.test(text)) return 'pdf';
-  if(/\b(markdown|md)\b|\.md\b/i.test(text)) return 'markdown';
+  if(/\bpdf\b|পিডিএফ/i.test(text)) return 'pdf';
+  if(/\b(markdown|md)\b|\.md\b|মার্কডাউন/i.test(text)) return 'markdown';
   return null;
 }
 
@@ -4089,8 +4096,9 @@ function showWritten(box, file){
 // With more than one tool switched on, a small model decides what this message asks for
 async function decideAction(text, hasImages){
   const searchOn = tools.web_search && caps.web_search;
-  // Even with no tool to choose between, Auto still has a model to choose
-  if(!imageMode() && !searchOn && !choosing()) return {action: 'chat'};
+  // Even with no tool to choose between, Auto still has a model to choose, and the router still
+  // reads whether a document is wanted - writing one needs no tool switched on
+  if(!imageMode() && !searchOn && !choosing() && !caps.routing) return {action: 'chat'};
   if(!caps.routing && !choosing()) return {action: imageMode() ? (hasImages ? 'edit' : 'image') : 'search'};
   setDeciding(true);
   deciding = new AbortController();
@@ -4277,19 +4285,18 @@ async function routeTurn(text, asking){
 
   // A video story is a choice, like the agent: switched on, it takes the turn
   if(videoMode()) return sendVideo(text, asking);
-  // A document: which kind is asked when the words do not say, and it is written once they do
-  if(!(tools.agent && caps.agent)){
-    const waiting = formatQuestion;
-    dropFormatQuestion();
-    const format = formatIn(text);
-    const usable = format && documentKinds().includes(format) ? format : null;
-    if(waiting && usable) return sendDocument(text, usable, asking, waiting.request);
-    if(wantsDocument(text)) return usable ? sendDocument(text, usable, asking, text) : askDocumentFormat(text, asking);
-  }
+  // The kind of file named in answer to "which kind of document?" is that answer, not a new request
+  const format = formatIn(text);
+  const usable = format && documentKinds().includes(format) ? format : null;
+  const waiting = formatQuestion;
+  dropFormatQuestion();
+  if(waiting && usable && !(tools.agent && caps.agent)) return sendDocument(text, usable, asking, waiting.request);
   const decision = await decideAction(text, turnPictures().length > 0);
   if(decision.action === 'stopped') return;
   // The agent is a choice, not a guess: switched on, it takes the turn
   if(tools.agent && caps.agent) return sendAgent(text, asking);
+  // A document, as the router read it: which kind is asked when the words do not say
+  if(decision.action === 'document') return usable ? sendChat(text, decision, asking, usable) : askDocumentFormat(text, asking);
   if(decision.action === 'map') return sendMap(text, decision, fix, asking);
   if(decision.action === 'photos') return sendMedia(text, decision, asking);
   if(decision.action === 'clean' || decision.action === 'blur' || decision.action === 'backdrop')

@@ -20,6 +20,9 @@ PHOTOS = "photos"               # a real photograph of a real thing, found rathe
 CLEAN, BLUR = "clean", "blur"   # what is asked of a photograph, as opposed to a drawing
 BACKDROP = "backdrop"           # the person kept exactly as they are, on a different plain colour
 MAP = "map"                     # somewhere on the earth, rather than something to read or draw
+# A piece of writing handed over as a file (app/tools/written.py). Not one of this prompt's answers:
+# understand.wants_a_file asks about it on its own, so the answers here stay as they were measured
+DOCUMENT = "document"
 
 PROMPT = """You route a user's message to one of these actions. Answer with one word and nothing else.
 
