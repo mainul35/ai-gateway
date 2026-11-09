@@ -543,6 +543,14 @@ a.paper{color:var(--text);text-decoration:none}
    the page; it would also hand the phone a second scrollbar, which this layout exists to avoid. */
 .drawer-btn{display:none;font-size:1.15rem;line-height:1}
 .scrim{display:none}
+/* On a wide screen the same button folds the sidebar away, for more room to read and write */
+@media (min-width: 861px){
+  .drawer-btn{display:inline-flex;float:left;margin:0 .6rem 0 0;padding:0 .1rem}
+  .pg.side-hidden{grid-template-columns:minmax(0, 1fr)}
+  .pg.side-hidden.with-panel{grid-template-columns:minmax(0, 1fr) min(var(--panel-w), calc(100vw - 24rem))}
+  .pg.side-hidden.with-panel.panel-wide{grid-template-columns:minmax(0, 1fr)}
+  .pg.side-hidden .side{display:none}
+}
 @media (max-width: 860px){
   .pg{grid-template-columns:1fr}
   .side{position:fixed;top:0;bottom:0;left:0;width:min(20rem, 86vw);z-index:30;
@@ -1799,7 +1807,36 @@ function setDrawer(open){
   drawerToggle.setAttribute('aria-expanded', String(open));
 }
 
-drawerToggle.addEventListener('click', () => setDrawer(!pg.classList.contains('open')));
+// The same button shows and hides the sidebar on a wide screen, where it is not a drawer; that
+// choice is kept in this browser
+const narrowScreen = window.matchMedia('(max-width: 860px)');
+const SIDE_HIDDEN_KEY = 'playground.sideHidden';
+
+function setSideHidden(hidden){
+  pg.classList.toggle('side-hidden', hidden);
+  showSideState();
+  try{ localStorage.setItem(SIDE_HIDDEN_KEY, hidden ? '1' : ''); }catch(e){}
+}
+
+function showSideState(){
+  if(narrowScreen.matches){
+    drawerToggle.title = 'Show conversations';
+    drawerToggle.setAttribute('aria-expanded', String(pg.classList.contains('open')));
+    return;
+  }
+  const hidden = pg.classList.contains('side-hidden');
+  drawerToggle.title = hidden ? 'Show the sidebar' : 'Hide the sidebar';
+  drawerToggle.setAttribute('aria-label', drawerToggle.title);
+  drawerToggle.setAttribute('aria-expanded', String(!hidden));
+}
+
+try{ pg.classList.toggle('side-hidden', localStorage.getItem(SIDE_HIDDEN_KEY) === '1'); }catch(e){}
+showSideState();
+narrowScreen.addEventListener('change', showSideState);
+drawerToggle.addEventListener('click', () => {
+  if(narrowScreen.matches) setDrawer(!pg.classList.contains('open'));
+  else setSideHidden(!pg.classList.contains('side-hidden'));
+});
 document.getElementById('scrim').addEventListener('click', () => setDrawer(false));
 document.addEventListener('keydown', e => { if(e.key === 'Escape') setDrawer(false); });
 // Anything picked from the drawer has done its job; the wide layout never has it open to close
