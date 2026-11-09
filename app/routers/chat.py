@@ -24,7 +24,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from app import access, backends, feedback, istory, limits, settings, usage as usage_log
+from app import access, backends, feedback, istory, limits, net, settings, usage as usage_log
 from app.auth import Principal, authenticate
 from app.db import get_session, session_factory
 from app.models import (AnswerFeedback, ChatFile, Conversation, ConversationMessage, MemoryEntry, SharedAccessRequest,
@@ -776,6 +776,36 @@ def _attachment(name):
     link's download attribute. The plain name for old browsers, the whole one (Bangla too) for the rest."""
     plain = re.sub(r'[^\w .,()-]+', "_", name.encode("ascii", "ignore").decode()).strip() or "download"
     return f"attachment; filename=\"{plain}\"; filename*=UTF-8''{urllib.parse.quote(name)}"
+
+
+@router.get("/files/{file_id}/text")
+async def file_text(file_id: int, principal: Principal = Depends(authenticate),
+                    session: AsyncSession = Depends(get_session)):
+    """A document's text, for the side panel: a Word file or a spreadsheet has nothing a browser can
+    show, and a text file is better read in the panel than downloaded."""
+    user = _require_user(principal)
+    stored = (await session.execute(
+        select(ChatFile).where(ChatFile.id == file_id, ChatFile.user_id == user.id))).scalar_one_or_none()
+    if stored is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "File not found")
+    name = stored.name or f"file-{stored.id}"
+    try:
+        text = await asyncio.to_thread(documents.extract, name, stored.data)
+    except documents.DocumentError as e:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(e))
+    return {"name": name, "text": text}
+
+
+@router.get("/reader")
+async def reader(url: str, principal: Principal = Depends(authenticate)):
+    """A web page's title and text, for the side panel. Only for people who may search the web: it is
+    the same kind of fetch, made by this server, and goes through the same guard (app/net.py)."""
+    _require_user(principal)
+    _require_feature(principal, "web_search")
+    try:
+        return await web_search.read_page(url)
+    except net.Refused as e:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, f"Could not open that page: {e}")
 
 
 @router.get("/files/{file_id}/istory")
