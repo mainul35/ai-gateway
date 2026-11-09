@@ -18,8 +18,11 @@ _cache = {}
 _lock = threading.Lock()
 
 
-def _parse(data):
-    """{key: value} of a GGUF header; arrays longer than 64 items are counted, not kept."""
+def _parse(data, partial=False):
+    """{key: value} of a GGUF header; arrays longer than 64 items are counted, not kept.
+
+    `partial` returns the keys read before `data` ran out, for the first megabytes of a file read
+    over the network: the architecture's keys come before the vocabulary, which can be most of it."""
     pos = 0
 
     def take(n):
@@ -55,8 +58,13 @@ def _parse(data):
     u64()                       # tensor count
     keys = {}
     for _ in range(u64()):
-        name = take(u64()).decode("utf-8", errors="replace")
-        keys[name] = value(u32())
+        try:
+            name = take(u64()).decode("utf-8", errors="replace")
+            keys[name] = value(u32())
+        except ValueError:
+            if not partial:
+                raise
+            break
     return keys
 
 

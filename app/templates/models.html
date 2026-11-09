@@ -8,18 +8,22 @@
 
 <div class="card" style="margin-bottom:1.5rem">
   <h2>Will it run here?</h2>
-  <p class="muted" style="margin:0 0 .8rem;font-size:.88rem">
-    A Hugging Face repository, as <code>owner/model</code>. Every quantization it publishes is measured
-    against this machine's memory, with the key/value cache counted in.</p>
+  <p class="muted" style="margin:0 0 .8rem;font-size:.88rem" id="sourceHint"></p>
   <div class="row">
+    <label style="flex:0 0 auto;min-width:11rem;margin:0">
+      <span class="lbl">Source</span>
+      <select id="source">
+        <option value="huggingface">Hugging Face</option>
+        <option value="ollama">Ollama library</option>
+      </select>
+    </label>
     <label style="flex:1;min-width:14rem;margin:0">
-      <span class="lbl">Repository</span>
-      <input id="repo" placeholder="e.g. unsloth/Qwen3-8B-GGUF" autocomplete="off">
+      <span class="lbl" id="repoLabel">Repository</span>
+      <input id="repo" autocomplete="off">
     </label>
     <button class="btn" id="check">Check</button>
   </div>
-  <div id="checking" class="muted" style="margin-top:.8rem" hidden>
-    Asking Hugging Face&hellip;</div>
+  <div id="checking" class="muted" style="margin-top:.8rem" hidden></div>
   <div id="found" hidden>
     <div id="about" style="margin-top:1rem"></div>
     <div id="fit" style="margin-top:1rem"></div>
@@ -232,6 +236,67 @@ function fitRows(data){
 
 let found = null;
 
+/* Where a name is looked up. Hugging Face names a repository owner/model; Ollama's own library names
+   a model and a tag (ornith-1.5:122b), which Hugging Face has never heard of. A pasted address says
+   which it is by itself, and switches the choice. */
+const SOURCES = {
+  huggingface: {label: 'Repository', placeholder: 'e.g. unsloth/Qwen3-8B-GGUF', asking: 'Asking Hugging Face',
+                hint: 'A Hugging Face repository, as <code>owner/model</code>. Every quantization it publishes is '
+                    + "measured against this machine's memory, with the key/value cache counted in."},
+  ollama: {label: 'Model', placeholder: 'e.g. qwen3:8b or ornith-1.5:122b', asking: "Asking Ollama's library",
+           hint: "A model from Ollama's library, as <code>model</code> or <code>model:tag</code> (or its "
+               + 'ollama.com address). Every tag of that size is measured against this machine, with the '
+               + "key/value cache counted in from the model's own header."},
+};
+const sourceBox = document.getElementById('source');
+
+function showSource(){
+  const source = SOURCES[sourceBox.value];
+  document.getElementById('repoLabel').textContent = source.label;
+  document.getElementById('repo').placeholder = source.placeholder;
+  document.getElementById('sourceHint').innerHTML = source.hint;
+  try{ localStorage.setItem('models.source', sourceBox.value); }catch(e){}
+}
+try{ const kept = localStorage.getItem('models.source'); if(SOURCES[kept]) sourceBox.value = kept; }catch(e){}
+showSource();
+sourceBox.addEventListener('change', showSource);
+document.getElementById('repo').addEventListener('input', e => {
+  const text = e.target.value.trim();
+  const said = /^(https?:\/\/)?(www\.)?(ollama\.com|registry\.ollama\.ai)\//i.test(text) || /^ollama\//i.test(text) ? 'ollama'
+             : /^(https?:\/\/)?(www\.)?(huggingface\.co|hf\.co)\//i.test(text) ? 'huggingface' : null;
+  if(said && said !== sourceBox.value){ sourceBox.value = said; showSource(); }
+});
+
+function ollamaResult(f){
+  const rows = f.tags.map(t => {
+    const runs = t.run_mode ? `<span class="pill ${t.run_mode === 'GPU' ? 'on' : 'off'}">${escapeHtml(t.run_mode)}</span>`
+                            : '<span class="pill err">too big</span>';
+    const action = t.installed ? '<span class="muted">installed</span>'
+      : !t.pullable ? `<span class="muted" style="font-size:.8rem">${escapeHtml(t.why)}</span>`
+      : t.run_mode ? `<button class="btn btn-sm" data-pull="${escapeHtml(t.name)}">Pull</button>` : '';
+    return `<tr${t.recommended ? ' style="background:rgba(99,102,241,.12)"' : ''}>
+      <td><code>${escapeHtml(t.tag)}</code>${t.recommended ? ' <span class="pill on">best fit</span>' : ''}</td>
+      <td>${escapeHtml(t.quantization || t.format || '')}</td>
+      <td>${t.size_gb} GB${t.projector_gb ? `<br><span class="muted" style="font-size:.78rem">+ ${t.projector_gb} GB vision</span>` : ''}</td>
+      <td>${t.memory_needed_gb} GB<br><span class="muted" style="font-size:.78rem">${
+        t.kv_cache_gb} GB cache at ${Math.round(t.context_length / 1024)}K${t.kv_estimated ? ', estimated' : ''}</span></td>
+      <td>${runs}</td>
+      <td style="text-align:right">${action}</td></tr>`;
+  }).join('');
+  const sys = f.system_info || {};
+  const gb = b => b ? (b / 1024 ** 3).toFixed(0) + ' GB' : '?';
+  return `<div><strong style="font-size:1.05rem">${escapeHtml(f.name)}</strong>
+      <span class="muted"> &middot; ${escapeHtml([f.family, f.parameters].filter(Boolean).join(', '))}</span>
+      <a class="linkish" href="${escapeHtml(f.page)}" target="_blank" rel="noopener" style="margin-left:.6rem">ollama.com &#8599;</a>
+      ${f.title ? `<div class="muted" style="font-size:.82rem">${escapeHtml(f.title)}</div>` : ''}
+    </div>
+    <p class="muted" style="font-size:.84rem;margin:.6rem 0">Measured against ${gb(sys.total_vram)} of GPU memory and
+      ${gb(sys.available_ram)} of free RAM. "GPU + CPU" runs, slower, with the layers that do not fit kept in RAM.</p>
+    <div style="overflow-x:auto"><table>
+      <tr><th>Tag</th><th>Quantization</th><th>Size</th><th>Memory needed</th><th>Runs as</th><th></th></tr>${rows}
+    </table></div>`;
+}
+
 // A repository of safetensors only has nothing to download here. When somebody has converted it, the
 // most downloaded conversion is checked straight away instead - its sizes are exact and its files
 // installable - and `original` (the repository asked for, and its other conversions) says so above it.
@@ -241,11 +306,19 @@ async function check(original, stay){
   if(!repo) return;
   showError('');
   document.getElementById('found').hidden = true;
-  document.getElementById('checking').hidden = false;
+  const checking = document.getElementById('checking');
+  checking.textContent = SOURCES[sourceBox.value].asking + '\u2026';
+  checking.hidden = false;
   document.getElementById('check').disabled = true;
   try{
     found = await api('/admin/models/check', {method: 'POST', headers: {'Content-Type': 'application/json'},
-                                              body: JSON.stringify({model_id: repo})});
+                                              body: JSON.stringify({model_id: repo, source: sourceBox.value})});
+    if(found.source === 'ollama'){
+      document.getElementById('about').innerHTML = '';
+      document.getElementById('fit').innerHTML = ollamaResult(found);
+      document.getElementById('found').hidden = false;
+      return;
+    }
     const others = found.gguf_alternatives || [];
     if(!original && !stay && !found.is_gguf_repo && others.length){
       document.getElementById('repo').value = others[0].id;
@@ -408,6 +481,8 @@ async function install(mode, quantization, source){
 }
 
 document.getElementById('fit').addEventListener('click', e => {
+  const pull = e.target.closest('[data-pull]');
+  if(pull) return install('library', 'library', pull.dataset.pull);
   const wanted = e.target.closest('[data-install]');
   if(wanted) return install(wanted.dataset.install, wanted.dataset.quant, wanted.dataset.source);
   const original = e.target.closest('[data-original]');

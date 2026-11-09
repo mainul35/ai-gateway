@@ -22,7 +22,7 @@ from app.auth import Principal, generate_key, hash_key, require_admin, require_m
 from app import config_writer
 from app.engine.supervisor import supervisor
 from app.engine import builds as engine_builds, convert, gguf_meta, profiles as engine_profiles, serving
-from utils import hf_client, hf_download
+from utils import hf_client, hf_download, ollama_library
 from utils.ollama_client import (StreamCancellation, check_ollama_status, ollama_host,
                                  stream_create_model, stream_pull_model)
 from utils.system_info import get_system_info, measure_hardware
@@ -818,6 +818,8 @@ def _progress_of(job):
 
 class ModelCheck(BaseModel):
     model_id: str = Field(min_length=1, max_length=256)
+    # Where the name is looked up: a Hugging Face repository, or a model in Ollama's own library
+    source: str = Field(default="huggingface", pattern="^(huggingface|ollama)$")
 
 
 class ModelInstall(BaseModel):
@@ -828,7 +830,8 @@ class ModelInstall(BaseModel):
     # "engine" downloads it for llama.cpp and adds an engine profile (config/engines.local.yaml);
     # "vllm" and "sglang" download the model's own files (safetensors) and add a profile that runs them;
     # "convert" makes a GGUF of them in that quantization (app/engine/convert.py) and adds a llama.cpp engine
-    mode: str = Field(default="pull", pattern="^(pull|create|engine|vllm|sglang|convert)$")
+    # "library" pulls a model from Ollama's own library by its name there (ornith-1.5:122b)
+    mode: str = Field(default="pull", pattern="^(pull|create|engine|vllm|sglang|convert|library)$")
     context_length: int = fitting.DEFAULT_CONTEXT_LENGTH
 
 
@@ -949,10 +952,57 @@ def _provider_answers(gguf_files, recommendations, builds, served, sharded=False
     return answers
 
 
+def _look_up_ollama(name, installed):
+    """What Ollama's library has under this name, and how each of its tags would run here. Blocking."""
+    found = ollama_library.look_up(name)
+    if "error" in found:
+        return found
+    system = get_system_info()
+    rows = []
+    for tag in found["tags"]:
+        cache = fitting.kv_cache(tag["architecture"])
+        # The vision projector is loaded beside the weights, so it counts too
+        weights = tag["size"] + tag["projector"]
+        memory_needed = weights * fitting.MEMORY_OVERHEAD + cache["kv_cache_recommended_bytes"]
+        mode = fitting.run_mode(system, memory_needed) if weights else None
+        gguf = tag["format"] in ("gguf", "")
+        rows.append({
+            "tag": tag["tag"], "name": tag["name"], "quantization": tag["quantization"], "format": tag["format"],
+            "parameters": tag["parameters"], "size_gb": round(tag["size"] / 1024 ** 3, 2),
+            "projector_gb": round(tag["projector"] / 1024 ** 3, 2),
+            "memory_needed_gb": round(memory_needed / 1024 ** 3, 2), "context_length": cache["recommended_context_length"],
+            "kv_cache_gb": cache["kv_cache_recommended_gb"], "kv_estimated": cache["estimated"],
+            "vram_usage_percent": round(memory_needed / system["total_vram"] * 100, 1) if system["total_vram"] else None,
+            "run_mode": mode, "installed": tag["name"] in installed or (tag["tag"] == "latest" and found["model"] in installed),
+            # Ollama on this kind of machine runs GGUF; a tag published another way (safetensors, as
+            # NVFP4 is) is listed, but not offered to pull
+            "pullable": gguf,
+            "why": "" if gguf else f"published as {tag['format']}, not as a GGUF file, which is what this machine's "
+                                   "Ollama loads",
+            "recommended": False,
+        })
+    # Best how it runs (on the GPU alone first), then the most of the model kept: the biggest file
+    candidates = [r for r in rows if r["run_mode"] and r["pullable"] and not r["installed"]] or \
+                 [r for r in rows if r["run_mode"] and r["pullable"]]
+    if candidates:
+        best = min(fitting.RUN_MODE_ORDER[r["run_mode"]] for r in candidates)
+        max((r for r in candidates if fitting.RUN_MODE_ORDER[r["run_mode"]] == best),
+            key=lambda r: r["size_gb"])["recommended"] = True
+    return {"source": "ollama", "name": found["name"], "model": found["model"], "page": found["page"],
+            "family": found["family"], "parameters": found["parameters"], "title": found["title"],
+            "tags": rows, "system_info": system}
+
+
 @router.post("/models/check")
 async def check_model(payload: ModelCheck, _: Principal = Depends(require_admin)):
     """What this model is, and which of its quantizations this machine could actually run."""
     model_id = payload.model_id.strip()
+    if payload.source == "ollama":
+        installed = {m["name"] for m in await _ollama_models()}
+        found = await asyncio.to_thread(_look_up_ollama, model_id, installed)
+        if "error" in found:
+            raise HTTPException(found.get("status_code") or status.HTTP_503_SERVICE_UNAVAILABLE, found["error"])
+        return found
     if not hf_client.is_valid_model_id(model_id):
         raise HTTPException(status.HTTP_400_BAD_REQUEST,
                             "That does not look like a Hugging Face repository name (owner/model)")
@@ -1139,7 +1189,10 @@ def _start_install(entry, who):
     cancellation = StreamCancellation()
     label = entry.get("label", "")
     source = fitting.hf_reference(entry["model_id"], entry["quantization"], label)
-    if entry["mode"] == "engine":
+    if entry["mode"] == "library":
+        name = entry["model_id"]
+        rows = stream_pull_model(name, cancellation)
+    elif entry["mode"] == "engine":
         name = fitting.engine_name(entry["model_id"], entry["quantization"], label)
         rows = _engine_rows(entry, name, cancellation)
     elif entry["mode"] == "convert":
@@ -1196,10 +1249,16 @@ async def install_model(payload: ModelInstall, principal: Principal = Depends(re
     Cancelling is a separate, deliberate act.
     """
     model_id = payload.model_id.strip()
-    if not hf_client.is_valid_model_id(model_id):
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, "That is not a Hugging Face repository name")
     label = ""
-    if payload.mode not in serving.ENGINES and payload.quantization not in fitting.QUANTIZATION_LEVELS:
+    if payload.mode == "library":
+        parsed = ollama_library.parse(model_id)
+        if not parsed:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "That is not an Ollama model name")
+        model_id = ollama_library.display(*parsed)
+    elif not hf_client.is_valid_model_id(model_id):
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "That is not a Hugging Face repository name")
+    if payload.mode not in serving.ENGINES and payload.mode != "library" \
+            and payload.quantization not in fitting.QUANTIZATION_LEVELS:
         if not payload.quantization.startswith(hf_client.FILE_KEY):
             raise HTTPException(status.HTTP_400_BAD_REQUEST, f"Unknown quantization {payload.quantization}")
         # A file that names no standard quantization: Ollama finds it by the label its name shows
