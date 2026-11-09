@@ -429,10 +429,14 @@ function openEditor(name){
   document.getElementById('editName').textContent = editing.name;
   const exact = new Set(editing.allowed_models.filter(m => !/[*?[]/.test(m)));
   const patterns = editing.allowed_models.filter(m => /[*?[]/.test(m));
-  document.getElementById('modelChecks').innerHTML = models.length
-    ? models.map(m => `<label style="margin:0;font-size:.88rem;display:flex;gap:.4rem;align-items:center">
+  // A model they were given that is not in the list now (removed, renamed, or a server that is
+  // asleep) is still offered, ticked, so saving keeps it unless it is unticked here
+  const unlisted = [...exact].filter(m => !models.includes(m));
+  document.getElementById('modelChecks').innerHTML = models.length || unlisted.length
+    ? [...models, ...unlisted].map(m => `<label style="margin:0;font-size:.88rem;display:flex;gap:.4rem;align-items:center">
         <input type="checkbox" value="${escapeHtml(m)}" ${exact.has(m) ? 'checked' : ''} style="width:auto">
-        <code style="background:none;padding:0">${escapeHtml(m)}</code></label>`).join('')
+        <code style="background:none;padding:0">${escapeHtml(m)}</code>${unlisted.includes(m)
+          ? ' <span class="muted" style="font-size:.76rem">(not in the model list now)</span>' : ''}</label>`).join('')
     : '<span class="muted">No models visible to you.</span>';
   document.getElementById('patterns').value = patterns.join(', ');
   document.querySelector(`input[name=mode][value=${editing.model_access}]`).checked = true;
