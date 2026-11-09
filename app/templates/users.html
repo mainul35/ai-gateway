@@ -2,9 +2,38 @@
 {% block title %}Users &middot; Model Gateway{% endblock %}
 {% block content %}
 <style>
-details.keys summary{cursor:pointer;color:var(--muted)}
-details.keys summary:hover{color:var(--text)}
-details.keys .key-row{display:flex;align-items:center;gap:.6rem;flex-wrap:wrap;margin-top:.4rem;font-size:.85rem}
+/* All users: one short line each, and the one picked opened beside the list */
+.users-head{display:flex;align-items:center;gap:1rem;flex-wrap:wrap;margin-bottom:.6rem}
+.users-head h2{margin:0;flex:1}
+.users-head input{max-width:16rem;margin:0}
+.users-split{display:grid;grid-template-columns:minmax(0, 1fr);gap:1.2rem;align-items:start}
+.users-split.open{grid-template-columns:minmax(0, 1fr) minmax(20rem, 26rem)}
+table.people td,table.people th{padding:.42rem .55rem;white-space:nowrap}
+table.people tr[data-user]{cursor:pointer}
+table.people tr[data-user]:hover td{background:rgba(255,255,255,.035)}
+table.people tr[data-user]:focus-visible{outline:2px solid var(--primary);outline-offset:-2px}
+table.people tr.selected td{background:rgba(99,102,241,.16)}
+table.people td.who{max-width:17rem;overflow:hidden;text-overflow:ellipsis}
+table.people td.who .mail{display:block;font-size:.76rem;overflow:hidden;text-overflow:ellipsis}
+.user-detail{border:1px solid var(--border);border-radius:10px;padding:.9rem 1rem;background:var(--bg);
+             position:sticky;top:1rem;max-height:calc(100vh - 2rem);overflow-y:auto}
+.detail-title{display:flex;align-items:flex-start;gap:.6rem;margin-bottom:.4rem}
+.detail-title h3{margin:0;font-size:1.05rem;overflow-wrap:anywhere}
+.detail-title > div{flex:1}
+.close-detail{background:none;border:none;color:var(--muted);font-size:1.3rem;line-height:1;cursor:pointer;padding:0 .2rem}
+.close-detail:hover{color:var(--text)}
+.detail-section{border-top:1px solid var(--input);padding:.7rem 0 .2rem;font-size:.9rem}
+.detail-section .lbl{display:block;margin-bottom:.35rem}
+.detail-section select{width:auto}
+.section-head{display:flex;align-items:center;justify-content:space-between;gap:.5rem;margin-bottom:.3rem}
+.section-head .lbl{margin:0}
+.user-detail .key-row{display:flex;align-items:center;gap:.5rem;flex-wrap:wrap;margin:.3rem 0;font-size:.84rem}
+#accessEditor h3{font-size:.9rem;margin:.2rem 0 .45rem}
+#accessEditor #modelChecks,#accessEditor #featureChecks{grid-template-columns:minmax(0, 1fr) !important}
+@media (max-width: 1000px){
+  .users-split.open{grid-template-columns:minmax(0, 1fr)}
+  .user-detail{position:static;max-height:none}
+}
 </style>
 <h1>Users</h1>
 <p class="sub">
@@ -100,45 +129,54 @@ details.keys .key-row{display:flex;align-items:center;gap:.6rem;flex-wrap:wrap;m
   </div>
   <p class="muted" style="margin:.75rem 0 0;font-size:.85rem">
     People who sign in through SSO for the first time appear as sign-in requests for an admin. To give
-    someone only certain models, add them with <em>none</em> and then use <em>Edit access</em>.
+    someone only certain models, add them with <em>none</em>, then pick them in the list below.
   </p>
 </div>
 
-<div class="card" id="accessEditor" hidden style="margin-bottom:1.5rem;border:1px solid var(--primary)">
-  <h2>Access for <span id="editName"></span></h2>
-  <h3 style="font-size:.95rem;margin:.2rem 0 .5rem">Models</h3>
-  <div class="row" style="gap:1.25rem;margin-bottom:1rem">
-    <label style="margin:0"><input type="radio" name="mode" value="all" style="width:auto"> All models</label>
-    <label style="margin:0"><input type="radio" name="mode" value="selected" style="width:auto"> Selected models</label>
-    <label style="margin:0"><input type="radio" name="mode" value="public" style="width:auto"> Public models</label>
-    <label style="margin:0"><input type="radio" name="mode" value="none" style="width:auto"> No models</label>
-  </div>
-  <div id="selectedPanel">
-    <div class="row" style="margin-bottom:.5rem">
-      <button class="btn btn-sm btn-secondary" type="button" id="checkAll">Select all</button>
-      <button class="btn btn-sm btn-secondary" type="button" id="checkNone">Clear</button>
-    </div>
-    <div id="modelChecks" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(19rem,1fr));gap:.3rem .9rem;margin-bottom:1rem"></div>
-    <label>
-      <span class="lbl">Extra patterns (optional, comma separated)</span>
-      <input id="patterns" placeholder="qwen*, hf.co/unsloth/*">
-      <span class="hint">Patterns also cover models added later that match. Admins only, or managers who have every model.</span>
-    </label>
-  </div>
-  <h3 style="font-size:.95rem;margin:.6rem 0 .3rem">Features</h3>
-  <p class="muted" style="margin:0 0 .5rem;font-size:.85rem">What they may use besides the models, granted to
-    them as a person. A feature they have neither here nor from a group is hidden from them and refused by
-    the server.<span id="featuresDefault"></span></p>
-  <div id="featureChecks" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(16rem,1fr));gap:.3rem .9rem;margin-bottom:1rem"></div>
-  <div class="row">
-    <button class="btn" id="saveAccess">Save access</button>
-    <button class="btn btn-secondary" id="cancelAccess">Cancel</button>
-  </div>
-</div>
-
 <div class="card">
-  <h2>All users</h2>
-  <div id="users" class="muted">Loading&hellip;</div>
+  <div class="users-head">
+    <h2>All users</h2>
+    <input type="search" id="userFilter" placeholder="Find a user" aria-label="Find a user">
+  </div>
+  <div class="users-split" id="usersSplit">
+    <div id="users" class="muted">Loading&hellip;</div>
+    <aside class="user-detail" id="userDetail" hidden aria-label="The user picked">
+      <div id="detailHead"></div>
+      <div id="accessEditor" class="detail-section" hidden>
+        <span id="editName" hidden></span>
+        <h3>Models</h3>
+        <div class="row" style="gap:1.25rem;margin-bottom:1rem">
+          <label style="margin:0"><input type="radio" name="mode" value="all" style="width:auto"> All models</label>
+          <label style="margin:0"><input type="radio" name="mode" value="selected" style="width:auto"> Selected models</label>
+          <label style="margin:0"><input type="radio" name="mode" value="public" style="width:auto"> Public models</label>
+          <label style="margin:0"><input type="radio" name="mode" value="none" style="width:auto"> No models</label>
+        </div>
+        <div id="selectedPanel">
+          <div class="row" style="margin-bottom:.5rem">
+            <button class="btn btn-sm btn-secondary" type="button" id="checkAll">Select all</button>
+            <button class="btn btn-sm btn-secondary" type="button" id="checkNone">Clear</button>
+          </div>
+          <div id="modelChecks" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(19rem,1fr));gap:.3rem .9rem;margin-bottom:1rem"></div>
+          <label>
+            <span class="lbl">Extra patterns (optional, comma separated)</span>
+            <input id="patterns" placeholder="qwen*, hf.co/unsloth/*">
+            <span class="hint">Patterns also cover models added later that match. Admins only, or managers who have every model.</span>
+          </label>
+        </div>
+        <h3 style="margin-top:.8rem">Features</h3>
+        <p class="muted" style="margin:0 0 .5rem;font-size:.85rem">What they may use besides the models, granted to
+          them as a person. A feature they have neither here nor from a group is hidden from them and refused by
+          the server.<span id="featuresDefault"></span></p>
+        <div id="featureChecks" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(16rem,1fr));gap:.3rem .9rem;margin-bottom:1rem"></div>
+        <div class="row">
+          <button class="btn btn-sm" id="saveAccess">Save access</button>
+          <button class="btn btn-sm btn-secondary" id="cancelAccess">Undo changes</button>
+        </div>
+      </div>
+      <div id="detailKeys"></div>
+      <div id="detailDanger"></div>
+    </aside>
+  </div>
 </div>
 {% endblock %}
 
@@ -179,41 +217,6 @@ function saidByAuthServer(u){
   </details>`;
 }
 
-// How many keys, and on opening, each one by its name and dates - never any of the key itself.
-// The list is for managing keys; a key's characters on an admin's screen help nobody and are a
-// piece of a credential on display.
-function keysCell(keys, manageable){
-  if(!keys.length) return '<span class="muted">none</span>';
-  const when = iso => iso ? new Date(iso).toLocaleDateString() : 'never';
-  const rows = keys.map(k => `<div class="key-row">
-      <span>${escapeHtml(k.name || 'key')}</span>
-      <span class="muted">made ${when(k.created_at)} · used ${when(k.last_used_at)}</span>
-      ${manageable ? `<button class="btn btn-danger btn-sm" data-revoke="${k.id}" title="Revoke this key">Revoke</button>` : ''}
-    </div>`).join('');
-  return `<details class="keys"><summary>${keys.length} ${keys.length === 1 ? 'key' : 'keys'}</summary>${rows}</details>`;
-}
-
-function accessSummary(u){
-  if(u.role === 'admin') return '<span class="muted">all (admin)</span>';
-  if(u.model_access === 'all') return 'all models';
-  if(u.model_access === 'none') return '<span class="pill err">none</span>';
-  if(u.model_access === 'public') return 'public models';
-  const list = u.allowed_models;
-  if(!list.length) return '<span class="pill err">none selected</span>';
-  const shown = list.slice(0, 3).map(m => `<code>${escapeHtml(m)}</code>`).join(' ');
-  return shown + (list.length > 3 ? ` <span class="muted">+${list.length - 3} more</span>` : '');
-}
-
-function featuresSummary(u){
-  if(u.role === 'admin') return '<span class="muted">all (admin)</span>';
-  const on = Object.keys(FEATURES).filter(f => u.features.includes(f));
-  const groups = u.groups.length ? `<br><span class="muted" style="font-size:.76rem">groups: ${
-    u.groups.map(escapeHtml).join(', ')}</span>` : '';
-  if(!on.length) return '<span class="pill err">none</span>' + groups;
-  if(on.length === Object.keys(FEATURES).length) return 'all' + groups;
-  return on.map(f => escapeHtml(FEATURES[f])).join(', ') + groups;
-}
-
 function roleCell(u){
   if(me.role !== 'admin') return escapeHtml(u.role);
   return `<select data-role="${escapeHtml(u.name)}" style="width:auto;padding:.3rem .5rem">
@@ -221,40 +224,148 @@ function roleCell(u){
   </select>`;
 }
 
+/* The list is one short line per person, and everything about one of them - role, models,
+   features, keys, whether the account works at all - is changed in the detail view beside it, once
+   they have been picked. A row used to carry all of it at once: a column of model names, a
+   paragraph of features and five buttons, for every person on the page. */
+let selected = null;
+
+function accessShort(u){
+  if(u.role === 'admin') return '<span class="muted">all</span>';
+  if(u.model_access === 'all') return 'all';
+  if(u.model_access === 'public') return 'public';
+  if(u.model_access === 'none') return '<span class="pill err">none</span>';
+  const n = u.allowed_models.length;
+  return n ? `${n} model${n === 1 ? '' : 's'}` : '<span class="pill err">none</span>';
+}
+
+function featuresShort(u){
+  if(u.role === 'admin') return '<span class="muted">all</span>';
+  const total = Object.keys(FEATURES).length;
+  const on = Object.keys(FEATURES).filter(f => u.features.includes(f)).length;
+  if(!on) return '<span class="pill err">none</span>';
+  return on === total ? 'all' : `${on} of ${total}`;
+}
+
 async function loadUsers(){
   const target = document.getElementById('users');
   try{
     users = await api('/admin/users');
     showRequests(users.filter(u => u.approval === 'pending'));
-    const listed = users.filter(u => u.approval !== 'pending');
-    target.innerHTML = `<div style="overflow-x:auto"><table>
-      <tr><th>User</th><th>Role</th><th>Model access</th><th>Features</th><th>Keys</th><th>Status</th><th></th></tr>` + listed.map(u => {
-        const manageable = canManage(u);
-        const keys = u.keys.filter(k => k.is_active);
-        return `<tr>
-          <td>${escapeHtml(u.name)}${u.email && u.email !== u.name ? `<br><span class="muted" style="font-size:.82rem">${escapeHtml(u.email)}</span>` : ''}
-              <br><span class="muted" style="font-size:.78rem">${escapeHtml(u.sign_in)}</span>
-              ${saidByAuthServer(u)}</td>
-          <td>${roleCell(u)}</td>
-          <td>${accessSummary(u)}</td>
-          <td style="white-space:normal;max-width:16rem;font-size:.84rem">${featuresSummary(u)}${
-            u.role !== 'admin' && !u.features_chosen && !u.groups.length ? '<br><span class="muted" style="font-size:.76rem">defaults</span>' : ''}</td>
-          <td>${keysCell(keys, manageable)}</td>
-          <td>${u.is_active ? '<span class="pill on">active</span>' : '<span class="pill off">disabled</span>'}</td>
-          <td style="text-align:right;white-space:nowrap">${manageable ? `
-            ${u.role !== 'admin' ? `<button class="btn btn-sm btn-secondary" data-access="${escapeHtml(u.name)}">Edit access</button>` : ''}
-            ${u.is_active ? `<button class="btn btn-sm btn-secondary" data-newkey="${escapeHtml(u.name)}">New key</button>` : ''}
-            ${u.name === me.name ? '' : u.is_active
-                ? `<button class="btn btn-sm btn-danger" data-active="${escapeHtml(u.name)}" data-value="false">Disable</button>`
-                : `<button class="btn btn-sm" data-active="${escapeHtml(u.name)}" data-value="true">Enable</button>`}
-            ${me.role === 'admin' && u.name !== me.name
-                ? `<button class="btn btn-sm btn-danger" data-purge="${escapeHtml(u.name)}"
-                     title="Removes the account and everything that is theirs, for good">Delete permanently</button>` : ''}`
-            : '<span class="muted" style="font-size:.82rem">admin only</span>'}</td>
-        </tr>`;
-      }).join('') + `</table></div>`;
+    renderUserList();
+    const still = users.find(u => u.name === selected && u.approval !== 'pending');
+    if(still) showDetail(still); else closeDetail();
   }catch(e){ target.textContent = 'Could not load users: ' + e.message; }
 }
+
+function renderUserList(){
+  const target = document.getElementById('users');
+  const wanted = document.getElementById('userFilter').value.trim().toLowerCase();
+  const listed = users.filter(u => u.approval !== 'pending')
+    .filter(u => !wanted || u.name.toLowerCase().includes(wanted) || (u.email || '').toLowerCase().includes(wanted));
+  if(!listed.length){
+    target.innerHTML = `<p class="muted">${wanted ? 'Nobody matches that.' : 'No users yet.'}</p>`;
+    return;
+  }
+  target.innerHTML = `<div style="overflow-x:auto"><table class="people">
+    <tr><th>User</th><th>Role</th><th>Models</th><th>Features</th><th>Keys</th><th>Status</th></tr>` + listed.map(u => {
+      const keys = u.keys.filter(k => k.is_active).length;
+      return `<tr data-user="${escapeHtml(u.name)}" tabindex="0" class="${u.name === selected ? 'selected' : ''}"
+                  title="Open ${escapeHtml(u.name)}">
+        <td class="who"><span class="name">${escapeHtml(u.name)}</span>${
+          u.email && u.email !== u.name ? `<span class="muted mail">${escapeHtml(u.email)}</span>` : ''}</td>
+        <td>${escapeHtml(u.role)}</td>
+        <td>${accessShort(u)}</td>
+        <td>${featuresShort(u)}</td>
+        <td>${keys || '<span class="muted">0</span>'}</td>
+        <td>${u.is_active ? '<span class="pill on">active</span>' : '<span class="pill off">disabled</span>'}</td>
+      </tr>`;
+    }).join('') + '</table></div>';
+}
+
+function pickUser(name){
+  selected = name;
+  document.querySelectorAll('#users tr[data-user]').forEach(row => row.classList.toggle('selected', row.dataset.user === name));
+  const u = users.find(x => x.name === name);
+  if(!u) return;
+  showDetail(u);
+  // Beside the list on a wide screen; under it on a narrow one, where it has to be scrolled to
+  if(window.matchMedia('(max-width: 1000px)').matches){
+    document.getElementById('userDetail').scrollIntoView({behavior: 'smooth', block: 'start'});
+  }
+}
+
+function closeDetail(){
+  selected = null;
+  document.getElementById('userDetail').hidden = true;
+  document.getElementById('usersSplit').classList.remove('open');
+  document.querySelectorAll('#users tr.selected').forEach(row => row.classList.remove('selected'));
+  editing = null;
+}
+
+function showDetail(u){
+  const manageable = canManage(u);
+  const keys = u.keys.filter(k => k.is_active);
+  const when = iso => iso ? new Date(iso).toLocaleDateString() : 'never';
+  document.getElementById('detailHead').innerHTML = `
+    <div class="detail-title">
+      <div style="min-width:0">
+        <h3>${escapeHtml(u.name)}</h3>
+        <div class="muted" style="font-size:.84rem">${u.email && u.email !== u.name ? escapeHtml(u.email) + ' &middot; ' : ''}${escapeHtml(u.sign_in)}</div>
+      </div>
+      ${u.is_active ? '<span class="pill on">active</span>' : '<span class="pill off">disabled</span>'}
+      <button class="close-detail" type="button" data-close-detail title="Close" aria-label="Close">&times;</button>
+    </div>
+    <div class="detail-section">
+      <span class="lbl">Role</span>
+      ${me.role === 'admin' && u.name !== me.name ? roleCell(u) : `<div>${escapeHtml(u.role)}${u.name === me.name ? ' <span class="muted" style="font-size:.8rem">(you)</span>' : ''}</div>`}
+    </div>
+    ${u.role === 'admin' ? `<div class="detail-section"><span class="lbl">Models and features</span>
+        <div class="muted">An admin always has every model and every feature.</div></div>` : ''}
+    ${!manageable ? '<p class="muted" style="font-size:.85rem">Only an admin can change this account.</p>' : ''}`;
+  document.getElementById('detailKeys').innerHTML = `
+    <div class="detail-section">
+      <div class="section-head"><span class="lbl">API keys</span>${manageable && u.is_active
+        ? `<button class="btn btn-sm btn-secondary" data-newkey="${escapeHtml(u.name)}">New key</button>` : ''}</div>
+      ${keys.length ? keys.map(k => `<div class="key-row">
+          <span>${escapeHtml(k.name || 'key')}</span>
+          <span class="muted">made ${when(k.created_at)} &middot; used ${when(k.last_used_at)}</span>
+          ${manageable ? `<button class="btn btn-danger btn-sm" data-revoke="${k.id}" title="Revoke this key">Revoke</button>` : ''}
+        </div>`).join('') : '<div class="muted">No keys.</div>'}
+    </div>
+    ${u.groups.length ? `<div class="detail-section"><span class="lbl">Groups</span><div>${u.groups.map(escapeHtml).join(', ')}</div></div>` : ''}
+    ${saidByAuthServer(u)}`;
+  document.getElementById('detailDanger').innerHTML = manageable && u.name !== me.name ? `
+    <div class="detail-section danger">
+      <span class="lbl">Account</span>
+      <div class="row" style="gap:.5rem">
+        ${u.is_active
+          ? `<button class="btn btn-sm btn-danger" data-active="${escapeHtml(u.name)}" data-value="false">Disable</button>`
+          : `<button class="btn btn-sm" data-active="${escapeHtml(u.name)}" data-value="true">Enable</button>`}
+        ${me.role === 'admin' ? `<button class="btn btn-sm btn-danger" data-purge="${escapeHtml(u.name)}"
+             title="Removes the account and everything that is theirs, for good">Delete permanently</button>` : ''}
+      </div>
+    </div>` : '';
+  const editable = manageable && u.role !== 'admin';
+  document.getElementById('accessEditor').hidden = !editable;
+  if(editable) openEditor(u.name);
+  else editing = null;
+  document.getElementById('userDetail').hidden = false;
+  document.getElementById('usersSplit').classList.add('open');
+}
+
+document.getElementById('userFilter').addEventListener('input', renderUserList);
+document.getElementById('users').addEventListener('click', e => {
+  const row = e.target.closest('tr[data-user]');
+  if(row) pickUser(row.dataset.user);
+});
+document.getElementById('users').addEventListener('keydown', e => {
+  const row = e.target.closest('tr[data-user]');
+  if(row && (e.key === 'Enter' || e.key === ' ')){ e.preventDefault(); pickUser(row.dataset.user); }
+});
+document.getElementById('userDetail').addEventListener('click', e => {
+  if(e.target.closest('[data-close-detail]')) closeDetail();
+});
 
 // Sign-in requests, for admins: the card stays hidden while there are none
 function showRequests(pending){
@@ -338,9 +449,6 @@ function openEditor(name){
     (editing.features_chosen ? '' : editing.groups.length ? ' Nothing granted to them as a person yet.'
                                   : ' These are the defaults of their model access until you save.');
   syncMode();
-  const editor = document.getElementById('accessEditor');
-  editor.hidden = false;
-  editor.scrollIntoView({behavior: 'smooth', block: 'start'});
 }
 
 function syncMode(){
@@ -352,9 +460,7 @@ document.getElementById('checkAll').addEventListener('click', () =>
   document.querySelectorAll('#modelChecks input').forEach(c => c.checked = true));
 document.getElementById('checkNone').addEventListener('click', () =>
   document.querySelectorAll('#modelChecks input').forEach(c => c.checked = false));
-document.getElementById('cancelAccess').addEventListener('click', () => {
-  document.getElementById('accessEditor').hidden = true; editing = null;
-});
+document.getElementById('cancelAccess').addEventListener('click', () => { if(editing) openEditor(editing.name); });
 
 document.getElementById('saveAccess').addEventListener('click', async () => {
   if(!editing) return;
@@ -368,8 +474,6 @@ document.getElementById('saveAccess').addEventListener('click', async () => {
                             features: [...document.querySelectorAll('#featureChecks input:checked')].map(c => c.value)})});
     showCreated(`Access for <strong>${escapeHtml(editing.name)}</strong> saved.`);
     document.getElementById('error').hidden = true;
-    document.getElementById('accessEditor').hidden = true;
-    editing = null;
     loadUsers();
   }catch(e){ showError(e.message); }
 });
@@ -404,7 +508,6 @@ document.addEventListener('change', async e => {
 });
 
 document.addEventListener('click', async e => {
-  const accessBtn = e.target.closest('[data-access]');
   const newKey = e.target.closest('[data-newkey]');
   const revoke = e.target.closest('[data-revoke]');
   const active = e.target.closest('[data-active]');
@@ -434,8 +537,6 @@ document.addEventListener('click', async e => {
       if(!confirm(`Turn down ${reject.dataset.reject}? The request is removed.`)) return;
       await api(`/admin/users/${encodeURIComponent(reject.dataset.reject)}/reject`, {method:'POST'});
       loadUsers();
-    }else if(accessBtn){
-      openEditor(accessBtn.dataset.access);
     }else if(newKey){
       const created = await api('/admin/keys', {method:'POST', headers:{'Content-Type':'application/json'},
         body: JSON.stringify({user: newKey.dataset.newkey, name: 'default'})});
