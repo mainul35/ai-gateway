@@ -34,7 +34,7 @@ from app.routers.openai_v1 import PROXY_PATHS, forward
 from app.tools import (agent, chooser, documents, image_prompt, images, jobs, map_plan,
                         map_web, maps, markdown, mcp_client, media, memory as memory_tool,
                         photo, places, portrait, router as intent_router, self_tools, subtitles,
-                        turn_facts, understand, video_story, voices, web_search)
+                        turn_facts, understand, video_story, voices, web_search, written)
 
 log = logging.getLogger("playground")
 
@@ -600,6 +600,8 @@ async def capabilities(principal: Principal = Depends(authenticate)):
         # Whether there is anything to be agentic with: the feature on, and a tool server
         # that this host could actually run
         "agent": agent.is_available_to(principal) and access.can_use_feature(principal, "agent"),
+        # Which documents the playground can write: Markdown always, a PDF when WeasyPrint is here
+        "documents": ["pdf", "markdown"] if _pdf_available() else ["markdown"],
         # Which map the browser must draw on, and the browser key for it when that is Google's.
         # The two are never mixed: Google's terms forbid their places on anybody else's tiles.
         "maps_tiles": places.tiles() if settings.feature_enabled("maps") else "osm",
@@ -639,6 +641,17 @@ def _image_type(data):
     if data[:4] in (b"II*\x00", b"MM\x00*"):
         return "image/tiff"
     return None
+
+
+_pdf_checked = None
+
+
+def _pdf_available():
+    """Whether PDFs can be made here, found out once: importing WeasyPrint takes a while."""
+    global _pdf_checked
+    if _pdf_checked is None:
+        _pdf_checked = written.is_pdf_available()
+    return _pdf_checked
 
 
 def _file_json(file):
@@ -853,14 +866,19 @@ def _error(message, plain=SERVER_TROUBLE):
 def _one_system(messages):
     """The conversation as the strictest chat templates take it (Mistral Small 4's raises on anything
     else): the system messages - the person's instructions, search results, memory, documents - as
-    one at the start, and two turns of the same side in a row - a question whose answer failed, then
-    the next - as one."""
+    one at the start, and two turns of the same side in a row as one.
+
+    Two questions in a row mean the first one's answer failed. Only the newer one is kept: joined
+    into one message, a model answered the old question, left unanswered weeks earlier, and ignored
+    the new one entirely."""
     said = [m["content"] for m in messages if m["role"] == "system" and isinstance(m["content"], str) and m["content"]]
     turns = []
     for m in messages:
         if m["role"] == "system":
             continue
-        if turns and turns[-1]["role"] == m["role"] and isinstance(turns[-1]["content"], str) \
+        if turns and turns[-1]["role"] == "user" and m["role"] == "user":
+            turns[-1] = m
+        elif turns and turns[-1]["role"] == m["role"] and isinstance(turns[-1]["content"], str) \
                 and isinstance(m["content"], str):
             turns[-1] = {"role": m["role"], "content": turns[-1]["content"] + "\n\n" + m["content"]}
         else:
@@ -881,6 +899,7 @@ class _Answer:
         self.reasoning = ""
         self.tokens = None
         self.sources = None
+        self.document = None    # the file made from it, when a document was asked for
         self.started = time.monotonic()
         self.first_token_at = None
         self._partial = ""
@@ -942,6 +961,9 @@ class CompleteIn(BaseModel):
     # works if each answer says which question it belongs to, and the answer is written down
     # here rather than by the browser.
     answers_to: int | None = None
+    # A document to write rather than an answer: the model writes it, and it is kept as this kind of
+    # file beside the answer (app/tools/written.py)
+    document: str | None = Field(default=None, pattern="^(markdown|pdf)$")
 
 
 async def _ask_helper(principal, body):
@@ -1060,6 +1082,9 @@ async def complete(payload: CompleteIn, principal: Principal = Depends(authentic
         if facts:
             messages.insert(1 if messages and messages[0]["role"] == "system" else 0,
                             {"role": "system", "content": facts})
+    if payload.document:
+        messages.insert(1 if messages and messages[0]["role"] == "system" else 0,
+                        {"role": "system", "content": written.WRITING_PROMPT})
 
     body = {"model": payload.model, "messages": messages, "stream": True}
     if payload.temperature is not None:
@@ -1109,6 +1134,21 @@ async def complete(payload: CompleteIn, principal: Principal = Depends(authentic
         # Measured here, where the model's words arrive one by one. The browser's own clock can see
         # them in a burst - after a web search, through a proxy - and once showed 1760 tok/s.
         yield _event("stats", stats=answer.stats(), model=payload.model)
+        if payload.document and answer.text:
+            yield _event("status", text="Making the PDF" if payload.document == "pdf" else "Saving the document")
+            try:
+                name, data, mime = await asyncio.to_thread(written.make, answer.text, payload.document)
+            except written.WrittenError as e:
+                yield _event("notice", text=str(e))
+                return
+            async with session_factory()() as db:
+                stored = ChatFile(user_id=user.id, kind="written", mime_type=mime, name=name,
+                                  prompt=None, data=data)
+                db.add(stored)
+                await db.commit()
+                await db.refresh(stored)
+            answer.document = {"file_id": stored.id, "name": name, "mime_type": mime, "format": payload.document}
+            yield _event("document", file=_file_json(stored), format=payload.document)
 
     async def save(_job):
         """Writes the turn down once the answer is finished, whoever is still watching."""
@@ -1123,6 +1163,8 @@ async def complete(payload: CompleteIn, principal: Principal = Depends(authentic
                 filed["sources"] = answer.sources
             if payload.answers_to is not None:
                 filed["answers_to"] = payload.answers_to
+            if answer.document:
+                filed["document"] = answer.document
             db.add(ConversationMessage(
                 conversation_id=payload.conversation_id, role="assistant", content=answer.text,
                 reasoning=answer.reasoning or None, model=payload.model,

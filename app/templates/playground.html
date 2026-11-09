@@ -67,7 +67,8 @@ details.tuning label{margin-bottom:.85rem}
 .edit-box .row{display:flex;gap:.5rem;justify-content:flex-end;margin-top:.45rem}
 /* --- the side panel: side questions, documents and web pages beside the conversation ------- */
 .pg{--panel-w:30rem}
-.pg.with-panel{grid-template-columns:17rem minmax(0, 1fr) var(--panel-w)}
+/* However wide it was dragged, the conversation keeps room to be read and written in */
+.pg.with-panel{grid-template-columns:17rem minmax(0, 1fr) min(var(--panel-w), calc(100vw - 17rem - 24rem))}
 .pg.with-panel.panel-wide{grid-template-columns:17rem minmax(0, 1fr)}
 .pg.with-panel.panel-wide .main{display:none}
 .panel{position:relative;display:flex;flex-direction:column;min-width:0;min-height:0;
@@ -361,6 +362,10 @@ a.cite{font-size:.75em;vertical-align:super;text-decoration:none;padding:0 .1rem
             display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}
 .paper .size{font-size:.7rem;color:var(--muted)}
 .paper .glyph{font-size:1.4rem;flex:none}
+/* Which kind of document, asked under the request; and the file made, under its answer */
+.choices{display:flex;flex-wrap:wrap;gap:.45rem;margin-top:.7rem}
+.written{display:flex;align-items:center;gap:.9rem;margin-top:.8rem}
+.written .paper{height:auto;min-height:3.2rem;width:auto;max-width:22rem}
 a.paper{color:var(--text);text-decoration:none}
 /* The camera, when one is asked for: a live picture with a shutter under it */
 .camera{position:fixed;inset:0;z-index:60;background:rgba(0,0,0,.85);display:flex;
@@ -1578,6 +1583,7 @@ function resetChat(how = 'push'){
    page and needs to be testable without a conversation, a server or a login. */
 function fillTranscript(messages){
   history = [];
+  formatQuestion = null;
   // Answers filed under the same question are siblings: the last one asked for is the one
   // shown, and the arrows on it reach the ones before. Anything written before answers knew
   // which question they belonged to has no filing, so it stands on its own exactly as it did.
@@ -1598,6 +1604,7 @@ function fillTranscript(messages){
       box._messageId = m.id;
       box.dataset.message = m.id;
       history.push({role: 'user', content: m.content, images: box._images});
+      dropFormatQuestion();
     }else{
       const turn = extra.answers_to || null;
       const box = answerBox(turn, m.model || (extra.map ? 'OpenStreetMap'
@@ -1610,9 +1617,11 @@ function fillTranscript(messages){
       else if(extra.video) renderVideo(box, extra.video, m.id);
       else if(extra.subtitles) renderSubtitles(box, extra.subtitles, m.content, m.stats);
       else renderAssistant(box, m.content, m.reasoning, withModel, extra.sources, m.html);
+      if(extra.document) showWritten(box, {url: fileUrl(extra.document.file_id), name: extra.document.name});
+      if(extra.asks === 'document_format') showFormatQuestion(box, extra.formats || ['markdown'], extra.request || '');
       // The same question under every answer a model wrote, with the verdict already given: maps,
       // picture search, subtitles and photo work are the tools' answers, not a model's to be ranked on
-      if(m.id && m.model && !extra.map && !extra.media && !extra.subtitles){
+      if(m.id && m.model && !extra.map && !extra.media && !extra.subtitles && !extra.asks){
         addVerdict(box, {messageId: m.id, kind: extra.generated ? 'image' : extra.video ? 'video'
                                                 : extra.agent ? 'agent' : 'chat',
                          category: m.feedback?.category || null, hadPicture: lastHadPicture,
@@ -2517,7 +2526,7 @@ askSelection.addEventListener('click', () => {
   askAside(found.box, found.text.slice(0, 4000));
 });
 
-const ACTION_LABELS = {chat: 'answered directly', search: 'searched the web',
+const ACTION_LABELS = {chat: 'answered directly', search: 'searched the web', document: 'wrote a document',
                        image: 'created an image', edit: 'edited the image',
                        map: 'looked it up on the map', photos: 'found real pictures of it',
                        subtitles: 'wrote down what the video says'};
@@ -3830,6 +3839,102 @@ function refreshSendButton(){
   button.title = working ? 'Sends this when the current answer is finished' : '';
 }
 
+/* --- documents the gateway writes ------------------------------------------------------------
+   Asked for a document, a model used to answer in chat and leave nothing to keep. Now a request for
+   one is recognised here, the kind of file is asked for when the words do not say, and the model
+   writes the document, which the gateway saves as that file (app/tools/written.py) and the side
+   panel opens. */
+
+// Making a file, as opposed to asking about one: a verb that makes something, with a document, a
+// PDF or Markdown as what is made. Reading one ("summarise this document"), asking about the craft
+// ("how do I make a PDF in Java") or wanting code ("write a PDF parser") is not.
+const MAKES_DOCUMENT = /\b(generate|create|make|write|prepare|produce|export|draft|build|give|turn|convert|save|put|compile)\b(?:\s+(?:me|us|it|this|that|everything|all|the\s+[\p{L}\p{N}_-]+))?(?:\s+(?:up\s+)?(?:a|an|as|as\s+a|as\s+an|into|into\s+a|into\s+an|to\s+a|to\s+an|in\s+a|in\s+an|in))?(?:\s+(?!(?:of|from|about|this|the|that|my|your|attached)\b)[\p{L}\p{N}_-]+){0,3}?\s+(document|doc|pdf|markdown|md)\b(?!\s*(?:parser|reader|library|viewer|editor|generator|converter|uploads?|uploader|api|tool|app|component|plugin|module|class|function|script|service|feature|files?\s+(?:upload|reader|parser)))/iu;
+const ASKS_ABOUT = /^\s*(how\s+(do|can|to|would|should|does|is)|what\s+(is|are|does|do)|why|explain|which\s+(library|tool|package))\b/i;
+const FORMAT_LABELS = {pdf: 'PDF', markdown: 'Markdown'};
+const IN_CHAT = 'Answer in the chat instead';
+
+function wantsDocument(text){
+  return !!text && text.length <= 500 && !ASKS_ABOUT.test(text) && MAKES_DOCUMENT.test(text);
+}
+
+function formatIn(text){
+  if(/\bpdf\b/i.test(text)) return 'pdf';
+  if(/\b(markdown|md)\b|\.md\b/i.test(text)) return 'markdown';
+  return null;
+}
+
+function documentKinds(){ return caps.documents?.length ? caps.documents : ['markdown']; }
+
+// The question "which kind of document?", while it waits for its answer
+let formatQuestion = null;
+
+function showFormatQuestion(box, kinds, request){
+  dropFormatQuestion();
+  const row = document.createElement('div');
+  row.className = 'choices';
+  row.innerHTML = kinds.map(k => `<button class="btn btn-sm" data-format="${k}">${FORMAT_LABELS[k]}</button>`).join('')
+    + `<button class="btn btn-sm btn-secondary" data-format="">${IN_CHAT}</button>`;
+  row.addEventListener('click', e => {
+    const choice = e.target.closest('[data-format]');
+    if(!choice || controller) return;
+    sendTurn({text: choice.dataset.format ? FORMAT_LABELS[choice.dataset.format] : IN_CHAT, fresh: true, images: []});
+  });
+  box.appendChild(row);
+  formatQuestion = {box, request};
+}
+
+function dropFormatQuestion(){
+  formatQuestion?.box.querySelector('.choices')?.remove();
+  formatQuestion = null;
+}
+
+/* Asks which kind of file, and saves the question like any answer: a request left without one is
+   what the next question gets mixed up with */
+async function askDocumentFormat(text, again){
+  const kinds = documentKinds();
+  try{
+    await ensureConversation(text, currentModel());
+  }catch(e){
+    showError('Could not save the conversation: ' + errorText(e));
+    return;
+  }
+  const files = turnFiles.map(f => ({id: f.id, name: f.name, document: !!f.document}));
+  const images = files.map(f => f.id);
+  turnFiles = [];
+  if(!again) history.push({role: 'user', content: text, images});
+  const asked = await askedNow(text, images.map(fileUrl), files,
+                               files.length ? {images: files.map(f => ({file_id: f.id, document: f.document, name: f.name}))} : null,
+                               again);
+  const box = answerBox(again ? again.messageId : asked?._messageId, 'Model Gateway');
+  const question = `Which kind of document would you like: ${kinds.map(k => FORMAT_LABELS[k]).join(' or ')}?`;
+  box.querySelector('.body').textContent = question;
+  recordAnswer(box, question, again ? again.replaceAt : null);
+  showFormatQuestion(box, kinds, text);
+  await saveMessage({role: 'assistant', content: question, model: 'Model Gateway',
+                     attachments: {asks: 'document_format', request: text, formats: kinds,
+                                   answers_to: box.dataset.turn ? Number(box.dataset.turn) : null}});
+  loadConversations();
+}
+
+// The model is chosen for the request itself, not for the one word that said which kind of file
+async function sendDocument(text, format, again, request){
+  const decision = await decideAction(request || text, turnPictures().length > 0);
+  if(decision.action === 'stopped') return;
+  return sendChat(text, {...decision, action: 'document'}, again, format);
+}
+
+/* The file under the answer it was written from; opening it shows it in the side panel */
+function showWritten(box, file){
+  box.querySelector('.written')?.remove();
+  const row = document.createElement('div');
+  row.className = 'written';
+  row.innerHTML = `<a class="paper" href="${escapeHtml(file.url)}" title="Open the document">
+      <span class="glyph">${paperGlyph(file)}</span>
+      <span class="what"><span class="doc-name">${escapeHtml(file.name || 'document')}</span></span></a>
+    <a class="linkish" href="${escapeHtml(file.url)}?download=1" download="${escapeHtml(file.name || 'document')}">Download</a>`;
+  box.querySelector('.body').after(row);
+}
+
 // --- sending ----------------------------------------------------------------
 
 // With more than one tool switched on, a small model decides what this message asks for
@@ -4023,6 +4128,15 @@ async function routeTurn(text, asking){
 
   // A video story is a choice, like the agent: switched on, it takes the turn
   if(videoMode()) return sendVideo(text, asking);
+  // A document: which kind is asked when the words do not say, and it is written once they do
+  if(!(tools.agent && caps.agent)){
+    const waiting = formatQuestion;
+    dropFormatQuestion();
+    const format = formatIn(text);
+    const usable = format && documentKinds().includes(format) ? format : null;
+    if(waiting && usable) return sendDocument(text, usable, asking, waiting.request);
+    if(wantsDocument(text)) return usable ? sendDocument(text, usable, asking, text) : askDocumentFormat(text, asking);
+  }
   const decision = await decideAction(text, turnPictures().length > 0);
   if(decision.action === 'stopped') return;
   // The agent is a choice, not a guess: switched on, it takes the turn
@@ -4035,7 +4149,7 @@ async function routeTurn(text, asking){
   return sendChat(text, decision, asking);
 }
 
-async function sendChat(text, decision, again){
+async function sendChat(text, decision, again, documentFormat = null){
   const hadPicture = turnPictures().length > 0;    // what the answer's question asks about
   const model = decision.model || currentModel(turnPictures().length > 0);
   if(turnPictures().length && !canSee(model)){
@@ -4082,6 +4196,8 @@ async function sendChat(text, decision, again){
                    web_search: decision.action === 'search',
                    vision: tools.vision && caps.vision};
   if(models[model]?.owned_by === 'llamacpp') payload.thinking = document.getElementById('thinking').checked;
+  if(documentFormat) payload.document = documentFormat;
+  let written = null;
 
   controller = new AbortController();
   busy(true);
@@ -4095,6 +4211,7 @@ async function sendChat(text, decision, again){
         else if(event.type === 'notice') showError(event.text);
         else if(event.type === 'sources'){ sources = event.sources; renderSources(box, sources); }
         else if(event.type === 'stats') measured = event.stats;   // timed where the words arrive, not here
+        else if(event.type === 'document') written = event.file;
         return;
       }
       if(chunk.usage) usage = chunk.usage;
@@ -4152,6 +4269,10 @@ async function sendChat(text, decision, again){
     return;
   }
   renderAssistant(box, answer, thinking, stats, sources, await renderedHtml(answer));
+  if(written){
+    showWritten(box, written);
+    openFile(written.url, written.name);
+  }
   if(currentId) addVerdict(box, {conversationId: currentId, startsWith: answer.slice(0, 200), kind: 'chat',
                                  category: decision.category, hadPicture, searched: decision.action === 'search'});
 

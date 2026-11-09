@@ -34,3 +34,5 @@ mcp>=2.2
 yt-dlp>=2026.8.19
 faster-whisper>=1.2.1
 nvidia-cublas-cu12>=12.4; sys_platform == "linux"
+# Draws the PDFs the playground writes (app/tools/written.py); needs Pango on the host (libpango-1.0-0)
+weasyprint>=66.0
