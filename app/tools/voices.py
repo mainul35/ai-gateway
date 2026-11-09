@@ -151,11 +151,16 @@ def job_voice(lang, slot, narrator):
 
 def retune(pitch, tempo):
     """The ffmpeg filter that turns one voice into a character: asetrate lifts or drops the pitch, and
-    atempo gives back the pace the pitch change took away, then the character's own of it. Both speak
-    at 24 kHz, so the sample rate is written out rather than guessed at."""
+    atempo gives back the pace the pitch change took away, then the character's own of it.
+
+    asetrate scales whatever rate it is given, so the line is brought to 24 kHz first: the voices do
+    not all speak at it (the Bangla narration came at 16 kHz), and 24000 x 0.92 read as a 16 kHz
+    line raised the pitch by a third instead of lowering it. The filter that changes the rate back is
+    aresample; "resample" is not one, and every turned voice failed with it from 2026-10-25 to
+    2026-11-09 ("No option name near '24000'")."""
     if (pitch, tempo) == (1.0, 1.0):
-        return ""
-    return f"asetrate=24000*{pitch:.3f},resample=24000,atempo={tempo / pitch:.4f}"
+        return "anull"
+    return f"aresample=24000,asetrate=24000*{pitch:.3f},aresample=24000,atempo={tempo / pitch:.4f}"
 
 
 def shifted(lang, slot, narrator):
