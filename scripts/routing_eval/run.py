@@ -69,13 +69,15 @@ async def new_route(client, model, message, attachments, has_images, history):
         found = router.clean_answer(await ask(client, router.build_request(message, allowed, history), model), allowed)
         return router.settle_action(found, message, allowed, has_images)[0]
 
-    answer, other = await asyncio.gather(
-        ask(client, understand.build_request(message, attachments, history), model), second())
+    answer, other, file_answer = await asyncio.gather(
+        ask(client, understand.build_request(message, attachments, history), model), second(),
+        ask(client, understand.build_document_request(message, attachments, history), model))
     reading = understand.read_answer(answer)
     if reading is None:
         return router.by_keywords(message, allowed, has_images), router.category_by_keywords(message, has_images), None
-    return (understand.decide(reading, allowed, has_images, message, other),
-            understand.category(reading, has_images), reading)
+    file_wanted = understand.wants_a_document(file_answer)
+    return (understand.decide(reading, allowed, has_images, message, other, file_wanted),
+            understand.category(reading, has_images), {**reading, "second_opinion": other, "wants_a_document": file_wanted})
 
 
 def acceptable(value, wanted):

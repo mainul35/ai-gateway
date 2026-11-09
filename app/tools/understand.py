@@ -26,7 +26,7 @@ import re
 
 from app import settings
 from app.tools import router
-from app.tools.router import BACKDROP, BLUR, CHAT, CLEAN, EDIT, IMAGE, MAP, PHOTOS, SEARCH
+from app.tools.router import BACKDROP, BLUR, CHAT, CLEAN, DOCUMENT, EDIT, IMAGE, MAP, PHOTOS, SEARCH
 
 log = logging.getLogger("tools.understand")
 
@@ -143,6 +143,47 @@ Message: "make a poster for this"
 {"request": "a poster designed from the attached document", "wants_back": "new_picture", "picture_change": "none", "facts_from": "knowledge", "work": "small_talk"}"""
 
 
+# Whether a document is wanted, read by a second reading beside the first. Put into PROMPT itself as
+# a sixth thing to want back, it was understood (requests for a document 12 of 12, from 0), but the
+# 1.7B model then read other messages differently: "how do I make a good logo?" as a picture, a
+# drive between two cities as an answer - 62 of 64 and 28 of 30 where it had 64 and 29. Asked as its
+# own yes or no, or as how to hand the result over, the same model said "a file" for poems, code and
+# watercolours. So the prompt with documents in it is asked as well, at the same time, and only its
+# answer to "is it a document?" is used: everything else still comes from the reading that was
+# measured, whatever the added words do to the second one.
+DOCUMENT_WANT = """  document        - a piece of writing produced as a file to keep, download, print or send: a resume
+                    or CV, a report, a letter, minutes, notes, a handout, a guide, a proposal. Whatever
+                    the words or the language, whenever the person wants it as a PDF, Markdown, a
+                    document or a file - also "that, as a file" about something written earlier.
+                    Reading, summarising or translating an attached document is answer, and so is code
+                    that makes files. A poster, a flyer to look at or any other picture is new_picture.
+"""
+DOCUMENT_PROMPT = PROMPT.replace("  place           - a position on a map:",
+                                 DOCUMENT_WANT + "  place           - a position on a map:", 1)
+DOCUMENT_SCHEMA = {**SCHEMA, "properties": {**SCHEMA["properties"],
+                                            "wants_back": {"type": "string", "enum": [*WANTS, "document"]}}}
+assert DOCUMENT_PROMPT != PROMPT, "the place line moved: the document reading would be the plain one"
+
+
+def build_document_request(message, attachments=(), history=()):
+    """The second reading: the same view of the conversation, the prompt with documents in it."""
+    request = build_request(message, attachments, history)
+    request["response_format"] = {"type": "json_schema",
+                                  "json_schema": {"name": "reading", "schema": DOCUMENT_SCHEMA}}
+    request["messages"] = [{"role": "system", "content": DOCUMENT_PROMPT}, request["messages"][1]]
+    return request
+
+
+def wants_a_document(text):
+    """Whether the second reading says a document is wanted; False when it cannot be read."""
+    text = re.sub(r"<think>.*?</think>", "", text or "", flags=re.S)
+    match = re.search(r"\{.*\}", text, re.S)
+    try:
+        return (json.loads(match.group(0)).get("wants_back") == "document") if match else False
+    except (ValueError, AttributeError):
+        return False
+
+
 def describe_attachments(attachments):
     """What came with the message, as the line the prompt shows: "1 picture (a.jpg), 1 document (b.pdf)"."""
     groups = {}
@@ -213,7 +254,7 @@ CATEGORY = {"code": "code", "reasoning": "reasoning", "long_read": "long", "expe
             "small_talk": "light"}
 
 
-def decide(reading, allowed, has_images, message="", second_opinion=None):
+def decide(reading, allowed, has_images, message="", second_opinion=None, file_wanted=False):
     """The tool for a reading, from those the toggles allow. CHAT when the wanted one is switched off.
 
     One thing is checked against the words rather than taken on trust: the three photograph tools
@@ -225,6 +266,12 @@ def decide(reading, allowed, has_images, message="", second_opinion=None):
 
     def first(*actions):
         return next((a for a in actions if a in allowed), CHAT)
+
+    # A file is written by the chat model, so it needs no tool switched on. Only a plain answer or a
+    # new picture becomes one: a place, a photo found or a picture changed is something else entirely,
+    # and a resume "as a PDF" is what the reading most often took for a picture
+    if file_wanted and wants in (ANSWER, NEW_PICTURE):
+        return DOCUMENT
 
     # "Blur the background" came back as wanting an answer with a background blur as the change: the
     # two fields disagree, and the words settle it - they ask for exactly what that tool does

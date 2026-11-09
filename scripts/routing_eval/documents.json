@@ -1,0 +1,130 @@
+[
+ {
+  "message": "generate an updated CV for me as a PDF",
+  "want": "document"
+ },
+ {
+  "message": "genrate teh report pdf file with the newest info",
+  "want": "document"
+ },
+ {
+  "message": "pls make my cv into pdf",
+  "want": "document"
+ },
+ {
+  "message": "can you put everything we discussed into a report I can download",
+  "want": "document"
+ },
+ {
+  "message": "I need this summary as a markdown file",
+  "want": "document"
+ },
+ {
+  "message": "write my cover letter and give it to me as a document",
+  "want": "document"
+ },
+ {
+  "message": "export the troubleshooting steps as a pdf",
+  "want": "document"
+ },
+ {
+  "message": "prepare meeting minutes from this conversation in a file I can share",
+  "want": "document"
+ },
+ {
+  "message": "make a printable handout of these tips",
+  "want": "document"
+ },
+ {
+  "message": "turn the analysis above into a proper document",
+  "want": "document"
+ },
+ {
+  "message": "draft a project proposal document for a food delivery app",
+  "want": "document"
+ },
+ {
+  "message": "এই আলোচনা থেকে একটি পিডিএফ বানিয়ে দাও",
+  "want": "document"
+ },
+ {
+  "message": "now the full thing please, as a pdf I can send",
+  "history": [
+   {
+    "role": "user",
+    "content": "write a short profile summary from my experience"
+   },
+   {
+    "role": "assistant",
+    "content": "Senior engineer with eight years in backend systems and payments..."
+   }
+  ],
+  "want": "document"
+ },
+ {
+  "message": "can I get that as a file?",
+  "history": [
+   {
+    "role": "user",
+    "content": "list the steps to set up a home lab backup"
+   },
+   {
+    "role": "assistant",
+    "content": "1. Pick a backup target. 2. Schedule nightly snapshots..."
+   }
+  ],
+  "want": "document"
+ },
+ {
+  "message": "summarise this document",
+  "attachments": [
+   {
+    "kind": "document",
+    "name": "contract.pdf"
+   }
+  ],
+  "want": "chat"
+ },
+ {
+  "message": "translate the attached pdf into Bangla",
+  "attachments": [
+   {
+    "kind": "document",
+    "name": "letter.pdf"
+   }
+  ],
+  "want": "chat"
+ },
+ {
+  "message": "how do I convert a Word file to PDF?",
+  "want": "chat"
+ },
+ {
+  "message": "write a python script that saves a report to pdf",
+  "want": "chat"
+ },
+ {
+  "message": "what should a good resume include?",
+  "want": "chat"
+ },
+ {
+  "message": "write me a short poem about rain",
+  "want": "chat"
+ },
+ {
+  "message": "design a poster for a resume writing workshop",
+  "want": "image"
+ },
+ {
+  "message": "make a picture of a man reading a book in a library",
+  "want": "image"
+ },
+ {
+  "message": "draw an icon of a document with a red ribbon",
+  "want": "image"
+ },
+ {
+  "message": "what's the latest version of Adobe Acrobat?",
+  "want": "search"
+ }
+]

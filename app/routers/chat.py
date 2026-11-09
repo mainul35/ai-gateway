@@ -2317,14 +2317,18 @@ async def route(payload: RouteIn, principal: Principal = Depends(authenticate),
                 principal, intent_router.build_request(payload.message, allowed, history)), allowed)
             return intent_router.settle_action(found, payload.message, allowed, payload.has_images)[0]
 
-        answer, other = await asyncio.gather(
+        answer, other, file_answer = await asyncio.gather(
             _ask_helper(principal, understand.build_request(payload.message, attachments, history)),
-            second_opinion())
+            second_opinion(),
+            _ask_helper(principal, understand.build_document_request(payload.message, attachments, history)))
         reading = understand.read_answer(answer)
         if reading is not None:
-            only = len(allowed) == 1
+            file_wanted = understand.wants_a_document(file_answer)
+            # The only tool switched on still gives way to a document, which needs none
+            only = len(allowed) == 1 and not (file_wanted and reading["wants_back"] in (understand.ANSWER,
+                                                                                      understand.NEW_PICTURE))
             action = allowed[0] if only else understand.decide(reading, allowed, payload.has_images,
-                                                               payload.message, other)
+                                                               payload.message, other, file_wanted)
             decision = {"action": action,
                         "decided_by": "the only tool switched on" if only else settings.router_model(),
                         "understood": reading["request"]}
@@ -2388,7 +2392,7 @@ async def _with_model(principal, session, decision, category, category_by, paylo
     decision.update(category=category, category_by=category_by)
     # Only a text answer is the model's to choose: a picture is drawn by the image model, and a
     # photograph is worked on by tools that have nothing to do with the drop-down
-    if action in (intent_router.CHAT, intent_router.SEARCH):
+    if action in (intent_router.CHAT, intent_router.SEARCH, intent_router.DOCUMENT):
         picked = await _choose_model(principal, session, category, payload.has_images,
                                      prefer=payload.current_model or None)
         if picked:
