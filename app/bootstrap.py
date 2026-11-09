@@ -2,7 +2,7 @@
 import logging
 import secrets
 
-from sqlalchemy import select, text
+from sqlalchemy import func, select, text
 
 from app import settings
 from app.db import engine, session_factory
@@ -82,6 +82,34 @@ async def ensure_schema():
                                           "GROUP BY conversation_id)"))
             await connection.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS memory_one_per_conversation "
                                           "ON memory_entries (conversation_id) WHERE scope = 'conversation'"))
+        # One account per email. Two once came about - one made by an admin, one by that person's
+        # first SSO sign-in - and an admin granting access to one of them could not tell which was
+        # the person. Accounts already sharing an email are left for an admin to resolve (which one
+        # holds the keys and conversations is theirs to decide): the index waits for that, and
+        # the duplicates are named in the log at every start until then.
+        has_index = (await connection.execute(text(
+            "SELECT 1 FROM pg_indexes WHERE schemaname = current_schema() AND indexname = 'users_one_per_email'"))).first()
+        if not has_index:
+            shared = (await connection.execute(text(
+                "SELECT lower(email), string_agg(name, ', ' ORDER BY id) FROM users WHERE email IS NOT NULL "
+                "GROUP BY lower(email) HAVING count(*) > 1"))).all()
+            if shared:
+                for email, names in shared:
+                    log.warning("Accounts sharing the email %s: %s. Delete or change all but one on the Users page.",
+                                email, names)
+            else:
+                await connection.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS users_one_per_email "
+                                              "ON users (lower(email)) WHERE email IS NOT NULL"))
+
+
+async def account_with_email(session, email, but=None):
+    """The account that already has this email, letter case aside, other than `but`; or None."""
+    if not email:
+        return None
+    query = select(User).where(func.lower(User.email) == email.strip().lower())
+    if but is not None:
+        query = query.where(User.id != but)
+    return (await session.execute(query.limit(1))).scalar_one_or_none()
 
 
 async def ensure_default_admin():

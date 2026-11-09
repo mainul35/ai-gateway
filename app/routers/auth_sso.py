@@ -11,7 +11,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from app import access, backends, claude_desktop, settings, sso
+from app import access, backends, bootstrap, claude_desktop, settings, sso
 from app.auth import Principal, authenticate, generate_key, hash_key
 from app.db import get_session
 from app.models import ApiKey, UsageRecord, User, utcnow
@@ -125,8 +125,14 @@ async def callback(request: Request, code: str | None = None, state: str | None 
         if not user.is_active:
             # Signing in again must not undo an admin disabling the account
             raise HTTPException(status.HTTP_403_FORBIDDEN, "This account has been disabled")
-        if identity["email_verified"]:
-            user.email = identity["email"]
+        # The auth server's email, unless another account here has it: then this one keeps its own
+        if identity["email_verified"] and identity["email"] != user.email:
+            holder = await bootstrap.account_with_email(session, identity["email"], but=user.id)
+            if holder is None:
+                user.email = identity["email"]
+            else:
+                log.warning("%s signed in with the email %s, which %s has; their email was left as it was",
+                            user.name, identity["email"], holder.name)
         # Listed, verified admin emails are always promoted; otherwise keep the role set in the UI
         if sso.role_for(identity["email"], identity["email_verified"]) == "admin":
             user.role = "admin"
@@ -149,13 +155,20 @@ def _back_to_login(notice):
 
 
 async def _account_for(session, identity):
-    """The account this auth-server identity already has, or None.
+    """The account this auth-server identity already has, or None when there is none and one is made.
 
     By the auth server's own id. Before accounts carried it they were found by name - the email, or
     the display name - so one made that way is taken over once, by the person it was made for:
     only an account an SSO sign-in created (it has seen claims), with no password, not linked to
     anybody yet, and only on an email the auth server has verified. A manager's pre-made account,
     the built-in admin, and anyone merely calling themselves by somebody's name are never matched.
+
+    Then by email, because one email is one person here: whoever already has an account with it -
+    made by an admin, made by an earlier sign-in, with a password or without - signs in to that
+    account, and a new one is made only for an email nobody has. Two accounts with one email, one
+    made by an admin and one by a first sign-in, was how one person came to have two, each with
+    different access. Only an email the auth server has verified counts: an unverified one is
+    whatever somebody typed there, and would hand them another person's account.
     """
     key = sso.subject_key(identity["subject"])
     found = (await session.execute(select(User).where(User.sso_subject == key))).scalar_one_or_none()
@@ -167,7 +180,20 @@ async def _account_for(session, identity):
     if legacy is not None:
         log.info("SSO account %s now linked to the auth server's id", legacy.name)
         legacy.sso_subject = key
-    return legacy
+        return legacy
+    holder = await bootstrap.account_with_email(session, identity["email"])
+    if holder is None:
+        return None
+    if holder.sso_subject is None:
+        # Found by its id from now on, whatever the email becomes
+        holder.sso_subject = key
+        log.info("SSO sign-in as %s linked to the account %s", identity["email"], holder.name)
+    else:
+        # Already linked to another id at the auth server - an account there made again with the same
+        # email. That link is kept; this sign-in reaches the account by its email
+        log.info("SSO sign-in as %s reaches %s by its email (it is linked to another id)", identity["email"],
+                 holder.name)
+    return holder
 
 
 async def _free_name(session, wanted, subject):
