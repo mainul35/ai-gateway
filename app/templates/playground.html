@@ -2387,7 +2387,9 @@ function openFile(url, name){
   const tab = addTab({kind: 'file', title: name || 'Document', href: url, body});
   tab.head.title = name || '';
   if(lower.endsWith('.pdf')){
-    body.innerHTML = `<iframe src="${escapeHtml(url)}" title="${escapeHtml(name || 'document')}"></iframe>`;
+    // As wide as the panel, without the page thumbnails: a whole A4 page squeezed in beside them
+    // is too small to read
+    body.innerHTML = `<iframe src="${escapeHtml(url)}#navpanes=0&view=FitH" title="${escapeHtml(name || 'document')}"></iframe>`;
     return;
   }
   if(/\.(png|jpe?g|gif|webp|bmp|avif)$/.test(lower)){

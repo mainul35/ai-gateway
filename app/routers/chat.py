@@ -1084,7 +1084,15 @@ async def complete(payload: CompleteIn, principal: Principal = Depends(authentic
                             {"role": "system", "content": facts})
     if payload.document:
         messages.insert(1 if messages and messages[0]["role"] == "system" else 0,
-                        {"role": "system", "content": written.WRITING_PROMPT})
+                        {"role": "system", "content": written.writing_prompt(payload.document)})
+        # And again where a small model actually looks: right after the request
+        for m in reversed(messages):
+            if m["role"] == "user":
+                if isinstance(m["content"], str):
+                    m["content"] = (m["content"] or "") + written.reminder(payload.document)
+                elif isinstance(m["content"], list) and m["content"] and m["content"][0].get("type") == "text":
+                    m["content"][0]["text"] += written.reminder(payload.document)
+                break
 
     body = {"model": payload.model, "messages": messages, "stream": True}
     if payload.temperature is not None:
@@ -1134,7 +1142,10 @@ async def complete(payload: CompleteIn, principal: Principal = Depends(authentic
         # Measured here, where the model's words arrive one by one. The browser's own clock can see
         # them in a burst - after a web search, through a proxy - and once showed 1760 tok/s.
         yield _event("stats", stats=answer.stats(), model=payload.model)
-        if payload.document and answer.text:
+        if payload.document and answer.text and written.is_refusal(answer.text):
+            yield _event("notice", text="The model wrote about making the document instead of writing it, so no "
+                                        "file was made. Ask again, or pick another model.")
+        elif payload.document and answer.text:
             yield _event("status", text="Making the PDF" if payload.document == "pdf" else "Saving the document")
             try:
                 name, data, mime = await asyncio.to_thread(written.make, answer.text, payload.document)
