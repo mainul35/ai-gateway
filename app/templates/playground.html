@@ -62,23 +62,71 @@ details.tuning label{margin-bottom:.85rem}
 .turn-tools button:disabled{opacity:.5;cursor:default;text-decoration:none}
 /* Changing what you said, in place */
 .msg.user.editing{width:min(40rem,85%)}
-.edit-box textarea,.aside textarea{width:100%;min-height:4.5rem;background:var(--bg);color:var(--text);
+.edit-box textarea{width:100%;min-height:4.5rem;background:var(--bg);color:var(--text);
      border:1px solid var(--border);border-radius:8px;padding:.5rem .6rem;font:inherit;resize:vertical}
-.edit-box .row,.aside .row{display:flex;gap:.5rem;justify-content:flex-end;margin-top:.45rem}
-/* A side question: asked about one message and answered beside the conversation, never in it */
-dialog.aside{width:min(44rem,94vw);max-height:88vh;background:var(--card);color:var(--text);
-     border:1px solid var(--border);border-radius:12px;padding:1rem 1.1rem}
-dialog.aside::backdrop{background:rgba(0,0,0,.55)}
-.aside .head{display:flex;align-items:center;gap:.5rem;margin-bottom:.4rem}
-.aside .head strong{flex:1}
-.aside .head button{background:none;border:none;color:var(--muted);font-size:1.1rem;cursor:pointer}
-.aside .about{color:var(--muted);font-size:.85rem;border-left:3px solid var(--border);padding-left:.6rem;
-     margin:0 0 .5rem;max-height:4.8em;overflow:hidden;white-space:pre-wrap}
-.aside .note{color:var(--muted);font-size:.78rem;margin:0 0 .5rem}
-.aside .answer{margin-top:.8rem;max-height:52vh;overflow:auto;white-space:pre-wrap}
-.aside .answer.md{white-space:normal}
-.aside .answer:empty{display:none}
-.aside .about.quote{color:var(--text);border-left-color:var(--primary)}
+.edit-box .row{display:flex;gap:.5rem;justify-content:flex-end;margin-top:.45rem}
+/* --- the side panel: side questions, documents and web pages beside the conversation ------- */
+.pg{--panel-w:30rem}
+.pg.with-panel{grid-template-columns:17rem minmax(0, 1fr) var(--panel-w)}
+.pg.with-panel.panel-wide{grid-template-columns:17rem minmax(0, 1fr)}
+.pg.with-panel.panel-wide .main{display:none}
+.panel{position:relative;display:flex;flex-direction:column;min-width:0;min-height:0;
+       border-left:1px solid var(--border);background:var(--card)}
+.panel[hidden]{display:none}
+.panel-bar{display:flex;align-items:center;gap:.15rem;padding:.35rem .4rem;border-bottom:1px solid var(--border);flex:none}
+.panel-tabs{display:flex;gap:.25rem;flex:1;min-width:0;overflow-x:auto;scrollbar-width:none}
+.ptab{display:flex;align-items:center;gap:.15rem;max-width:12rem;min-width:5.5rem;flex:0 1 auto;padding:.22rem .25rem .22rem .6rem;
+      border-radius:7px;font-size:.8rem;color:var(--muted);cursor:pointer;border:1px solid transparent}
+.ptab.active{color:var(--text);background:var(--bg);border-color:var(--border)}
+.ptab-name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.ptab button,.panel-bar>button{background:none;border:none;color:var(--muted);cursor:pointer;line-height:1;border-radius:6px}
+.ptab button{font-size:.95rem;padding:.05rem .25rem}
+.panel-bar>button{font-size:1rem;width:1.9rem;height:1.9rem;flex:none}
+.panel-bar>button:hover,.ptab button:hover{color:var(--text);background:var(--bg)}
+.panel-body,.ptab-body{flex:1;min-height:0;display:flex;flex-direction:column}
+.ptab-body[hidden]{display:none}
+/* Wider or narrower from its left edge */
+.panel-grip{position:absolute;left:-4px;top:0;bottom:0;width:8px;cursor:col-resize;z-index:2}
+.panel-grip:hover,.pg.resizing .panel-grip{background:var(--primary);opacity:.45}
+.pg.resizing{user-select:none;cursor:col-resize}
+.pg.resizing iframe{pointer-events:none}
+.pg.panel-wide .panel-grip{display:none}
+/* The folded panel: a handle on the right edge, clear of the composer */
+.panel-pill{position:fixed;right:0;top:45%;z-index:25;border-radius:999px 0 0 999px;font-size:.8rem;
+            padding:.45rem .8rem .45rem .9rem;box-shadow:0 4px 14px rgba(0,0,0,.4)}
+/* A side question and what it led to */
+.sq-thread{flex:1;min-height:0;overflow-y:auto;padding:.9rem 1rem}
+.sq .about{color:var(--muted);font-size:.85rem;border-left:3px solid var(--border);padding-left:.6rem;
+           margin:0 0 .5rem;max-height:4.8em;overflow:hidden;white-space:pre-wrap}
+.sq .about.quote{color:var(--text);border-left-color:var(--primary)}
+.sq .note{color:var(--muted);font-size:.78rem;margin:0 0 .5rem}
+.sq-q{margin:1rem 0 .5rem auto;max-width:85%;width:fit-content;background:var(--bg);border:1px solid var(--border);
+      border-radius:10px;padding:.45rem .7rem;white-space:pre-wrap}
+.sq-a{white-space:pre-wrap;line-height:1.55}
+.sq-a.md{white-space:normal}
+.sq-ask{flex:none;border-top:1px solid var(--border);padding:.6rem .8rem .8rem}
+.sq-ask textarea{width:100%;min-height:3.2rem;max-height:30vh;background:var(--bg);color:var(--text);
+                 border:1px solid var(--border);border-radius:8px;padding:.5rem .6rem;font:inherit;resize:vertical}
+.sq-ask .row{display:flex;gap:.5rem;justify-content:flex-end;margin-top:.45rem}
+/* A document or a web page */
+.doc,.web{flex:1;min-height:0;overflow-y:auto;padding:.9rem 1rem}
+.doc:has(iframe){padding:0;overflow:hidden}
+.doc iframe{width:100%;height:100%;border:0;background:#fff}
+.doc img{max-width:100%;height:auto;border-radius:6px}
+.doc-text{white-space:pre-wrap;line-height:1.55;font-size:.93rem;overflow-wrap:anywhere}
+.doc-text.md,.web .doc-text{white-space:normal}
+.web .doc-text p{margin:0 0 .6rem}
+.web-head{display:flex;gap:.6rem;align-items:baseline;justify-content:space-between}
+.web-head a{flex:none;font-size:.82rem}
+.web-host{font-size:.8rem;margin:.1rem 0 .9rem}
+/* On a phone the panel is the whole screen while it is open */
+@media (max-width: 860px){
+  .pg.with-panel,.pg.with-panel.panel-wide{grid-template-columns:1fr}
+  .pg.with-panel.panel-wide .main{display:flex}
+  .panel{position:fixed;inset:0;z-index:40;border-left:0}
+  .panel-grip,.panel-bar>button[data-panel="wide"]{display:none}
+  .sq-ask textarea{font-size:16px}
+}
 /* The way to a side question about words you have selected in a message */
 .ask-selection{position:fixed;z-index:30;font-size:.8rem;padding:.3rem .65rem;border-radius:999px;
      box-shadow:0 4px 14px rgba(0,0,0,.4)}
@@ -752,7 +800,21 @@ a.paper{color:var(--text);text-decoration:none}
       </div>
     </div>
   </section>
+
+  <section class="panel" id="panel" hidden aria-label="Side panel">
+    <div class="panel-grip" id="panelGrip" title="Drag to make the panel wider or narrower"></div>
+    <div class="panel-bar">
+      <div class="panel-tabs" id="panelTabs" role="tablist"></div>
+      <button type="button" data-panel="new" title="New side question" aria-label="New side question">+</button>
+      <button type="button" data-panel="pop" title="Move this tab to a browser tab of its own" aria-label="Open in a browser tab">&#8599;</button>
+      <button type="button" data-panel="wide" title="Widen over the conversation" aria-label="Widen">&#10530;</button>
+      <button type="button" data-panel="min" title="Fold the panel away" aria-label="Minimise">&minus;</button>
+      <button type="button" data-panel="close" title="Close the panel and every tab in it" aria-label="Close the panel">&times;</button>
+    </div>
+    <div class="panel-body" id="panelBody"></div>
+  </section>
 </div>
+<button class="btn panel-pill" id="panelPill" hidden></button>
 {% endblock %}
 
 {% block scripts %}
@@ -2014,59 +2076,168 @@ function startEdit(box){
   }
 }
 
-/* A side question about one message: answered from the conversation up to that point, in a panel
-   of its own, and never saved - the conversation carries on as if it had not been asked. */
-let asideController = null;
+/* --- the side panel -------------------------------------------------------------------
+   Beside the conversation, never in it: side questions, documents and web pages, each in a tab of
+   its own. Nothing here is saved; closing a tab forgets it. The panel can be widened over the
+   conversation, folded away to a small button, resized from its left edge, and any tab can be moved
+   out to a browser tab of its own. */
+const panelEl = document.getElementById('panel');
+const panelTabsEl = document.getElementById('panelTabs');
+const panelBodyEl = document.getElementById('panelBody');
+const panelPill = document.getElementById('panelPill');
+const panelTabs = [];
+let activeTab = null, tabCount = 0;
 
-function askAside(box, quote = ''){
-  let dialog = document.getElementById('asideDialog');
-  if(!dialog){
-    dialog = document.createElement('dialog');
-    dialog.id = 'asideDialog';
-    dialog.className = 'aside';
-    dialog.innerHTML = '<div class="head"><strong>Side question</strong>'
-      + '<button type="button" data-close title="Close" aria-label="Close">&times;</button></div>'
-      + '<div class="about"></div>'
-      + '<p class="note">Answered from the conversation up to this message. Nothing here is added to it.</p>'
-      + '<textarea placeholder="Ask about this message..." aria-label="Side question"></textarea>'
-      + '<div class="row"><button class="btn btn-danger btn-sm" data-stop hidden>Stop</button>'
-      + '<button class="btn btn-sm" data-ask>Ask</button></div><div class="answer"></div>';
-    document.body.appendChild(dialog);
-    const area = dialog.querySelector('textarea');
-    dialog.querySelector('[data-close]').addEventListener('click', () => dialog.close());
-    dialog.querySelector('[data-ask]').addEventListener('click', () => answerAside(dialog));
-    dialog.querySelector('[data-stop]').addEventListener('click', () => asideController?.abort());
-    area.addEventListener('keydown', e => {
-      if(e.key === 'Enter' && !e.shiftKey && !e.isComposing){ e.preventDefault(); answerAside(dialog); }
-    });
-    dialog.addEventListener('close', () => asideController?.abort());
-  }
-  asideController?.abort();
-  dialog._box = box;
-  dialog._quote = quote;
-  const about = dialog.querySelector('.about');
-  about.textContent = quote || box._text || '';
-  about.classList.toggle('quote', !!quote);
-  dialog.querySelector('.note').textContent = quote
-    ? 'About the selected text, answered from the conversation up to this message. Nothing here is added to it.'
-    : 'Answered from the conversation up to this message. Nothing here is added to it.';
-  const area = dialog.querySelector('textarea');
-  area.value = '';
-  area.placeholder = quote ? 'Ask about the selected text, or leave empty to have it explained...'
-                           : 'Ask about this message...';
-  const answer = dialog.querySelector('.answer');
-  answer.textContent = '';
-  answer.classList.remove('md');
-  dialog.showModal();
-  dialog.querySelector('textarea').focus();
+const PANEL_WIDTH_KEY = 'playground.panelWidth';
+try{
+  const width = parseInt(localStorage.getItem(PANEL_WIDTH_KEY), 10);
+  if(width) pg.style.setProperty('--panel-w', `${width}px`);
+}catch(e){}
+
+function showPanel(){
+  panelEl.hidden = false;
+  panelPill.hidden = true;
+  pg.classList.add('with-panel');
 }
 
-async function answerAside(dialog){
-  const area = dialog.querySelector('textarea');
-  const quote = dialog._quote || '';
-  const question = area.value.trim() || (quote ? 'Explain this.' : '');
-  if(!question || asideController) return;
-  // The conversation as far as this question and the answer on screen to it
+function refreshPanel(){
+  if(!panelTabs.length){
+    panelEl.hidden = true;
+    panelPill.hidden = true;
+    pg.classList.remove('with-panel', 'panel-wide');
+    return;
+  }
+  panelPill.textContent = `Side panel · ${panelTabs.length}`;
+  panelEl.querySelector('[data-panel="wide"]').title = pg.classList.contains('panel-wide') ? 'Back beside the conversation' : 'Widen over the conversation';
+  panelEl.querySelector('[data-panel="wide"]').textContent = pg.classList.contains('panel-wide') ? '⤡' : '⤢';
+}
+
+function addTab(tab){
+  tab.id = ++tabCount;
+  tab.head = document.createElement('div');
+  tab.head.className = 'ptab';
+  tab.head.setAttribute('role', 'tab');
+  tab.head.innerHTML = '<span class="ptab-name"></span><button type="button" title="Close this tab" aria-label="Close this tab">&times;</button>';
+  tab.head.querySelector('.ptab-name').textContent = tab.title;
+  tab.head.addEventListener('click', e => { if(!e.target.closest('button')) selectTab(tab); });
+  tab.head.querySelector('button').addEventListener('click', () => closeTab(tab));
+  panelTabsEl.appendChild(tab.head);
+  tab.body.classList.add('ptab-body');
+  panelBodyEl.appendChild(tab.body);
+  panelTabs.push(tab);
+  showPanel();
+  selectTab(tab);
+  refreshPanel();
+  return tab;
+}
+
+function renameTab(tab, title){
+  tab.title = title;
+  tab.head.querySelector('.ptab-name').textContent = title;
+  tab.head.title = title;
+}
+
+function selectTab(tab){
+  activeTab = tab;
+  for(const t of panelTabs){
+    t.head.classList.toggle('active', t === tab);
+    t.head.setAttribute('aria-selected', t === tab ? 'true' : 'false');
+    t.body.hidden = t !== tab;
+  }
+  tab.head.scrollIntoView({block: 'nearest', inline: 'nearest'});
+}
+
+function closeTab(tab){
+  tab.controller?.abort();
+  const at = panelTabs.indexOf(tab);
+  if(at < 0) return;
+  panelTabs.splice(at, 1);
+  tab.head.remove();
+  tab.body.remove();
+  if(activeTab === tab){
+    activeTab = null;
+    const next = panelTabs[at] || panelTabs[at - 1];
+    if(next) selectTab(next);
+  }
+  refreshPanel();
+}
+
+panelEl.querySelector('.panel-bar').addEventListener('click', e => {
+  const action = e.target.closest('[data-panel]')?.dataset.panel;
+  if(action === 'new') askAside(null);
+  else if(action === 'pop' && activeTab) popOut(activeTab);
+  else if(action === 'wide'){ pg.classList.toggle('panel-wide'); refreshPanel(); }
+  else if(action === 'min'){ panelEl.hidden = true; panelPill.hidden = false; pg.classList.remove('with-panel'); }
+  else if(action === 'close') [...panelTabs].forEach(closeTab);
+});
+panelPill.addEventListener('click', showPanel);
+// More tabs than fit: the wheel moves along them
+panelTabsEl.addEventListener('wheel', e => {
+  if(Math.abs(e.deltaY) <= Math.abs(e.deltaX)) return;
+  panelTabsEl.scrollLeft += e.deltaY;
+  e.preventDefault();
+}, {passive: false});
+
+// Wider or narrower from the left edge; remembered for next time
+document.getElementById('panelGrip').addEventListener('pointerdown', e => {
+  e.preventDefault();
+  const grip = e.currentTarget;
+  grip.setPointerCapture(e.pointerId);
+  pg.classList.add('resizing');
+  const move = ev => {
+    const width = Math.min(Math.max(window.innerWidth - ev.clientX, 288), window.innerWidth * 0.7);
+    pg.style.setProperty('--panel-w', `${Math.round(width)}px`);
+  };
+  const done = () => {
+    grip.removeEventListener('pointermove', move);
+    pg.classList.remove('resizing');
+    try{ localStorage.setItem(PANEL_WIDTH_KEY, parseInt(pg.style.getPropertyValue('--panel-w'), 10)); }catch(err){}
+  };
+  grip.addEventListener('pointermove', move);
+  grip.addEventListener('pointerup', done, {once: true});
+  grip.addEventListener('pointercancel', done, {once: true});
+});
+
+/* Out to a browser tab of its own. A side question takes its conversation with it, through this
+   browser's storage, and carries on there; a document or a page simply opens. */
+function popOut(tab){
+  if(tab.kind === 'aside'){
+    const key = `aside-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    try{
+      localStorage.setItem(`playground.popout.${key}`, JSON.stringify(
+        {title: tab.title, context: tab.context, quote: tab.quote, turns: tab.turns}));
+    }catch(e){ showError('This browser would not hand the side question over: ' + errorText(e)); return; }
+    window.open(`/playground?aside=${encodeURIComponent(key)}`, '_blank');
+  }else{
+    window.open(tab.href, '_blank', 'noopener');
+  }
+  closeTab(tab);
+}
+
+function takeOverPoppedOut(){
+  const address = new URL(location.href);
+  const key = address.searchParams.get('aside');
+  if(!key) return;
+  address.searchParams.delete('aside');
+  window.history.replaceState(window.history.state, '', address);
+  let saved = null;
+  try{
+    saved = JSON.parse(localStorage.getItem(`playground.popout.${key}`) || 'null');
+    localStorage.removeItem(`playground.popout.${key}`);
+  }catch(e){}
+  if(!saved) return;
+  const tab = asideTab(saved.context || [], saved.quote || '', saved.title);
+  for(const turn of saved.turns || []) showTurn(tab, turn);
+  tab.turns = saved.turns || [];
+  pg.classList.add('panel-wide');
+  refreshPanel();
+}
+
+/* A side question: answered from the conversation as far as one message, in a tab of its own, and
+   carried on there as long as you like - the conversation goes on as if it had not been asked. */
+
+// The conversation as far as `box` and the answer on screen to it; all of it when there is no box
+function conversationUpTo(box){
   const upTo = [];
   let reached = false;
   for(const message of chat.querySelectorAll('.msg')){
@@ -2077,25 +2248,94 @@ async function answerAside(dialog){
     }else if(!message.hidden && message._text){
       upTo.push({role: 'assistant', content: message._text});
     }
-    if(message === dialog._box) reached = true;
+    if(message === box) reached = true;
   }
-  const messages = savedSystem ? [{role: 'system', content: savedSystem}] : [];
+  return upTo;
+}
+
+function askAside(box, quote = ''){
+  const context = conversationUpTo(box);
+  const tab = asideTab(context, quote, quote ? shortTitle(quote) : 'Side question');
+  tab.body.querySelector('textarea').focus();
+}
+
+function shortTitle(text){
+  const line = text.replace(/\s+/g, ' ').trim();
+  return line.length > 32 ? line.slice(0, 31) + '…' : line;
+}
+
+function asideTab(context, quote, title){
+  const body = document.createElement('div');
+  body.className = 'sq';
+  body.innerHTML = '<div class="sq-thread"><div class="about"></div><p class="note"></p></div>'
+    + '<div class="sq-ask"><textarea rows="2" aria-label="Side question"></textarea>'
+    + '<div class="row"><button class="btn btn-danger btn-sm" data-stop hidden>Stop</button>'
+    + '<button class="btn btn-sm" data-ask>Ask</button></div></div>';
+  const tab = {kind: 'aside', title, body, context, quote, turns: []};
+  const about = body.querySelector('.about');
+  const last = context.filter(m => m.role === 'user').at(-1);
+  about.textContent = quote || last?.content || '';
+  about.classList.toggle('quote', !!quote);
+  about.hidden = !about.textContent;
+  body.querySelector('.note').textContent = !context.length
+    ? 'Nothing here is added to the conversation.'
+    : quote ? 'About the selected text, answered from the conversation up to that message. Nothing here is added to it.'
+            : 'Answered from the conversation up to this message. Nothing here is added to it.';
+  const area = body.querySelector('textarea');
+  area.placeholder = quote ? 'Ask about the selected text, or leave empty to have it explained...' : 'Ask a side question...';
+  body.querySelector('[data-ask]').addEventListener('click', () => answerAside(tab));
+  body.querySelector('[data-stop]').addEventListener('click', () => tab.controller?.abort());
+  area.addEventListener('keydown', e => {
+    if(e.key === 'Enter' && !e.shiftKey && !e.isComposing){ e.preventDefault(); answerAside(tab); }
+  });
+  return addTab(tab);
+}
+
+function showTurn(tab, turn){
+  const thread = tab.body.querySelector('.sq-thread');
+  const asked = document.createElement('div');
+  asked.className = 'sq-q';
+  asked.textContent = turn.question;
+  const answer = document.createElement('div');
+  answer.className = 'sq-a';
+  answer.textContent = turn.answer || '';
+  thread.append(asked, answer);
+  if(turn.answer) renderedHtml(turn.answer).then(html => {
+    if(html){ answer.classList.add('md'); answer.innerHTML = html; renderMath(answer); }
+  });
+  return answer;
+}
+
+async function answerAside(tab){
+  const area = tab.body.querySelector('textarea');
+  const first = !tab.turns.length;
+  const question = area.value.trim() || (tab.quote && first ? 'Explain this.' : '');
+  if(!question || tab.controller) return;
+  area.placeholder = 'Ask a follow-up...';
   // The selected words, quoted the way the model reads a quote, then what was asked about them
-  const asked = quote ? `About this part of the conversation:\n\n${quote.split('\n').map(l => '> ' + l).join('\n')}\n\n${question}`
-                      : question;
-  messages.push(...upTo, {role: 'user', content: asked, images: []});
-  const answer = dialog.querySelector('.answer');
-  const ask = dialog.querySelector('[data-ask]');
-  const stop = dialog.querySelector('[data-stop]');
-  answer.classList.remove('md');
+  const asked = tab.quote && first
+    ? `About this part of the conversation:\n\n${tab.quote.split('\n').map(l => '> ' + l).join('\n')}\n\n${question}`
+    : question;
+  const messages = savedSystem ? [{role: 'system', content: savedSystem}] : [];
+  messages.push(...tab.context);
+  for(const turn of tab.turns){
+    messages.push({role: 'user', content: turn.asked, images: []}, {role: 'assistant', content: turn.answer});
+  }
+  messages.push({role: 'user', content: asked, images: []});
+  if(first && !tab.quote) renameTab(tab, shortTitle(question));
+  area.value = '';
+  const answer = showTurn(tab, {question});
   answer.textContent = 'Thinking...';
+  answer.scrollIntoView({block: 'nearest'});
+  const ask = tab.body.querySelector('[data-ask]');
+  const stop = tab.body.querySelector('[data-stop]');
   ask.disabled = true;
   stop.hidden = false;
-  asideController = new AbortController();
+  tab.controller = new AbortController();
   let text = '';
   try{
     const response = await fetch('/chat/complete', {
-      method: 'POST', signal: asideController.signal, headers: JSON_HEADERS,
+      method: 'POST', signal: tab.controller.signal, headers: JSON_HEADERS,
       body: JSON.stringify({model: currentModel(), messages, conversation_id: null, web_search: false,
                             max_tokens: parseInt(document.getElementById('maxTokens').value, 10) || 8192,
                             vision: tools.vision && caps.vision})});
@@ -2116,15 +2356,104 @@ async function answerAside(dialog){
       answer.innerHTML = html;
       renderMath(answer);
     }else answer.textContent = text || '(no answer)';
+    if(text) tab.turns.push({question, asked, answer: text});
   }catch(e){
     answer.textContent = e.name === 'AbortError' ? (text ? text + '\n\n(stopped)' : '(stopped)')
                                                  : 'That did not go through. ' + errorText(e);
+    if(e.name === 'AbortError' && text) tab.turns.push({question, asked, answer: text});
   }finally{
-    asideController = null;
+    tab.controller = null;
     ask.disabled = false;
     stop.hidden = true;
   }
 }
+
+/* A document you attached: a PDF as the browser draws it, a picture as itself, and a Word file, a
+   spreadsheet or a text file as its text - the browser can show none of those three itself */
+function openFile(url, name){
+  const lower = (name || '').toLowerCase();
+  for(const t of panelTabs) if(t.kind === 'file' && t.href === url){ showPanel(); selectTab(t); return; }
+  const body = document.createElement('div');
+  body.className = 'doc';
+  const tab = addTab({kind: 'file', title: name || 'Document', href: url, body});
+  tab.head.title = name || '';
+  if(lower.endsWith('.pdf')){
+    body.innerHTML = `<iframe src="${escapeHtml(url)}" title="${escapeHtml(name || 'document')}"></iframe>`;
+    return;
+  }
+  if(/\.(png|jpe?g|gif|webp|bmp|avif)$/.test(lower)){
+    body.innerHTML = `<img src="${escapeHtml(url)}" alt="${escapeHtml(name || 'image')}">`;
+    return;
+  }
+  body.innerHTML = '<p class="muted">Opening...</p>';
+  api(`${url}/text`).then(async found => {
+    const html = /\.(md|markdown)$/.test(lower) ? await renderedHtml(found.text) : null;
+    body.innerHTML = '';
+    const text = document.createElement('div');
+    text.className = html ? 'doc-text md' : 'doc-text';
+    if(html) text.innerHTML = html; else text.textContent = found.text;
+    body.appendChild(text);
+  }).catch(e => { body.innerHTML = ''; body.appendChild(panelNote('Could not open it. ' + errorText(e), url)); });
+}
+
+/* A web page, as its words: most sites refuse to be shown inside another page, so the gateway reads
+   it (app/tools/web_search.read_page) and the original is a click away */
+function openWeb(url){
+  for(const t of panelTabs) if(t.kind === 'web' && t.href === url){ showPanel(); selectTab(t); return; }
+  let host = url;
+  try{ host = new URL(url).hostname.replace(/^www\./, ''); }catch(e){}
+  const body = document.createElement('div');
+  body.className = 'web';
+  body.innerHTML = '<p class="muted">Opening...</p>';
+  const tab = addTab({kind: 'web', title: host, href: url, body});
+  tab.head.title = url;
+  api(`/chat/reader?url=${encodeURIComponent(url)}`).then(page => {
+    if(page.title) renameTab(tab, shortTitle(page.title));
+    body.innerHTML = `<div class="web-head"><strong></strong><a class="linkish" target="_blank" rel="noopener noreferrer">Open original &#8599;</a></div>`
+      + '<div class="muted web-host"></div><div class="doc-text"></div>';
+    body.querySelector('strong').textContent = page.title || host;
+    body.querySelector('a').href = url;
+    body.querySelector('.web-host').textContent = host;
+    const text = body.querySelector('.doc-text');
+    for(const line of (page.text || '').split('\n')){
+      const p = document.createElement('p');
+      p.textContent = line;
+      text.appendChild(p);
+    }
+    if(!page.text) text.appendChild(panelNote('This page has no text to show here; it is probably built in the browser.', url));
+  }).catch(e => { body.innerHTML = ''; body.appendChild(panelNote(errorText(e), url)); });
+}
+
+function panelNote(message, url){
+  const note = document.createElement('p');
+  note.className = 'muted';
+  note.textContent = message + ' ';
+  const link = document.createElement('a');
+  link.href = url; link.target = '_blank'; link.rel = 'noopener noreferrer';
+  link.textContent = 'Open it in a browser tab';
+  note.appendChild(link);
+  return note;
+}
+
+/* Links in the conversation open in the panel. Ctrl, Cmd, Shift or a middle click still opens a
+   browser tab, as anywhere else. */
+function openLinkInPanel(e){
+  if(e.defaultPrevented || e.button !== 0 || e.ctrlKey || e.metaKey || e.shiftKey || e.altKey) return;
+  const link = e.target.closest('a[href]');
+  if(!link || link.hasAttribute('download')) return;
+  if(link.classList.contains('paper')){
+    e.preventDefault();
+    openFile(link.getAttribute('href'), link.querySelector('.doc-name')?.textContent || 'Document');
+    return;
+  }
+  const web = link.closest('.sources') || link.classList.contains('cite')
+           || link.closest('.msg.assistant .body, .sq-a, .doc-text');
+  if(!web || !caps.web_search || !/^https?:\/\//i.test(link.href) || new URL(link.href).origin === location.origin) return;
+  e.preventDefault();
+  openWeb(link.href);
+}
+chat.addEventListener('click', openLinkInPanel);
+panelBodyEl.addEventListener('click', openLinkInPanel);
 
 /* Selecting words in a message offers a side question about just those words */
 const askSelection = document.createElement('button');
@@ -4789,6 +5118,8 @@ document.getElementById('sharedWithMe').addEventListener('click', e => {
 });
 
 fitComposer();
+// A side question moved here from another tab, at once: it is in this browser's storage only until read
+takeOverPoppedOut();
 // The conversation in the address opens once the models are known, whatever becomes of the list
 // and the memory panel beside it
 Promise.all([loadModels(), loadCapabilities()]).then(() => {

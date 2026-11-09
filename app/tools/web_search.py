@@ -179,19 +179,26 @@ class _TextExtractor(HTMLParser):
     def __init__(self):
         super().__init__(convert_charrefs=True)
         self.parts, self.skipping = [], 0
+        self.title, self.in_title = "", False
 
     def handle_starttag(self, tag, attrs):
-        if tag in self.SKIP:
+        if tag == "title":
+            self.in_title = True
+        elif tag in self.SKIP:
             self.skipping += 1
         elif tag in self.BLOCK:
             self.parts.append("\n")
 
     def handle_endtag(self, tag):
-        if tag in self.SKIP and self.skipping:
+        if tag == "title":
+            self.in_title = False
+        elif tag in self.SKIP and self.skipping:
             self.skipping -= 1
 
     def handle_data(self, data):
-        if not self.skipping:
+        if self.in_title:
+            self.title += data
+        elif not self.skipping:
             self.parts.append(data)
 
     def text(self):
@@ -220,6 +227,36 @@ async def _page_text(client, url):
     except Exception:
         return None
     return parser.text()[:PAGE_CHARS] or None
+
+
+READER_CHARS = 100_000      # text shown of one page opened in the playground's side panel
+
+
+async def read_page(url):
+    """One page as a person reads it in the side panel: its title and text, without its menus.
+
+    Most sites refuse to be shown inside another page, so the panel shows what they say rather than
+    the page itself. Fetched through app.net like every other page. Raises net.Refused with a reason.
+    """
+    async with net.client(timeout=PAGE_TIMEOUT, headers={"User-Agent": USER_AGENT, "Accept": "text/html"}) as client:
+        try:
+            page = await net.get(client, url, max_bytes=PAGE_BYTES, truncate=True)
+        except httpx.HTTPError as e:
+            raise net.Refused(f"the site did not answer ({type(e).__name__})")
+    if page.status_code != 200:
+        raise net.Refused(f"the site answered {page.status_code}")
+    if "html" not in page.content_type and not page.content_type.startswith("text/"):
+        raise net.Refused(f"it is not a web page ({page.content_type or 'unknown type'})")
+    if "html" not in page.content_type:
+        return {"url": page.url, "title": "", "text": page.text[:READER_CHARS]}
+    parser = _TextExtractor()
+    try:
+        parser.feed(page.text)
+    except Exception:
+        raise net.Refused("the page could not be read")
+    lines = [re.sub(r"[ \t\r\f\v]+", " ", line).strip() for line in "".join(parser.parts).splitlines()]
+    text = "\n".join(line for line in lines if len(line) > 3)
+    return {"url": page.url, "title": re.sub(r"\s+", " ", parser.title).strip()[:300], "text": text[:READER_CHARS]}
 
 
 async def fetch_pages(results, least=200, wanted=None):
