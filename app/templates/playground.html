@@ -80,6 +80,7 @@ details.tuning label{margin-bottom:.85rem}
       border-radius:7px;font-size:.8rem;color:var(--muted);cursor:pointer;border:1px solid transparent}
 .ptab.active{color:var(--text);background:var(--bg);border-color:var(--border)}
 .ptab-name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.ptab[hidden]{display:none}
 .ptab button,.panel-bar>button{background:none;border:none;color:var(--muted);cursor:pointer;line-height:1;border-radius:6px}
 .ptab button{font-size:.95rem;padding:.05rem .25rem}
 .panel-bar>button{font-size:1rem;width:1.9rem;height:1.9rem;flex:none}
@@ -1586,6 +1587,7 @@ function resetChat(how = 'push'){
   conversationInUrl(null, how);
   currentId = null;
   currentUid = null;
+  panelFollowsConversation();
   // A new conversation is a new task: back to Auto, with no earlier pick to lean towards
   if(modelSelect.querySelector('option[value="auto"]')){
     modelSelect.value = 'auto';
@@ -1677,6 +1679,7 @@ async function openConversation(id, how = 'push'){
     const conversation = await api(`/chat/conversations/${id}`);
     currentId = conversation.id;
     currentUid = conversation.uid;
+    panelFollowsConversation();
     conversationInUrl(conversation.uid, how);
     savedSystem = conversation.system_prompt || '';
     systemBox.value = savedSystem;
@@ -2152,6 +2155,15 @@ const panelBodyEl = document.getElementById('panelBody');
 const panelPill = document.getElementById('panelPill');
 const panelTabs = [];
 let activeTab = null, tabCount = 0;
+// Every tab belongs to the conversation it was opened in, and shows only while that one is open:
+// a PDF written in one chat used to stay beside every other. A new conversation's tabs are "new"
+// until it is saved, and then its own.
+let panelKey = 'new';
+const lastActive = {};          // the tab last looked at in each conversation
+let panelFolded = false, panelWide = false;
+
+function conversationKey(){ return currentId ? String(currentId) : 'new'; }
+function tabsHere(){ return panelTabs.filter(t => t.key === panelKey); }
 
 const PANEL_WIDTH_KEY = 'playground.panelWidth';
 try{
@@ -2160,25 +2172,46 @@ try{
 }catch(e){}
 
 function showPanel(){
-  panelEl.hidden = false;
-  panelPill.hidden = true;
-  pg.classList.add('with-panel');
+  panelFolded = false;
+  refreshPanel();
 }
 
 function refreshPanel(){
-  if(!panelTabs.length){
-    panelEl.hidden = true;
-    panelPill.hidden = true;
-    pg.classList.remove('with-panel', 'panel-wide');
-    return;
+  const here = tabsHere();
+  const open = here.length > 0 && !panelFolded;
+  panelEl.hidden = !open;
+  panelPill.hidden = !here.length || !panelFolded;
+  pg.classList.toggle('with-panel', open);
+  pg.classList.toggle('panel-wide', open && panelWide);
+  if(!here.length) return;
+  panelPill.textContent = `Side panel · ${here.length}`;
+  panelEl.querySelector('[data-panel="wide"]').title = panelWide ? 'Back beside the conversation' : 'Widen over the conversation';
+  panelEl.querySelector('[data-panel="wide"]').textContent = panelWide ? '⤡' : '⤢';
+}
+
+/* Called whenever the conversation on screen changes: its own tabs come back, and nobody else's */
+function panelFollowsConversation(){
+  const key = conversationKey();
+  // A conversation just saved takes the tabs opened while it was still new
+  if(panelKey === 'new' && key !== 'new'){
+    for(const t of panelTabs) if(t.key === 'new') t.key = key;
+    if(lastActive.new){ lastActive[key] = lastActive.new; delete lastActive.new; }
   }
-  panelPill.textContent = `Side panel · ${panelTabs.length}`;
-  panelEl.querySelector('[data-panel="wide"]').title = pg.classList.contains('panel-wide') ? 'Back beside the conversation' : 'Widen over the conversation';
-  panelEl.querySelector('[data-panel="wide"]').textContent = pg.classList.contains('panel-wide') ? '⤡' : '⤢';
+  panelKey = key;
+  const here = tabsHere();
+  for(const t of panelTabs){
+    t.head.hidden = t.key !== key;
+    if(t.key !== key) t.body.hidden = true;
+  }
+  activeTab = null;
+  if(here.length) selectTab(here.includes(lastActive[key]) ? lastActive[key] : here[here.length - 1]);
+  refreshPanel();
 }
 
 function addTab(tab){
+  panelFollowsConversation();
   tab.id = ++tabCount;
+  tab.key = panelKey;
   tab.head = document.createElement('div');
   tab.head.className = 'ptab';
   tab.head.setAttribute('role', 'tab');
@@ -2204,24 +2237,27 @@ function renameTab(tab, title){
 
 function selectTab(tab){
   activeTab = tab;
-  for(const t of panelTabs){
+  lastActive[tab.key] = tab;
+  for(const t of tabsHere()){
     t.head.classList.toggle('active', t === tab);
     t.head.setAttribute('aria-selected', t === tab ? 'true' : 'false');
     t.body.hidden = t !== tab;
   }
-  tab.head.scrollIntoView({block: 'nearest', inline: 'nearest'});
+  if(!tab.head.hidden) tab.head.scrollIntoView({block: 'nearest', inline: 'nearest'});
 }
 
 function closeTab(tab){
   tab.controller?.abort();
-  const at = panelTabs.indexOf(tab);
+  const siblings = panelTabs.filter(t => t.key === tab.key);
+  const at = siblings.indexOf(tab);
   if(at < 0) return;
-  panelTabs.splice(at, 1);
+  panelTabs.splice(panelTabs.indexOf(tab), 1);
   tab.head.remove();
   tab.body.remove();
+  if(lastActive[tab.key] === tab) delete lastActive[tab.key];
   if(activeTab === tab){
     activeTab = null;
-    const next = panelTabs[at] || panelTabs[at - 1];
+    const next = siblings[at + 1] || siblings[at - 1];
     if(next) selectTab(next);
   }
   refreshPanel();
@@ -2231,9 +2267,10 @@ panelEl.querySelector('.panel-bar').addEventListener('click', e => {
   const action = e.target.closest('[data-panel]')?.dataset.panel;
   if(action === 'new') askAside(null);
   else if(action === 'pop' && activeTab) popOut(activeTab);
-  else if(action === 'wide'){ pg.classList.toggle('panel-wide'); refreshPanel(); }
-  else if(action === 'min'){ panelEl.hidden = true; panelPill.hidden = false; pg.classList.remove('with-panel'); }
-  else if(action === 'close') [...panelTabs].forEach(closeTab);
+  else if(action === 'wide'){ panelWide = !panelWide; refreshPanel(); }
+  else if(action === 'min'){ panelFolded = true; refreshPanel(); }
+  // Only this conversation's tabs: another's are not on screen to be closed
+  else if(action === 'close') tabsHere().forEach(closeTab);
 });
 panelPill.addEventListener('click', showPanel);
 // More tabs than fit: the wheel moves along them
@@ -2294,7 +2331,7 @@ function takeOverPoppedOut(){
   const tab = asideTab(saved.context || [], saved.quote || '', saved.title);
   for(const turn of saved.turns || []) showTurn(tab, turn);
   tab.turns = saved.turns || [];
-  pg.classList.add('panel-wide');
+  panelWide = true;
   refreshPanel();
 }
 
@@ -2437,7 +2474,7 @@ async function answerAside(tab){
    spreadsheet or a text file as its text - the browser can show none of those three itself */
 function openFile(url, name){
   const lower = (name || '').toLowerCase();
-  for(const t of panelTabs) if(t.kind === 'file' && t.href === url){ showPanel(); selectTab(t); return; }
+  for(const t of tabsHere()) if(t.kind === 'file' && t.href === url){ showPanel(); selectTab(t); return; }
   const body = document.createElement('div');
   body.className = 'doc';
   const tab = addTab({kind: 'file', title: name || 'Document', href: url, body});
@@ -2466,7 +2503,7 @@ function openFile(url, name){
 /* A web page, as its words: most sites refuse to be shown inside another page, so the gateway reads
    it (app/tools/web_search.read_page) and the original is a click away */
 function openWeb(url){
-  for(const t of panelTabs) if(t.kind === 'web' && t.href === url){ showPanel(); selectTab(t); return; }
+  for(const t of tabsHere()) if(t.kind === 'web' && t.href === url){ showPanel(); selectTab(t); return; }
   let host = url;
   try{ host = new URL(url).hostname.replace(/^www\./, ''); }catch(e){}
   const body = document.createElement('div');
@@ -3803,6 +3840,7 @@ async function ensureConversation(firstMessage, model){
     body: JSON.stringify({title: firstMessage.slice(0, 80) || 'Images', model, system_prompt: system || null})});
   currentId = created.id;
   currentUid = created.uid;
+  panelFollowsConversation();
   conversationInUrl(created.uid, 'replace');     // the new conversation, saved: now it has an address
   savedSystem = system;
   document.getElementById('chatTitle').textContent = created.title;
