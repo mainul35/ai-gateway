@@ -542,10 +542,25 @@ a.paper{color:var(--text);text-decoration:none}
    Stacking pushes the composer off the bottom of the screen, and the composer is the point of
    the page; it would also hand the phone a second scrollbar, which this layout exists to avoid. */
 .drawer-btn{display:none;font-size:1.15rem;line-height:1}
+.drawer-btn .panel-icon{display:none}
 .scrim{display:none}
-/* On a wide screen the same button folds the sidebar away, for more room to read and write */
+/* The sidebar's own button, at its top: closes it on a wide screen */
+.side-head{display:flex;align-items:center;gap:.4rem}
+.side-head .mode-switch{flex:1;margin-bottom:0}
+.icon-btn{display:inline-flex;align-items:center;justify-content:center;width:2rem;height:2rem;flex:none;
+          background:none;border:none;border-radius:7px;color:var(--muted);cursor:pointer;padding:0}
+.icon-btn:hover{background:var(--input);color:var(--text)}
+#sideClose{display:none}
+/* On a wide screen the sidebar closes from its own top and opens again from the top of the
+   conversation, with the same picture of a sidebar on both: a menu sign beside the title did not
+   say what it showed or hid */
 @media (min-width: 861px){
-  .drawer-btn{display:inline-flex;float:left;margin:0 .6rem 0 0;padding:0 .1rem}
+  #sideClose{display:inline-flex}
+  .pg.side-hidden .drawer-btn{display:inline-flex;float:left;margin:-.3rem .5rem 0 -.35rem;width:2rem;height:2rem;
+                              align-items:center;justify-content:center;border-radius:7px;color:var(--muted);padding:0}
+  .pg.side-hidden .drawer-btn:hover{background:var(--input);color:var(--text)}
+  .drawer-btn .menu-icon{display:none}
+  .drawer-btn .panel-icon{display:block}
   .pg.side-hidden{grid-template-columns:minmax(0, 1fr)}
   .pg.side-hidden.with-panel{grid-template-columns:minmax(0, 1fr) min(var(--panel-w), calc(100vw - 24rem))}
   .pg.side-hidden.with-panel.panel-wide{grid-template-columns:minmax(0, 1fr)}
@@ -615,9 +630,12 @@ a.paper{color:var(--text);text-decoration:none}
 <div class="pg" id="pg">
   <div class="scrim" id="scrim"></div>
   <aside class="side">
-    <div class="mode-switch">
-      <button class="mode-btn active" data-mode="chat">Chat</button>
-      <button class="mode-btn" data-mode="code">Code</button>
+    <div class="side-head">
+      <div class="mode-switch">
+        <button class="mode-btn active" data-mode="chat">Chat</button>
+        <button class="mode-btn" data-mode="code">Code</button>
+      </div>
+      <button class="icon-btn" id="sideClose" type="button" title="Close sidebar" aria-label="Close sidebar"><svg class="panel-icon" viewBox="0 0 20 20" width="18" height="18" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="2.75" y="3.75" width="14.5" height="12.5" rx="2.5"/><path d="M7.75 4v12"/></svg></button>
     </div>
     <div class="group">
       <div class="head">
@@ -660,7 +678,7 @@ a.paper{color:var(--text);text-decoration:none}
     <header class="topbar">
       <div class="column">
         <button class="linkish drawer-btn" id="drawerToggle" aria-expanded="false"
-                aria-label="Show conversations">&#9776;</button>
+                aria-label="Show conversations"><span class="menu-icon">&#9776;</span><svg class="panel-icon" viewBox="0 0 20 20" width="18" height="18" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="2.75" y="3.75" width="14.5" height="12.5" rx="2.5"/><path d="M7.75 4v12"/></svg></button>
         <span class="chatTitle" id="chatTitle">New conversation</span>
         <button class="linkish reader-btn" id="readerToggle" aria-pressed="false"
                 title="Reading mode: hide the menu and the message box, so the answer has the whole screen"
@@ -1824,10 +1842,10 @@ function showSideState(){
     drawerToggle.setAttribute('aria-expanded', String(pg.classList.contains('open')));
     return;
   }
-  const hidden = pg.classList.contains('side-hidden');
-  drawerToggle.title = hidden ? 'Show the sidebar' : 'Hide the sidebar';
-  drawerToggle.setAttribute('aria-label', drawerToggle.title);
-  drawerToggle.setAttribute('aria-expanded', String(!hidden));
+  // Only there while the sidebar is closed; the sidebar's own button closes it
+  drawerToggle.title = 'Open sidebar';
+  drawerToggle.setAttribute('aria-label', 'Open sidebar');
+  drawerToggle.setAttribute('aria-expanded', String(!pg.classList.contains('side-hidden')));
 }
 
 try{ pg.classList.toggle('side-hidden', localStorage.getItem(SIDE_HIDDEN_KEY) === '1'); }catch(e){}
@@ -1835,8 +1853,9 @@ showSideState();
 narrowScreen.addEventListener('change', showSideState);
 drawerToggle.addEventListener('click', () => {
   if(narrowScreen.matches) setDrawer(!pg.classList.contains('open'));
-  else setSideHidden(!pg.classList.contains('side-hidden'));
+  else setSideHidden(false);
 });
+document.getElementById('sideClose').addEventListener('click', () => setSideHidden(true));
 document.getElementById('scrim').addEventListener('click', () => setDrawer(false));
 document.addEventListener('keydown', e => { if(e.key === 'Escape') setDrawer(false); });
 // Anything picked from the drawer has done its job; the wide layout never has it open to close
