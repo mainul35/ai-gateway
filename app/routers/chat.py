@@ -216,9 +216,24 @@ async def get_conversation(conversation_id: str, principal: Principal = Depends(
             # a reader may ask to write in it, once, while its owner lets people ask
             "may_ask": how == "viewer" and asked == "viewer" and bool(shared and shared.allow_edit_requests),
             "asked": asked,
-            "messages": [{**_message_json(m), "author": names.get(m.author_id or (conversation.user_id if m.role == "user" else 0)),
+            # The reasoning is left out, and fetched when someone opens "Show reasoning": it is a long
+            # text few read, and it was up to a third of what every switch to a conversation carried
+            "messages": [{**_message_json(m), "reasoning": None, "has_reasoning": bool(m.reasoning),
+                          "author": names.get(m.author_id or (conversation.user_id if m.role == "user" else 0)),
                           "by_me": m.role == "user" and (m.author_id or conversation.user_id) == user.id,
                           "feedback": judged.get(m.id)} for m in conversation.messages]}
+
+
+@router.get("/conversations/{conversation_id}/messages/{message_id}/reasoning")
+async def message_reasoning(conversation_id: str, message_id: int, principal: Principal = Depends(authenticate),
+                            session: AsyncSession = Depends(get_session)):
+    """One answer's reasoning, when "Show reasoning" is opened under it."""
+    user = _require_user(principal)
+    conversation, _ = await _access(session, conversation_id, user)
+    message = await session.get(ConversationMessage, message_id)
+    if message is None or message.conversation_id != conversation.id:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "No such message")
+    return {"reasoning": message.reasoning or ""}
 
 
 class FeedbackIn(BaseModel):

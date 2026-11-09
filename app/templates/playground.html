@@ -883,7 +883,13 @@ function openAtLatest(){
 
 // Follows a streaming answer, but only while the reader is already at the bottom: pulling the view
 // away from someone who has scrolled up to read something is worse than not following at all.
+// While a saved conversation is drawn in one go: openAtLatest puts it at the end once it is all there
+let drawingWhole = false;
+
 function followAlong(){
+  // Each call makes the browser lay out everything drawn so far, so following along message by
+  // message while 63 were drawn took 645 of the 694 ms it took to open the conversation
+  if(drawingWhole) return;
   const fromBottom = transcript.scrollHeight - transcript.scrollTop - transcript.clientHeight;
   if(fromBottom < 260) transcript.scrollTop = transcript.scrollHeight;
 }
@@ -1614,6 +1620,12 @@ function resetChat(how = 'push'){
    from it. Its own function because the answer grouping is the fiddly part of this
    page and needs to be testable without a conversation, a server or a login. */
 function fillTranscript(messages){
+  drawingWhole = true;
+  try{ fillMessages(messages); }
+  finally{ drawingWhole = false; }
+}
+
+function fillMessages(messages){
   history = [];
   formatQuestion = null;
   // Answers filed under the same question are siblings: the last one asked for is the one
@@ -1648,7 +1660,8 @@ function fillTranscript(messages){
       else if(extra.generated) renderGenerated(box, extra.generated, m.stats);
       else if(extra.video) renderVideo(box, extra.video, m.id);
       else if(extra.subtitles) renderSubtitles(box, extra.subtitles, m.content, m.stats);
-      else renderAssistant(box, m.content, m.reasoning, withModel, extra.sources, m.html);
+      else renderAssistant(box, m.content, m.reasoning || (m.has_reasoning ? {conversation: currentId, message: m.id} : null),
+                           withModel, extra.sources, m.html);
       if(extra.document) showWritten(box, {url: fileUrl(extra.document.file_id), name: extra.document.name});
       if(extra.asks === 'document_format') showFormatQuestion(box, extra.formats || ['markdown'], extra.request || '');
       // The same question under every answer a model wrote, with the verdict already given: maps,
@@ -1675,6 +1688,19 @@ function fillTranscript(messages){
     }
   }
   refreshTurnTools();
+}
+
+/* Which conversation in the sidebar is the open one, marked where it is: fetching the whole list
+   again on every switch only to move the highlight was a second request each time. A conversation
+   not in the list (just shared with you, say) still brings the list in. */
+function markOpenConversation(){
+  let found = false;
+  for(const item of document.querySelectorAll('.conv[data-open]')){
+    const here = item.dataset.open === String(currentId) || item.dataset.open === currentUid;
+    item.classList.toggle('active', here);
+    found = found || here;
+  }
+  if(!found) loadConversations();
 }
 
 async function openConversation(id, how = 'push'){
@@ -1706,7 +1732,7 @@ async function openConversation(id, how = 'push'){
     }else{
       showError('');
     }
-    loadConversations();
+    markOpenConversation();
     loadMemory();
   }catch(e){ showError('Could not open conversation: ' + errorText(e)); }
 }
@@ -2768,7 +2794,23 @@ function renderAssistant(box, content, reasoning, stats, sources, html){
     const think = document.createElement('details');
     think.className = 'think';
     think.innerHTML = '<summary>Show reasoning</summary><div style="white-space:pre-wrap"></div>';
-    think.querySelector('div').textContent = reasoning;
+    const words = think.querySelector('div');
+    if(typeof reasoning === 'string') words.textContent = reasoning;
+    else{
+      // A saved answer's reasoning is not sent with the conversation: it is fetched on opening
+      words.textContent = 'Loading\u2026';
+      think.addEventListener('toggle', async () => {
+        if(!think.open || think._loaded) return;
+        think._loaded = true;
+        try{
+          words.textContent = (await api(`/chat/conversations/${reasoning.conversation}/messages/${reasoning.message}/reasoning`)).reasoning
+                              || '(no reasoning was kept)';
+        }catch(e){
+          think._loaded = false;
+          words.textContent = 'Could not load the reasoning: ' + errorText(e);
+        }
+      });
+    }
     box.insertBefore(think, body);
   }
   const text = content || (reasoning ? '(the model only produced reasoning; raise max tokens)' : '(no answer)');
