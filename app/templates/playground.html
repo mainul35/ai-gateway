@@ -3991,12 +3991,19 @@ function refreshSendButton(){
 // PDF or Markdown as what is made. Reading one ("summarise this document"), asking about the craft
 // ("how do I make a PDF in Java") or wanting code ("write a PDF parser") is not.
 const MAKES_DOCUMENT = /\b(generate|create|make|write|prepare|produce|export|draft|build|give|turn|convert|save|put|compile)\b(?:\s+(?:me|us|it|this|that|everything|all|the\s+[\p{L}\p{N}_-]+))?(?:\s+(?:up\s+)?(?:a|an|as|as\s+a|as\s+an|into|into\s+a|into\s+an|to\s+a|to\s+an|in\s+a|in\s+an|in))?(?:\s+(?!(?:of|from|about|this|the|that|my|your|attached)\b)[\p{L}\p{N}_-]+){0,3}?\s+(document|doc|pdf|markdown|md)\b(?!\s*(?:parser|reader|library|viewer|editor|generator|converter|uploads?|uploader|api|tool|app|component|plugin|module|class|function|script|service|feature|files?\s+(?:upload|reader|parser)))/iu;
+// The file's kind said at the end, whatever is made: "generate me a latest updated resume in pdf",
+// where the document is a resume and the PDF comes last. Missed by the rule above, that request went
+// to the router, which drew a portrait.
+const IN_A_FORMAT = /\b(generate|create|make|write|prepare|produce|export|draft|build|give|turn|convert|save|put|compile|update|redo|rewrite|format)\b[^.?!\n]{0,160}?\b(?:in|as|into|to)\s+(?:a\s+|an\s+)?(pdf|markdown|md)\b(?!\s*(?:parser|reader|library|viewer|editor|converter))/iu;
+// Code that makes or reads a file is code, not a document: "write code to save the report in pdf"
+const ABOUT_CODE = /\b(code|script|program|function|class|parser|library|api|regex|query|snippet)\b/i;
 const ASKS_ABOUT = /^\s*(how\s+(do|can|to|would|should|does|is)|what\s+(is|are|does|do)|why|explain|which\s+(library|tool|package))\b/i;
 const FORMAT_LABELS = {pdf: 'PDF', markdown: 'Markdown'};
 const IN_CHAT = 'Answer in the chat instead';
 
 function wantsDocument(text){
-  return !!text && text.length <= 500 && !ASKS_ABOUT.test(text) && MAKES_DOCUMENT.test(text);
+  if(!text || text.length > 500 || ASKS_ABOUT.test(text) || ABOUT_CODE.test(text)) return false;
+  return MAKES_DOCUMENT.test(text) || IN_A_FORMAT.test(text);
 }
 
 function formatIn(text){
