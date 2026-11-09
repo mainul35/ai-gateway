@@ -91,6 +91,11 @@ body.videos-studio main{max-width:none;padding:0}
 dialog.zoom{border:none;background:none;padding:0;max-width:96vw}
 dialog.zoom img{max-width:96vw;max-height:90vh;border-radius:8px}
 dialog.zoom::backdrop{background:rgba(0,0,0,.8)}
+/* A picture opened big had no way out but Escape, which nothing said: a close button where one is
+   looked for, and a click anywhere on it or around it closes it too */
+dialog.zoom{cursor:zoom-out}
+dialog.zoom .close{position:fixed;top:1rem;right:1rem;width:2.6rem;height:2.6rem;border-radius:50%;border:none;background:rgba(255,255,255,.14);color:#fff;font-size:1.6rem;line-height:1;cursor:pointer;z-index:1}
+dialog.zoom .close:hover{background:rgba(255,255,255,.26)}
 .gap{display:flex;align-items:center;gap:.5rem;width:100%;padding:.15rem .8rem;border:0;background:none;cursor:pointer;
      color:var(--muted);font:inherit;font-size:.72rem;opacity:.35;border-bottom:1px solid var(--card)}
 .gap::before,.gap::after{content:"";flex:1;border-top:1px dashed var(--border)}
@@ -127,7 +132,7 @@ dialog.addScene .actions{display:flex;justify-content:flex-end;gap:.5rem;margin-
       <button class="btn" id="save" disabled>Save and remake</button></div>
   </div>
 </div>
-<dialog class="zoom" id="zoom"><img alt=""></dialog>
+<dialog class="zoom" id="zoom"><button class="close" type="button" title="Close (Esc)" aria-label="Close">&times;</button><img alt=""></dialog>
 <dialog class="addScene" id="addScene">
   <form method="dialog">
     <h3></h3>
@@ -146,6 +151,9 @@ dialog.addScene .actions{display:flex;justify-content:flex-end;gap:.5rem;margin-
 <script src="{{ static_url('video_draft.js') }}"></script>
 <script src="{{ static_url('video_downloads.js') }}"></script>
 <script>
+// A picture opened big closes on a click anywhere: the button, the picture, or the dark around it
+// (which, for a modal dialog, is the dialog itself)
+document.getElementById('zoom').addEventListener('click', e => e.currentTarget.close());
 const NAMES = {en: 'English', bn: 'বাংলা', es: 'Español', fr: 'Français', zh: '中文', ja: '日本語', ko: '한국어',
                th: 'ไทย', ar: 'العربية', ur: 'اردو', hi: 'हिन्दी'};
 const IN_ENGLISH = {en: 'English', bn: 'Bangla', es: 'Spanish', fr: 'French', zh: 'Chinese', ja: 'Japanese',
@@ -502,6 +510,7 @@ function renderEditor(){
     const zoom = document.getElementById('zoom');
     zoom.querySelector('img').src = e.target.src;
     zoom.showModal();
+    zoom.querySelector('.close').focus();
   });
   editor.querySelector('#redraw').addEventListener('change', e => {
     edits[i] = {...(edits[i] || {}), redraw: e.target.checked};

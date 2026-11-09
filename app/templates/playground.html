@@ -535,6 +535,9 @@ a.paper{color:var(--text);text-decoration:none}
 .lightbox{position:fixed;inset:0;background:rgba(0,0,0,.85);display:flex;align-items:center;justify-content:center;
           z-index:50;cursor:zoom-out;padding:1rem}
 .lightbox img{max-width:100%;max-height:100%;border-radius:8px}
+.lightbox .close{position:fixed;top:1rem;right:1rem;width:2.6rem;height:2.6rem;border-radius:50%;border:none;
+                 background:rgba(255,255,255,.14);color:#fff;font-size:1.6rem;line-height:1;cursor:pointer;z-index:1}
+.lightbox .close:hover{background:rgba(255,255,255,.26)}
 /* --- narrow windows ------------------------------------------------------------------------
    Last in the file on purpose. These override the component rules above at the same specificity,
    and CSS settles a tie by taking the one written later - so above them they did nothing at all.
@@ -1487,7 +1490,8 @@ document.addEventListener('click', e => {
   if(!zoom) return;
   const box = document.createElement('div');
   box.className = 'lightbox';
-  box.innerHTML = `<img src="${zoom.dataset.zoom}" alt="">`;
+  // A click anywhere closes it, and so does Escape; the button is there to say so
+  box.innerHTML = `<button class="close" type="button" title="Close (Esc)" aria-label="Close">&times;</button><img src="${zoom.dataset.zoom}" alt="">`;
   box.addEventListener('click', () => box.remove());
   document.body.appendChild(box);
 });
