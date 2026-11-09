@@ -78,6 +78,10 @@ dialog.aside::backdrop{background:rgba(0,0,0,.55)}
 .aside .answer{margin-top:.8rem;max-height:52vh;overflow:auto;white-space:pre-wrap}
 .aside .answer.md{white-space:normal}
 .aside .answer:empty{display:none}
+.aside .about.quote{color:var(--text);border-left-color:var(--primary)}
+/* The way to a side question about words you have selected in a message */
+.ask-selection{position:fixed;z-index:30;font-size:.8rem;padding:.3rem .65rem;border-radius:999px;
+     box-shadow:0 4px 14px rgba(0,0,0,.4)}
 /* Answers to the same question, when it was asked more than once */
 .variants{display:inline-flex;align-items:center;gap:.3rem;margin-left:.5rem;font-weight:400}
 .variants button{background:none;border:none;padding:0 .15rem;cursor:pointer;color:var(--muted);
@@ -2014,7 +2018,7 @@ function startEdit(box){
    of its own, and never saved - the conversation carries on as if it had not been asked. */
 let asideController = null;
 
-function askAside(box){
+function askAside(box, quote = ''){
   let dialog = document.getElementById('asideDialog');
   if(!dialog){
     dialog = document.createElement('dialog');
@@ -2039,8 +2043,17 @@ function askAside(box){
   }
   asideController?.abort();
   dialog._box = box;
-  dialog.querySelector('.about').textContent = box._text || '';
-  dialog.querySelector('textarea').value = '';
+  dialog._quote = quote;
+  const about = dialog.querySelector('.about');
+  about.textContent = quote || box._text || '';
+  about.classList.toggle('quote', !!quote);
+  dialog.querySelector('.note').textContent = quote
+    ? 'About the selected text, answered from the conversation up to this message. Nothing here is added to it.'
+    : 'Answered from the conversation up to this message. Nothing here is added to it.';
+  const area = dialog.querySelector('textarea');
+  area.value = '';
+  area.placeholder = quote ? 'Ask about the selected text, or leave empty to have it explained...'
+                           : 'Ask about this message...';
   const answer = dialog.querySelector('.answer');
   answer.textContent = '';
   answer.classList.remove('md');
@@ -2050,7 +2063,8 @@ function askAside(box){
 
 async function answerAside(dialog){
   const area = dialog.querySelector('textarea');
-  const question = area.value.trim();
+  const quote = dialog._quote || '';
+  const question = area.value.trim() || (quote ? 'Explain this.' : '');
   if(!question || asideController) return;
   // The conversation as far as this question and the answer on screen to it
   const upTo = [];
@@ -2060,13 +2074,16 @@ async function answerAside(dialog){
     if(message.classList.contains('user')){
       if(reached) break;
       upTo.push({role: 'user', content: message._text || '', images: message._images || []});
-      reached = message === dialog._box;
     }else if(!message.hidden && message._text){
       upTo.push({role: 'assistant', content: message._text});
     }
+    if(message === dialog._box) reached = true;
   }
   const messages = savedSystem ? [{role: 'system', content: savedSystem}] : [];
-  messages.push(...upTo, {role: 'user', content: question, images: []});
+  // The selected words, quoted the way the model reads a quote, then what was asked about them
+  const asked = quote ? `About this part of the conversation:\n\n${quote.split('\n').map(l => '> ' + l).join('\n')}\n\n${question}`
+                      : question;
+  messages.push(...upTo, {role: 'user', content: asked, images: []});
   const answer = dialog.querySelector('.answer');
   const ask = dialog.querySelector('[data-ask]');
   const stop = dialog.querySelector('[data-stop]');
@@ -2108,6 +2125,68 @@ async function answerAside(dialog){
     stop.hidden = true;
   }
 }
+
+/* Selecting words in a message offers a side question about just those words */
+const askSelection = document.createElement('button');
+askSelection.className = 'btn btn-sm ask-selection';
+askSelection.textContent = 'Side question';
+askSelection.title = 'Ask about the selected text without adding to the conversation';
+askSelection.hidden = true;
+document.body.appendChild(askSelection);
+let selectionTimer = null, pointerHeld = false;
+
+function selectedInMessage(){
+  const selection = window.getSelection();
+  if(!selection || selection.isCollapsed || !selection.rangeCount) return null;
+  const text = selection.toString().trim();
+  if(!text) return null;
+  const inside = node => (node?.nodeType === 1 ? node : node?.parentElement)?.closest('#chat .msg');
+  const box = inside(selection.anchorNode);
+  if(!box || box !== inside(selection.focusNode) || box.dataset.failed) return null;
+  // Not words being typed while a message is changed in place
+  if((selection.anchorNode.nodeType === 1 ? selection.anchorNode : selection.anchorNode.parentElement)
+       .closest('textarea, .edit-box, .turn-tools')) return null;
+  return {box, text, rect: selection.getRangeAt(0).getBoundingClientRect()};
+}
+
+function placeAskSelection(){
+  const found = pointerHeld ? null : selectedInMessage();
+  if(!found){ askSelection.hidden = true; return; }
+  askSelection._found = found;
+  askSelection.hidden = false;
+  const {rect} = found, width = askSelection.offsetWidth, height = askSelection.offsetHeight;
+  // Under the selection, where a phone's own copy menu above it does not cover it
+  let top = rect.bottom + 8;
+  if(top + height > window.innerHeight - 8) top = Math.max(8, rect.top - height - 8);
+  const left = Math.min(Math.max(8, rect.left + rect.width / 2 - width / 2), window.innerWidth - width - 8);
+  askSelection.style.top = `${top}px`;
+  askSelection.style.left = `${left}px`;
+}
+
+document.addEventListener('selectionchange', () => {
+  clearTimeout(selectionTimer);
+  selectionTimer = setTimeout(placeAskSelection, 200);
+});
+document.addEventListener('pointerdown', e => { if(e.target !== askSelection) pointerHeld = true; });
+function pointerLetGo(){
+  if(!pointerHeld) return;
+  pointerHeld = false;
+  clearTimeout(selectionTimer);
+  selectionTimer = setTimeout(placeAskSelection, 10);
+}
+// A phone's long press ends in pointercancel when it turns into a selection
+document.addEventListener('pointerup', pointerLetGo);
+document.addEventListener('pointercancel', pointerLetGo);
+document.getElementById('transcript').addEventListener('scroll', () => { askSelection.hidden = true; }, {passive: true});
+// Keeps the selection: the button is pressed without taking it away
+askSelection.addEventListener('mousedown', e => e.preventDefault());
+askSelection.addEventListener('click', () => {
+  const found = askSelection._found;
+  askSelection.hidden = true;
+  if(!found) return;
+  window.getSelection()?.removeAllRanges();
+  askAside(found.box, found.text.slice(0, 4000));
+});
 
 const ACTION_LABELS = {chat: 'answered directly', search: 'searched the web',
                        image: 'created an image', edit: 'edited the image',
