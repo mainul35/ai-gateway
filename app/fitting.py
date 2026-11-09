@@ -61,14 +61,26 @@ def published_level(key, entry, param_count):
                            + (f" ({len(entry['files'])} parts)" if len(entry["files"]) > 1 else "")}
 
 
+def run_mode(system_info, memory_needed):
+    """"GPU", "GPU + CPU" or "CPU" for a model needing this much memory here, or None if it will not run."""
+    total_vram = system_info["total_vram"]
+    gpu_budget = total_vram * MEMORY_HEADROOM
+    ram_budget = system_info["available_ram"] * MEMORY_HEADROOM
+    if total_vram and memory_needed <= gpu_budget:
+        return "GPU"
+    if total_vram and memory_needed <= gpu_budget + ram_budget:
+        return "GPU + CPU"   # Ollama offloads the layers that do not fit to system RAM
+    if not total_vram and memory_needed <= ram_budget:
+        return "CPU"
+    return None
+
+
 def recommend(system_info, param_count, kv_cache_bytes, gguf_files, gguf_details=None):
     """Every quantization that would run here, best first, with one marked as the one to take.
 
     gguf_details (utils.hf_client.gguf_files_detailed) adds the files that name no standard
     quantization, each as its own row."""
     total_vram = system_info["total_vram"]
-    gpu_budget = total_vram * MEMORY_HEADROOM
-    ram_budget = system_info["available_ram"] * MEMORY_HEADROOM
     recommendations = []
     levels = dict(QUANTIZATION_LEVELS)
     for key, entry in (gguf_details or {}).items():
@@ -83,14 +95,8 @@ def recommend(system_info, param_count, kv_cache_bytes, gguf_files, gguf_details
         if not estimated_size:
             continue
         memory_needed = estimated_size * MEMORY_OVERHEAD + kv_cache_bytes
-
-        if total_vram and memory_needed <= gpu_budget:
-            run_mode = "GPU"
-        elif total_vram and memory_needed <= gpu_budget + ram_budget:
-            run_mode = "GPU + CPU"   # Ollama offloads the layers that do not fit to system RAM
-        elif not total_vram and memory_needed <= ram_budget:
-            run_mode = "CPU"
-        else:
+        mode = run_mode(system_info, memory_needed)
+        if mode is None:
             continue
 
         recommendations.append({
@@ -101,7 +107,7 @@ def recommend(system_info, param_count, kv_cache_bytes, gguf_files, gguf_details
             "size_is_exact": quant_name in gguf_files,
             "memory_needed_gb": round(memory_needed / (1024 ** 3), 2),
             "vram_usage_percent": round(memory_needed / total_vram * 100, 1) if total_vram else None,
-            "run_mode": run_mode, "available": quant_name in gguf_files, "recommended": False,
+            "run_mode": mode, "available": quant_name in gguf_files, "recommended": False,
             # Ollama loads a model only from a single file; one in parts runs in llama.cpp alone
             "parts": len(((gguf_details or {}).get(quant_name) or {}).get("files") or []) or 1,
         })
