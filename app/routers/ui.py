@@ -73,8 +73,6 @@ NOTICES = {
     "requested": "Your request to use this gateway has been sent to an admin. Sign in again once "
                  "they have approved it.",
     "pending": "Your request is still waiting for an admin to approve it.",
-    "taken": "An account here already has your email and is not linked to this sign-in. Ask an admin "
-             "to sort it out on the Users page; a second account is not made for the same email.",
 }
 
 

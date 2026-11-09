@@ -110,8 +110,6 @@ async def callback(request: Request, code: str | None = None, state: str | None 
         raise _auth_server_failed("Auth server returned no subject claim to know the person by")
 
     user = await _account_for(session, identity)
-    if user is _TAKEN:
-        return _back_to_login("taken")
     if user is None:
         user = await _new_account(session, identity)
         user.claims = json.dumps(claims) if claims else None
@@ -156,13 +154,8 @@ def _back_to_login(notice):
     return response
 
 
-# What _account_for says when the email belongs to an account this sign-in must not become
-_TAKEN = object()
-
-
 async def _account_for(session, identity):
-    """The account this auth-server identity already has; None for nobody; _TAKEN when its email
-    belongs to an account it cannot be given.
+    """The account this auth-server identity already has, or None when there is none and one is made.
 
     By the auth server's own id. Before accounts carried it they were found by name - the email, or
     the display name - so one made that way is taken over once, by the person it was made for:
@@ -170,12 +163,12 @@ async def _account_for(session, identity):
     anybody yet, and only on an email the auth server has verified. A manager's pre-made account,
     the built-in admin, and anyone merely calling themselves by somebody's name are never matched.
 
-    Then by email, verified by the auth server, because one email is one person here: an account an
-    admin made for that email (no password, no sign-in linked yet) is the one they meant for this
-    person, and is linked to them. An account with that email that is someone's - a password, or a
-    different sign-in already linked - is never taken over, and no second account is made beside
-    it either: two accounts with one email, one made by an admin and one by a first sign-in, was
-    how one person came to have two, each with different access.
+    Then by email, because one email is one person here: whoever already has an account with it -
+    made by an admin, made by an earlier sign-in, with a password or without - signs in to that
+    account, and a new one is made only for an email nobody has. Two accounts with one email, one
+    made by an admin and one by a first sign-in, was how one person came to have two, each with
+    different access. Only an email the auth server has verified counts: an unverified one is
+    whatever somebody typed there, and would hand them another person's account.
     """
     key = sso.subject_key(identity["subject"])
     found = (await session.execute(select(User).where(User.sso_subject == key))).scalar_one_or_none()
@@ -191,13 +184,16 @@ async def _account_for(session, identity):
     holder = await bootstrap.account_with_email(session, identity["email"])
     if holder is None:
         return None
-    if holder.sso_subject is None and holder.password_hash is None:
-        log.info("SSO sign-in linked to %s, the account made for %s", holder.name, identity["email"])
+    if holder.sso_subject is None:
+        # Found by its id from now on, whatever the email becomes
         holder.sso_subject = key
-        return holder
-    log.warning("SSO sign-in as %s refused: %s already has that email and is %s", identity["email"],
-                holder.name, "linked to another sign-in" if holder.sso_subject else "a password account")
-    return _TAKEN
+        log.info("SSO sign-in as %s linked to the account %s", identity["email"], holder.name)
+    else:
+        # Already linked to another id at the auth server - an account there made again with the same
+        # email. That link is kept; this sign-in reaches the account by its email
+        log.info("SSO sign-in as %s reaches %s by its email (it is linked to another id)", identity["email"],
+                 holder.name)
+    return holder
 
 
 async def _free_name(session, wanted, subject):
