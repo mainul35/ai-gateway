@@ -129,9 +129,42 @@ async def by_model(session, since):
                func.sum(UsageRecord.total_tokens))
         .where(UsageRecord.created_at >= since).group_by(UsageRecord.model)
     )).all()
-    return {
+    found = {
         model: {"requests": int(requests or 0), "failures": int(failures or 0),
                 "last_used": last.isoformat() if last else None, "_last": last,
                 "avg_latency_ms": int(latency or 0), "tokens": int(tokens or 0), "last_error": None}
         for model, requests, failures, last, latency, tokens in rows
     }
+    for model, requests, faults in await _recent_faults(session, since):
+        if model in found:
+            found[model]["recent_requests"] = int(requests or 0)
+            found[model]["recent_faults"] = int(faults or 0)
+    return found
+
+
+RECENT_TRIES = 20      # the requests a model is judged on: its last this many
+# What the supervisor answers when another model holds the GPU (supervisor.py): the GPU was taken,
+# the model asked for did nothing wrong
+BUSY_GPU = "The GPU is busy%"
+
+
+async def _recent_faults(session, since):
+    """(model, requests, faults) over each model's last RECENT_TRIES requests since a moment.
+
+    A fault is the model's own doing - a 5xx: it crashed, hung up, or would not load. The failures
+    counted above are every status of 400 and up, which is what an operator wants to see, but a
+    chooser that counts a picture the client could not encode, a prompt longer than any window or a
+    GPU another model was using as the model's failures stops picking a healthy model: on 2026-11-09
+    qwen3.8-27b lost the playground to GLM-4.7-Flash over 14 such "failures" from two weeks before,
+    none of them the engine's. Only the latest requests count, so a fault ages out as soon as the model
+    has answered again, and a model that broke an hour ago is caught however long its record is.
+    """
+    newest_first = func.row_number().over(partition_by=UsageRecord.model,
+                                          order_by=UsageRecord.created_at.desc()).label("n")
+    latest = (select(UsageRecord.model, UsageRecord.status_code, UsageRecord.error, newest_first)
+              .where(UsageRecord.created_at >= since).subquery())
+    fault = (latest.c.status_code >= 500) & ~func.coalesce(latest.c.error, "").like(BUSY_GPU)
+    return (await session.execute(
+        select(latest.c.model, func.count(), func.sum(case((fault, 1), else_=0)))
+        .where(latest.c.n <= RECENT_TRIES).group_by(latest.c.model)
+    )).all()

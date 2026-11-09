@@ -32,6 +32,7 @@ SPECIALIST = re.compile(r"embed|rerank|guard|shield|whisper|tts|image|diffusion|
 
 BROKEN_SHARE = 0.5      # failing this often, with enough attempts to mean it, is broken
 ENOUGH_TRIES = 2
+FAILURE_WEIGHT = 10     # points off per share failed: one in twenty costs 0.5, one in ten or worse 1
 SLOW_MS = 60_000
 UNKNOWN_SIZE = 30.0   # billions; what a model is taken to be when nothing says        # a minute per answer is worth a point against, not a disqualification
 
@@ -58,17 +59,29 @@ def _parameters(model):
     return {"M": size / 1000, "T": size * 1000}.get(found.group(2), size)
 
 
+def _record(health):
+    """(requests, failures) a model is judged on: its latest requests and its own faults in them
+    (usage.by_model's recent_*), else - a record without them - every request and every 4xx/5xx."""
+    health = health or {}
+    if "recent_requests" in health:
+        return health["recent_requests"] or 0, health.get("recent_faults") or 0
+    return health.get("requests") or 0, health.get("failures") or 0
+
+
 def _reliability(health):
-    """How much this model's own record argues for or against using it now."""
-    requests = (health or {}).get("requests") or 0
-    failures = (health or {}).get("failures") or 0
+    """How much this model's own record argues for or against using it now.
+
+    In proportion to how often it fails: a flat point off for any failure at all made one fault in
+    fifty cost as much as one in three, and handed the job to a model with a shorter record.
+    """
+    requests, failures = _record(health)
     if requests >= ENOUGH_TRIES and failures / requests >= BROKEN_SHARE:
         return None            # not a score: a refusal
     score = 0.0
     if requests and not failures:
         score += 0.5           # it has been asked and it has answered
     elif failures:
-        score -= 1.0
+        score -= min(1.0, FAILURE_WEIGHT * failures / max(requests, 1))
     if (health or {}).get("avg_latency_ms", 0) > SLOW_MS:
         score -= 1.0
     return score
@@ -180,8 +193,8 @@ def why(model, category):
         reasons.append(f"reads {round(model['context_length'] / 1024)}K at once")
     if model.get("parameter_size"):
         reasons.append(f"{model['parameter_size']} parameters")
-    health = model.get("health") or {}
-    if health.get("requests") and not health.get("failures"):
+    requests, failures = _record(model.get("health"))
+    if requests and not failures:
         reasons.append("no failures here")
     return ", ".join(reasons[:3])
 
@@ -229,6 +242,7 @@ def _passed_over(models, category, needs_vision, prefer, chosen):
     if best is None or best.get("name") == chosen.get("name"):
         return None
     health = next((m.get("health") or {} for m in models if m.get("name") == best.get("name")), {})
-    if not health.get("failures"):
+    requests, failures = _record(health)
+    if not failures:
         return None
-    return {"model": best["name"], "failures": health["failures"], "requests": health.get("requests") or 0}
+    return {"model": best["name"], "failures": failures, "requests": requests}
