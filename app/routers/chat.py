@@ -836,6 +836,43 @@ async def reader(url: str, principal: Principal = Depends(authenticate)):
         raise HTTPException(status.HTTP_400_BAD_REQUEST, f"Could not open that page: {e}")
 
 
+class WrittenIn(BaseModel):
+    text: str = Field(min_length=1, max_length=400_000)
+    format: str = Field(pattern="^(markdown|pdf)$")
+    message_id: int | None = None     # the saved answer it was made from, to keep it with
+
+
+@router.post("/written")
+async def write_answer_file(payload: WrittenIn, principal: Principal = Depends(authenticate),
+                            session: AsyncSession = Depends(get_session)):
+    """An answer as a file, from the "Save as" under it: the router does not always see that a file
+    was wanted, and the answer is in the chat either way. Made like a document asked for
+    (app/tools/written.py), and kept with the answer when it is a saved one the person may write in."""
+    user = _require_user(principal)
+    message = None
+    if payload.message_id is not None:
+        message = await session.get(ConversationMessage, payload.message_id)
+        if message is None or message.role != "assistant":
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "No such answer")
+        _, how = await _access(session, message.conversation_id, user)
+        if how == "viewer":
+            message = None            # a reader may have the file, not change the conversation
+    try:
+        name, data, mime = await asyncio.to_thread(written.make, payload.text, payload.format)
+    except written.WrittenError as e:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(e))
+    stored = ChatFile(user_id=user.id, kind="written", mime_type=mime, name=name, prompt=None, data=data)
+    session.add(stored)
+    await session.commit()
+    await session.refresh(stored)
+    if message is not None:
+        filed = json.loads(message.attachments) if message.attachments else {}
+        filed["document"] = {"file_id": stored.id, "name": name, "mime_type": mime, "format": payload.format}
+        message.attachments = json.dumps(filed)
+        await session.commit()
+    return _file_json(stored)
+
+
 @router.get("/files/{file_id}/istory")
 async def file_istory_status(file_id: int, principal: Principal = Depends(authenticate)):
     """Whether a video story reached the person's istory studio (app/istory.py)."""
