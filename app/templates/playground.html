@@ -492,6 +492,12 @@ a.paper{color:var(--text);text-decoration:none}
 .preview .share-row[hidden]{display:none}
 .preview .share-row input{flex:1;min-width:14rem;font-size:.8rem;padding:.25rem .4rem}
 .code-tools{display:flex;gap:.4rem;justify-content:flex-end;margin:-.4rem 0 .6rem}
+/* Any answer as a file */
+.as-file{display:flex;align-items:center;gap:.45rem;margin-top:.55rem;font-size:.76rem;color:var(--muted)}
+.as-file button{background:none;border:1px solid var(--border);border-radius:999px;color:var(--muted);
+                font:inherit;padding:.05rem .6rem;cursor:pointer}
+.as-file button:hover:not(:disabled){color:var(--text);border-color:var(--primary)}
+.as-file button:disabled{opacity:.6;cursor:default}
 .code-tools button{background:none;border:1px solid var(--border);color:var(--muted);border-radius:6px;
                    font-size:.72rem;padding:.12rem .45rem;cursor:pointer;font-family:inherit}
 .code-tools button:hover{color:var(--text);border-color:var(--primary)}
@@ -1656,6 +1662,7 @@ function fillMessages(messages){
       const box = answerBox(turn, m.model || (extra.map ? 'OpenStreetMap'
                                               : extra.media ? 'Picture search' : ''));
       const withModel = m.stats || m.model ? {...(m.stats || {}), model: m.model} : null;
+      box._answerId = m.id;
       if(extra.agent) renderAgent(box, extra.agent, m.content, m.html, withModel);
       else if(extra.map) renderMap(box, extra.map);
       else if(extra.media) renderMedia(box, extra.media);
@@ -3603,57 +3610,33 @@ function offerFiles(box, text){
     if((suffix === 'html' || !language) && WHOLE_PAGE.test(code.textContent)) preview(block, code);
   }
 
-  // The answer as a file, but only when the question asked for one. It used to appear under every
-  // long reply, which put a download card under answers nobody wanted to keep; asking for it in
-  // words is the signal, and it is the one people actually use.
-  const question = questionAbove(box);
-  if(!wantsAFile(question)) return;
-  const named = ASKED_FORMAT.exec(question);
-  const kind = named ? named[1].toLowerCase() : 'md';
-  const name = fileName(text, kind === 'markdown' ? 'md' : kind);
-  const card = document.createElement('div');
-  card.className = 'file';
-  card.innerHTML = `
-    <span class="icon">&#128196;</span>
-    <span class="about">
-      <span class="name"></span>
-      <span class="kind">${(text.length / 1024).toFixed(1)} KB</span>
-    </span>
-    <button class="btn btn-sm btn-secondary" data-copy-all>Copy</button>
-    <button class="btn btn-sm" data-save-all>Download</button>`;
-  card.querySelector('.name').textContent = name;
-  card.querySelector('[data-save-all]').addEventListener('click',
-    () => download(text, name, 'text/markdown'));
-  card.querySelector('[data-copy-all]').addEventListener('click', async e => {
-    await navigator.clipboard.writeText(text);
-    e.target.textContent = 'Copied';
-    setTimeout(() => { e.target.textContent = 'Copy'; }, 1500);
+  // Any answer as a file, a click away. The card that offered one waited for the question to ask
+  // in the right words, and the router does not always see that a file was wanted either; the
+  // answer is in the chat regardless, so turning it into a PDF or Markdown is always on offer.
+  if(text.trim().length < 40) return;
+  const row = document.createElement('div');
+  row.className = 'as-file';
+  row.innerHTML = '<span>Save as</span>' + documentKinds().map(kind =>
+    `<button type="button" data-as="${kind}">${FORMAT_LABELS[kind]}</button>`).join('');
+  row.addEventListener('click', async e => {
+    const chosen = e.target.closest('[data-as]');
+    if(!chosen) return;
+    const buttons = row.querySelectorAll('button');
+    const label = chosen.textContent;
+    buttons.forEach(b => { b.disabled = true; });
+    chosen.textContent = chosen.dataset.as === 'pdf' ? 'Making the PDF\u2026' : 'Saving\u2026';
+    try{
+      const file = await api('/chat/written', {method: 'POST', headers: JSON_HEADERS,
+        body: JSON.stringify({text, format: chosen.dataset.as, message_id: box._answerId || null})});
+      showWritten(box, file);
+      openFile(file.url, file.name);
+    }catch(err){ showError('Could not make the file: ' + errorText(err)); }
+    finally{
+      chosen.textContent = label;
+      buttons.forEach(b => { b.disabled = false; });
+    }
   });
-  box.appendChild(card);
-}
-
-/* The question this answer is answering: the nearest thing above it that somebody typed. */
-function questionAbove(box){
-  for(let before = box.previousElementSibling; before; before = before.previousElementSibling){
-    if(before.classList && before.classList.contains('user')) return before._text || '';
-  }
-  return '';
-}
-
-// Asking for the answer as something to keep, rather than mentioning a file in passing. "Write it
-// to a file", "as markdown", "can I download this" - but not "read the file I attached".
-const WANTS_A_FILE = new RegExp(
-  String.raw`\b(download|save|export)\b[^.?!]{0,40}\b(it|this|that|answer|reply|them|here)\b` +
-  String.raw`|\b(give|send|make|write|put|get)\s+(me\s+|it\s+|this\s+|that\s+)*` +
-  String.raw`(as|in|into|to)\s+(an?\s+)?(file|markdown|md|text|document|doc)\b` +
-  String.raw`|\bas\s+(an?\s+)?(markdown|md|\.md|text|txt|\.txt|file|document)\b` +
-  String.raw`|\b(downloadable|a file i can|file version|in a file|to a file)\b` +
-  String.raw`|\b(can|could) i (download|save|have)\b`, "i");
-// Which kind, when they said. Everything here is written out as text either way.
-const ASKED_FORMAT = /\b(markdown|md|txt|text|csv|json|yaml|yml|html)\b(?:\s+(?:file|document))?/i;
-
-function wantsAFile(question){
-  return WANTS_A_FILE.test(question || '');
+  box.appendChild(row);
 }
 
 /* The question under an answer, asked about the work it did: "Did the code work?" under code,
@@ -4026,6 +4009,7 @@ let formatQuestion = null;
 
 function showFormatQuestion(box, kinds, request){
   dropFormatQuestion();
+  box.querySelector('.as-file')?.remove();
   const row = document.createElement('div');
   row.className = 'choices';
   row.innerHTML = kinds.map(k => `<button class="btn btn-sm" data-format="${k}">${FORMAT_LABELS[k]}</button>`).join('')
