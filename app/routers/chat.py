@@ -939,13 +939,29 @@ async def written_source(file_id: int, principal: Principal = Depends(authentica
     return {"name": stored.name, "format": "pdf" if stored.mime_type == "application/pdf" else "markdown", "text": text}
 
 
+class SourceIn(BaseModel):
+    text: str = Field(min_length=1, max_length=400_000)
+
+
+@router.put("/files/{file_id}/source")
+async def save_written_source(file_id: int, payload: SourceIn, principal: Principal = Depends(authenticate),
+                              session: AsyncSession = Depends(get_session)):
+    """Keeps edited text with a written document without making the file again, so the editor opens
+    on it next time; the file itself changes when it is made again."""
+    user = _require_user(principal)
+    stored, _ = await _written_file(session, user, file_id)
+    stored.prompt = payload.text
+    await session.commit()
+    return {"saved": True, "characters": len(payload.text)}
+
+
 class ReviseIn(BaseModel):
     text: str = Field(min_length=1, max_length=400_000)
     # The editor's drawings of the document's ```chart blocks, in order (mdchart's SVG), for a PDF
     charts: list[str] = Field(default_factory=list, max_length=50)
 
 
-async def _pictures_of(session, user, text):
+async def _document_pictures(session, user, text):
     """{file id: data URL} of this person's own pictures the document shows (![..](/chat/files/<id>)),
     so a PDF has them in it without fetching anything."""
     ids = {int(n) for n in re.findall(r"\]\(/chat/files/(\d+)\)", text)}
@@ -966,7 +982,7 @@ async def revise_written(file_id: int, payload: ReviseIn, principal: Principal =
     fmt = "pdf" if stored.mime_type == "application/pdf" else "markdown"
     if any(len(chart) > 300_000 for chart in payload.charts):
         raise HTTPException(status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, "A chart is too large to draw")
-    pictures = await _pictures_of(session, user, payload.text) if fmt == "pdf" else {}
+    pictures = await _document_pictures(session, user, payload.text) if fmt == "pdf" else {}
     try:
         name, data, mime = await asyncio.to_thread(written.make, payload.text, fmt, pictures, payload.charts)
     except written.WrittenError as e:

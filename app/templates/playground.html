@@ -2764,9 +2764,11 @@ async function editFile(tab){
   catch(e){ showError('This document cannot be edited: ' + errorText(e)); return; }
   const again = source.format === 'pdf' ? 'Make the PDF again' : 'Save the Markdown again';
   tab.body.classList.add('editing');
-  tab.body.innerHTML = `<div class="doc-bar"><button class="btn btn-sm" type="button" data-remake>${again}</button>
-      <button class="btn btn-sm btn-secondary" type="button" data-stop-edit>Cancel</button>
-      <span class="muted" style="font-size:.78rem">Select words in either half, then a tool</span></div>
+  tab.body.innerHTML = `<div class="doc-bar"><button class="btn btn-sm btn-secondary" type="button" data-save-edit
+          title="Keep the changes, to come back to (Ctrl+S); the file is made from them with the next button" disabled>Save</button>
+      <button class="btn btn-sm" type="button" data-remake>${again}</button>
+      <button class="btn btn-sm btn-secondary" type="button" data-stop-edit>Close</button>
+      <span class="muted edit-state" style="font-size:.78rem">Select words in either half, then a tool</span></div>
     <div class="format-bar"></div>
     <div class="doc-edit"><textarea spellcheck="true" aria-label="The document's text"></textarea>
       <div class="doc-preview md" aria-label="Preview"></div></div>`;
@@ -2782,11 +2784,42 @@ async function editFile(tab){
     preview.innerHTML = html;
     window.mdToolbar?.drawCharts(preview);
   };
-  area.addEventListener('input', () => { clearTimeout(soon); soon = setTimeout(draw, 400); });
+  // What is kept on the server: the text the editor opens on next time
+  let saved = source.text;
+  const saveButton = tab.body.querySelector('[data-save-edit]');
+  const state = tab.body.querySelector('.edit-state');
+  const showState = text => { state.textContent = text; };
+  const changed = () => {
+    saveButton.disabled = area.value === saved;
+    if(area.value !== saved) showState('Unsaved changes');
+  };
+  const save = async () => {
+    if(area.value === saved) return true;
+    const text = area.value;
+    saveButton.disabled = true;
+    showState('Saving…');
+    try{
+      await api(`/chat/files/${id}/source`, {method: 'PUT', headers: JSON_HEADERS, body: JSON.stringify({text})});
+      saved = text;
+      showState(source.format === 'pdf' ? 'Saved. The PDF changes when it is made again.' : 'Saved. The file changes when it is saved again.');
+      changed();
+      return true;
+    }catch(err){
+      showState('Not saved');
+      saveButton.disabled = false;
+      showError('Could not save your changes: ' + errorText(err));
+      return false;
+    }
+  };
+  saveButton.addEventListener('click', save);
+  area.addEventListener('keydown', e => {
+    if((e.ctrlKey || e.metaKey) && !e.altKey && e.key.toLowerCase() === 's'){ e.preventDefault(); save(); }
+  });
+  area.addEventListener('input', () => { clearTimeout(soon); soon = setTimeout(draw, 400); changed(); });
   draw();
   area.focus();
   tab.body.querySelector('[data-stop-edit]').addEventListener('click', () => {
-    if(area.value !== source.text && !confirm('Leave without making the document again? Your changes are lost.')) return;
+    if(area.value !== saved && !confirm('Close without saving? Your unsaved changes are lost.')) return;
     toolbar?.close();
     tab.body.classList.remove('editing');
     showFile(tab);
@@ -2816,6 +2849,8 @@ async function editFile(tab){
       button.disabled = false;
       button.textContent = again;
       showError('Could not make the document again: ' + errorText(err));
+      // The edits are kept even so, to try again from later
+      await save();
     }
   });
 }
