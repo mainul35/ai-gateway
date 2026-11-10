@@ -493,6 +493,7 @@ a.paper{color:var(--text);text-decoration:none}
 .preview .share-row input{flex:1;min-width:14rem;font-size:.8rem;padding:.25rem .4rem}
 .code-tools{display:flex;gap:.4rem;justify-content:flex-end;margin:-.4rem 0 .6rem}
 /* Any answer as a file */
+.earlier,.more-convs{text-align:center;font-size:.78rem;color:var(--muted);padding:.4rem 0}
 .as-file{display:flex;align-items:center;gap:.45rem;margin-top:.55rem;font-size:.76rem;color:var(--muted)}
 .as-file button{background:none;border:1px solid var(--border);border-radius:999px;color:var(--muted);
                 font:inherit;padding:.05rem .6rem;cursor:pointer}
@@ -893,6 +894,60 @@ function openAtLatest(){
 // away from someone who has scrolled up to read something is worse than not following at all.
 // While a saved conversation is drawn in one go: openAtLatest puts it at the end once it is all there
 let drawingWhole = false;
+
+/* A long conversation opens on its latest messages; the earlier ones are drawn as you scroll up to
+   them. They are all fetched (the model is told the whole conversation, and the side question
+   reads it too), only not drawn, so every part of the page that walks the messages - history after
+   an edit, asking again, answers to the same question - goes through allMessages, which includes
+   the ones still held back. */
+const HOLD_BACK_FROM = 60, DRAW_FIRST = 40, DRAW_MORE = 30;
+let heldBack = [];
+
+function allMessages(selector = '.msg'){
+  return [...heldBack.filter(m => m.matches(selector)), ...chat.querySelectorAll(selector)];
+}
+
+function holdBackEarlier(){
+  heldBack = [];
+  const drawn = [...chat.querySelectorAll(':scope > .msg')];
+  if(drawn.length <= HOLD_BACK_FROM) return;
+  // From a question, so a question and its answers stay together
+  let cut = drawn.length - DRAW_FIRST;
+  while(cut > 0 && !drawn[cut].classList.contains('user')) cut--;
+  if(cut <= 0) return;
+  heldBack = drawn.slice(0, cut);
+  heldBack.forEach(m => m.remove());
+  const note = document.createElement('div');
+  note.className = 'earlier';
+  note.id = 'earlierNote';
+  chat.prepend(note);
+  describeEarlier();
+  earlierWatch.observe(note);
+}
+
+function describeEarlier(){
+  const note = document.getElementById('earlierNote');
+  if(note) note.textContent = `${heldBack.length} earlier message${heldBack.length === 1 ? '' : 's'} - scroll up to see them`;
+}
+
+function drawEarlier(){
+  const note = document.getElementById('earlierNote');
+  if(!heldBack.length || !note) return;
+  let from = Math.max(0, heldBack.length - DRAW_MORE);
+  while(from > 0 && !heldBack[from].classList.contains('user')) from--;
+  const piece = heldBack.splice(from);
+  // Drawn above what is on screen without moving it: the page grows upwards
+  const before = transcript.scrollHeight;
+  note.after(...piece);
+  transcript.scrollTop += transcript.scrollHeight - before;
+  if(heldBack.length) describeEarlier();
+  else{ earlierWatch.unobserve(note); note.remove(); }
+}
+
+// Some way before the top is reached, so scrolling up does not stop at an empty edge
+const earlierWatch = new IntersectionObserver(entries => {
+  if(entries.some(e => e.isIntersecting)) drawEarlier();
+}, {root: document.getElementById('transcript'), rootMargin: '800px 0px 0px 0px'});
 
 function followAlong(){
   // Each call makes the browser lay out everything drawn so far, so following along message by
@@ -1573,19 +1628,47 @@ document.getElementById('addNote').addEventListener('click', async () => {
 
 // --- conversation list ----------------------------------------------------
 
-async function loadConversations(){
-  const target = document.getElementById('convs');
-  try{
-    conversations = await api('/chat/conversations');
-    target.innerHTML = conversations.length ? conversations.map(c => `
-      <div class="conv ${c.id === currentId ? 'active' : ''}" data-open="${c.id}" title="${escapeHtml(c.title)}">
+// The list draws its first rows and the rest as the sidebar is scrolled down to them
+const LIST_FIRST = 40, LIST_MORE = 40;
+let listDrawn = 0;
+
+function conversationRow(c){
+  return `<div class="conv ${c.id === currentId ? 'active' : ''}" data-open="${c.id}" title="${escapeHtml(c.title)}">
         <div style="flex:1;min-width:0">
           <div class="title">${escapeHtml(c.title)}</div>
           <div class="when">${relativeTime(c.updated_at)} &middot; ${c.message_count} msg</div>
         </div>
         <button class="del" data-delete="${c.id}" title="Delete">&times;</button>
-      </div>`).join('')
+      </div>`;
+}
+
+function drawMoreConversations(upTo = listDrawn + LIST_MORE){
+  const target = document.getElementById('convs');
+  const end = Math.min(conversations.length, upTo);
+  if(end <= listDrawn) return;
+  document.getElementById('moreConvs')?.remove();
+  target.insertAdjacentHTML('beforeend', conversations.slice(listDrawn, end).map(conversationRow).join(''));
+  listDrawn = end;
+  if(listDrawn < conversations.length){
+    target.insertAdjacentHTML('beforeend', `<div class="more-convs muted" id="moreConvs">${conversations.length - listDrawn} more</div>`);
+    listWatch.observe(document.getElementById('moreConvs'));
+  }
+}
+
+const listWatch = new IntersectionObserver(entries => {
+  if(entries.some(e => e.isIntersecting)) drawMoreConversations();
+}, {root: document.querySelector('.side'), rootMargin: '0px 0px 400px 0px'});
+
+async function loadConversations(){
+  const target = document.getElementById('convs');
+  try{
+    conversations = await api('/chat/conversations');
+    listDrawn = 0;
+    target.innerHTML = conversations.length ? ''
       : '<span class="muted" style="padding:0 .5rem;font-size:.88rem">No saved conversations yet.</span>';
+    // At least down to the open one, so it is there to be marked
+    const open = conversations.findIndex(c => c.id === currentId);
+    drawMoreConversations(Math.max(LIST_FIRST, open + 1));
   }catch(e){ target.innerHTML = `<span class="muted">Could not load: ${escapeHtml(errorText(e))}</span>`; }
   loadSharedWithMe();
 }
@@ -1602,6 +1685,8 @@ function conversationInUrl(id, how = 'push'){
 }
 
 function resetChat(how = 'push'){
+  leaveConversation();
+  heldBack = [];
   conversationInUrl(null, how);
   currentId = null;
   currentUid = null;
@@ -1629,6 +1714,8 @@ function resetChat(how = 'push'){
    page and needs to be testable without a conversation, a server or a login. */
 function fillTranscript(messages){
   drawingWhole = true;
+  // The previous conversation's held-back messages are not this one's
+  heldBack = [];
   try{ fillMessages(messages); }
   finally{ drawingWhole = false; }
 }
@@ -1703,6 +1790,8 @@ function fillMessages(messages){
    again on every switch only to move the highlight was a second request each time. A conversation
    not in the list (just shared with you, say) still brings the list in. */
 function markOpenConversation(){
+  const at = conversations.findIndex(c => c.id === currentId);
+  if(at >= listDrawn) drawMoreConversations(at + 1);
   let found = false;
   for(const item of document.querySelectorAll('.conv[data-open]')){
     const here = item.dataset.open === String(currentId) || item.dataset.open === currentUid;
@@ -1712,10 +1801,65 @@ function markOpenConversation(){
   if(!found) loadConversations();
 }
 
+/* Conversations already opened are kept, so going back to one shows it at once. It is then asked for
+   again in the background - with the version kept, so an unchanged one costs a 304 and no body - and
+   drawn again only if it did change: on another device, by a task that finished, by someone it is
+   shared with. One changed in this tab (a message sent or edited, a verdict given) is not shown
+   from what was kept, which does not have that change. */
+const keptConversations = new Map();     // its number and its uid -> the conversation as last fetched
+const fetchingConversations = new Map();
+const KEEP_MOST = 30;
+let changedHere = false;
+
+function keepConversation(conversation){
+  for(const key of [String(conversation.id), String(conversation.uid)]){
+    keptConversations.delete(key);
+    keptConversations.set(key, conversation);
+  }
+  while(keptConversations.size > KEEP_MOST * 2) keptConversations.delete(keptConversations.keys().next().value);
+}
+
+function forgetConversation(id, uid){
+  keptConversations.delete(String(id));
+  keptConversations.delete(String(uid));
+}
+
+// Asked for once at a time: a hover and the click after it share one request
+function fetchConversation(id){
+  const key = String(id);
+  if(fetchingConversations.has(key)) return fetchingConversations.get(key);
+  const asking = api(`/chat/conversations/${id}`)
+    .then(conversation => { keepConversation(conversation); return conversation; })
+    .finally(() => fetchingConversations.delete(key));
+  fetchingConversations.set(key, asking);
+  return asking;
+}
+
+// Leaving the open conversation: what was kept of it is out of date if something changed here
+function leaveConversation(){
+  if(changedHere && currentId) forgetConversation(currentId, currentUid);
+  changedHere = false;
+}
+
 async function openConversation(id, how = 'push'){
   if(controller) return;
+  leaveConversation();
+  const kept = keptConversations.get(String(id));
+  if(kept){
+    showConversation(kept, how);
+    fetchConversation(id).then(fresh => {
+      if(fresh.version !== kept.version && currentId === fresh.id && !controller && !changedHere){
+        showConversation(fresh, 'none');
+      }
+    }).catch(() => {});
+    return;
+  }
+  try{ showConversation(await fetchConversation(id), how); }
+  catch(e){ showError('Could not open conversation: ' + errorText(e)); }
+}
+
+function showConversation(conversation, how){
   try{
-    const conversation = await api(`/chat/conversations/${id}`);
     currentId = conversation.id;
     currentUid = conversation.uid;
     panelFollowsConversation();
@@ -1734,6 +1878,7 @@ async function openConversation(id, how = 'push'){
     history = [];
     fillTranscript(conversation.messages);
     if(!conversation.messages.length) chat.innerHTML = '<p class="muted" id="empty">Empty conversation.</p>';
+    holdBackEarlier();
     openAtLatest();
     attachToRunningJob(conversation.id);
     if(conversation.model && !models[conversation.model]){
@@ -1806,6 +1951,23 @@ document.getElementById('convs').addEventListener('click', async e => {
   }
   const open = e.target.closest('[data-open]');
   if(open) openConversation(Number(open.dataset.open));
+});
+
+let restingOn = null;
+document.getElementById('convs').addEventListener('pointerover', e => {
+  const item = e.target.closest('[data-open]');
+  if(!item || item === restingOn) return;
+  restingOn = item;
+  clearTimeout(item._soon);
+  item._soon = setTimeout(() => {
+    if(item.dataset.open !== String(currentId) && !keptConversations.has(item.dataset.open)){
+      fetchConversation(item.dataset.open).catch(() => {});
+    }
+  }, 80);
+});
+document.getElementById('convs').addEventListener('pointerout', e => {
+  const item = e.target.closest('[data-open]');
+  if(item && !item.contains(e.relatedTarget)){ clearTimeout(item._soon); restingOn = null; }
 });
 
 document.getElementById('convs').addEventListener('dblclick', async e => {
@@ -1972,7 +2134,7 @@ function addTurnTools(box){
    answer. An older one says what it will cost, because everything after it answers something that
    is about to change. */
 function refreshTurnTools(){
-  const asked = [...chat.querySelectorAll('.msg.user')];
+  const asked = allMessages('.msg.user');
   asked.forEach((box, i) => {
     const edit = box.querySelector('[data-edit]');
     if(edit) edit.hidden = !box._messageId;
@@ -1992,7 +2154,7 @@ function refreshTurnTools(){
 function turnsAfter(box){
   const later = [];
   let reached = false;
-  for(const message of chat.querySelectorAll('.msg')){
+  for(const message of allMessages()){
     if(message === box){ reached = true; continue; }
     if(!reached) continue;
     if(message.classList.contains('user')) later.push(message);
@@ -2006,7 +2168,7 @@ function turnsAfter(box){
    kind of bookkeeping that goes wrong quietly. */
 function rebuildHistory(){
   history = [];
-  for(const box of chat.querySelectorAll('.msg')){
+  for(const box of allMessages()){
     if(box.dataset.failed) continue;           // a turn that produced nothing is not a turn
     if(box.classList.contains('user')){
       history.push({role: 'user', content: box._text || '', images: box._images || []});
@@ -2016,7 +2178,7 @@ function rebuildHistory(){
     }
   }
   // The answers waiting behind the arrows share the place of the one on screen
-  for(const box of chat.querySelectorAll('.msg.assistant')){
+  for(const box of allMessages('.msg.assistant')){
     if(!box.hidden) continue;
     const reading = answersTo(box).find(other => !other.hidden);
     if(reading) box._historyIndex = reading._historyIndex;
@@ -2031,7 +2193,7 @@ function rebuildHistory(){
    screen is the one the model is told about in the next turn. */
 function answersTo(box){
   const turn = box && box.dataset.turn;
-  return turn ? [...chat.querySelectorAll(`.msg.assistant[data-turn="${turn}"]`)] : [box].filter(Boolean);
+  return turn ? allMessages(`.msg.assistant[data-turn="${turn}"]`) : [box].filter(Boolean);
 }
 
 function recordAnswer(box, content, at){
@@ -2106,7 +2268,7 @@ async function resendTurn(box){
     if(after.dataset.failed) after.remove();
     after = next;
   }
-  const answered = chat.querySelectorAll(`.msg.assistant[data-turn="${box._messageId}"]`);
+  const answered = allMessages(`.msg.assistant[data-turn="${box._messageId}"]`);
   const replaceAt = answered.length ? answered[0]._historyIndex : null;
   // The same attachments as the first time; they are uploaded already, so this is only a
   // description of them
@@ -2159,6 +2321,7 @@ function startEdit(box){
     turning = true;
     try{
       try{
+        changedHere = true;
         await api(`/chat/conversations/${currentId}/messages/${box._messageId}`,
                   {method: 'PATCH', headers: JSON_HEADERS, body: JSON.stringify({content: text})});
       }catch(e){
@@ -2381,7 +2544,7 @@ function takeOverPoppedOut(){
 function conversationUpTo(box){
   const upTo = [];
   let reached = false;
-  for(const message of chat.querySelectorAll('.msg')){
+  for(const message of allMessages()){
     if(message.dataset.failed) continue;
     if(message.classList.contains('user')){
       if(reached) break;
@@ -3728,6 +3891,7 @@ function addVerdict(box, where, saved){
     // A just-finished answer is written down by the server a moment after the last word arrives
     for(let attempt = 0; ; attempt++){
       try{
+        changedHere = true;
         const result = await api('/chat/feedback', {method: 'POST', headers: JSON_HEADERS, body: JSON.stringify(body)});
         where.messageId = result.message_id;
         const words = TASK_WORDS[result.category];
@@ -4224,6 +4388,7 @@ async function sendTurn(redo = null){
   if(controller) return;
   const files = redo ? (redo.images || []) : pending;
   if(!text && !files.length) return;
+  changedHere = true;
   if(files.some(p => p.uploading)){
     showError('One moment: the picture is still uploading.');
     return;
