@@ -9,6 +9,7 @@ A PDF is laid out with the fonts this server has. Bangla needs a font that has i
 Bengali, from the fonts-noto-core package); without one its letters come out as empty boxes.
 """
 import logging
+import os
 import re
 import unicodedata
 
@@ -147,8 +148,38 @@ def _no_fetching(url, *args, **kwargs):
     raise ValueError("documents fetch nothing")
 
 
-def make(text, fmt):
-    """(file name, bytes, media type) for the document in `text`, as Markdown or as a PDF."""
+CHART_BLOCK = re.compile(r'<pre><code class="language-chart">.*?</code></pre>', re.S)
+CHAT_IMAGE = re.compile(r'<img src="/chat/files/(\d+)"')
+CHART_STYLE_FILE = os.path.join(os.path.dirname(os.path.dirname(__file__)), "static", "mdchart", "mdchart.css")
+
+
+def _chart_style():
+    """mdchart's stylesheet, without which a chart has no colours; its data table is left out of print."""
+    try:
+        with open(CHART_STYLE_FILE, encoding="utf-8") as f:
+            return f.read() + "\n.mdc-table { display: none; }\n.mdc-figure { break-inside: avoid; }\n"
+    except OSError:
+        return ""
+
+
+def _with_charts(body, charts):
+    """Each ```chart block, in order, replaced by the chart the editor drew of it (mdchart's SVG).
+    Only drawn into this PDF, which fetches nothing; one that carries a script is left as its text."""
+    pending = iter(charts)
+
+    def swap(found):
+        chart = next(pending, None)
+        if not chart or "<script" in chart.lower() or "<foreignobject" in chart.lower():
+            return found.group(0)
+        return chart
+    return CHART_BLOCK.sub(swap, body)
+
+
+def make(text, fmt, images=None, charts=None):
+    """(file name, bytes, media type) for the document in `text`, as Markdown or as a PDF.
+
+    For a PDF, `images` {file id: data URL} are the person's own pictures it shows (/chat/files/<id>),
+    put in the page so nothing is fetched, and `charts` the drawings of its ```chart blocks."""
     if fmt not in FORMATS:
         raise WrittenError(f"{fmt} is not a kind of document this server writes.")
     extension, mime = FORMATS[fmt]
@@ -164,8 +195,15 @@ def make(text, fmt):
     body = markdown.render(text)
     if body is None:
         body = "<pre>" + (text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")) + "</pre>"
+    style = PDF_STYLE
+    if charts:
+        body = _with_charts(body, charts)
+        style += _chart_style()
+    if images:
+        body = CHAT_IMAGE.sub(lambda m: f'<img src="{images[int(m.group(1))]}"' if int(m.group(1)) in images
+                              else m.group(0), body)
     page = (f"<!doctype html><html><head><meta charset='utf-8'><title>{_escape(title)}</title>"
-            f"<style>{PDF_STYLE}</style></head><body>{body}</body></html>")
+            f"<style>{style}</style></head><body>{body}</body></html>")
     try:
         pdf = HTML(string=page, url_fetcher=_no_fetching).write_pdf()
     except Exception as e:

@@ -1,0 +1,438 @@
+/*
+ * mdchart - the stylesheet the charts are drawn from.
+ *
+ * Not decoration: mdchart.js emits no colours at all, only class names and
+ * var(--mdc-series-N) references, so without this file a chart renders as an
+ * invisible shape on the page. That is deliberate. A chart whose colours live
+ * in CSS follows a theme switch with no re-render, which is the one thing a
+ * diagram tool that bakes colour into its SVG can never do.
+ *
+ * Everything is namespaced --mdc-*. To fit this into an application's own
+ * palette, set those variables somewhere that wins over :root - nothing else
+ * needs touching, and none of the rules below need copying.
+ *
+ * Dark mode is handled three ways so it works however the host page decides:
+ * data-theme="dark" on the root, .mdc-dark on any ancestor, or the reader's
+ * system setting. A host that toggles a theme explicitly should use one of the
+ * first two; the media query is the fallback for a page that does not.
+ *
+ * MIT licensed. https://github.com/mainul35/mdchart
+ */
+
+:root {
+  /* ---- the plate a chart is drawn on -------------------------------- */
+  --mdc-plate: #EFF3F7;
+  --mdc-grid: #DFE5EC;
+  --mdc-axis: #C7D2DE;
+  --mdc-ink: #16202B;
+  --mdc-ink-soft: #5A6875;
+
+  /* ---- the categorical palette ---------------------------------------
+     A validated set, checked against the plate above rather than against
+     white: contrast only means anything against the surface a chart is
+     actually drawn on. Assigned in this order and never cycled - past eight
+     series the smallest fold into "Other" instead.
+
+     Four of these sit below 3:1 against the light plate. That is legal only
+     because identity is never carried by colour alone here: there is always a
+     legend, direct labels, and a table view. Do not remove those if you
+     re-colour this. */
+  --mdc-series-1: #2A78D6;
+  --mdc-series-2: #EB6834;
+  --mdc-series-3: #1BAF7A;
+  --mdc-series-4: #EDA100;
+  --mdc-series-5: #E87BA4;
+  --mdc-series-6: #008300;
+  --mdc-series-7: #4A3AA7;
+  --mdc-series-8: #E34948;
+
+  /* ---- chrome, and where a host palette plugs in --------------------- */
+  --mdc-line: #DFE5EC;
+  --mdc-accent: #0B6E7F;
+  --mdc-shadow: 0 1px 2px rgba(22, 32, 43, .06);
+  --mdc-radius: 7px;
+  --mdc-font: system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  --mdc-mono: ui-monospace, SFMono-Regular, "Cascadia Mono", Consolas, monospace;
+
+  /* The ochre used for "this was not drawn as asked" notes. Deliberately not
+     red: nothing has failed, a rule was applied. */
+  --mdc-mark: #A23B2E;
+  --mdc-note-bg: #F1F5F9;
+
+  /* A stat tile's change line. Status colours, never reused as series hues. */
+  --mdc-up: #0CA30C;
+  --mdc-down: #D03B3B;
+
+  /* A genuine failure, which is a different thing from a refusal. */
+  --mdc-error-ink: #8C2F22;
+  --mdc-error-bg: #FBEDEA;
+  --mdc-error-line: #E4BDB5;
+}
+
+/* The dark column is the same eight hues re-stepped for the dark surface - a
+   selected palette, not an automatic flip of the light one. */
+:root[data-theme="dark"],
+.mdc-dark {
+  --mdc-plate: #131C26;
+  --mdc-grid: #22303F;
+  --mdc-axis: #2C3D4E;
+  --mdc-ink: #D7DEE6;
+  --mdc-ink-soft: #8A9AAA;
+
+  --mdc-series-1: #3987E5;
+  --mdc-series-2: #D95926;
+  --mdc-series-3: #199E70;
+  --mdc-series-4: #C98500;
+  --mdc-series-5: #D55181;
+  --mdc-series-6: #008300;
+  --mdc-series-7: #9085E9;
+  --mdc-series-8: #E66767;
+
+  --mdc-line: #22303F;
+  --mdc-accent: #3FB8CC;
+  --mdc-shadow: none;
+  --mdc-mark: #E08A7B;
+  --mdc-note-bg: #141E29;
+  --mdc-up: #4FC24F;
+  --mdc-down: #E06C5B;
+  --mdc-error-ink: #F2A79A;
+  --mdc-error-bg: #2A1614;
+  --mdc-error-line: #5E2E28;
+}
+
+/* For a page that never sets a theme itself. Guarded so an explicit light
+   choice still wins. */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --mdc-plate: #131C26;
+    --mdc-grid: #22303F;
+    --mdc-axis: #2C3D4E;
+    --mdc-ink: #D7DEE6;
+    --mdc-ink-soft: #8A9AAA;
+
+    --mdc-series-1: #3987E5;
+    --mdc-series-2: #D95926;
+    --mdc-series-3: #199E70;
+    --mdc-series-4: #C98500;
+    --mdc-series-5: #D55181;
+    --mdc-series-6: #008300;
+    --mdc-series-7: #9085E9;
+    --mdc-series-8: #E66767;
+
+    --mdc-line: #22303F;
+    --mdc-accent: #3FB8CC;
+    --mdc-shadow: none;
+    --mdc-mark: #E08A7B;
+    --mdc-note-bg: #141E29;
+    --mdc-up: #4FC24F;
+    --mdc-down: #E06C5B;
+    --mdc-error-ink: #F2A79A;
+    --mdc-error-bg: #2A1614;
+    --mdc-error-line: #5E2E28;
+  }
+}
+
+/* ---------------------------------------------------------------- figure */
+
+/* The horizontal margins are zeroed on purpose. A <figure> carries 40px of
+   left and right margin from the browser's own stylesheet, and a host that
+   sets only the vertical ones leaves a chart quietly narrower than the box it
+   was measured against - the SVG then gets scaled down to fit, taking its 11px
+   type to 5px with it. */
+.mdc-figure {
+  margin: 1.8em 0;
+  padding: 16px 18px 12px;
+  box-sizing: border-box;
+  background: var(--mdc-plate);
+  border: 1px solid var(--mdc-line);
+  border-left: 3px solid var(--mdc-accent);
+  border-radius: var(--mdc-radius);
+  box-shadow: var(--mdc-shadow);
+  font-family: var(--mdc-font);
+}
+
+.mdc-title {
+  font-size: .95em;
+  font-weight: 600;
+  color: var(--mdc-ink);
+  margin: 0 0 2px;
+  text-align: left;
+}
+
+.mdc-unit {
+  font-weight: 400;
+  color: var(--mdc-ink-soft);
+}
+
+/* "Drawn as a bar chart - a pie is unreadable past 6 slices and this has 7."
+   A footnote about the chart above it, not a warning about the page. */
+.mdc-swap {
+  margin: 0 0 8px;
+  font-size: .82em;
+  color: var(--mdc-ink-soft);
+  border-left: 2px solid var(--mdc-mark);
+  padding-left: 8px;
+}
+
+.mdc-plot { overflow-x: auto; }
+
+.mdc-svg { display: block; max-width: 100%; }
+
+/* A pie keeps a fixed size however wide the plate is - it does not get more
+   readable by being bigger - so it is centred rather than left against the
+   edge of a plate three times its width. */
+.mdc-figure-round .mdc-svg {
+  margin-left: auto;
+  margin-right: auto;
+}
+
+.mdc-figure-stat { padding: 18px 20px; }
+
+/* ---------------------------------------------------------------- legend */
+
+/* The dependable identity channel whenever there is more than one series.
+   Text stays in ink; the swatch beside it carries the colour. A single series
+   gets no legend at all - the title already names it. */
+.mdc-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 16px;
+  margin: 2px 0 10px;
+  font-size: .82em;
+  color: var(--mdc-ink-soft);
+}
+
+.mdc-key {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.mdc-swatch {
+  width: 10px;
+  height: 10px;
+  border-radius: 3px;
+  display: inline-block;
+}
+
+/* ----------------------------------------------------------------- marks */
+
+.mdc-grid {
+  stroke: var(--mdc-grid);
+  stroke-width: 1;
+}
+
+.mdc-tick,
+.mdc-cat {
+  fill: var(--mdc-ink-soft);
+  font-size: 11px;
+  font-family: var(--mdc-font);
+}
+
+.mdc-tick { font-variant-numeric: tabular-nums; }
+
+.mdc-value {
+  fill: var(--mdc-ink);
+  font-size: 11px;
+  font-family: var(--mdc-font);
+  font-variant-numeric: tabular-nums;
+}
+
+.mdc-line {
+  fill: none;
+  stroke-width: 2;
+  stroke-linejoin: round;
+  stroke-linecap: round;
+}
+
+/* A wash under the line, never a saturated block. */
+.mdc-area { opacity: .10; }
+
+/* The ring is surface-coloured so overlapping dots stay legible without a
+   stroke that would read as data ink. */
+.mdc-dot {
+  stroke: var(--mdc-plate);
+  stroke-width: 2;
+}
+
+.mdc-slice { stroke: none; }
+
+.mdc-hero {
+  fill: var(--mdc-ink);
+  font-size: 20px;
+  font-weight: 600;
+  font-family: var(--mdc-font);
+}
+
+/* ------------------------------------------------------------- stat tile */
+
+.mdc-stat-label {
+  margin: 0 0 4px;
+  font-size: .85em;
+  color: var(--mdc-ink-soft);
+}
+
+/* Proportional figures on purpose: tabular-nums gives every digit the width of
+   a zero, which makes a large number look loose. */
+.mdc-stat-value {
+  margin: 0;
+  font-size: 2.4em;
+  font-weight: 600;
+  line-height: 1.1;
+  color: var(--mdc-ink);
+  font-family: var(--mdc-font);
+}
+
+.mdc-stat-unit {
+  font-size: .4em;
+  font-weight: 400;
+  color: var(--mdc-ink-soft);
+  margin-left: .4em;
+}
+
+.mdc-stat-delta {
+  margin: 4px 0 0;
+  font-size: .85em;
+}
+
+.mdc-stat-delta.is-up { color: var(--mdc-up); }
+.mdc-stat-delta.is-down { color: var(--mdc-down); }
+
+/* ------------------------------------------------------------ table view */
+
+/* The twin, so no value is reachable only by hovering. Four of the light
+   series hues sit below 3:1 against the plate; this is what makes that
+   acceptable rather than a defect. Open it before printing - a closed
+   <details> prints closed, and paper cannot hover at all. */
+.mdc-table {
+  margin-top: 10px;
+  font-size: .85em;
+}
+
+.mdc-table summary {
+  cursor: pointer;
+  color: var(--mdc-ink-soft);
+  font-size: .9em;
+}
+
+.mdc-table table {
+  margin: 8px 0 0;
+  font-size: 1em;
+  border-collapse: collapse;
+}
+
+.mdc-table th,
+.mdc-table td {
+  padding: 4px 10px 4px 0;
+  text-align: left;
+  color: var(--mdc-ink);
+  font-weight: 400;
+}
+
+.mdc-table th { color: var(--mdc-ink-soft); }
+
+.mdc-table td { font-variant-numeric: tabular-nums; }
+
+/* ---------------------------------------------------------- not drawn */
+
+/* A chart that was not drawn on purpose. Advice, and styled as advice: an
+   ochre edge rather than a red one, and a label that says what happened in
+   three words. Error-red reads as "the tool broke", which is the wrong
+   conclusion - the chart was refused by a rule that was working. */
+.mdc-note {
+  position: relative;
+  box-sizing: border-box;
+  margin: 1.8em 0;
+  padding: 34px 18px 14px;
+  background: var(--mdc-note-bg);
+  border: 1px solid var(--mdc-line);
+  border-left: 3px solid var(--mdc-mark);
+  border-radius: var(--mdc-radius);
+  font-family: var(--mdc-font);
+}
+
+.mdc-note::before {
+  content: "chart not drawn";
+  position: absolute;
+  top: 9px;
+  left: 18px;
+  font-family: var(--mdc-mono);
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: .16em;
+  text-transform: uppercase;
+  color: var(--mdc-mark);
+}
+
+.mdc-note-msg {
+  margin: 0 0 10px;
+  color: var(--mdc-ink);
+  font-size: .95em;
+  line-height: 1.5;
+}
+
+/* The fence body, kept: a chart that will not draw should still leave the
+   numbers on the page rather than an empty plate. */
+.mdc-note-src {
+  margin: 0;
+  font-family: var(--mdc-mono);
+  font-size: .82em;
+  white-space: pre-wrap;
+  color: var(--mdc-ink-soft);
+  background: none;
+  border: none;
+  padding: 0;
+}
+
+/* A genuine failure, which is a different thing and looks like one. */
+.mdc-error {
+  border-left: 3px solid var(--mdc-error-line);
+  background: var(--mdc-error-bg);
+  padding: 10px 14px;
+  border-radius: 5px;
+  font-family: var(--mdc-font);
+}
+
+.mdc-error-msg {
+  margin: 0 0 6px;
+  color: var(--mdc-error-ink);
+  font-size: .9em;
+}
+
+.mdc-error-src {
+  margin: 0;
+  font-family: var(--mdc-mono);
+  font-size: .82em;
+  white-space: pre-wrap;
+  color: var(--mdc-ink-soft);
+  background: none;
+  border: none;
+  padding: 0;
+}
+
+/* ----------------------------------------------------------------- print */
+
+@media print {
+  /* One object: a chart split across a page fold is two halves of a picture.
+     And nothing may scroll - there is nothing to scroll on paper, so anything
+     past the edge is simply gone. */
+  .mdc-figure {
+    page-break-inside: avoid;
+    break-inside: avoid;
+    box-shadow: none;
+  }
+
+  .mdc-plot { overflow: visible; }
+
+  .mdc-svg { max-width: 100%; height: auto; }
+
+  /* On paper the table view is not an appendix, it is where the numbers are.
+     Open the details elements before printing; CSS cannot do that, so call
+     MdChart.redrawAll(pageWidth) and set the open attribute first. */
+  .mdc-table summary { cursor: default; }
+
+  .mdc-table table {
+    page-break-inside: auto;
+    break-inside: auto;
+  }
+}
