@@ -123,7 +123,41 @@ def render(text):
     if _renderer is None:
         _renderer = _build()
     try:
-        return _renderer.render(text)
+        return "".join(_renderer.render(part) if side is None
+                       else f'<div style="text-align:{side}">{_renderer.render(part)}</div>'
+                       for side, part in _aligned(text))
     except Exception as e:  # never lose an answer over its formatting
         log.warning("Could not render Markdown: %s", e)
         return None
+
+
+ALIGN_OPEN = re.compile(r'^\s*<div align="(left|center|right)">\s*$', re.I)
+ALIGN_CLOSE = re.compile(r"^\s*</div>\s*$", re.I)
+FENCE = re.compile(r"^\s*(```|~~~)")
+
+
+def _aligned(text):
+    """[(side or None, Markdown)]: the one piece of HTML let through, as MDViewer writes it - a line
+    `<div align="center">` and a line `</div>` around Markdown, which is then aligned. Nothing else
+    of it is kept: the side is one of three words, and what is inside is still rendered with HTML
+    escaped. Not inside a fenced block, and not nested."""
+    if "<div" not in text:
+        return [(None, text)]
+    parts, current, side, fenced = [], [], None, False
+    for line in text.split("\n"):
+        if FENCE.match(line):
+            fenced = not fenced
+        opening = None if fenced else ALIGN_OPEN.match(line)
+        if opening and side is None:
+            parts.append((None, "\n".join(current)))
+            current, side = [], opening.group(1).lower()
+            continue
+        if side is not None and not fenced and ALIGN_CLOSE.match(line):
+            parts.append((side, "\n".join(current)))
+            current, side = [], None
+            continue
+        current.append(line)
+    if side is not None:                       # never closed: the opening line was only text
+        current = [f'<div align="{side}">'] + current
+    parts.append((None, "\n".join(current)))
+    return [(s, p) for s, p in parts if p.strip()] or [(None, text)]

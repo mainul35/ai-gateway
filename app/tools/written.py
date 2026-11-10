@@ -9,6 +9,7 @@ A PDF is laid out with the fonts this server has. Bangla needs a font that has i
 Bengali, from the fonts-noto-core package); without one its letters come out as empty boxes.
 """
 import logging
+import os
 import re
 import unicodedata
 
@@ -140,15 +141,119 @@ def is_pdf_available():
 
 def _no_fetching(url, *args, **kwargs):
     """The PDF is drawn from the model's words alone: an image or a stylesheet it points at is
-    never fetched, so a document cannot be used to make this server read an address on its network."""
+    never fetched, so a document cannot be used to make this server read an address on its network.
+    For WeasyPrint before 66, which takes a function; _fetcher() gives the newer ones theirs."""
     if url.startswith("data:"):
         from weasyprint import default_url_fetcher
         return default_url_fetcher(url, *args, **kwargs)
     raise ValueError("documents fetch nothing")
 
 
-def make(text, fmt):
-    """(file name, bytes, media type) for the document in `text`, as Markdown or as a PDF."""
+def _fetcher():
+    """What WeasyPrint may fetch with: data: URLs only - the pictures put in the page itself. Newer
+    WeasyPrint (70 here) wants a URLFetcher, and a plain function failed every PDF that had one."""
+    try:
+        from weasyprint.urls import URLFetcher
+    except ImportError:
+        return _no_fetching
+    return URLFetcher(allowed_protocols={"data"})
+
+
+CHART_BLOCK = re.compile(r'<pre><code class="language-chart">.*?</code></pre>', re.S)
+CHAT_IMAGE = re.compile(r'<img src="/chat/files/(\d+)"')
+CHART_STYLE_FILE = os.path.join(os.path.dirname(os.path.dirname(__file__)), "static", "mdchart", "mdchart.css")
+
+
+def _chart_style():
+    """mdchart's stylesheet, without which a chart has no colours; its data table is left out of print."""
+    try:
+        with open(CHART_STYLE_FILE, encoding="utf-8") as f:
+            style = f.read()
+    except OSError:
+        return ""
+    colours = _chart_colours()
+    # Written in, as in the charts: inside an SVG WeasyPrint does not resolve var()
+    style = re.sub(r"var\((--mdc-[\w-]+)\)", lambda m: colours.get(m.group(1), m.group(0)), style)
+    return style + "\n.mdc-table { display: none; }\n.mdc-figure { break-inside: avoid; }\n"
+
+
+def _chart_colours():
+    """mdchart's light colours, {--mdc-name: value}, from its stylesheet's first :root."""
+    try:
+        with open(CHART_STYLE_FILE, encoding="utf-8") as f:
+            root = re.search(r":root\s*\{(.*?)\}", f.read(), re.S)
+    except OSError:
+        return {}
+    found = dict(re.findall(r"(--mdc-[\w-]+)\s*:\s*([^;]+);", root.group(1) if root else ""))
+    for _ in range(4):                                   # a colour named after another one
+        found = {k: re.sub(r"var\((--mdc-[\w-]+)\)", lambda m: found.get(m.group(1), m.group(0)), v).strip()
+                 for k, v in found.items()}
+    return found
+
+
+# What mdchart's stylesheet paints SVG parts with, as attributes: WeasyPrint does not apply a
+# stylesheet inside an SVG, and the grid lines came out black. {name} is one of its colours.
+SVG_PAINT = {
+    "mdc-grid": {"stroke": "{grid}", "stroke-width": "1"},
+    "mdc-tick": {"fill": "{ink-soft}", "font-size": "11"},
+    "mdc-cat": {"fill": "{ink-soft}", "font-size": "11"},
+    "mdc-value": {"fill": "{ink}", "font-size": "11"},
+    "mdc-line": {"fill": "none", "stroke-width": "2"},
+    "mdc-area": {"opacity": "0.1"},
+    "mdc-dot": {"stroke": "{plate}", "stroke-width": "2"},
+    "mdc-slice": {"stroke": "none"},
+    "mdc-hero": {"fill": "{ink}", "font-size": "20", "font-weight": "600"},
+}
+SVG_PART = re.compile(r'<([a-z]+)\b([^>]*?\bclass="([^"]*)"[^>]*)>')
+
+
+def _painted(chart, colours):
+    """The chart with SVG_PAINT's attributes on its parts, where a part has none of its own."""
+    def paint(found):
+        tag, inside, classes = found.groups()
+        extra = {}
+        for name in classes.split():
+            extra.update(SVG_PAINT.get(name, {}))
+        missing = [f'{k}="{v.format_map(_ColourNames(colours))}"' for k, v in extra.items()
+                   if not re.search(rf'\s{re.escape(k)}=', inside)]
+        if not missing:
+            return found.group(0)
+        closed = inside.rstrip().endswith("/")
+        inside = inside.rstrip().rstrip("/").rstrip() if closed else inside
+        return f"<{tag}{inside} {' '.join(missing)}{'/' if closed else ''}>"
+    return SVG_PART.sub(paint, chart)
+
+
+class _ColourNames(dict):
+    def __init__(self, colours):
+        super().__init__({k.removeprefix("--mdc-"): v for k, v in colours.items()})
+
+    def __missing__(self, key):
+        return "#5A6875"
+
+
+def _with_charts(body, charts):
+    """Each ```chart block, in order, replaced by the chart the editor drew of it (mdchart's SVG).
+    Only drawn into this PDF, which fetches nothing; one that carries a script is left as its text.
+    WeasyPrint leaves var() unresolved inside an SVG - every bar came out black - so the colours are
+    written in."""
+    pending = iter(charts)
+    colours = _chart_colours()
+
+    def swap(found):
+        chart = next(pending, None)
+        if not chart or "<script" in chart.lower() or "<foreignobject" in chart.lower():
+            return found.group(0)
+        chart = re.sub(r"var\((--mdc-[\w-]+)\)", lambda m: colours.get(m.group(1), m.group(0)), chart)
+        return _painted(chart, colours)
+    return CHART_BLOCK.sub(swap, body)
+
+
+def make(text, fmt, images=None, charts=None):
+    """(file name, bytes, media type) for the document in `text`, as Markdown or as a PDF.
+
+    For a PDF, `images` {file id: data URL} are the person's own pictures it shows (/chat/files/<id>),
+    put in the page so nothing is fetched, and `charts` the drawings of its ```chart blocks."""
     if fmt not in FORMATS:
         raise WrittenError(f"{fmt} is not a kind of document this server writes.")
     extension, mime = FORMATS[fmt]
@@ -164,10 +269,17 @@ def make(text, fmt):
     body = markdown.render(text)
     if body is None:
         body = "<pre>" + (text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")) + "</pre>"
+    style = PDF_STYLE
+    if charts:
+        body = _with_charts(body, charts)
+        style += _chart_style()
+    if images:
+        body = CHAT_IMAGE.sub(lambda m: f'<img src="{images[int(m.group(1))]}"' if int(m.group(1)) in images
+                              else m.group(0), body)
     page = (f"<!doctype html><html><head><meta charset='utf-8'><title>{_escape(title)}</title>"
-            f"<style>{PDF_STYLE}</style></head><body>{body}</body></html>")
+            f"<style>{style}</style></head><body>{body}</body></html>")
     try:
-        pdf = HTML(string=page, url_fetcher=_no_fetching).write_pdf()
+        pdf = HTML(string=page, url_fetcher=_fetcher()).write_pdf()
     except Exception as e:
         log.warning("Could not draw a PDF: %s", e)
         raise WrittenError("The PDF could not be drawn; the document is in the answer above.")

@@ -941,6 +941,19 @@ async def written_source(file_id: int, principal: Principal = Depends(authentica
 
 class ReviseIn(BaseModel):
     text: str = Field(min_length=1, max_length=400_000)
+    # The editor's drawings of the document's ```chart blocks, in order (mdchart's SVG), for a PDF
+    charts: list[str] = Field(default_factory=list, max_length=50)
+
+
+async def _pictures_of(session, user, text):
+    """{file id: data URL} of this person's own pictures the document shows (![..](/chat/files/<id>)),
+    so a PDF has them in it without fetching anything."""
+    ids = {int(n) for n in re.findall(r"\]\(/chat/files/(\d+)\)", text)}
+    if not ids:
+        return {}
+    found = (await session.execute(select(ChatFile).where(ChatFile.id.in_(ids), ChatFile.user_id == user.id,
+                                                          ChatFile.mime_type.like("image/%")))).scalars()
+    return {f.id: f"data:{f.mime_type};base64,{base64.b64encode(f.data).decode()}" for f in found}
 
 
 @router.post("/files/{file_id}/revise")
@@ -951,8 +964,11 @@ async def revise_written(file_id: int, payload: ReviseIn, principal: Principal =
     user = _require_user(principal)
     stored, holder = await _written_file(session, user, file_id)
     fmt = "pdf" if stored.mime_type == "application/pdf" else "markdown"
+    if any(len(chart) > 300_000 for chart in payload.charts):
+        raise HTTPException(status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, "A chart is too large to draw")
+    pictures = await _pictures_of(session, user, payload.text) if fmt == "pdf" else {}
     try:
-        name, data, mime = await asyncio.to_thread(written.make, payload.text, fmt)
+        name, data, mime = await asyncio.to_thread(written.make, payload.text, fmt, pictures, payload.charts)
     except written.WrittenError as e:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(e))
     made = ChatFile(user_id=user.id, kind="written", mime_type=mime, name=name, prompt=payload.text, data=data)
