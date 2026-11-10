@@ -18,8 +18,12 @@ _cache = {}
 _lock = threading.Lock()
 
 
+PER_LAYER_LIMIT = 1024
+
+
 def _parse(data, partial=False):
-    """{key: value} of a GGUF header; arrays longer than 64 items are counted, not kept.
+    """{key: value} of a GGUF header; arrays of numbers longer than PER_LAYER_LIMIT, and of text
+    longer than 64 (a vocabulary), are counted, not kept.
 
     `partial` returns the keys read before `data` ran out, for the first megabytes of a file read
     over the network: the architecture's keys come before the vocabulary, which can be most of it."""
@@ -43,11 +47,13 @@ def _parse(data, partial=False):
             return take(u64()).decode("utf-8", errors="replace")
         if kind == 9:
             inner, count = u32(), u64()
-            if inner in _FIXED and count > 64:
+            # Per-layer numbers are kept up to a model of 1024 layers: Nemotron 3.5 Bolt's 88 KV head
+            # counts, cut off at 64, were read as one count of 88 and its cache came out 20x too big
+            if inner in _FIXED and count > PER_LAYER_LIMIT:
                 take(struct.calcsize(_FIXED[inner]) * count)
                 return count
             items = [value(inner) for _ in range(count)]
-            return items if count <= 64 else count
+            return items if count <= (PER_LAYER_LIMIT if inner in _FIXED else 64) else count
         if kind not in _FIXED:
             raise ValueError(f"unknown GGUF value type {kind}")
         return struct.unpack(_FIXED[kind], take(struct.calcsize(_FIXED[kind])))[0]
