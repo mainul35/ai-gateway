@@ -113,6 +113,20 @@ details.tuning label{margin-bottom:.85rem}
 /* A document or a web page */
 .doc,.web{flex:1;min-height:0;overflow-y:auto;padding:.9rem 1rem}
 .doc:has(iframe){padding:0;overflow:hidden}
+/* A document written here: a bar to edit it above what it shows, and the editor with its preview */
+.doc.editable{display:flex;flex-direction:column;padding:0;overflow:hidden}
+.doc.editable .doc-view{flex:1;min-height:0;overflow-y:auto}
+.doc.editable .doc-view:has(iframe){overflow:hidden}
+.doc.editable .doc-view:not(:has(iframe)){padding:.9rem 1rem}
+.doc-view iframe{width:100%;height:100%;border:0;background:#fff;display:block}
+.doc-bar{flex:none;display:flex;align-items:center;gap:.6rem;padding:.4rem .7rem;border-bottom:1px solid var(--border);
+         background:var(--card);flex-wrap:wrap}
+.doc-edit{flex:1;min-height:0;display:grid;grid-template-rows:minmax(0, 1fr) minmax(0, 1fr)}
+.doc-edit textarea{width:100%;height:100%;resize:none;border:0;border-bottom:1px solid var(--border);border-radius:0;
+                   background:var(--bg);color:var(--text);padding:.7rem .9rem;font:.86rem/1.5 ui-monospace,Consolas,monospace}
+.doc-preview{overflow-y:auto;padding:.7rem .9rem}
+.pg.panel-wide .doc-edit{grid-template-rows:none;grid-template-columns:minmax(0, 1fr) minmax(0, 1fr)}
+.pg.panel-wide .doc-edit textarea{border-bottom:0;border-right:1px solid var(--border)}
 .doc iframe{width:100%;height:100%;border:0;background:#fff}
 .doc img{max-width:100%;height:auto;border-radius:6px}
 .doc-text{white-space:pre-wrap;line-height:1.55;font-size:.93rem;overflow-wrap:anywhere}
@@ -2677,32 +2691,98 @@ async function answerAside(tab){
 
 /* A document you attached: a PDF as the browser draws it, a picture as itself, and a Word file, a
    spreadsheet or a text file as its text - the browser can show none of those three itself */
-function openFile(url, name){
-  const lower = (name || '').toLowerCase();
+function openFile(url, name, editable = false){
   for(const t of tabsHere()) if(t.kind === 'file' && t.href === url){ showPanel(); selectTab(t); return; }
   const body = document.createElement('div');
   body.className = 'doc';
-  const tab = addTab({kind: 'file', title: name || 'Document', href: url, body});
+  const tab = addTab({kind: 'file', title: name || 'Document', href: url, body, editable});
   tab.head.title = name || '';
+  showFile(tab);
+}
+
+/* What a file tab shows: a PDF as the browser draws it, a picture as itself, and a Word file, a
+   spreadsheet or a text file as its text. A document written here can also be edited: its text,
+   with a preview beside it, made into the same kind of file again. */
+function showFile(tab){
+  const body = tab.body, url = tab.href, name = tab.title, lower = (name || '').toLowerCase();
+  body.classList.toggle('editable', !!tab.editable);
+  body.innerHTML = tab.editable ? `<div class="doc-bar"><button class="btn btn-sm btn-secondary" type="button" data-edit-doc>Edit</button>
+      <a class="linkish" href="${escapeHtml(url)}?download=1" download="${escapeHtml(name || 'document')}">Download</a></div>` : '';
+  body.querySelector('[data-edit-doc]')?.addEventListener('click', () => editFile(tab));
+  const view = document.createElement('div');
+  view.className = 'doc-view';
+  body.appendChild(view);
   if(lower.endsWith('.pdf')){
     // As wide as the panel, without the page thumbnails: a whole A4 page squeezed in beside them
     // is too small to read
-    body.innerHTML = `<iframe src="${escapeHtml(url)}#navpanes=0&view=FitH" title="${escapeHtml(name || 'document')}"></iframe>`;
+    view.innerHTML = `<iframe src="${escapeHtml(url)}#navpanes=0&view=FitH" title="${escapeHtml(name || 'document')}"></iframe>`;
     return;
   }
   if(/\.(png|jpe?g|gif|webp|bmp|avif)$/.test(lower)){
-    body.innerHTML = `<img src="${escapeHtml(url)}" alt="${escapeHtml(name || 'image')}">`;
+    view.innerHTML = `<img src="${escapeHtml(url)}" alt="${escapeHtml(name || 'image')}">`;
     return;
   }
-  body.innerHTML = '<p class="muted">Opening...</p>';
+  view.innerHTML = '<p class="muted">Opening...</p>';
   api(`${url}/text`).then(async found => {
     const html = /\.(md|markdown)$/.test(lower) ? await renderedHtml(found.text) : null;
-    body.innerHTML = '';
+    view.innerHTML = '';
     const text = document.createElement('div');
     text.className = html ? 'doc-text md' : 'doc-text';
     if(html) text.innerHTML = html; else text.textContent = found.text;
-    body.appendChild(text);
-  }).catch(e => { body.innerHTML = ''; body.appendChild(panelNote('Could not open it. ' + errorText(e), url)); });
+    view.appendChild(text);
+  }).catch(e => { view.innerHTML = ''; view.appendChild(panelNote('Could not open it. ' + errorText(e), url)); });
+}
+
+async function editFile(tab){
+  const id = (tab.href.match(/\/chat\/files\/(\d+)/) || [])[1];
+  let source;
+  try{ source = await api(`/chat/files/${id}/source`); }
+  catch(e){ showError('This document cannot be edited: ' + errorText(e)); return; }
+  const again = source.format === 'pdf' ? 'Make the PDF again' : 'Save the Markdown again';
+  tab.body.classList.add('editing');
+  tab.body.innerHTML = `<div class="doc-bar"><button class="btn btn-sm" type="button" data-remake>${again}</button>
+      <button class="btn btn-sm btn-secondary" type="button" data-stop-edit>Cancel</button>
+      <span class="muted" style="font-size:.78rem">Markdown: # for headings, - for lists, **bold**</span></div>
+    <div class="doc-edit"><textarea spellcheck="true" aria-label="The document's text"></textarea>
+      <div class="doc-preview md" aria-label="Preview"></div></div>`;
+  const area = tab.body.querySelector('textarea');
+  const preview = tab.body.querySelector('.doc-preview');
+  area.value = source.text;
+  let soon = null;
+  const draw = async () => { const html = await renderedHtml(area.value); if(html !== null) preview.innerHTML = html; };
+  area.addEventListener('input', () => { clearTimeout(soon); soon = setTimeout(draw, 400); });
+  draw();
+  area.focus();
+  tab.body.querySelector('[data-stop-edit]').addEventListener('click', () => {
+    if(area.value !== source.text && !confirm('Leave without making the document again? Your changes are lost.')) return;
+    tab.body.classList.remove('editing');
+    showFile(tab);
+  });
+  tab.body.querySelector('[data-remake]').addEventListener('click', async e => {
+    const button = e.currentTarget;
+    button.disabled = true;
+    button.textContent = source.format === 'pdf' ? 'Making the PDF…' : 'Saving…';
+    try{
+      const made = await api(`/chat/files/${id}/revise`, {method: 'POST', headers: JSON_HEADERS,
+                                                        body: JSON.stringify({text: area.value})});
+      // The answer's chip and this tab now show the new file
+      for(const chip of document.querySelectorAll(`.written a.paper[href="${tab.href}"]`)){
+        const row = chip.closest('.written');
+        chip.setAttribute('href', made.url);
+        chip.querySelector('.doc-name').textContent = made.name;
+        const download = row.querySelector('[download]');
+        if(download){ download.setAttribute('href', made.url + '?download=1'); download.setAttribute('download', made.name); }
+      }
+      tab.href = made.url;
+      renameTab(tab, made.name);
+      tab.body.classList.remove('editing');
+      showFile(tab);
+    }catch(err){
+      button.disabled = false;
+      button.textContent = again;
+      showError('Could not make the document again: ' + errorText(err));
+    }
+  });
 }
 
 /* A web page, as its words: most sites refuse to be shown inside another page, so the gateway reads
@@ -2752,7 +2832,8 @@ function openLinkInPanel(e){
   if(!link || link.hasAttribute('download')) return;
   if(link.classList.contains('paper')){
     e.preventDefault();
-    openFile(link.getAttribute('href'), link.querySelector('.doc-name')?.textContent || 'Document');
+    openFile(link.getAttribute('href'), link.querySelector('.doc-name')?.textContent || 'Document',
+             link.dataset.written === '1');
     return;
   }
   const web = link.closest('.sources') || link.classList.contains('cite')
@@ -3795,7 +3876,7 @@ function offerFiles(box, text){
       const file = await api('/chat/written', {method: 'POST', headers: JSON_HEADERS,
         body: JSON.stringify({text, format: chosen.dataset.as, message_id: box._answerId || null})});
       showWritten(box, file);
-      openFile(file.url, file.name);
+      openFile(file.url, file.name, true);
     }catch(err){ showError('Could not make the file: ' + errorText(err)); }
     finally{
       chosen.textContent = label;
@@ -4235,7 +4316,7 @@ function showWritten(box, file){
   box.querySelector('.written')?.remove();
   const row = document.createElement('div');
   row.className = 'written';
-  row.innerHTML = `<a class="paper" href="${escapeHtml(file.url)}" title="Open the document">
+  row.innerHTML = `<a class="paper" data-written="1" href="${escapeHtml(file.url)}" title="Open the document">
       <span class="glyph">${paperGlyph(file)}</span>
       <span class="what"><span class="doc-name">${escapeHtml(file.name || 'document')}</span></span></a>
     <a class="linkish" href="${escapeHtml(file.url)}?download=1" download="${escapeHtml(file.name || 'document')}">Download</a>`;
@@ -4579,7 +4660,7 @@ async function sendChat(text, decision, again, documentFormat = null){
   renderAssistant(box, answer, thinking, stats, sources, await renderedHtml(answer));
   if(written){
     showWritten(box, written);
-    openFile(written.url, written.name);
+    openFile(written.url, written.name, true);
   }
   if(currentId) addVerdict(box, {conversationId: currentId, startsWith: answer.slice(0, 200), kind: 'chat',
                                  category: decision.category, hadPicture, searched: decision.action === 'search'});
