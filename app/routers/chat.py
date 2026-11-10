@@ -3,6 +3,7 @@
 Every user only ever sees their own conversations and files.
 """
 import asyncio
+import hashlib
 import base64
 import binascii
 import io
@@ -15,10 +16,11 @@ import secrets
 import tempfile
 import time
 import urllib.parse
+from collections import OrderedDict
 from datetime import timedelta
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, Response, UploadFile, status
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -152,11 +154,30 @@ def _conversation_json(conversation, message_count=None):
     return data
 
 
+# An answer's HTML, kept once rendered: an answer does not change once written, and rendering every
+# answer again on every visit was 108 of the 143 ms it took to send the largest conversation. Keyed by
+# the text itself, so an answer that is changed is rendered again.
+_RENDERED = OrderedDict()
+_RENDERED_MOST = 4000
+
+
+def _rendered(text):
+    key = hashlib.sha1((text or "").encode("utf-8")).digest()
+    if key in _RENDERED:
+        _RENDERED.move_to_end(key)
+        return _RENDERED[key]
+    html = markdown.render(text)
+    _RENDERED[key] = html
+    if len(_RENDERED) > _RENDERED_MOST:
+        _RENDERED.popitem(last=False)
+    return html
+
+
 def _message_json(message):
     return {
         "id": message.id, "role": message.role, "content": message.content, "reasoning": message.reasoning,
         # Answers are Markdown; the playground shows the rendered form and keeps the text for copying
-        "html": markdown.render(message.content) if message.role == "assistant" else None,
+        "html": _rendered(message.content) if message.role == "assistant" else None,
         "model": message.model, "stats": json.loads(message.stats) if message.stats else None,
         "attachments": json.loads(message.attachments) if message.attachments else None,
         "created_at": message.created_at.isoformat(),
@@ -194,8 +215,23 @@ async def create_conversation(payload: ConversationIn, principal: Principal = De
 
 
 @router.get("/conversations/{conversation_id}")
-async def get_conversation(conversation_id: str, principal: Principal = Depends(authenticate),
+async def get_conversation(conversation_id: str, request: Request, principal: Principal = Depends(authenticate),
                            session: AsyncSession = Depends(get_session)):
+    """A conversation with its messages, and its version: the playground keeps the conversations it
+    has opened and asks again with the version it holds, and when nothing has changed the answer is
+    304 with no body - a few bytes through the tunnel rather than up to 400 KB."""
+    found = await _conversation_answer(conversation_id, principal, session)
+    version = '"' + hashlib.sha1(json.dumps(found, sort_keys=True, default=str).encode("utf-8")).hexdigest()[:20] + '"'
+    found["version"] = version
+    # Cloudflare may hand the version back marked weak (W/"..."); it is the same version
+    held = [tag.strip().removeprefix("W/") for tag in (request.headers.get("if-none-match") or "").split(",")]
+    headers = {"ETag": version, "Cache-Control": "private, no-cache"}
+    if version in held:
+        return Response(status_code=status.HTTP_304_NOT_MODIFIED, headers=headers)
+    return JSONResponse(found, headers=headers)
+
+
+async def _conversation_answer(conversation_id, principal, session):
     user = _require_user(principal)
     conversation, how = await _access(session, conversation_id, user, with_messages=True)
     ids = [m.id for m in conversation.messages if m.role == "assistant"]

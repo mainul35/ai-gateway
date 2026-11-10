@@ -1602,6 +1602,7 @@ function conversationInUrl(id, how = 'push'){
 }
 
 function resetChat(how = 'push'){
+  leaveConversation();
   conversationInUrl(null, how);
   currentId = null;
   currentUid = null;
@@ -1712,10 +1713,65 @@ function markOpenConversation(){
   if(!found) loadConversations();
 }
 
+/* Conversations already opened are kept, so going back to one shows it at once. It is then asked for
+   again in the background - with the version kept, so an unchanged one costs a 304 and no body - and
+   drawn again only if it did change: on another device, by a task that finished, by someone it is
+   shared with. One changed in this tab (a message sent or edited, a verdict given) is not shown
+   from what was kept, which does not have that change. */
+const keptConversations = new Map();     // its number and its uid -> the conversation as last fetched
+const fetchingConversations = new Map();
+const KEEP_MOST = 30;
+let changedHere = false;
+
+function keepConversation(conversation){
+  for(const key of [String(conversation.id), String(conversation.uid)]){
+    keptConversations.delete(key);
+    keptConversations.set(key, conversation);
+  }
+  while(keptConversations.size > KEEP_MOST * 2) keptConversations.delete(keptConversations.keys().next().value);
+}
+
+function forgetConversation(id, uid){
+  keptConversations.delete(String(id));
+  keptConversations.delete(String(uid));
+}
+
+// Asked for once at a time: a hover and the click after it share one request
+function fetchConversation(id){
+  const key = String(id);
+  if(fetchingConversations.has(key)) return fetchingConversations.get(key);
+  const asking = api(`/chat/conversations/${id}`)
+    .then(conversation => { keepConversation(conversation); return conversation; })
+    .finally(() => fetchingConversations.delete(key));
+  fetchingConversations.set(key, asking);
+  return asking;
+}
+
+// Leaving the open conversation: what was kept of it is out of date if something changed here
+function leaveConversation(){
+  if(changedHere && currentId) forgetConversation(currentId, currentUid);
+  changedHere = false;
+}
+
 async function openConversation(id, how = 'push'){
   if(controller) return;
+  leaveConversation();
+  const kept = keptConversations.get(String(id));
+  if(kept){
+    showConversation(kept, how);
+    fetchConversation(id).then(fresh => {
+      if(fresh.version !== kept.version && currentId === fresh.id && !controller && !changedHere){
+        showConversation(fresh, 'none');
+      }
+    }).catch(() => {});
+    return;
+  }
+  try{ showConversation(await fetchConversation(id), how); }
+  catch(e){ showError('Could not open conversation: ' + errorText(e)); }
+}
+
+function showConversation(conversation, how){
   try{
-    const conversation = await api(`/chat/conversations/${id}`);
     currentId = conversation.id;
     currentUid = conversation.uid;
     panelFollowsConversation();
@@ -1806,6 +1862,23 @@ document.getElementById('convs').addEventListener('click', async e => {
   }
   const open = e.target.closest('[data-open]');
   if(open) openConversation(Number(open.dataset.open));
+});
+
+let restingOn = null;
+document.getElementById('convs').addEventListener('pointerover', e => {
+  const item = e.target.closest('[data-open]');
+  if(!item || item === restingOn) return;
+  restingOn = item;
+  clearTimeout(item._soon);
+  item._soon = setTimeout(() => {
+    if(item.dataset.open !== String(currentId) && !keptConversations.has(item.dataset.open)){
+      fetchConversation(item.dataset.open).catch(() => {});
+    }
+  }, 80);
+});
+document.getElementById('convs').addEventListener('pointerout', e => {
+  const item = e.target.closest('[data-open]');
+  if(item && !item.contains(e.relatedTarget)){ clearTimeout(item._soon); restingOn = null; }
 });
 
 document.getElementById('convs').addEventListener('dblclick', async e => {
@@ -2159,6 +2232,7 @@ function startEdit(box){
     turning = true;
     try{
       try{
+        changedHere = true;
         await api(`/chat/conversations/${currentId}/messages/${box._messageId}`,
                   {method: 'PATCH', headers: JSON_HEADERS, body: JSON.stringify({content: text})});
       }catch(e){
@@ -3728,6 +3802,7 @@ function addVerdict(box, where, saved){
     // A just-finished answer is written down by the server a moment after the last word arrives
     for(let attempt = 0; ; attempt++){
       try{
+        changedHere = true;
         const result = await api('/chat/feedback', {method: 'POST', headers: JSON_HEADERS, body: JSON.stringify(body)});
         where.messageId = result.message_id;
         const words = TASK_WORDS[result.category];
@@ -4224,6 +4299,7 @@ async function sendTurn(redo = null){
   if(controller) return;
   const files = redo ? (redo.images || []) : pending;
   if(!text && !files.length) return;
+  changedHere = true;
   if(files.some(p => p.uploading)){
     showError('One moment: the picture is still uploading.');
     return;
