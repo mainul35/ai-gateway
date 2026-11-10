@@ -267,13 +267,25 @@ document.getElementById('repo').addEventListener('input', e => {
   if(said && said !== sourceBox.value){ sourceBox.value = said; showSource(); }
 });
 
+const CONTEXT_STEPS = [8192, 16384, 32768, 65536, 131072, 262144, 524288, 1048576];
+const kTokens = n => n >= 1048576 ? `${n / 1048576}M` : `${Math.round(n / 1024)}K`;
+
+// The context to give a model as it is pulled: the server's default unless another is picked
+function contextChoice(trained){
+  if(!trained) return '';
+  const steps = [...new Set([...CONTEXT_STEPS.filter(n => n <= trained), trained])].sort((a, b) => a - b);
+  return `<select class="pull-context" title="The context this model is given once it is down" style="width:auto;padding:.2rem .4rem;margin:0 .4rem 0 0;font-size:.8rem">
+      <option value="">default context</option>${steps.map(n => `<option value="${n}">${kTokens(n)} context</option>`).join('')}
+    </select>`;
+}
+
 function ollamaResult(f){
   const rows = f.tags.map(t => {
     const runs = t.run_mode ? `<span class="pill ${t.run_mode === 'GPU' ? 'on' : 'off'}">${escapeHtml(t.run_mode)}</span>`
                             : '<span class="pill err">too big</span>';
     const action = t.installed ? '<span class="muted">installed</span>'
       : !t.pullable ? `<span class="muted" style="font-size:.8rem">${escapeHtml(t.why)}</span>`
-      : t.run_mode ? `<button class="btn btn-sm" data-pull="${escapeHtml(t.name)}">Pull</button>` : '';
+      : t.run_mode ? `${contextChoice(t.trained_context)}<button class="btn btn-sm" data-pull="${escapeHtml(t.name)}">Pull</button>` : '';
     return `<tr${t.recommended ? ' style="background:rgba(99,102,241,.12)"' : ''}>
       <td><code>${escapeHtml(t.tag)}</code>${t.recommended ? ' <span class="pill on">best fit</span>' : ''}</td>
       <td>${escapeHtml(t.quantization || t.format || '')}</td>
@@ -457,7 +469,7 @@ async function rejoinInstall(){
 
 let installMode = null;
 
-async function install(mode, quantization, source){
+async function install(mode, quantization, source, context = null){
   if(installJob){ showError('Something is already installing.'); return; }
   showError('');
   installMode = mode;
@@ -469,8 +481,10 @@ async function install(mode, quantization, source){
   try{
     const response = await fetch('/admin/models/install', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
+      // A context picked for a pull is given to the model as soon as it is down
       body: JSON.stringify({model_id: model, quantization: quantization || 'weights', mode,
-                            context_length: parseInt(document.getElementById('context')?.value, 10) || 4096})});
+                            context_length: context || parseInt(document.getElementById('context')?.value, 10) || 4096,
+                            set_context: !!context})});
     if(!response.ok){
       const body = await response.json().catch(() => null);
       throw new Error((body && body.detail) || `HTTP ${response.status}`);
@@ -482,7 +496,10 @@ async function install(mode, quantization, source){
 
 document.getElementById('fit').addEventListener('click', e => {
   const pull = e.target.closest('[data-pull]');
-  if(pull) return install('library', 'library', pull.dataset.pull);
+  if(pull){
+    const picked = parseInt(pull.closest('td')?.querySelector('.pull-context')?.value, 10);
+    return install('library', 'library', pull.dataset.pull, picked || null);
+  }
   const wanted = e.target.closest('[data-install]');
   if(wanted) return install(wanted.dataset.install, wanted.dataset.quant, wanted.dataset.source);
   const original = e.target.closest('[data-original]');
@@ -561,8 +578,12 @@ function modelCard(m){
       ${(m.capabilities || []).map(c => `<span class="pill off">${escapeHtml(c)}</span>`).join('')}
       ${mtp.state === 'on' ? `<span class="pill on" title="${escapeHtml(mtp.why)}">MTP</span>` : ''}
       ${best.map(b => `<span class="pill on" title="${escapeHtml(b.evidence)}">best: ${escapeHtml(b.label.split(' (')[0].toLowerCase())}</span>`).join('')}
-      <span class="spacer" style="flex:1"></span>${button}
+      <span class="spacer" style="flex:1"></span>
+      ${m.backend === 'ollama' && m.trained_context ? `<button class="btn btn-sm btn-secondary" data-context="${escapeHtml(m.name)}"
+          title="The context window it is given: ${m.own_context ? 'its own' : "the server's default"}">Context ${kTokens(m.context_length || m.trained_context)}</button>` : ''}
+      ${button}
     </div>
+    <div class="ctx-panel" hidden></div>
     <details class="model-more" style="margin-top:.25rem">
       <summary class="muted" style="font-size:.82rem;cursor:pointer">
         ${escapeHtml([facts, speedText, short].filter(Boolean).join(' · '))}
@@ -609,6 +630,52 @@ async function loadModels(){
       + groups[name].map(modelCard).join('')).join('') || '<span class="muted">No models found.</span>';
   }catch(e){ target.textContent = 'Could not load models: ' + e.message; }
 }
+
+/* A model's context window, changed in place: every size up to what it was trained for, with the
+   memory it needs here, worked out layer by layer from the model itself. */
+document.getElementById('models').addEventListener('click', async e => {
+  const open = e.target.closest('[data-context]');
+  const apply = e.target.closest('[data-ctx-apply]');
+  const cancel = e.target.closest('[data-ctx-cancel]');
+  if(cancel){ cancel.closest('.ctx-panel').hidden = true; return; }
+  if(open){
+    const panel = open.closest('div').parentElement.querySelector('.ctx-panel');
+    if(!panel.hidden){ panel.hidden = true; return; }
+    panel.hidden = false;
+    panel.innerHTML = '<span class="muted">Working out what each size needs&hellip;</span>';
+    try{
+      const f = await api(`/admin/models/ollama/context?name=${encodeURIComponent(open.dataset.context)}`);
+      panel.dataset.name = f.name;
+      panel.innerHTML = `<label style="margin:0;display:flex;gap:.5rem;align-items:center;flex-wrap:wrap">
+          <span>Context</span>
+          <select style="width:auto">${f.options.map(o => `<option value="${o.tokens}" ${o.tokens === f.current ? 'selected' : ''}>
+              ${kTokens(o.tokens)} &middot; ${o.memory_gb} GB &middot; ${o.run_mode ? escapeHtml(o.run_mode) : 'too big for this machine'}</option>`).join('')}</select>
+          <button class="btn btn-sm" data-ctx-apply>Apply</button>
+          <button class="btn btn-sm btn-secondary" data-ctx-cancel>Cancel</button></label>
+        <p class="muted" style="margin:.4rem 0 0;font-size:.8rem">Trained for ${kTokens(f.trained)}; now ${kTokens(f.current)}
+          (${f.own ? 'its own' : `the server's default of ${kTokens(f.server_default)}`}). Memory is the weights plus the
+          key/value cache${f.estimated ? ', estimated' : ''}; "GPU + CPU" runs slower, partly in RAM.</p>`;
+    }catch(err){ panel.innerHTML = `<span class="muted">${escapeHtml(err.message)}</span>`; }
+    return;
+  }
+  if(apply){
+    const panel = apply.closest('.ctx-panel');
+    const tokens = parseInt(panel.querySelector('select').value, 10);
+    apply.disabled = true;
+    apply.textContent = 'Applying\u2026';
+    try{
+      const done = await api('/admin/models/ollama/context', {method: 'POST', headers: {'Content-Type': 'application/json'},
+                                                              body: JSON.stringify({name: panel.dataset.name, context_length: tokens})});
+      panel.innerHTML = `<span class="note ok" style="display:block;margin:0;padding:.4rem .7rem;font-size:.85rem">Context set to
+          ${kTokens(done.context_length)}.${done.loaded ? ' It is loaded now with the old size, and takes the new one the next time it loads.' : ''}</span>`;
+      setTimeout(loadModels, 1500);
+    }catch(err){
+      apply.disabled = false;
+      apply.textContent = 'Apply';
+      showError(err.message);
+    }
+  }
+});
 
 // Deleting is not undoable without pulling the model again, so it is asked twice: once here, and once
 // more by the server when the model is spoken for

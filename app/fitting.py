@@ -150,6 +150,54 @@ def kv_cache(model_architecture):
     }
 
 
+def kv_cache_bytes(keys, tokens):
+    """The key/value cache for this many tokens, read layer by layer from a model's GGUF keys (or
+    Ollama's model_info with verbose on, which carries the same keys). None without the keys.
+
+    Counted per layer because models differ in exactly what a uniform estimate gets wrong. Gemma
+    keeps most layers to a 1024-token sliding window with their own head count and width: counted
+    as full attention, gemma4:31b needed 50 GB for 8K, where it runs at 64K in 48. A hybrid Qwen
+    keeps a cache in one layer of every full_attention_interval and none in the rest.
+    """
+    arch = keys.get("general.architecture")
+    layers = keys.get(f"{arch}.block_count") if arch else None
+    if not isinstance(layers, int) or layers <= 0:
+        return None
+
+    def per_layer(name, default=None):
+        value = keys.get(f"{arch}.{name}")
+        if isinstance(value, list):
+            return [value[i] if i < len(value) and value[i] is not None else default for i in range(layers)]
+        return [value if value is not None else default] * layers
+
+    heads = per_layer("attention.head_count", 32)
+    kv_heads = [kv or h for kv, h in zip(per_layer("attention.head_count_kv"), heads)]
+    width = keys.get(f"{arch}.embedding_length") or 4096
+    key = per_layer("attention.key_length")
+    value = per_layer("attention.value_length")
+    key_swa, value_swa = per_layer("attention.key_length_swa"), per_layer("attention.value_length_swa")
+    window = keys.get(f"{arch}.attention.sliding_window")
+    pattern = keys.get(f"{arch}.attention.sliding_window_pattern")
+    interval = keys.get(f"{arch}.full_attention_interval")
+    total = 0
+    for i in range(layers):
+        if isinstance(interval, int) and interval > 1 and (i + 1) % interval:
+            continue                                   # a recurrent layer: no key/value cache
+        if isinstance(pattern, list):
+            sliding = bool(pattern[i]) if i < len(pattern) else False
+        elif isinstance(pattern, int) and pattern > 1:
+            sliding = (i + 1) % pattern != 0           # every pattern-th layer sees everything
+        else:
+            sliding = False
+        sliding = sliding and isinstance(window, int) and window > 0
+        head_width = width // (heads[i] or 1)
+        k = (key_swa[i] if sliding and key_swa[i] else key[i]) or head_width
+        v = (value_swa[i] if sliding and value_swa[i] else value[i]) or k
+        held = min(tokens, window) if sliding else tokens
+        total += kv_heads[i] * (k + v) * KV_CACHE_BYTES_PER_ELEMENT * held
+    return total
+
+
 def tag_of(quantization, label=""):
     """The tag Ollama knows a quantization by: the standard name, the label a file's name shows
     (UD-Q4_K_XL), or none - a repository's only model, which Hugging Face serves as :latest."""

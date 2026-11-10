@@ -1,5 +1,6 @@
 """Admin API: users, API keys, usage, and the models themselves."""
 import asyncio
+import itertools
 import json
 import logging
 import os
@@ -8,6 +9,7 @@ import threading
 from datetime import timedelta
 
 import httpx
+import requests
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
@@ -701,6 +703,8 @@ async def list_models_for_admin(_: Principal = Depends(require_admin),
             "quantization": details.get("quantization_level", ""),
             "family": details.get("family", ""),
             "context_length": backend.context_length,
+            "trained_context": getattr(backend, "trained_context", None),
+            "own_context": getattr(backend, "own_context", None),
             "capabilities": sorted(backend.capabilities),
             "modified_at": backend.modified_at,
             "description": catalogue.describe(
@@ -837,6 +841,9 @@ class ModelInstall(BaseModel):
     # "library" pulls a model from Ollama's own library by its name there (ornith-1.5:122b)
     mode: str = Field(default="pull", pattern="^(pull|create|engine|vllm|sglang|convert|library)$")
     context_length: int = fitting.DEFAULT_CONTEXT_LENGTH
+    # A pull ("pull" or "library") gives the model this context of its own once it is down, rather
+    # than the server-wide OLLAMA_CONTEXT_LENGTH every model otherwise gets
+    set_context: bool = False
 
 
 class Cancel(BaseModel):
@@ -978,6 +985,7 @@ def _look_up_ollama(name, installed):
             "kv_cache_gb": cache["kv_cache_recommended_gb"], "kv_estimated": cache["estimated"],
             "vram_usage_percent": round(memory_needed / system["total_vram"] * 100, 1) if system["total_vram"] else None,
             "run_mode": mode, "installed": tag["name"] in installed or (tag["tag"] == "latest" and found["model"] in installed),
+            "trained_context": tag["architecture"].get("max_position_embeddings"),
             # Ollama on this kind of machine runs GGUF; a tag published another way (safetensors, as
             # NVFP4 is) is listed, but not offered to pull
             "pullable": gguf,
@@ -1212,6 +1220,11 @@ def _start_install(entry, who):
     else:
         name = source
         rows = stream_pull_model(source, cancellation)
+    # Pulled, then given its own context: Ollama keeps the weights and writes only the model's
+    # parameters again (measured: the same blobs, num_ctx set, template and the rest kept)
+    if entry["mode"] in ("pull", "library") and entry.get("set_context"):
+        rows = itertools.chain(rows, stream_create_model(
+            name, name, {"num_ctx": fitting.clamp_context(entry["context_length"])}, cancellation))
     entry = {**entry, "name": name}
     _list_install(entry, True)
     log.info("%s of %s started by %s", entry["mode"], name, who)
@@ -1278,7 +1291,8 @@ async def install_model(payload: ModelInstall, principal: Principal = Depends(re
                                 "download it for llama.cpp instead")
     owner = principal.user.id if principal.user else 0
     job, name = _start_install({"model_id": model_id, "quantization": payload.quantization, "mode": payload.mode,
-                                "context_length": payload.context_length, "owner": owner, "label": label},
+                                "context_length": payload.context_length, "set_context": payload.set_context,
+                                "owner": owner, "label": label},
                                getattr(principal.user, "name", None) or "master-key")
 
     async def stream():
@@ -1288,6 +1302,82 @@ async def install_model(payload: ModelInstall, principal: Principal = Depends(re
 
     return StreamingResponse(stream(), media_type="text/event-stream",
                              headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+
+CONTEXT_STEPS = (8192, 16384, 32768, 65536, 131072, 262144, 524288, 1048576)
+
+
+def _ollama_context_options(name):
+    """The context lengths an installed Ollama model can be given, each with the memory it needs here
+    and how it would run, its current one, and what it was trained for. Blocking."""
+    host = ollama_host()
+    # verbose: the per-layer lists (head counts, which layers keep a sliding window), which the short
+    # answer leaves empty - a few MB, read on this machine in under half a second
+    shown = requests.post(f"{host}/api/show", json={"model": name, "verbose": True}, timeout=60)
+    if shown.status_code == 404:
+        return {"error": f"Ollama has no model {name}", "status_code": 404}
+    shown.raise_for_status()
+    shown = shown.json()
+    info = shown.get("model_info") or {}
+    trained = next((v for k, v in info.items() if k.endswith(".context_length")), None) or fitting.DEFAULT_CONTEXT_LENGTH
+    own = backends.NUM_CTX.search(shown.get("parameters") or "")
+    own = int(own.group(1)) if own else None
+    size = next((m.get("size") or 0 for m in requests.get(f"{host}/api/tags", timeout=10).json().get("models") or []
+                 if m.get("name") == name), 0)
+    uniform = fitting.kv_cache({**ollama_library.architecture(info), "max_position_embeddings": trained})
+    measured = fitting.kv_cache_bytes(info, 1) is not None
+    system = get_system_info()
+    steps = sorted({n for n in CONTEXT_STEPS if n <= trained} | {trained})
+    options = []
+    for tokens in steps:
+        cache_bytes = fitting.kv_cache_bytes(info, tokens) if measured else uniform["kv_cache_per_token_bytes"] * tokens
+        needed = size * fitting.MEMORY_OVERHEAD + cache_bytes
+        options.append({"tokens": tokens, "memory_gb": round(needed / 1024 ** 3, 1),
+                        "run_mode": fitting.run_mode(system, needed)})
+    loaded = any(m.get("name") == name for m in requests.get(f"{host}/api/ps", timeout=10).json().get("models") or [])
+    return {"name": name, "trained": trained, "own": own, "server_default": backends._ollama_context_limit(),
+            "current": min(own or backends._ollama_context_limit(), trained), "estimated": not measured,
+            "options": options, "loaded": loaded}
+
+
+@router.get("/models/ollama/context")
+async def ollama_context_options(name: str, _: Principal = Depends(require_admin)):
+    found = await asyncio.to_thread(_ollama_context_options, name)
+    if "error" in found:
+        raise HTTPException(found["status_code"], found["error"])
+    return found
+
+
+class OllamaContext(BaseModel):
+    name: str = Field(min_length=1, max_length=256)
+    context_length: int = Field(ge=fitting.MIN_CONTEXT_LENGTH, le=fitting.MAX_CONTEXT_LENGTH)
+
+
+@router.post("/models/ollama/context")
+async def set_ollama_context(payload: OllamaContext, principal: Principal = Depends(require_admin)):
+    """Gives an installed Ollama model a context length of its own, in place: Ollama writes the
+    model's parameters again with num_ctx set and keeps its weights. A model already loaded keeps its
+    old window until it is next loaded."""
+    found = await asyncio.to_thread(_ollama_context_options, payload.name)
+    if "error" in found:
+        raise HTTPException(found["status_code"], found["error"])
+    if payload.context_length > found["trained"]:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST,
+                            f"{payload.name} was trained for {found['trained']} tokens; it cannot be given more")
+
+    def apply():
+        response = requests.post(f"{ollama_host()}/api/create", timeout=300,
+                                 json={"model": payload.name, "from": payload.name, "stream": False,
+                                       "parameters": {"num_ctx": payload.context_length}})
+        return response.status_code, (response.json() if response.content else {})
+
+    code, answer = await asyncio.to_thread(apply)
+    if code >= 400 or answer.get("error"):
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, f"Ollama refused: {answer.get('error') or code}")
+    backends.forget_discovery()
+    log.info("%s given a context of %s tokens by %s", payload.name, payload.context_length,
+             getattr(principal.user, "name", None) or "master-key")
+    return {"name": payload.name, "context_length": payload.context_length, "loaded": found["loaded"]}
 
 
 @router.get("/models/installing")

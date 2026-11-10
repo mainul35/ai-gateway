@@ -6,6 +6,7 @@ Models come from two places:
 """
 import asyncio
 import os
+import re
 import time
 
 import httpx
@@ -19,6 +20,10 @@ _cache = {"expires_at": 0.0, "models": {}}
 # Ollama model digest -> what /api/show said about it; a digest never changes what it is
 _capabilities_by_digest = {}
 _context_by_digest = {}
+# The window a model was given of its own (its num_ctx parameter), which Ollama uses instead of
+# OLLAMA_CONTEXT_LENGTH; None for a model that has none
+_num_ctx_by_digest = {}
+NUM_CTX = re.compile(r"^num_ctx\s+(\d+)", re.M)
 
 
 class Backend:
@@ -37,6 +42,9 @@ class Backend:
         self.size_bytes = size_bytes
         self.details = details or {}
         self.context_length = context_length
+        # For an Ollama model: the window it was trained for, and the one it was given of its own
+        self.trained_context = None
+        self.own_context = None
         self.modified_at = modified_at
         self.description = description
 
@@ -119,6 +127,8 @@ async def _add_ollama_capabilities(host, tags, discovered):
                     info = shown.get("model_info") or {}
                     _context_by_digest[tag.get("digest")] = next(
                         (value for key, value in info.items() if key.endswith(".context_length")), None)
+                    own = NUM_CTX.search(shown.get("parameters") or "")
+                    _num_ctx_by_digest[tag.get("digest")] = int(own.group(1)) if own else None
                 except (httpx.HTTPError, ValueError):
                     pass  # tried again at the next discovery
             await asyncio.gather(*(show(t) for t in unknown))
@@ -126,11 +136,14 @@ async def _add_ollama_capabilities(host, tags, discovered):
         if tag.get("name") in discovered:
             discovered[tag["name"]].capabilities = set(_capabilities_by_digest.get(tag.get("digest"), ()))
             trained = _context_by_digest.get(tag.get("digest"))
-            # What Ollama actually serves, not what the model was trained for: its context is capped
-            # by OLLAMA_CONTEXT_LENGTH on the server, and an agent told the bigger number lets a
-            # conversation grow past what the model is given
-            served = _ollama_context_limit()
-            discovered[tag["name"]].context_length = min(trained, served) if trained and served else trained
+            # What Ollama actually serves, not what the model was trained for: the model's own num_ctx
+            # when it has one (set on the Models page), else OLLAMA_CONTEXT_LENGTH on the server - an
+            # agent told a bigger number lets a conversation grow past what the model is given. The
+            # router model carries num_ctx 8192 and was listed with its trained 40K.
+            served = _num_ctx_by_digest.get(tag.get("digest")) or _ollama_context_limit()
+            discovered[tag["name"]].context_length = min(trained, served) if trained and served else (trained or served)
+            discovered[tag["name"]].trained_context = trained
+            discovered[tag["name"]].own_context = _num_ctx_by_digest.get(tag.get("digest"))
 
 
 def _ollama_context_limit():
