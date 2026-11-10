@@ -1687,6 +1687,9 @@ function conversationInUrl(id, how = 'push'){
 function resetChat(how = 'push'){
   leaveConversation();
   heldBack = [];
+  // A warning about the conversation left behind is not about the new one: deleting a conversation
+  // whose model was gone left "This conversation used ..." over an empty page
+  showError('');
   conversationInUrl(null, how);
   currentId = null;
   currentUid = null;
