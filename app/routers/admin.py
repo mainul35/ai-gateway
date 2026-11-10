@@ -1380,6 +1380,145 @@ async def set_ollama_context(payload: OllamaContext, principal: Principal = Depe
     return {"name": payload.name, "context_length": payload.context_length, "loaded": found["loaded"]}
 
 
+# What llama.cpp keeps a key/value cache element in, per --cache-type (q8_0: 34 bytes a block of 32)
+CACHE_ELEMENT_BYTES = {"f32": 4, "f16": 2, "bf16": 2, "q8_0": 34 / 32, "q5_1": 24 / 32, "q5_0": 22 / 32,
+                       "q4_1": 20 / 32, "q4_0": 18 / 32, "iq4_nl": 18 / 32}
+ENGINE_WORKING_MEMORY = 1.5 * 1024 ** 3   # vLLM/SGLang per GPU: activations and CUDA graphs, besides the cache
+
+
+def _file_size(path):
+    try:
+        return os.path.getsize(path)
+    except (OSError, TypeError):
+        return 0
+
+
+def _gguf_weights(path):
+    """A GGUF's size on disk, every part of one split in parts (name-00001-of-00003.gguf)."""
+    split = re.search(r"-(\d{5})-of-(\d{5})\.gguf$", path or "")
+    if not split:
+        return _file_size(path)
+    count = int(split.group(2))
+    return sum(_file_size(path[:split.start()] + f"-{i:05d}-of-{count:05d}.gguf") for i in range(1, count + 1))
+
+
+def _config_cache_bytes(config, tokens, element_bytes):
+    """The key/value cache for this many tokens, from a model's config.json, layer by layer: hybrid
+    models (qwen3.6) keep one in their full-attention layers only, sliding-window layers only for the
+    window."""
+    text = config.get("text_config") or config
+    layers = text.get("num_hidden_layers") or 32
+    heads = text.get("num_attention_heads") or 32
+    kv_heads = text.get("num_key_value_heads") or heads
+    head_dim = text.get("head_dim") or (text.get("hidden_size") or 4096) // heads
+    kinds = text.get("layer_types")
+    if not isinstance(kinds, list) or len(kinds) != layers:
+        interval = text.get("full_attention_interval")
+        kinds = ["full_attention" if not interval or (i + 1) % interval == 0 else "linear_attention"
+                 for i in range(layers)]
+    window = text.get("sliding_window")
+    total = 0
+    for kind in kinds:
+        if kind in ("full_attention", "attention"):
+            held = tokens
+        elif kind == "sliding_attention" and isinstance(window, int) and window > 0:
+            held = min(tokens, window)
+        else:
+            continue                                   # a linear/recurrent layer: a small fixed state
+        total += 2 * kv_heads * head_dim * element_bytes * held
+    return total
+
+
+def _engine_context_options(name):
+    """The context lengths one of our own engines (llama.cpp, vLLM, SGLang) can be started with, each
+    with the memory it needs here and whether it fits; its current one and what it was trained for.
+    Blocking (reads the model's header or config from disk)."""
+    profile = engine_profiles.load_profiles().get(name)
+    if profile is None:
+        return {"error": f"No engine profile {name}", "status_code": 404}
+    system = get_system_info()
+    current = profile.ctx_size
+    # A window stretched past the trained one by hand (YaRN, --override-kv ...context_length=) stays offered
+    stretched = re.search(r"context_length=int:(\d+)", " ".join(profile.extra_args))
+    if profile.server == "llama":
+        keys = gguf_meta.keys(profile.model_path)
+        arch = keys.get("general.architecture")
+        trained = keys.get(f"{arch}.context_length") if arch else None
+        bytes_per = (CACHE_ELEMENT_BYTES.get(profile.cache_type_k, 2) + CACHE_ELEMENT_BYTES.get(profile.cache_type_v, 2)) / 2
+        measured = fitting.kv_cache_bytes(keys, 1) is not None
+        weights = _gguf_weights(profile.model_path) + _file_size(profile.mmproj)
+
+        def option(tokens):
+            cache = (fitting.kv_cache_bytes(keys, tokens) or 0) * bytes_per / fitting.KV_CACHE_BYTES_PER_ELEMENT
+            needed = weights * fitting.MEMORY_OVERHEAD + cache
+            # --fit places what does not fit on the GPUs in RAM, slower
+            return {"tokens": tokens, "memory_gb": round(needed / 1024 ** 3, 1), "run_mode": fitting.run_mode(system, needed)}
+    else:
+        try:
+            with open(os.path.join(profile.model_path, "config.json"), encoding="utf-8") as f:
+                config = json.load(f)
+        except (OSError, ValueError):
+            return {"error": f"{name}'s config.json could not be read", "status_code": 409}
+        text = config.get("text_config") or config
+        trained = text.get("max_position_embeddings") or config.get("max_position_embeddings")
+        args = " ".join(profile.extra_args)
+        element = 1 if re.search(r"--kv-cache-dtype[ =]fp8", args) else 2
+        measured = bool(text.get("num_hidden_layers") and text.get("num_key_value_heads"))
+        weights = sum(_file_size(os.path.join(profile.model_path, f)) for f in os.listdir(profile.model_path)
+                      if f.endswith(".safetensors")) if os.path.isdir(profile.model_path) else 0
+        gpus = sorted((g.get("vram_total") or 0 for g in system.get("gpu_info") or []), reverse=True)
+        used = gpus[:profile.tensor_parallel or 1]
+        # vLLM and SGLang take their share of each GPU up front and refuse to start when the cache
+        # does not fit in what the weights leave of it: nothing goes to RAM
+        room = (profile.gpu_memory or 0.9) * sum(used) - weights - ENGINE_WORKING_MEMORY * len(used)
+
+        def option(tokens):
+            cache = _config_cache_bytes(config, tokens, element)
+            return {"tokens": tokens, "memory_gb": round((weights + cache) / 1024 ** 3, 1),
+                    "run_mode": "GPU" if cache <= room else None}
+    trained = int(trained or current)
+    ceiling = max(trained, current, int(stretched.group(1)) if stretched else 0)
+    steps = sorted({n for n in CONTEXT_STEPS if n <= ceiling} | {trained, current})
+    running = next((m for m in supervisor.status()["running"] if m["name"] == name and m["running"]), None)
+    return {"name": name, "engine": backends.ENGINE_NAMES.get(profile.server, profile.server),
+            "provider": PROVIDER_LABELS.get(backends.ENGINE_NAMES.get(profile.server), profile.server),
+            "trained": trained, "ceiling": ceiling, "current": current, "own": True, "estimated": not measured,
+            "options": [option(n) for n in steps], "loaded": running is not None,
+            "in_flight": (running or {}).get("in_flight", 0)}
+
+
+@router.get("/models/engine/context")
+async def engine_context_options(name: str, _: Principal = Depends(require_admin)):
+    found = await asyncio.to_thread(_engine_context_options, name)
+    if "error" in found:
+        raise HTTPException(found["status_code"], found["error"])
+    return found
+
+
+@router.post("/models/engine/context")
+async def set_engine_context(payload: OllamaContext, principal: Principal = Depends(require_admin)):
+    """Gives one of our engines another context window: written to its profile and used the next time
+    the engine starts. A running engine is not restarted for it - it may be answering someone."""
+    found = await asyncio.to_thread(_engine_context_options, payload.name)
+    if "error" in found:
+        raise HTTPException(found["status_code"], found["error"])
+    if payload.context_length > found["ceiling"]:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST,
+                            f"{payload.name} was trained for {found['trained']} tokens; it cannot be given more")
+    chosen = next((o for o in found["options"] if o["tokens"] == payload.context_length), None)
+    if (found["engine"] != "llamacpp" and chosen and chosen["run_mode"] is None
+            and payload.context_length != found["current"]):
+        raise HTTPException(status.HTTP_400_BAD_REQUEST,
+                            f"{found['provider']} would not start {payload.name} with {payload.context_length} tokens: "
+                            "the cache does not fit in the GPU memory it is given")
+    if not await asyncio.to_thread(engine_profiles.set_context, payload.name, payload.context_length):
+        raise HTTPException(status.HTTP_404_NOT_FOUND, f"No engine profile {payload.name}")
+    backends.forget_discovery()
+    log.info("engine %s given a context of %s tokens by %s", payload.name, payload.context_length,
+             getattr(principal.user, "name", None) or "master-key")
+    return {"name": payload.name, "context_length": payload.context_length, "loaded": found["loaded"]}
+
+
 @router.get("/models/installing")
 async def installing(_: Principal = Depends(require_admin)):
     """What this machine is downloading right now, so a reloaded page can pick it back up."""
