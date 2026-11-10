@@ -171,7 +171,9 @@ def kv_cache_bytes(keys, tokens):
         return [value if value is not None else default] * layers
 
     heads = per_layer("attention.head_count", 32)
-    kv_heads = [kv or h for kv, h in zip(per_layer("attention.head_count_kv"), heads)]
+    # None: not said, as many as the heads. 0 in a per-layer list: a layer with no attention (a Mamba
+    # layer of Nemotron-H), which keeps no cache
+    kv_heads = [h if kv is None else kv for kv, h in zip(per_layer("attention.head_count_kv"), heads)]
     width = keys.get(f"{arch}.embedding_length") or 4096
     key = per_layer("attention.key_length")
     value = per_layer("attention.value_length")
@@ -183,6 +185,8 @@ def kv_cache_bytes(keys, tokens):
     for i in range(layers):
         if isinstance(interval, int) and interval > 1 and (i + 1) % interval:
             continue                                   # a recurrent layer: no key/value cache
+        if not kv_heads[i]:
+            continue
         if isinstance(pattern, list):
             sliding = bool(pattern[i]) if i < len(pattern) else False
         elif isinstance(pattern, int) and pattern > 1:

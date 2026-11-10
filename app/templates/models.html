@@ -581,6 +581,8 @@ function modelCard(m){
       <span class="spacer" style="flex:1"></span>
       ${m.backend === 'ollama' && m.trained_context ? `<button class="btn btn-sm btn-secondary" data-context="${escapeHtml(m.name)}"
           title="The context window it is given: ${m.own_context ? 'its own' : "the server's default"}">Context ${kTokens(m.context_length || m.trained_context)}</button>` : ''}
+      ${m.backend === 'llamacpp' && m.context_length ? `<button class="btn btn-sm btn-secondary" data-context="${escapeHtml(m.name)}" data-context-kind="engine"
+          title="The context window its engine is started with">Context ${kTokens(m.context_length)}</button>` : ''}
       ${button}
     </div>
     <div class="ctx-panel" hidden></div>
@@ -643,18 +645,30 @@ document.getElementById('models').addEventListener('click', async e => {
     if(!panel.hidden){ panel.hidden = true; return; }
     panel.hidden = false;
     panel.innerHTML = '<span class="muted">Working out what each size needs&hellip;</span>';
+    const kind = open.dataset.contextKind || 'ollama';
     try{
-      const f = await api(`/admin/models/ollama/context?name=${encodeURIComponent(open.dataset.context)}`);
+      const f = await api(`/admin/models/${kind}/context?name=${encodeURIComponent(open.dataset.context)}`);
       panel.dataset.name = f.name;
+      panel.dataset.kind = kind;
+      // vLLM and SGLang keep the whole cache on the GPUs: a size that does not fit would not start
+      const gpuOnly = kind === 'engine' && f.engine !== 'llamacpp';
+      const mode = o => o.run_mode ? escapeHtml(o.run_mode) : (gpuOnly ? 'does not fit on the GPUs' : 'too big for this machine');
+      const note = kind === 'engine'
+        ? `Trained for ${kTokens(f.trained)}; now ${kTokens(f.current)}. Memory is the weights plus the key/value cache${f.estimated ? ', estimated' : ''}.
+           ${gpuOnly ? `${escapeHtml(f.provider)} keeps it all on the GPUs, in the share of them it is given.`
+                     : '"GPU + CPU" runs slower, partly in RAM.'}
+           A new size is used the next time the engine starts${f.loaded ? ': it is running now and is not restarted for it' : ''}.`
+        : `Trained for ${kTokens(f.trained)}; now ${kTokens(f.current)}
+           (${f.own ? 'its own' : `the server's default of ${kTokens(f.server_default)}`}). Memory is the weights plus the
+           key/value cache${f.estimated ? ', estimated' : ''}; "GPU + CPU" runs slower, partly in RAM.`;
       panel.innerHTML = `<label style="margin:0;display:flex;gap:.5rem;align-items:center;flex-wrap:wrap">
           <span>Context</span>
-          <select style="width:auto">${f.options.map(o => `<option value="${o.tokens}" ${o.tokens === f.current ? 'selected' : ''}>
-              ${kTokens(o.tokens)} &middot; ${o.memory_gb} GB &middot; ${o.run_mode ? escapeHtml(o.run_mode) : 'too big for this machine'}</option>`).join('')}</select>
+          <select style="width:auto">${f.options.map(o => `<option value="${o.tokens}" ${o.tokens === f.current ? 'selected' : ''}
+              ${gpuOnly && !o.run_mode && o.tokens !== f.current ? 'disabled' : ''}>
+              ${kTokens(o.tokens)} &middot; ${o.memory_gb} GB &middot; ${mode(o)}</option>`).join('')}</select>
           <button class="btn btn-sm" data-ctx-apply>Apply</button>
           <button class="btn btn-sm btn-secondary" data-ctx-cancel>Cancel</button></label>
-        <p class="muted" style="margin:.4rem 0 0;font-size:.8rem">Trained for ${kTokens(f.trained)}; now ${kTokens(f.current)}
-          (${f.own ? 'its own' : `the server's default of ${kTokens(f.server_default)}`}). Memory is the weights plus the
-          key/value cache${f.estimated ? ', estimated' : ''}; "GPU + CPU" runs slower, partly in RAM.</p>`;
+        <p class="muted" style="margin:.4rem 0 0;font-size:.8rem">${note}</p>`;
     }catch(err){ panel.innerHTML = `<span class="muted">${escapeHtml(err.message)}</span>`; }
     return;
   }
@@ -664,10 +678,13 @@ document.getElementById('models').addEventListener('click', async e => {
     apply.disabled = true;
     apply.textContent = 'Applying\u2026';
     try{
-      const done = await api('/admin/models/ollama/context', {method: 'POST', headers: {'Content-Type': 'application/json'},
+      const engine = panel.dataset.kind === 'engine';
+      const done = await api(`/admin/models/${engine ? 'engine' : 'ollama'}/context`, {method: 'POST', headers: {'Content-Type': 'application/json'},
                                                               body: JSON.stringify({name: panel.dataset.name, context_length: tokens})});
+      const later = engine ? ' Its engine is running now with the old size, and takes the new one the next time it starts.'
+                           : ' It is loaded now with the old size, and takes the new one the next time it loads.';
       panel.innerHTML = `<span class="note ok" style="display:block;margin:0;padding:.4rem .7rem;font-size:.85rem">Context set to
-          ${kTokens(done.context_length)}.${done.loaded ? ' It is loaded now with the old size, and takes the new one the next time it loads.' : ''}</span>`;
+          ${kTokens(done.context_length)}.${done.loaded ? later : ''}</span>`;
       setTimeout(loadModels, 1500);
     }catch(err){
       apply.disabled = false;

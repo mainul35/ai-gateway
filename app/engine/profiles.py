@@ -167,9 +167,12 @@ def load_profiles():
     known = {f for f in EngineProfile.__dataclass_fields__ if f not in ("name", "model_path", "port")}
     local = _read(local_engines_file())
     removed = set(local.get("removed") or ())
+    contexts = local.get("context") or {}
     for entry in (data.get("models") or []) + (local.get("models") or []):
         merged = {**defaults, **entry}
         name = merged.get("name")
+        if isinstance(contexts.get(name), int):
+            merged["ctx_size"] = contexts[name]      # set on the Models page, for one of engines.yaml's
         model_path = merged.get("model_path")
         if not name or not model_path or name in profiles:
             continue
@@ -206,6 +209,22 @@ def add_local_profile(entry):
     _write_local(models, removed=[n for n in _read(local_engines_file()).get("removed") or () if n != entry["name"]])
 
 
+def set_context(name, tokens):
+    """Gives a profile a new context window, applied the next time its engine starts. One of this
+    machine's has its ctx_size changed where it stands; one of engines.yaml's - which every deploy
+    writes back - keeps it in engines.local.yaml's `context`. False when there is no such profile."""
+    models = local_profiles()
+    at = next((i for i, m in enumerate(models) if m.get("name") == name), None)
+    if at is not None:
+        models[at] = {**models[at], "ctx_size": tokens}
+        _write_local(models)
+        return True
+    if name not in load_profiles():
+        return False
+    _write_local(models, context={**(_read(local_engines_file()).get("context") or {}), name: tokens})
+    return True
+
+
 def remove_profile(name):
     """Deletes a profile: one of this machine's is taken out of engines.local.yaml, one of
     engines.yaml's - which every deploy writes back - is listed there as removed. True when there
@@ -220,14 +239,20 @@ def remove_profile(name):
     return False
 
 
-def _write_local(models, removed=None):
+def _write_local(models, removed=None, context=None):
     path = local_engines_file()
     if removed is None:
         removed = list(_read(path).get("removed") or ())
+    if context is None:
+        context = _read(path).get("context") or {}
+    # A context kept for a profile since deleted, or one now in this file itself, is dropped
+    context = {n: c for n, c in context.items() if n not in removed and not any(m.get("name") == n for m in models)}
     with open(path + ".new", "w", encoding="utf-8") as f:
         f.write("# Engine profiles this machine added for itself (Models page: Download for llama.cpp).\n"
                 "# Read after config/engines.yaml, with its defaults; deploys leave this file alone.\n"
-                "# removed: engines.yaml's profiles deleted from the Models page, skipped when read.\n")
-        yaml.safe_dump({"models": models} | ({"removed": removed} if removed else {}), f,
+                "# removed: engines.yaml's profiles deleted from the Models page, skipped when read.\n"
+                "# context: engines.yaml's profiles given another ctx_size on the Models page.\n")
+        yaml.safe_dump({"models": models} | ({"removed": removed} if removed else {})
+                       | ({"context": context} if context else {}), f,
                        sort_keys=False, allow_unicode=True, width=120)
     os.replace(path + ".new", path)
