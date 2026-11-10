@@ -709,7 +709,7 @@ def _file_json(file):
     data = {"id": file.id, "url": f"/chat/files/{file.id}", "mime_type": file.mime_type,
             "name": file.name, "kind": file.kind}
     # A document keeps its text in prompt, which is megabytes of no use to the browser
-    data["prompt"] = None if file.kind == "document" else file.prompt
+    data["prompt"] = None if file.kind in ("document", "written") else file.prompt
     return data
 
 
@@ -897,7 +897,7 @@ async def write_answer_file(payload: WrittenIn, principal: Principal = Depends(a
         name, data, mime = await asyncio.to_thread(written.make, payload.text, payload.format)
     except written.WrittenError as e:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(e))
-    stored = ChatFile(user_id=user.id, kind="written", mime_type=mime, name=name, prompt=None, data=data)
+    stored = ChatFile(user_id=user.id, kind="written", mime_type=mime, name=name, prompt=payload.text, data=data)
     session.add(stored)
     await session.commit()
     await session.refresh(stored)
@@ -907,6 +907,64 @@ async def write_answer_file(payload: WrittenIn, principal: Principal = Depends(a
         message.attachments = json.dumps(filed)
         await session.commit()
     return _file_json(stored)
+
+
+async def _written_file(session, user, file_id):
+    """A file the playground wrote for this person, and the answer it is kept with (or None)."""
+    stored = (await session.execute(
+        select(ChatFile).where(ChatFile.id == file_id, ChatFile.user_id == user.id))).scalar_one_or_none()
+    if stored is None or stored.kind != "written":
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Not a document written here")
+    holder = (await session.execute(
+        select(ConversationMessage).join(Conversation, Conversation.id == ConversationMessage.conversation_id)
+        .where(Conversation.user_id == user.id, ConversationMessage.role == "assistant",
+               ConversationMessage.attachments.contains(f'"file_id": {file_id},'))
+        .order_by(ConversationMessage.id.desc()).limit(1))).scalar_one_or_none()
+    # Only the one whose document it is, not an answer naming the same number for something else
+    if holder is not None and (json.loads(holder.attachments or "{}").get("document") or {}).get("file_id") != file_id:
+        holder = None
+    return stored, holder
+
+
+@router.get("/files/{file_id}/source")
+async def written_source(file_id: int, principal: Principal = Depends(authenticate),
+                         session: AsyncSession = Depends(get_session)):
+    """The Markdown a written document was made from, to edit. One made before its text was kept
+    falls back to the answer it is filed with."""
+    user = _require_user(principal)
+    stored, holder = await _written_file(session, user, file_id)
+    text = stored.prompt or (holder.content if holder else None)
+    if not text:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "The text this document was made from was not kept")
+    return {"name": stored.name, "format": "pdf" if stored.mime_type == "application/pdf" else "markdown", "text": text}
+
+
+class ReviseIn(BaseModel):
+    text: str = Field(min_length=1, max_length=400_000)
+
+
+@router.post("/files/{file_id}/revise")
+async def revise_written(file_id: int, payload: ReviseIn, principal: Principal = Depends(authenticate),
+                         session: AsyncSession = Depends(get_session)):
+    """A written document made again from edited text, in the same kind. A new file, so nothing
+    cached of the old one is shown for it; the answer it was filed with keeps the new one instead."""
+    user = _require_user(principal)
+    stored, holder = await _written_file(session, user, file_id)
+    fmt = "pdf" if stored.mime_type == "application/pdf" else "markdown"
+    try:
+        name, data, mime = await asyncio.to_thread(written.make, payload.text, fmt)
+    except written.WrittenError as e:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(e))
+    made = ChatFile(user_id=user.id, kind="written", mime_type=mime, name=name, prompt=payload.text, data=data)
+    session.add(made)
+    await session.commit()
+    await session.refresh(made)
+    if holder is not None:
+        filed = json.loads(holder.attachments or "{}")
+        filed["document"] = {"file_id": made.id, "name": name, "mime_type": mime, "format": fmt}
+        holder.attachments = json.dumps(filed)
+        await session.commit()
+    return {**_file_json(made), "replaces": file_id}
 
 
 @router.get("/files/{file_id}/istory")
@@ -1242,7 +1300,7 @@ async def complete(payload: CompleteIn, principal: Principal = Depends(authentic
                 return
             async with session_factory()() as db:
                 stored = ChatFile(user_id=user.id, kind="written", mime_type=mime, name=name,
-                                  prompt=None, data=data)
+                                  prompt=answer.text, data=data)
                 db.add(stored)
                 await db.commit()
                 await db.refresh(stored)
