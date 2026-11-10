@@ -276,14 +276,73 @@ def make(text, fmt, images=None, charts=None):
     if images:
         body = CHAT_IMAGE.sub(lambda m: f'<img src="{images[int(m.group(1))]}"' if int(m.group(1)) in images
                               else m.group(0), body)
-    page = (f"<!doctype html><html><head><meta charset='utf-8'><title>{_escape(title)}</title>"
-            f"<style>{style}</style></head><body>{body}</body></html>")
+    def drawn(css):
+        page = (f"<!doctype html><html><head><meta charset='utf-8'><title>{_escape(title)}</title>"
+                f"<style>{css}</style></head><body>{body}</body></html>")
+        return HTML(string=page, url_fetcher=_fetcher()).render()
+
     try:
-        pdf = HTML(string=page, url_fetcher=_fetcher()).write_pdf()
+        if is_resume(text):
+            pdf = _fitted(drawn, style)
+        else:
+            pdf = drawn(style).write_pdf()
     except Exception as e:
         log.warning("Could not draw a PDF: %s", e)
         raise WrittenError("The PDF could not be drawn; the document is in the answer above.")
     return file_name(title, extension), pdf, mime
+
+
+# A resume's sections, as its headings name them: two or more of these and the document is laid out
+# as one - read from the document's own structure, the same in any wording of the request
+RESUME_SECTIONS = re.compile(
+    r"^#{2,3}\s+\**\s*(?:professional\s+|work\s+|technical\s+|core\s+|key\s+)?"
+    r"(?:experience|employment(?:\s+history)?|work\s+history|education|skills|competencies|projects|"
+    r"personal\s+projects|certifications?|summary|profile|achievements|publications|languages|awards)\b",
+    re.I | re.M)
+
+
+def is_resume(text):
+    return len({m.group(0).strip("#* ").lower() for m in RESUME_SECTIONS.finditer(text or "")}) >= 2
+
+
+def resume_style(size):
+    """A resume's layout at a body size of `size` pt: tight spacing, and a page broken wherever the
+    text reaches - a section heading keeps only its next line with it, and a bullet may go on over
+    the page - so no page ends in a gap."""
+    return f"""
+@page {{ size: A4; margin: 13mm 15mm 14mm;
+        @bottom-center {{ content: counter(page) " / " counter(pages); font-size: 8pt; color: #8a8a96; }} }}
+html {{ font-size: {size}pt; line-height: 1.38; }}
+h1 {{ font-size: {size * 2.05:.2f}pt; margin: 0 0 5pt; padding-bottom: 4pt; border-bottom-width: 1.6pt; }}
+h2 {{ font-size: {size * 1.2:.2f}pt; margin: 10pt 0 4pt; padding-bottom: 2pt; border-bottom: 0.6pt solid #c7d2fe;
+      letter-spacing: .02em; }}
+h3 {{ font-size: {size * 1.04:.2f}pt; margin: 7pt 0 1pt; }}
+h1 + p {{ margin-bottom: 4pt; }}
+p {{ margin: 0 0 3pt; }}
+ul, ol {{ margin: 1pt 0 4pt; padding-left: 13pt; }}
+li {{ margin: 0 0 1.5pt; }}
+p, li {{ orphans: 2; widows: 2; }}
+h2, h3 {{ break-after: avoid; }}
+table {{ font-size: {size * 0.92:.2f}pt; margin: 4pt 0 6pt; }}
+th, td {{ padding: 3pt 5pt; }}
+"""
+
+
+# pt, largest first: below 9.5 a resume stops being comfortable to read, above 11.5 it looks padded
+RESUME_SIZES = (11.5, 11.25, 11, 10.75, 10.5, 10.25, 10, 9.75, 9.5)
+
+
+def _fitted(drawn, style):
+    """A resume drawn at the largest size in RESUME_SIZES that still needs as few pages as the
+    smallest: no page more for a few lines, and the last page as full as the text can make it.
+    About a quarter of a second a try."""
+    smallest = drawn(style + resume_style(RESUME_SIZES[-1]))
+    fewest = len(smallest.pages)
+    for size in RESUME_SIZES[:-1]:
+        tried = drawn(style + resume_style(size))
+        if len(tried.pages) <= fewest:
+            return tried.write_pdf()
+    return smallest.write_pdf()
 
 
 def _escape(text):
