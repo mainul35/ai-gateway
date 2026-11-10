@@ -292,17 +292,20 @@ def make(text, fmt, images=None, charts=None):
     return file_name(title, extension), pdf, mime
 
 
-# A resume's sections, as its headings name them: two or more of these and the document is laid out
-# as one - read from the document's own structure, the same in any wording of the request
-RESUME_SECTIONS = re.compile(
-    r"^#{2,3}\s+\**\s*(?:professional\s+|work\s+|technical\s+|core\s+|key\s+)?"
-    r"(?:experience|employment(?:\s+history)?|work\s+history|education|skills|competencies|projects|"
-    r"personal\s+projects|certifications?|summary|profile|achievements|publications|languages|awards)\b",
-    re.I | re.M)
+# A resume, read from the document's own headings rather than the request: a heading that is a
+# whole career-history section, and another that is education, skills or the like. Headings only, and
+# the whole heading, so a report with a "Summary" and "Projects", or an "Education budget", keeps
+# the standard layout and size every other document has.
+_SECTION = r"^#{2,3}\s+\**\s*(?:professional\s+|work\s+|technical\s+|core\s+|key\s+|relevant\s+)?(?:%s)\s*\**\s*$"
+CAREER_SECTION = re.compile(_SECTION % r"experience|employment(?:\s+history)?|work\s+history|career(?:\s+history)?",
+                            re.I | re.M)
+OTHER_SECTION = re.compile(_SECTION % r"education|skills|competencies|(?:personal\s+)?projects|certifications?|"
+                                       r"achievements|publications|languages|awards|profile|summary",
+                           re.I | re.M)
 
 
 def is_resume(text):
-    return len({m.group(0).strip("#* ").lower() for m in RESUME_SECTIONS.finditer(text or "")}) >= 2
+    return bool(CAREER_SECTION.search(text or "")) and bool(OTHER_SECTION.search(text or ""))
 
 
 def resume_style(size):
