@@ -483,6 +483,16 @@ a.paper{color:var(--text);text-decoration:none}
              display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}
 .trace .step.notice .what{font-weight:400;color:var(--warning);font-family:inherit}
 .trace .step.tools .what{font-weight:400;color:var(--muted);font-family:inherit}
+/* The agent asking to read a folder on this computer: why, and the command that says yes */
+.device-ask{border:1px solid var(--primary);border-radius:10px;padding:.65rem .8rem;margin:.4rem 0 .6rem;
+            background:var(--card);font-size:.85rem;white-space:normal}
+.device-ask .why{margin:.25rem 0 .5rem}
+.device-ask .how{color:var(--muted);margin:.2rem 0}
+.device-ask .shell{font-size:.75rem;color:var(--muted);margin:.45rem 0 .1rem}
+.device-ask pre{margin:0;white-space:pre-wrap;word-break:break-all}
+.device-ask .row{display:flex;align-items:center;gap:.6rem;margin-top:.55rem;flex-wrap:wrap}
+.device-ask .wait{color:var(--muted);flex:1}
+.device-ask.settled{border-color:var(--border);padding:.4rem .7rem}
 
 /* Pictures found on the web rather than drawn. Every tile carries the site it came from, because
    that is what tells the reader whether it is the right thing: the manufacturer's own photograph
@@ -1969,6 +1979,10 @@ async function attachToRunningJob(conversationId){
                     event.fraction != null ? event.fraction : undefined);
         }else if(event.type === 'call'){
           setStatus(box, `Using ${event.tool}`);      // an agent's step, while it works
+        }else if(event.type === 'device_connect'){
+          askForFolder(box, event);                    // still waiting for a folder: ask here too
+        }else if(event.type === 'device_done'){
+          folderAnswered(event);
         }
         return;
       }
@@ -3768,6 +3782,8 @@ async function sendAgent(text, again){
       else if(event.type === 'tools') addTrace(trace, 'tools', `${event.tools.length} tools in reach`,
                                                event.tools.join(', '));
       else if(event.type === 'notice') addTrace(trace, 'notice', event.text, '');
+      else if(event.type === 'device_connect') askForFolder(trace, event);
+      else if(event.type === 'device_done') folderAnswered(event);
       else if(event.type === 'call') addTrace(trace, 'call', event.tool, event.arguments, event.round);
       else if(event.type === 'result'){
         finishTrace(trace, event);
@@ -3797,6 +3813,54 @@ async function sendAgent(text, again){
   // The server writes the turn down itself, the way the other long jobs do
   revealFrom(box);
   loadConversations();
+}
+
+/* The agent wants to read a folder on this computer and none is connected to the conversation: the
+   person sees why, and connects one by running a command in it (bin/ai-gateway-folder.py), or says
+   no. A stream joined again replays this request with its answer right behind it, so the card waits
+   a moment before appearing, and does not for a request already answered. */
+const answeredFolders = new Map();       // request -> how it was answered
+
+function askForFolder(where, event){
+  setTimeout(() => {
+    if(answeredFolders.has(event.id) || document.querySelector(`.device-ask[data-id="${event.id}"]`)) return;
+    const script = `${location.origin}/downloads/ai-gateway-folder.py`;
+    const card = document.createElement('div');
+    card.className = 'device-ask';
+    card.dataset.id = event.id;
+    card.innerHTML = '<b>The agent wants to read a folder on your computer</b><p class="why"></p>'
+      + '<p class="how">To allow it, open a terminal in the folder it should read and run this there. '
+      + 'It can only list, search and read files in that folder, and the terminal shows each request.</p>'
+      + '<div class="shell">Windows (PowerShell)</div><pre><code class="copyable"></code></pre>'
+      + '<div class="shell">macOS / Linux</div><pre><code class="copyable"></code></pre>'
+      + '<div class="row"><span class="wait"></span>'
+      + '<button type="button" class="btn btn-sm" data-deny>Don&#39;t allow</button></div>';
+    card.querySelector('.why').textContent = `Why: ${event.reason}`;
+    const [ps, sh] = card.querySelectorAll('code');
+    ps.textContent = `irm ${script} | python - ${event.id}`;
+    sh.textContent = `curl -fsSL ${script} | python3 - ${event.id}`;
+    card.querySelector('.wait').textContent =
+      `Waiting for the folder… The command works once, for ${Math.round((event.seconds || 300) / 60)} minutes.`;
+    card.querySelector('[data-deny]').addEventListener('click', async e => {
+      e.target.disabled = true;
+      try{
+        await api('/chat/device/deny', {method: 'POST', headers: JSON_HEADERS, body: JSON.stringify({id: event.id})});
+      }catch(err){ e.target.disabled = false; showError(errorText(err)); }
+    });
+    where.appendChild(card);
+    addCopyButtons();
+    followAlong();
+  }, 400);
+}
+
+function folderAnswered(event){
+  answeredFolders.set(event.id, event);
+  const card = document.querySelector(`.device-ask[data-id="${event.id}"]`);
+  if(!card) return;
+  card.className = 'device-ask settled';
+  card.textContent = event.folder ? `Reading the folder “${event.folder}” on your computer`
+                   : event.denied ? 'Not allowed to read a folder on your computer'
+                   : 'No folder was connected in time';
 }
 
 /* One line of the trace. A call is added when it starts and completed when it comes back, so a

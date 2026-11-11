@@ -33,7 +33,7 @@ from app.models import (AnswerFeedback, ChatFile, Conversation, ConversationMess
                         SharedConversation, User, utcnow)
 from app.engine.supervisor import supervisor
 from app.routers.openai_v1 import PROXY_PATHS, forward
-from app.tools import (agent, chooser, documents, image_prompt, images, jobs, map_plan,
+from app.tools import (agent, chooser, device_files, documents, image_prompt, images, jobs, map_plan,
                         map_web, maps, markdown, mcp_client, media, memory as memory_tool,
                         photo, places, portrait, router as intent_router, self_tools, subtitles,
                         turn_facts, understand, video_story, voices, web_search, written)
@@ -4496,7 +4496,8 @@ async def run_agent(payload: AgentIn, principal: Principal = Depends(authenticat
             mine = (access.tool_servers_for(principal, mcp_client.available())
                     if mcp_client.is_enabled() else [])
             own = self_tools.is_available_to(principal)
-            tools, where, trouble = await agent.offered(mine, builtin=own)
+            device = device_files.is_enabled()
+            tools, where, trouble = await agent.offered(mine, builtin=own, device=device)
         except Exception as e:
             yield _error(f"The tool servers could not be reached ({e.__class__.__name__}).")
             return
@@ -4517,13 +4518,19 @@ async def run_agent(payload: AgentIn, principal: Principal = Depends(authenticat
         latest_said = next((m.content for m in reversed(payload.messages) if m.role == "user"), "")
         seen = [latest_said or ""]      # what this turn has shown: evidence a note may be changed on
         extra = [agent.about_self() if own else "",
+                 device_files.guide(agent.SEPARATOR) if device else "",
                  memory_tool.tool_guide(memory["listed"](), agent.SEPARATOR) if memory else ""]
         messages = agent.with_system([{"role": m.role, "content": m.content} for m in payload.messages],
                                      "\n\n".join(e for e in extra if e))
         budget = agent.Budget()
         answer, finished = "", None
+        # A folder on the person's computer, once they share one, makes this a turn that reads a
+        # project: more rounds, more time and as much text as the model's window takes (device_files)
+        folder = device_files.Turn()
+        rounds, widened = agent.MAX_ROUNDS, False
 
-        for round_number in range(agent.MAX_ROUNDS):
+        round_number = -1
+        while (round_number := round_number + 1) < rounds:
             stopping = budget.why_stop()
             if stopping:
                 finished = stopping
@@ -4560,6 +4567,22 @@ async def run_agent(payload: AgentIn, principal: Principal = Depends(authenticat
                     # The model invented a tool. Telling it so is more useful than failing.
                     text, bad = (f"There is no tool called {call['name']}. The ones you have are: "
                                  f"{', '.join(sorted(where))}."), True
+                elif known[0] is agent.DEVICE:
+                    # Answered by the folder the person connected from their own computer, if they do
+                    async for kind, value, *rest in device_files.call(
+                            user_id, payload.conversation_id, known[1],
+                            agent.arguments(call.get("arguments")), folder):
+                        if kind == "event":
+                            yield _event(value.pop("type"), **value)
+                        else:
+                            (text, bad), waited = value, rest[0]
+                            budget.began += waited      # the person deciding is not the agent's time
+                    if folder.folder is not None and not widened:
+                        widened = True
+                        rounds = max(rounds, device_files.ROUNDS)
+                        budget.seconds = max(budget.seconds, device_files.SECONDS)
+                        room = min(device_files.CHARACTERS, int((backend.context_length or 65536) * 2))
+                        budget.characters += max(0, room - agent.MAX_TOOL_CHARS)
                 else:
                     server, tool = known
                     try:
@@ -4596,7 +4619,7 @@ async def run_agent(payload: AgentIn, principal: Principal = Depends(authenticat
                 messages.append({"role": "tool", "tool_call_id": call["id"],
                                  "name": call["name"], "content": text})
         else:
-            finished = (f"It reached {agent.MAX_ROUNDS} rounds of tool calls, which is as far as "
+            finished = (f"It reached {rounds} rounds of tool calls, which is as far as "
                         f"this goes. What it had at that point is below.")
 
         if finished:
