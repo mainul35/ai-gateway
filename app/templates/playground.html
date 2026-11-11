@@ -83,6 +83,9 @@ details.tuning label{margin-bottom:.85rem}
       border-radius:7px;font-size:.8rem;color:var(--muted);cursor:pointer;border:1px solid transparent}
 .ptab.active{color:var(--text);background:var(--bg);border-color:var(--border)}
 .ptab-name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+/* A side question still being answered: a small spinner before its name, seen from any other tab */
+.ptab.busy::before{content:"";flex:0 0 auto;width:.6rem;height:.6rem;margin-right:.3rem;border:2px solid var(--border);
+  border-top-color:var(--primary);border-radius:50%;animation:spin .8s linear infinite}
 .ptab[hidden]{display:none}
 .ptab button,.panel-bar>button{background:none;border:none;color:var(--muted);cursor:pointer;line-height:1;border-radius:6px}
 .ptab button{font-size:.95rem;padding:.05rem .25rem}
@@ -2615,7 +2618,7 @@ function selectTab(tab){
 }
 
 function closeTab(tab){
-  tab.controller?.abort();
+  if(tab.kind === 'aside') stopAside(tab); else tab.controller?.abort();
   const siblings = panelTabs.filter(t => t.key === tab.key);
   const at = siblings.indexOf(tab);
   if(at < 0) return;
@@ -2756,7 +2759,7 @@ function asideTab(context, quote, title){
   const area = body.querySelector('textarea');
   area.placeholder = quote ? 'Ask about the selected text, or leave empty to have it explained...' : 'Ask a side question...';
   body.querySelector('[data-ask]').addEventListener('click', () => answerAside(tab));
-  body.querySelector('[data-stop]').addEventListener('click', () => tab.controller?.abort());
+  body.querySelector('[data-stop]').addEventListener('click', () => stopAside(tab));
   area.addEventListener('keydown', e => {
     if(e.key === 'Enter' && !e.shiftKey && !e.isComposing){ e.preventDefault(); answerAside(tab); }
   });
@@ -2799,31 +2802,90 @@ async function answerAside(tab){
   if(first && !tab.quote) renameTab(tab, shortTitle(question));
   area.value = '';
   const answer = showTurn(tab, {question});
-  answer.textContent = 'Thinking...';
+  // The same spinner and words as the conversation's own answers, above this one, and on the tab, so
+  // a side question still working shows from any other tab
+  const status = document.createElement('div');
+  status.className = 'status';
+  status.innerHTML = '<span class="spinner"></span><span class="text"></span>';
+  answer.before(status);
+  const say = words => { status.querySelector('.text').textContent = words; };
+  say('Waiting for the first words');
+  tab.head.classList.add('busy');
   answer.scrollIntoView({block: 'nearest'});
   const ask = tab.body.querySelector('[data-ask]');
   const stop = tab.body.querySelector('[data-stop]');
   ask.disabled = true;
   stop.hidden = false;
   tab.controller = new AbortController();
-  let text = '';
+  tab.jobId = null;
+  let text = '', finished = false, attempt = null, onBack = null;
+  const onChunk = chunk => {
+    if(chunk.gateway){
+      if(chunk.gateway.type === 'status' && !text) say(chunk.gateway.text || 'Working');
+      return;
+    }
+    const choice = chunk.choices?.[0] || {};
+    const delta = choice.delta || {};
+    // A thinking model reasons first, in its own field: say so rather than sit still
+    if((delta.reasoning_content || delta.reasoning) && !text) say('Thinking');
+    if(delta.content){
+      if(!text) say('Writing');
+      text += delta.content;
+      answer.textContent = text;
+    }
+    if(choice.finish_reason) finished = true;
+  };
   try{
-    const response = await fetch('/chat/complete', {
-      method: 'POST', signal: tab.controller.signal, headers: JSON_HEADERS,
+    // As a job in the gateway (detach): the answer goes on when this page loses the connection -
+    // the screen dims, another app comes to the front - and is picked up again below
+    attempt = new AbortController();
+    let response = await fetch('/chat/complete', {
+      method: 'POST', signal: AbortSignal.any([tab.controller.signal, attempt.signal]), headers: JSON_HEADERS,
       body: JSON.stringify({model: currentModel(), messages, conversation_id: null, web_search: false,
                             max_tokens: parseInt(document.getElementById('maxTokens').value, 10) || 8192,
-                            vision: tools.vision && caps.vision})});
+                            vision: tools.vision && caps.vision, detach: true})});
     if(!response.ok){
       const err = await response.json().catch(() => ({}));
       throw new Error((typeof err.detail === 'string' && err.detail) || err.error?.message || `HTTP ${response.status}`);
     }
-    await readEvents(response, chunk => {
-      if(chunk.gateway) return;
-      const words = chunk.choices?.[0]?.delta?.content;
-      if(!words) return;
-      text += words;
-      answer.textContent = text;
-    });
+    tab.jobId = response.headers.get('X-Job-Id');
+    // Back on the page after it was hidden: a phone may have frozen the connection without ending
+    // it, so a fresh one is taken rather than waiting on one that will never move again
+    onBack = () => { if(document.visibilityState === 'visible' && !finished) attempt?.abort(); };
+    document.addEventListener('visibilitychange', onBack);
+    for(let tries = 0; ; tries++){
+      try{
+        await readEvents(response, onChunk);
+        if(finished || !tab.jobId) break;
+        throw new Error('the connection ended before the answer did');
+      }catch(e){
+        if(tab.controller.signal.aborted || !tab.jobId || tries >= 30) throw e;
+      }
+      // Lost: wait until the page is in front and online, then follow the job from its start
+      say(text ? 'Connection lost; picking the answer up again' : 'Connection lost; reconnecting');
+      await new Promise(resolve => {
+        const ready = () => document.visibilityState === 'visible' && navigator.onLine;
+        if(ready()) return setTimeout(resolve, 1500);
+        const check = () => { if(ready()){ document.removeEventListener('visibilitychange', check);
+                                           window.removeEventListener('online', check); resolve(); } };
+        document.addEventListener('visibilitychange', check);
+        window.addEventListener('online', check);
+      });
+      if(tab.controller.signal.aborted) throw new DOMException('stopped', 'AbortError');
+      attempt = new AbortController();
+      try{
+        response = await fetch(`/chat/jobs/${tab.jobId}/stream`,
+                               {signal: AbortSignal.any([tab.controller.signal, attempt.signal])});
+      }catch(e){
+        if(tab.controller.signal.aborted) throw e;
+        continue;                      // still offline: wait and try again
+      }
+      if(response.status === 404) throw new Error('the answer was finished and forgotten before the page came back');
+      if(!response.ok) continue;
+      text = '';                       // the job is replayed from its first word
+      answer.textContent = '';
+      say('Catching up');
+    }
     const html = await renderedHtml(text);
     if(html){
       answer.classList.add('md');
@@ -2836,11 +2898,21 @@ async function answerAside(tab){
                                                  : 'That did not go through. ' + errorText(e);
     if(e.name === 'AbortError' && text) tab.turns.push({question, asked, answer: text});
   }finally{
+    if(onBack) document.removeEventListener('visibilitychange', onBack);
+    status.remove();
+    tab.head.classList.remove('busy');
     tab.controller = null;
+    tab.jobId = null;
     ask.disabled = false;
     stop.hidden = true;
     keepSideQuestions(tab.key);
   }
+}
+
+// Stop, or closing the tab: the answer is a job in the gateway, so leaving the stream is not enough
+function stopAside(tab){
+  if(tab.jobId) fetch(`/chat/jobs/${tab.jobId}/cancel`, {method: 'POST'}).catch(() => {});
+  tab.controller?.abort();
 }
 
 /* A document you attached: a PDF as the browser draws it, a picture as itself, and a Word file, a
