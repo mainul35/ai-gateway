@@ -2424,6 +2424,9 @@ const panelListEl = document.getElementById('panelList');
 const panelListBtn = panelEl.querySelector('[data-panel="list"]');
 const panelTabs = [];
 let activeTab = null, tabCount = 0;
+const sideState = {};       // conversation -> 'loading', 'ready' (kept here) or 'none' (not ours to keep)
+const sideSaves = {};       // conversation -> the save waiting to go, so a burst of changes is one PUT
+let restoringSide = false;
 // Every tab belongs to the conversation it was opened in, and shows only while that one is open:
 // a PDF written in one chat used to stay beside every other. A new conversation's tabs are "new"
 // until it is saved, and then its own.
@@ -2497,8 +2500,9 @@ new ResizeObserver(tabsOverflow).observe(panelTabsEl);
 function panelFollowsConversation(){
   const key = conversationKey();
   // A conversation just saved takes the tabs opened while it was still new
+  let moved = false;
   if(panelKey === 'new' && key !== 'new'){
-    for(const t of panelTabs) if(t.key === 'new') t.key = key;
+    for(const t of panelTabs) if(t.key === 'new'){ t.key = key; moved = true; }
     if(lastActive.new){ lastActive[key] = lastActive.new; delete lastActive.new; }
   }
   panelKey = key;
@@ -2510,6 +2514,61 @@ function panelFollowsConversation(){
   activeTab = null;
   if(here.length) selectTab(here.includes(lastActive[key]) ? lastActive[key] : here[here.length - 1]);
   refreshPanel();
+  restoreSideQuestions(key);
+  // Tabs opened before the conversation existed are kept with it - once what it already had is
+  // loaded (keepSideQuestions waits for that), so they are added to it rather than written over it
+  if(moved) keepSideQuestions(key);
+}
+
+/* Side questions are kept with their conversation (/chat/conversations/{id}/side-questions), each with
+   the conversation as far as it was asked from and its turns, and come back the first time that
+   conversation is on screen - after a reload, or on another computer. Only the owner's: the server
+   refuses anyone else's, and then nothing is kept. Saving waits until what was kept has been loaded,
+   or it would write the list over with only the tabs opened since. (Its state is declared with
+   panelTabs, above: panelFollowsConversation may run before this point is reached.) */
+
+function keepSideQuestions(key){
+  if(restoringSide || !key || key === 'new') return;
+  if(sideState[key] === 'loading'){ sideState[key] = 'loading+save'; return; }
+  if(sideState[key] !== 'ready') return;
+  clearTimeout(sideSaves[key]);
+  sideSaves[key] = setTimeout(async () => {
+    delete sideSaves[key];
+    const asides = panelTabs.filter(t => t.key === key && t.kind === 'aside');
+    const front = asides.indexOf(lastActive[key]);
+    try{
+      await api(`/chat/conversations/${key}/side-questions`, {method: 'PUT', headers: JSON_HEADERS,
+        body: JSON.stringify({active: front >= 0 ? front : null,
+                              tabs: asides.map(t => ({title: t.title, quote: t.quote || '',
+                                                      context: t.context || [], turns: t.turns || []}))})});
+    }catch(e){ showError('The side questions could not be kept: ' + errorText(e)); }
+  }, 600);
+}
+
+async function restoreSideQuestions(key){
+  if(!key || key === 'new' || sideState[key]) return;
+  sideState[key] = 'loading';
+  let kept = null;
+  try{ kept = await api(`/chat/conversations/${key}/side-questions`); }
+  catch(e){ sideState[key] = 'none'; return; }       // someone else's conversation, shared with us
+  // Another conversation opened meanwhile: these are loaded when this one is on screen again
+  if(conversationKey() !== key){ delete sideState[key]; return; }
+  const wanted = sideState[key] === 'loading+save';
+  sideState[key] = 'ready';
+  const made = [];
+  restoringSide = true;
+  try{
+    for(const saved of kept?.tabs || []){
+      const tab = asideTab(saved.context || [], saved.quote || '', saved.title || 'Side question');
+      for(const turn of saved.turns || []) showTurn(tab, turn);
+      tab.turns = saved.turns || [];
+      if(tab.turns.length) tab.body.querySelector('textarea').placeholder = 'Ask a follow-up...';
+      made.push(tab);
+    }
+  }finally{ restoringSide = false; }
+  const front = made[kept?.active] || made.at(-1);
+  if(front) selectTab(front);
+  if(wanted) keepSideQuestions(key);
 }
 
 function addTab(tab){
@@ -2538,6 +2597,7 @@ function renameTab(tab, title){
   tab.head.querySelector('.ptab-name').textContent = title;
   tab.head.title = title;
   tabsOverflow();
+  if(tab.kind === 'aside') keepSideQuestions(tab.key);
 }
 
 function selectTab(tab){
@@ -2566,6 +2626,7 @@ function closeTab(tab){
     if(next) selectTab(next);
   }
   refreshPanel();
+  if(tab.kind === 'aside') keepSideQuestions(tab.key);
 }
 
 panelEl.querySelector('.panel-bar').addEventListener('click', e => {
@@ -2696,7 +2757,9 @@ function asideTab(context, quote, title){
   area.addEventListener('keydown', e => {
     if(e.key === 'Enter' && !e.shiftKey && !e.isComposing){ e.preventDefault(); answerAside(tab); }
   });
-  return addTab(tab);
+  addTab(tab);
+  keepSideQuestions(tab.key);
+  return tab;
 }
 
 function showTurn(tab, turn){
@@ -2773,6 +2836,7 @@ async function answerAside(tab){
     tab.controller = null;
     ask.disabled = false;
     stop.hidden = true;
+    keepSideQuestions(tab.key);
   }
 }
 

@@ -260,6 +260,68 @@ async def _conversation_answer(conversation_id, principal, session):
                           "feedback": judged.get(m.id)} for m in conversation.messages]}
 
 
+# --- side questions -----------------------------------------------------------------------------
+# Asked beside a conversation without adding to it (the playground's side panel). Each one carries the
+# conversation as far as the message it was asked about, because that is what it is answered from and
+# messages do not all have ids yet when it is asked. Kept on the conversation, as one JSON list, and
+# only its owner's: someone reading a shared conversation asks their own, which are not kept.
+
+SIDE_TABS = 30
+SIDE_BYTES = 4_000_000
+
+
+class SideTurn(BaseModel):
+    question: str = Field(default="", max_length=20_000)
+    asked: str = Field(default="", max_length=60_000)
+    answer: str = Field(default="", max_length=200_000)
+
+
+class SideQuestion(BaseModel):
+    title: str = Field(default="Side question", max_length=200)
+    quote: str = Field(default="", max_length=20_000)
+    context: list[dict] = Field(default_factory=list, max_length=2000)
+    turns: list[SideTurn] = Field(default_factory=list, max_length=500)
+
+
+class SideQuestionsIn(BaseModel):
+    tabs: list[SideQuestion] = Field(default_factory=list, max_length=SIDE_TABS)
+    active: int | None = None       # which tab was in front
+
+
+@router.get("/conversations/{conversation_id}/side-questions")
+async def get_side_questions(conversation_id: str, principal: Principal = Depends(authenticate),
+                             session: AsyncSession = Depends(get_session)):
+    conversation = await _owned(session, conversation_id, _require_user(principal))
+    try:
+        kept = json.loads(conversation.side_questions) if conversation.side_questions else {}
+    except ValueError:
+        kept = {}
+    return {"tabs": kept.get("tabs") or [], "active": kept.get("active")}
+
+
+@router.put("/conversations/{conversation_id}/side-questions")
+async def put_side_questions(conversation_id: str, payload: SideQuestionsIn,
+                             principal: Principal = Depends(authenticate),
+                             session: AsyncSession = Depends(get_session)):
+    conversation = await _owned(session, conversation_id, _require_user(principal))
+    tabs = []
+    for tab in payload.tabs:
+        # Only what a turn of the conversation is: a role, its words and its pictures' addresses
+        context = [{"role": m.get("role") if m.get("role") in ("user", "assistant") else "user",
+                    "content": str(m.get("content") or ""),
+                    **({"images": [str(i) for i in m.get("images") or []][:20]} if m.get("images") else {})}
+                   for m in tab.context if isinstance(m, dict)]
+        tabs.append({"title": tab.title, "quote": tab.quote, "context": context,
+                     "turns": [t.model_dump() for t in tab.turns]})
+    text = json.dumps({"tabs": tabs, "active": payload.active}) if tabs else None
+    if text and len(text.encode("utf-8")) > SIDE_BYTES:
+        raise HTTPException(status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                            "The side questions are too long to keep; close some of them.")
+    conversation.side_questions = text        # updated_at left alone: the conversation itself did not change
+    await session.commit()
+    return {"kept": len(tabs)}
+
+
 @router.get("/conversations/{conversation_id}/messages/{message_id}/reasoning")
 async def message_reasoning(conversation_id: str, message_id: int, principal: Principal = Depends(authenticate),
                             session: AsyncSession = Depends(get_session)):

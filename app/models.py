@@ -125,6 +125,9 @@ class Conversation(Base):
     title: Mapped[str] = mapped_column(String(200), default="New conversation")
     model: Mapped[str | None] = mapped_column(String(256), nullable=True)
     system_prompt: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # JSON: the side questions open beside it - each with what it was asked about and its turns - so
+    # they come back when the page is reloaded or the conversation opened elsewhere (owner's only)
+    side_questions: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
 
