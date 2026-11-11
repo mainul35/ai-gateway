@@ -2537,10 +2537,13 @@ function keepSideQuestions(key){
     const asides = panelTabs.filter(t => t.key === key && t.kind === 'aside');
     const front = asides.indexOf(lastActive[key]);
     try{
-      await api(`/chat/conversations/${key}/side-questions`, {method: 'PUT', headers: JSON_HEADERS,
+      const kept = await api(`/chat/conversations/${key}/side-questions`, {method: 'PUT', headers: JSON_HEADERS,
         body: JSON.stringify({active: front >= 0 ? front : null,
                               tabs: asides.map(t => ({title: t.title, quote: t.quote || '',
                                                       context: t.context || [], turns: t.turns || []}))})});
+      // Too many or too large to keep them all: the oldest are not kept, and stay only until a reload
+      if(kept?.left_out) showError(`The ${kept.left_out} oldest side question${kept.left_out === 1 ? ' is' : 's are'} `
+        + 'too many to keep and will be gone after a reload; close the ones you no longer need.');
     }catch(e){ showError('The side questions could not be kept: ' + errorText(e)); }
   }, 600);
 }

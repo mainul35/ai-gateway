@@ -266,25 +266,29 @@ async def _conversation_answer(conversation_id, principal, session):
 # messages do not all have ids yet when it is asked. Kept on the conversation, as one JSON list, and
 # only its owner's: someone reading a shared conversation asks their own, which are not kept.
 
-SIDE_TABS = 30
-SIDE_BYTES = 4_000_000
+# What is kept: the newest tabs, as many as fit both limits. Nothing is refused - a save that fails
+# loses the answer just given with it. Each tab carries its own copy of the conversation, so a long
+# conversation asked about from many tabs is large; and a question can be a whole pasted document,
+# which is why no field has a limit of its own (one over it once refused the save of every tab).
+SIDE_TABS = 60
+SIDE_BYTES = 24_000_000
 
 
 class SideTurn(BaseModel):
-    question: str = Field(default="", max_length=20_000)
-    asked: str = Field(default="", max_length=60_000)
-    answer: str = Field(default="", max_length=200_000)
+    question: str = ""
+    asked: str = ""
+    answer: str = ""
 
 
 class SideQuestion(BaseModel):
-    title: str = Field(default="Side question", max_length=200)
-    quote: str = Field(default="", max_length=20_000)
-    context: list[dict] = Field(default_factory=list, max_length=2000)
-    turns: list[SideTurn] = Field(default_factory=list, max_length=500)
+    title: str = "Side question"
+    quote: str = ""
+    context: list[dict] = Field(default_factory=list)
+    turns: list[SideTurn] = Field(default_factory=list)
 
 
 class SideQuestionsIn(BaseModel):
-    tabs: list[SideQuestion] = Field(default_factory=list, max_length=SIDE_TABS)
+    tabs: list[SideQuestion] = Field(default_factory=list)
     active: int | None = None       # which tab was in front
 
 
@@ -313,13 +317,23 @@ async def put_side_questions(conversation_id: str, payload: SideQuestionsIn,
                    for m in tab.context if isinstance(m, dict)]
         tabs.append({"title": tab.title, "quote": tab.quote, "context": context,
                      "turns": [t.model_dump() for t in tab.turns]})
-    text = json.dumps({"tabs": tabs, "active": payload.active}) if tabs else None
-    if text and len(text.encode("utf-8")) > SIDE_BYTES:
+    # The oldest go first when there are too many or they are too large; the one in front stays in front
+    active = payload.active if payload.active is not None and 0 <= payload.active < len(tabs) else None
+    sizes = [len(json.dumps(tab).encode("utf-8")) for tab in tabs]
+    first = max(0, len(tabs) - SIDE_TABS)
+    while first < len(tabs) - 1 and sum(sizes[first:]) > SIDE_BYTES:
+        first += 1
+    left_out = first
+    tabs = tabs[first:]
+    if active is not None:
+        active = active - first if active >= first else None
+    if tabs and sizes[-1] > SIDE_BYTES:      # one tab too large on its own: kept is what was there
         raise HTTPException(status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
-                            "The side questions are too long to keep; close some of them.")
-    conversation.side_questions = text        # updated_at left alone: the conversation itself did not change
+                            "This side question is too long to keep.")
+    conversation.side_questions = json.dumps({"tabs": tabs, "active": active}) if tabs else None
+    # updated_at left alone: the conversation itself did not change
     await session.commit()
-    return {"kept": len(tabs)}
+    return {"kept": len(tabs), "left_out": left_out}
 
 
 @router.get("/conversations/{conversation_id}/messages/{message_id}/reasoning")
