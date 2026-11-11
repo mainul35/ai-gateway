@@ -26,9 +26,10 @@ from app.tools import jobs
 
 # A page following a download holds its progress stream open for hours: the download is a job, and
 # counts as one; the stream watching it is nobody working, and must not look like a request in flight
-# The Claude Code sessions agent's long poll and its reports are the same: a computer waiting, not working
+# The Claude Code sessions agent's long poll and its reports are the same: a computer waiting, not working,
+# and so is a connected project folder's (device_files)
 _IGNORED = re.compile(r"^/(health|internal/activity|coding/remote/\d+/next|admin/models/install/\d+/watch"
-                      r"|chat/sessions/agent/next|chat/sessions/register)$")
+                      r"|chat/sessions/agent/next|chat/sessions/register|chat/device/next)$")
 # GETs the web pages repeat on a timer (wake/wake_front.py has the same list). From a browser they
 # are a tab refreshing itself, not someone working, so an open dashboard does not keep the machine up.
 POLLED = re.compile(r"^/(admin/system|admin/usage|admin/usage/hourly|admin/metrics|v1/models|coding/projects|coding/tasks/\d+/events"

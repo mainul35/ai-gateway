@@ -133,7 +133,8 @@ async def logout(session: AsyncSession = Depends(get_session),
 
 
 # Windows, then macOS and Linux: ai-gateway is the launcher for every app, claude-gateway the older one
-LAUNCHERS = ("ai-gateway.ps1", "ai-gateway.sh", "claude-gateway.ps1", "claude-gateway.sh")
+LAUNCHERS = ("ai-gateway.ps1", "ai-gateway.sh", "claude-gateway.ps1", "claude-gateway.sh",
+             "ai-gateway-folder.py")      # the last: what the agent's connect-a-folder command runs
 DEFAULT_GATEWAY = "https://ai-gateway.mainul35.dev"
 
 
