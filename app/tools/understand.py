@@ -249,6 +249,27 @@ NOW_WORDS = re.compile(
     r"currently|current (price|rate|version|score|status)s?|out yet|released yet|news|forecast|"
     r"weather|exchange rate|stock price|live score)\b", re.I)
 
+# Words that only ever mean the person's own code - a project on their computer, which only the agent
+# can read (device_files) - as NOW_WORDS mean the web. Kept out of PROMPT: adding to it moved the 1.7B
+# model's other answers (see DOCUMENT_WANT). "my files" or "the project" alone mean too many other
+# things, so the project word needs "my"/"our"/"this", or a verb of reading in front of it.
+_PROJECT = r"(?:project|repo|repository|codebase|code\s?base|source(?:\s+code)?)"
+OWN_PROJECT_WORDS = re.compile(
+    rf"\b(?:(?:my|our)\s+(?:own\s+)?(?:{_PROJECT}|code)"
+    rf"|this\s+{_PROJECT}(?!\s+manag)"
+    rf"|(?:read|explore|analy[sz]e|scan|go\s+through|look\s+(?:at|into)|understand|review|document)"
+    rf"\s+(?:the|this|my|our)\s+(?:whole\s+|entire\s+)?(?:{_PROJECT}|code)"
+    rf"|on\s+my\s+(?:computer|pc|laptop|machine|desktop)"
+    rf"|(?:my\s+)?local\s+(?:folder|project|repo|copy|files?))\b", re.I)
+
+
+def needs_own_project(message):
+    """Whether the words ask about the person's own project, which has to be read rather than recalled.
+    Not when the code is in the message itself: what is pasted is there to be read already."""
+    text = message or ""
+    return "```" not in text and bool(OWN_PROJECT_WORDS.search(text))
+
+
 PHOTO_TOOLS = {"improve_quality": CLEAN, "blur_background": BLUR, "plain_background": BACKDROP}
 CATEGORY = {"code": "code", "reasoning": "reasoning", "long_read": "long", "expertise": "general",
             "small_talk": "light"}

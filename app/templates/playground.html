@@ -3044,7 +3044,7 @@ askSelection.addEventListener('click', () => {
 const ACTION_LABELS = {chat: 'answered directly', search: 'searched the web', document: 'wrote a document',
                        image: 'created an image', edit: 'edited the image',
                        map: 'looked it up on the map', photos: 'found real pictures of it',
-                       subtitles: 'wrote down what the video says'};
+                       subtitles: 'wrote down what the video says', agent: 'used the agent'};
 
 const CATEGORY_LABELS = {code: 'a coding question', vision: 'a question about the picture',
                          reasoning: 'something to work out', long: 'a long read',
@@ -3058,7 +3058,8 @@ function noteDecision(box, decision){
     const note = document.createElement('span');
     note.className = 'muted';
     note.style.fontWeight = '400';
-    note.textContent = ` · ${ACTION_LABELS[decision.action] || decision.action}`;
+    note.textContent = ` · ${ACTION_LABELS[decision.action] || decision.action}`
+                     + (decision.agent_why ? `: ${decision.agent_why}` : '');
     note.title = (decision.understood ? `Understood as: ${decision.understood}. ` : '') +
                  `Chosen by ${decision.decided_by || 'the gateway'} from the tools you switched on.` +
                  ' Leave only one tool on to force it.';
@@ -3739,15 +3740,16 @@ function offerLocation(box, text, decision){
 /* One agent turn. What it does is shown as it does it - which tool, with what arguments, what
    came back - because an agent that works silently for a minute and then speaks is one you can
    neither trust nor debug. The same record is saved, so the turn reads the same way tomorrow. */
-async function sendAgent(text, again){
+// `decision` is Auto's, when it sent the turn here because the answer needs the person's own project
+async function sendAgent(text, again, decision = null){
   showError('');
   try{
-    await ensureConversation(text, currentModel());
+    await ensureConversation(text, decision?.model || currentModel());
   }catch(e){
     showError('Could not save the conversation: ' + errorText(e));
     return;
   }
-  const model = currentModel();
+  const model = decision?.model || currentModel();
   if(!models[model] || !(models[model].capabilities || []).includes('tools')){
     showError(`${model} cannot call tools. Pick a model marked "calls tools" to use the agent.`);
     return;
@@ -3756,6 +3758,7 @@ async function sendAgent(text, again){
   const asked = await askedNow(text, [], [], null, again);
 
   const box = answerBox(again ? again.messageId : asked?._messageId, model);
+  noteDecision(box, decision);
   const body = box.querySelector('.body');
   body.className = 'body agent';
   const trace = document.createElement('div');
@@ -4525,6 +4528,7 @@ async function decideAction(text, hasImages){
                                                                name: (p.name || '').slice(0, 200)})),
       maps: tools.maps && caps.maps, photo_blur: blurAllowed(),
       choose_model: choosing(), current_model: chosenModel,
+      agent: !!caps.agent, conversation_id: currentId || null,
       history: history.slice(-4).map(h => ({role: h.role, content: h.content}))})});
     if(decision.model) chosenModel = decision.model;
     return decision;
@@ -4708,10 +4712,17 @@ async function routeTurn(text, asking){
   const waiting = formatQuestion;
   dropFormatQuestion();
   if(waiting && usable && !(tools.agent && caps.agent)) return sendDocument(text, usable, asking, waiting.request);
-  const decision = await decideAction(text, turnPictures().length > 0);
+  let decision = await decideAction(text, turnPictures().length > 0);
   if(decision.action === 'stopped') return;
   // The agent is a choice, not a guess: switched on, it takes the turn
   if(tools.agent && caps.agent) return sendAgent(text, asking);
+  // Auto's choice when the answer needs the person's own project: only the agent can read it
+  // (unless the model picked by hand cannot call tools: then it answers as it would have)
+  if(decision.action === 'agent'){
+    const model = decision.model || currentModel();
+    if((models[model]?.capabilities || []).includes('tools')) return sendAgent(text, asking, decision);
+    decision = {...decision, action: 'chat'};
+  }
   // A document, as the router read it: which kind is asked when the words do not say
   if(decision.action === 'document') return usable ? sendChat(text, decision, asking, usable) : askDocumentFormat(text, asking);
   if(decision.action === 'map') return sendMap(text, decision, fix, asking);

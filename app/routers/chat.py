@@ -2070,9 +2070,11 @@ CHOOSER_DAYS = 30      # how far back the chooser looks at a model's record
 NEAR_LIMIT = 30_000    # metres: beyond this, a result is not an answer to "near me"
 
 
-async def _choose_model(principal, session, category, has_images, prefer=None):
+async def _choose_model(principal, session, category, has_images, prefer=None, needs_tools=False):
     """The best model this user may use for this kind of work, with the reason it was picked."""
     available = await backends.available_models()
+    if needs_tools:
+        available = {name: b for name, b in available.items() if "tools" in (b.capabilities or ())}
     health = await usage_log.by_model(session, utcnow() - timedelta(days=CHOOSER_DAYS))
     judged = await feedback.by_model(session, utcnow() - timedelta(days=CHOOSER_DAYS),
                                      principal.user.id if principal.user else None)
@@ -2438,6 +2440,38 @@ class RouteIn(BaseModel):
     # because swapping model reloads weights and throws away a warm cache
     current_model: str = ""
     choose_model: bool = False
+    # Whether the page may hand the turn to the agent, and the conversation it is in: a question about
+    # the person's own project goes to the agent, which can read it from their computer (_to_agent)
+    agent: bool = False
+    conversation_id: int | None = None
+
+
+def _to_agent(principal, payload, decision, category):
+    """The decision, sent to the agent instead when the answer needs the person's own project.
+
+    Only a plain answer or a document, with nothing attached (what is attached is read already), and
+    only for someone the agent is there for. Two things say a project is needed: the words
+    (understand.needs_own_project), or a folder already connected to this conversation with code,
+    reasoning or a long read asked for - the follow-ups to "explain my project" rarely name it again.
+    """
+    if not payload.agent or decision.get("action") not in (intent_router.CHAT, intent_router.DOCUMENT):
+        return decision
+    if payload.has_images or payload.attachments or principal.user is None:
+        return decision
+    if not (device_files.is_enabled() and agent.is_available_to(principal)
+            and access.can_use_feature(principal, "agent")):
+        return decision
+    if understand.needs_own_project(payload.message):
+        why = "it needs your project's files"
+    elif (payload.conversation_id is not None and category in ("code", "reasoning", "long")
+          and device_files.folder_for(principal.user.id, payload.conversation_id)):
+        why = "a folder on your computer is connected to this conversation"
+    else:
+        return decision
+    return {**decision, "action": AGENT_ACTION, "agent_why": why}
+
+
+AGENT_ACTION = "agent"
 
 
 @router.post("/route")
@@ -2495,9 +2529,10 @@ async def route(payload: RouteIn, principal: Principal = Depends(authenticate),
             decision = {"action": action,
                         "decided_by": "the only tool switched on" if only else settings.router_model(),
                         "understood": reading["request"]}
+            work = understand.category(reading, payload.has_images)
+            decision = _to_agent(principal, payload, decision, work)
             if payload.choose_model:
-                return await _with_model(principal, session, decision,
-                                         understand.category(reading, payload.has_images),
+                return await _with_model(principal, session, decision, work,
                                          settings.router_model(), payload)
             return decision
 
@@ -2543,7 +2578,7 @@ async def route(payload: RouteIn, principal: Principal = Depends(authenticate),
         decide_action(), decide_category(), look_or_change())
     action, decided_by = intent_router.settle_picture(action, decided_by, wanted, payload.message,
                                                       allowed)
-    decision = {"action": action, "decided_by": decided_by}
+    decision = _to_agent(principal, payload, {"action": action, "decided_by": decided_by}, category)
     if category is None:
         return decision
     return await _with_model(principal, session, decision, category, category_by, payload)
@@ -2555,9 +2590,11 @@ async def _with_model(principal, session, decision, category, category_by, paylo
     decision.update(category=category, category_by=category_by)
     # Only a text answer is the model's to choose: a picture is drawn by the image model, and a
     # photograph is worked on by tools that have nothing to do with the drop-down
-    if action in (intent_router.CHAT, intent_router.SEARCH, intent_router.DOCUMENT):
+    if action in (intent_router.CHAT, intent_router.SEARCH, intent_router.DOCUMENT, AGENT_ACTION):
+        # The agent calls tools, so only a model that can is in the running for it
         picked = await _choose_model(principal, session, category, payload.has_images,
-                                     prefer=payload.current_model or None)
+                                     prefer=payload.current_model or None,
+                                     needs_tools=action == AGENT_ACTION)
         if picked:
             decision.update(model=picked["model"], model_why=picked["why"],
                             considered=picked["considered"], passed_over=picked.get("passed_over"))
