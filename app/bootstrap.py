@@ -46,6 +46,8 @@ _ADDED_COLUMNS = (
     ("ccd_sessions", "seen_at", "TIMESTAMPTZ"),
     ("ccd_sessions", "transcript", "TEXT"),
     ("ccd_sessions", "client", "VARCHAR(32)"),
+    # The side questions open beside a conversation, kept so a reload does not lose them
+    ("conversations", "side_questions", "TEXT"),
 )
 
 
