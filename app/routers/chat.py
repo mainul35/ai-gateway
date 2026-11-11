@@ -1218,6 +1218,10 @@ class CompleteIn(BaseModel):
     # A document to write rather than an answer: the model writes it, and it is kept as this kind of
     # file beside the answer (app/tools/written.py)
     document: str | None = Field(default=None, pattern="^(markdown|pdf)$")
+    # Run as a job even with no conversation to save to: a side question. The answer then goes on
+    # in the gateway when the browser lets the connection go - the screen dims, another app is in
+    # front - and the page picks it up again from /chat/jobs/<id>/stream when it is back.
+    detach: bool = False
 
 
 async def _ask_helper(principal, body):
@@ -1442,6 +1446,13 @@ async def complete(payload: CompleteIn, principal: Principal = Depends(authentic
             await _refresh_memory(principal, user.id, payload.conversation_id)
 
     if payload.conversation_id is None:
+        if payload.detach:
+            # A side question: nothing is saved, but the answer outlives the connection
+            asked = (latest_user.content if latest_user else "") or "Side question"
+            job = jobs.start(user.id, None, "side", asked[:120], stream())
+            return StreamingResponse(jobs.follow(job), media_type="text/event-stream",
+                                     headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no",
+                                              "X-Job-Id": str(job.id)})
         # Nothing to come back to, so there is nothing to keep
         return StreamingResponse(stream(), media_type="text/event-stream",
                                  headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
