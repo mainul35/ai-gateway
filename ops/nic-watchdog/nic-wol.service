@@ -1,0 +1,12 @@
+[Unit]
+Description=Wake-on-LAN on for homelabai's network card, by its address (replaces wol-enp3s0)
+After=network-pre.target
+Wants=network-pre.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/nic-watchdog wol
+
+[Install]
+WantedBy=multi-user.target

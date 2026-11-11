@@ -1,0 +1,19 @@
+# /etc/netplan/01-lan.yaml - homelabai's wired network, matched by the card's hardware address.
+# Replaces 00-installer-config.yaml, which named the card enp3s0: after the card dropped off the bus
+# on 2026-11-01 it came back as enp4s0, that file matched nothing, and the machine ran on dracut's
+# DHCP fallback - with Wake-on-LAN no longer set by netplan.
+network:
+  version: 2
+  renderer: networkd
+  ethernets:
+    lan:
+      match:
+        macaddress: "a8:a1:59:9d:f4:ae"
+      wakeonlan: true
+      dhcp4: false
+      addresses: [192.168.50.146/24]
+      routes:
+        - to: default
+          via: 192.168.50.1
+      nameservers:
+        addresses: [192.168.50.1, 1.1.1.1]
