@@ -1,0 +1,6 @@
+[Unit]
+Description=Bring homelabai's network card back if it has died
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/nic-watchdog watch

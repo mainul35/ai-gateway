@@ -1,0 +1,7 @@
+#!/bin/sh
+# /usr/lib/systemd/system-sleep/nic-watchdog - after every wake, check the network card came back.
+# Started apart from the wake itself (systemd-run), so waiting for the link does not hold it up.
+case "$1" in
+    post) systemd-run --no-block --collect --unit="nic-watchdog-resume-$(date +%s)" /usr/local/sbin/nic-watchdog resume ;;
+esac
+exit 0
