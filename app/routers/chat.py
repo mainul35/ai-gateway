@@ -29,8 +29,8 @@ from sqlalchemy.orm import selectinload
 from app import access, backends, feedback, istory, limits, net, settings, usage as usage_log
 from app.auth import Principal, authenticate
 from app.db import get_session, session_factory
-from app.models import (AnswerFeedback, ChatFile, Conversation, ConversationMessage, MemoryEntry, SharedAccessRequest,
-                        SharedConversation, User, utcnow)
+from app.models import (AnswerFeedback, ChatFile, Conversation, ConversationMessage, MemoryEntry, MemoryProposal,
+                        SharedAccessRequest, SharedConversation, User, utcnow)
 from app.engine.supervisor import supervisor
 from app.routers.openai_v1 import PROXY_PATHS, forward
 from app.tools import (agent, chooser, device_files, documents, image_prompt, images, jobs, map_plan,
@@ -1293,7 +1293,13 @@ async def complete(payload: CompleteIn, principal: Principal = Depends(authentic
     history = list(payload.messages)
     remembered = None
     if memory_tool.is_enabled():
-        notes = [n.content for n in await _user_notes(session, user)]
+        listed = await _user_notes(session, user)
+        # A note with a change put to the user and not yet answered: what they said since is shown
+        # with it, so the old note is not taken as the last word in the meantime
+        asked = {p.memory_id: p for p in (await session.execute(select(MemoryProposal).where(
+            MemoryProposal.user_id == user.id, MemoryProposal.status == "pending"))).scalars()}
+        notes = [n.content + (f' (since then the user said: "{asked[n.id].said[:300]}" - not yet confirmed)'
+                              if n.id in asked and asked[n.id].said_by == "user" else "") for n in listed]
         summary = await _conversation_memory(session, user.id, payload.conversation_id)
         remembered = memory_tool.context_block(notes, summary.content if summary else None)
         if summary and summary.covered_count:
@@ -1493,8 +1499,41 @@ async def watch_job(job_id: int, principal: Principal = Depends(authenticate)):
 
 def _memory_json(entry):
     return {"id": entry.id, "scope": entry.scope, "conversation_id": entry.conversation_id,
-            "content": entry.content, "source": entry.source,
+            "content": entry.content, "source": entry.source, "evidence": entry.evidence,
             "updated_at": entry.updated_at.isoformat()}
+
+
+def _proposal_json(p):
+    return {"id": p.id, "memory_id": p.memory_id, "conversation_id": p.conversation_id, "action": p.action,
+            "old_text": p.old_text, "old_evidence": p.old_evidence,
+            "old_saved_at": p.old_saved_at.isoformat() if p.old_saved_at else None,
+            "new_text": p.new_text, "said": p.said, "said_by": p.said_by, "status": p.status,
+            "created_at": p.created_at.isoformat()}
+
+
+async def _propose(db, user_id, note, action, new_text, said, said_by="user", conversation_id=None):
+    """Puts a change to a note to the user instead of making it. A newer proposal for the same note
+    takes the place of one still unanswered; the same proposal twice is made once."""
+    waiting = list((await db.execute(select(MemoryProposal).where(
+        MemoryProposal.memory_id == note.id, MemoryProposal.status == "pending"))).scalars())
+    for old in waiting:
+        if old.action == action and (old.new_text or "") == (new_text or ""):
+            return old
+        old.status, old.resolved_at = "replaced", utcnow()
+    proposal = MemoryProposal(user_id=user_id, memory_id=note.id, conversation_id=conversation_id,
+                              action=action, old_text=note.content, old_evidence=note.evidence,
+                              old_saved_at=note.updated_at, new_text=new_text, said=said[:2000],
+                              said_by=said_by)
+    db.add(proposal)
+    return proposal
+
+
+async def _pending_keys(db, by_key):
+    """The keys of notes with a proposal the user has not answered."""
+    ids = set((await db.execute(select(MemoryProposal.memory_id).where(
+        MemoryProposal.memory_id.in_([n.id for n in by_key.values()] or [0]),
+        MemoryProposal.status == "pending"))).scalars())
+    return {key for key, note in by_key.items() if note.id in ids}
 
 
 async def _user_notes(session, user):
@@ -1519,9 +1558,62 @@ async def list_memory(conversation_id: int | None = None, principal: Principal =
     """What the playground remembers about this user, and about this conversation."""
     user = _require_user(principal)
     summary = await _conversation_memory(session, user.id, conversation_id)
+    proposals = (await session.execute(select(MemoryProposal).where(
+        MemoryProposal.user_id == user.id, MemoryProposal.status == "pending")
+        .order_by(MemoryProposal.id))).scalars()
     return {"enabled": memory_tool.is_enabled(),
             "user": [_memory_json(n) for n in await _user_notes(session, user)],
-            "conversation": _memory_json(summary) if summary else None}
+            "conversation": _memory_json(summary) if summary else None,
+            "proposals": [_proposal_json(p) for p in proposals]}
+
+
+class ProposalAnswer(BaseModel):
+    accept: bool
+    # The note as the user wants it, when they edited the proposed text before accepting
+    text: str | None = Field(default=None, max_length=memory_tool.NOTE_LENGTH * 4)
+
+
+@router.post("/memory/proposals/{proposal_id}")
+async def answer_proposal(proposal_id: int, payload: ProposalAnswer, principal: Principal = Depends(authenticate),
+                          session: AsyncSession = Depends(get_session)):
+    """The user's answer to a proposed change: yes applies it, no leaves the note as it was."""
+    user = _require_user(principal)
+    proposal = (await session.execute(select(MemoryProposal).where(
+        MemoryProposal.id == proposal_id, MemoryProposal.user_id == user.id))).scalar_one_or_none()
+    if proposal is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Not found")
+    if proposal.status != "pending":
+        raise HTTPException(status.HTTP_409_CONFLICT, f"This was already {proposal.status}")
+    proposal.resolved_at = utcnow()
+    if not payload.accept:
+        proposal.status = "rejected"
+        await session.commit()
+        log.info("User %s kept a note as it was: %r", user.id, proposal.old_text)
+        return {"proposal": _proposal_json(proposal), "note": None}
+    note = await session.get(MemoryEntry, proposal.memory_id) if proposal.memory_id else None
+    proposal.status = "accepted"
+    edited = (payload.text or "").strip()
+    if proposal.action == "delete":
+        if note is not None and note.user_id == user.id:
+            await session.delete(note)
+        await session.commit()
+        log.info("User %s confirmed forgetting: %r", user.id, proposal.old_text)
+        return {"proposal": _proposal_json(proposal), "note": None}
+    text = edited or proposal.new_text
+    if not text:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "The note would be empty")
+    if note is None or note.user_id != user.id:
+        # Removed in the meantime: what they confirmed is still true, so it is kept as a new note
+        note = MemoryEntry(user_id=user.id, scope="user", source="auto")
+        session.add(note)
+    note.content, note.updated_at = text, utcnow()
+    note.evidence = proposal.said if proposal.said_by == "user" else note.evidence
+    if edited and edited != proposal.new_text:
+        note.source = "manual"          # their own wording now, as any note they edit
+    await session.commit()
+    await session.refresh(note)
+    log.info("User %s confirmed a note change: %r -> %r", user.id, proposal.old_text, text)
+    return {"proposal": _proposal_json(proposal), "note": _memory_json(note)}
 
 
 class MemoryIn(BaseModel):
@@ -1657,20 +1749,24 @@ async def _agent_memory(user_id):
     return state
 
 
-async def _memory_edit(user_id, memory, tool, args, seen_text):
-    """One memory tool call from the agent, checked and applied at once. Returns (text, failed)."""
+async def _memory_edit(user_id, memory, tool, args, seen_text, user_text="", conversation_id=None):
+    """One memory tool call from the agent, checked. A new note is added at once; a change to one
+    already there is put to the user. Returns (text, failed)."""
     if not memory:
         return "Memory is switched off.", True
-    edit, refused = memory_tool.check_tool_edit(tool, args, memory["text"], seen_text, memory["manual"])
+    # The user's own notes too: nothing changes without their yes, so none needs keeping out
+    edit, refused = memory_tool.check_tool_edit(tool, args, memory["text"], seen_text)
     if refused:
         return refused, True
     action, key, text = edit
+    quote = str(args.get("evidence") or "").strip()
     async with session_factory()() as db:
         if action == "add":
             if len(memory["text"]) >= settings.max_user_notes():
                 return (f"Not added: there are {settings.max_user_notes()} notes, the most kept. "
                         "Update or forget one first."), True
-            entry = MemoryEntry(user_id=user_id, scope="user", content=text, source="auto")
+            entry = MemoryEntry(user_id=user_id, scope="user", content=text, source="auto",
+                                evidence=quote if memory_tool.said_by_user(quote, user_text) else None)
             db.add(entry)
             await db.commit()
             key = f"n{max([int(k[1:]) for k in memory['text']] + [0]) + 1}"
@@ -1680,16 +1776,13 @@ async def _memory_edit(user_id, memory, tool, args, seen_text):
         entry = await db.get(MemoryEntry, memory["ids"][key])
         if entry is None or entry.user_id != user_id:
             return f"Not changed: {key} is gone.", True
-        if action == "update":
-            log.info("Agent updated a note for user %s: %r -> %r", user_id, entry.content, text)
-            entry.content, entry.updated_at = text, utcnow()
-            memory["text"][key] = text
-        else:
-            log.info("Agent forgot a note for user %s: %r", user_id, entry.content)
-            await db.delete(entry)
-            del memory["text"][key], memory["ids"][key]
+        said_by = "user" if memory_tool.said_by_user(quote, user_text) else "tool"
+        await _propose(db, user_id, entry, action, text, quote, said_by, conversation_id)
         await db.commit()
-    return f"{key} {'updated' if action == 'update' else 'forgotten'}.", False
+    log.info("Agent proposed to %s a note for user %s: %r", action, user_id, entry.content)
+    what = f'change it to "{text}"' if action == "update" else "forget it"
+    return (f'The user is asked whether to {what}; {key} stays as it is until they answer. For the rest '
+            "of this task go by what they said or the tool showed, not by the old note."), False
 
 
 NOTES_MIN_BILLIONS = 14     # smaller models were measured to record plans as facts and to duplicate notes
@@ -1734,21 +1827,25 @@ async def _check_notes(principal, session, user_id, conversation, model):
     notes = list((await session.execute(select(MemoryEntry).where(
         MemoryEntry.user_id == user_id, MemoryEntry.scope == "user").order_by(MemoryEntry.id))).scalars())
     by_key = {f"n{i + 1}": note for i, note in enumerate(notes)}
-    protected = {key for key, note in by_key.items() if note.source == "manual"}
+    mine = {key for key, note in by_key.items() if note.source == "manual"}
+    waiting = await _pending_keys(session, by_key)
+    # No note is kept out of the check: a change is only proposed, and the user decides
     changes = memory_tool.parse_changes(await _ask_helper(principal, memory_tool.check_request(
-        [(key, note.content, key in protected) for key, note in by_key.items()], exchange, model)),
-        {key: note.content for key, note in by_key.items()}, user_text, protected)
-    if not changes or not any(changes.values()):
+        [(key, note.content, key in mine) for key, note in by_key.items()], exchange, model, waiting)),
+        {key: note.content for key, note in by_key.items()}, user_text)
+    if not changes or not any(changes[k] for k in ("update", "delete", "add")):
         return
+    said = changes["said"]
     for key, text in changes["update"].items():
-        by_key[key].content, by_key[key].updated_at = text, utcnow()
+        await _propose(session, user_id, by_key[key], "update", text, said[key], "user", conversation.id)
     for key in changes["delete"]:
-        await session.delete(by_key[key])
-    room = settings.max_user_notes() - (len(notes) - len(changes["delete"]))
+        await _propose(session, user_id, by_key[key], "delete", None, said[key], "user", conversation.id)
+    # Room counts the notes a proposal may yet remove as still there: they are, until the user says
+    room = settings.max_user_notes() - len(notes)
     for text in changes["add"][:max(room, 0)]:
-        session.add(MemoryEntry(user_id=user_id, scope="user", content=text, source="auto"))
+        session.add(MemoryEntry(user_id=user_id, scope="user", content=text, source="auto", evidence=said[text]))
     await session.commit()
-    log.info("Notes for user %s: %d updated, %d deleted, %d added", user_id,
+    log.info("Notes for user %s: %d changes and %d removals put to them, %d added", user_id,
              len(changes["update"]), len(changes["delete"]), min(len(changes["add"]), max(room, 0)))
 
 
@@ -4713,7 +4810,7 @@ async def run_agent(payload: AgentIn, principal: Principal = Depends(authenticat
                         if server is MEMORY_TOOLS:
                             text, bad = await _memory_edit(user_id, memory, tool,
                                                            agent.arguments(call.get("arguments")),
-                                                           "\n".join(seen))
+                                                           "\n".join(seen), seen[0], payload.conversation_id)
                         elif server is self_tools.BUILTIN:
                             text, bad = await self_tools.call(
                                 tool, agent.arguments(call.get("arguments")),
