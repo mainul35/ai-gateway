@@ -2859,7 +2859,8 @@ async function answerAside(tab){
         if(finished || !tab.jobId) break;
         throw new Error('the connection ended before the answer did');
       }catch(e){
-        if(tab.controller.signal.aborted || !tab.jobId || tries >= 30) throw e;
+        // The model failing is an answer, not a lost connection: replaying the job would only fail again
+        if(e.fromModel || tab.controller.signal.aborted || !tab.jobId || tries >= 30) throw e;
       }
       // Lost: wait until the page is in front and online, then follow the job from its start
       say(text ? 'Connection lost; picking the answer up again' : 'Connection lost; reconnecting');
@@ -4523,7 +4524,9 @@ async function readEvents(response, onData){
       if(!data || data === '[DONE]') continue;
       let chunk;
       try{ chunk = JSON.parse(data); }catch(e){ continue; }
-      if(chunk.error) throw new Error(plainError(chunk.error.message, MODEL_TROUBLE));
+      // Marked as the model's own answer, so a caller that reconnects on a lost connection does not
+      // take it for one and ask again
+      if(chunk.error) throw Object.assign(new Error(plainError(chunk.error.message, MODEL_TROUBLE)), {fromModel: true});
       onData(chunk);
     }
   }
