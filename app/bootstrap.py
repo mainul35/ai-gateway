@@ -46,6 +46,8 @@ _ADDED_COLUMNS = (
     ("ccd_sessions", "seen_at", "TIMESTAMPTZ"),
     ("ccd_sessions", "transcript", "TEXT"),
     ("ccd_sessions", "client", "VARCHAR(32)"),
+    # The words a note was taken from, for asking the user before it is changed
+    ("memory_entries", "evidence", "TEXT"),
     # The side questions open beside a conversation, kept so a reload does not lose them
     ("conversations", "side_questions", "TEXT"),
 )

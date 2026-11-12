@@ -9,6 +9,11 @@ by its id - so that something that stops being true is taken out the moment the 
 (CHECK_PROMPT). An agent turn also has them as tools (memory_tools), so a note is fixed in the
 middle of a task, as soon as a tool or the user shows it is wrong, the way Claude Code keeps its
 memory. Both are shown in the playground, where they can be edited or deleted.
+
+A new fact is added at once. A change to a note already there - rewritten or removed - is not: it
+becomes a proposal (MemoryProposal) that the playground puts to the user, quoting the note, the
+words it came from, and what they have said since. Only their yes applies it, so a passing remark,
+a misread quote or a hypothetical never quietly rewrites what they told the gateway before.
 """
 import json
 import logging
@@ -45,8 +50,8 @@ of facts about the user: it can be wrong. Every edit quotes, in "user_said", the
 that make it necessary, copied exactly from a USER line. No such words, no edit.
 
 - update: a note the user's words make out of date or wrong - a plan now done, a choice changed, a
-  number that is different now. Write the note as it is true now, and keep the parts of the old
-  note the user did not change. A plan is written as a plan ("Plans to add a Tesla P100"), never as
+  number that is different now, a detail they correct. Write the note as it is true now, changing
+  only the part their words are about and keeping the rest. A plan is written as a plan ("Plans to add a Tesla P100"), never as
   something already done.
 - delete: a note the user's words contradict or show no longer holds. The quoted words must be about
   the same thing as the note: words about which model they use never delete a note about RAM. A
@@ -55,8 +60,16 @@ that make it necessary, copied exactly from a USER line. No such words, no edit.
   preferences, how they like answers. Not one-off questions and not the topic of today's chat.
 
 Each note is one specific fact under 120 characters ("Has 92 GB RAM, upgraded from 45 GB"), never a
-topic ("Discussed RAM"). Notes marked (user's own) were written by the user: never change or delete
-them. Keep the list at most {limit} notes: when it is full, add only by updating or deleting.
+topic ("Discussed RAM"). Keep the list at most {limit} notes: when it is full, add only by updating
+or deleting.
+
+Every update and delete is put to the user before it happens: they are shown the note, their new
+words and your new text, and asked whether they really mean to change it. So propose one only when
+their words, taken as they wrote them, say something different about the same thing - not for a
+question, a hypothetical ("what if I had 128 GB?") or something they are only considering. Notes
+marked (user's own) were written by the user: propose a change to one only when their words
+plainly correct it. A note marked (change waiting) already has a question out to the user: leave it
+alone unless their words now say something different again.
 
 Reply with JSON only, for example:
 {{"update": [{{"id": "n3", "text": "...", "user_said": "..."}}],
@@ -112,9 +125,11 @@ def about(quote, note):
     return bool(significant(quote) & significant(note))
 
 
-def check_request(notes, exchange, model):
-    """notes: (key, text, written_by_user) in list order; exchange: the latest turns, as text."""
+def check_request(notes, exchange, model, waiting=()):
+    """notes: (key, text, written_by_user) in list order; exchange: the latest turns, as text;
+    waiting: keys of notes with a proposed change the user has not answered yet."""
     listed = "\n".join(f"{key}: {text}" + (" (user's own)" if manual else "")
+                       + (" (change waiting)" if key in waiting else "")
                        for key, text, manual in notes) or "(no notes yet)"
     return {
         "model": model, "stream": False, "temperature": 0, "max_tokens": 900,
@@ -131,8 +146,8 @@ def parse_changes(text, notes_now, user_text, protected=()):
     """The model's edits, checked: each backed by the user's own words, only ids that exist, never a
     note the user wrote, no duplicates.
 
-    notes_now is {key: the note's text}. Returns {"update": {key: text}, "delete": {key}, "add": [text]},
-    or None when unreadable.
+    notes_now is {key: the note's text}. Returns {"update": {key: text}, "delete": {key}, "add": [text],
+    "said": {key or added text: the user's words behind it}}, or None when unreadable.
     """
     cleaned = re.sub(r"<think>.*?</think>", "", text or "", flags=re.S)
     match = re.search(r"\{.*\}", cleaned, flags=re.S)
@@ -149,23 +164,27 @@ def parse_changes(text, notes_now, user_text, protected=()):
         return (isinstance(item, dict) and said_by_user(item.get("user_said"), user_text)
                 and (changes is None or about(item.get("user_said"), changes)))
 
-    update = {}
+    update, said = {}, {}
     for item in raw.get("update") or ():
         new = str(item.get("text") or "").strip()[:NOTE_LENGTH] if isinstance(item, dict) else ""
         key = item.get("id") if isinstance(item, dict) else None
         # An "update" to the same words is no edit; seen when the model had nothing to change
         if key in editable and new and new != notes_now[key] and backed(item, notes_now[key]):
-            update[key] = new
-    delete = {item["id"] for item in raw.get("delete") or ()
-              if isinstance(item, dict) and item.get("id") in editable
-              and backed(item, notes_now[item["id"]])} - set(update)
+            update[key], said[key] = new, str(item["user_said"]).strip()
+    delete = set()
+    for item in raw.get("delete") or ():
+        if (isinstance(item, dict) and item.get("id") in editable and item["id"] not in update
+                and backed(item, notes_now[item["id"]])):
+            delete.add(item["id"])
+            said[item["id"]] = str(item["user_said"]).strip()
     add, seen = [], {t.lower() for t in update.values()}
     for item in raw.get("add") or ():
         note = str(item.get("text") or "").strip()[:NOTE_LENGTH] if backed(item) else ""
         if note and note.lower() not in seen:
             seen.add(note.lower())
             add.append(note)
-    return {"update": update, "delete": delete, "add": add}
+            said[note] = str(item["user_said"]).strip()
+    return {"update": update, "delete": delete, "add": add, "said": said}
 
 
 # --- memory as tools, for the agent: notes changed the moment something is learned ---------------
@@ -176,7 +195,9 @@ carry what you knew from earlier conversations, and they can be out of date.
 
 Treat them as you would your own notes: when the user says, or one of your tools shows, that a note
 is no longer true - a plan now done, a setting changed, a number different - fix it at once with
-{server}{sep}update or {server}{sep}forget, in the middle of the task, before carrying on. When you
+{server}{sep}update or {server}{sep}forget, in the middle of the task, before carrying on. Those two
+ask the user first: the note stays as it is until they confirm, so for the rest of this task go by
+what they said or the tool showed, not by the old note. When you
 learn a lasting fact about the user or their setup that is not there, add it with
 {server}{sep}remember. Never note one-off questions or today's topic, and never something you only
 assumed. Every change quotes its evidence: the user's own words, or what a tool returned this turn.
@@ -193,9 +214,11 @@ def memory_tools(sep):
     text = {"type": "string", "description": "The note as it is true now: one specific fact, under 120 characters."}
     spec = [("remember", "Add a lasting fact about the user that is not in the notes yet.",
              {"text": text, "evidence": evidence}, ["text", "evidence"]),
-            ("update", "Rewrite a note that is out of date or wrong, as it is true now.",
+            ("update", "Rewrite a note that is out of date or wrong, as it is true now. The user is asked "
+                       "to confirm before it changes.",
              {"id": note_id, "text": text, "evidence": evidence}, ["id", "text", "evidence"]),
-            ("forget", "Remove a note that no longer holds or that the user contradicted.",
+            ("forget", "Remove a note that no longer holds or that the user contradicted. The user is "
+                       "asked to confirm before it goes.",
              {"id": note_id, "evidence": evidence}, ["id", "evidence"])]
     return [{"type": "function", "function": {
         "name": f"{TOOL_SERVER}{sep}{name}", "description": description,
@@ -205,7 +228,8 @@ def memory_tools(sep):
 
 def tool_guide(notes, sep):
     """notes: (key, text, written_by_user)."""
-    listed = "\n".join(f"{key}: {text}" + (" (user's own - do not change)" if manual else "")
+    listed = "\n".join(f"{key}: {text}" + (" (user's own - change only when they plainly correct it)"
+                                           if manual else "")
                        for key, text, manual in notes) or "(none yet)"
     return TOOL_GUIDE.format(server=TOOL_SERVER, sep=sep, notes=listed)
 

@@ -173,6 +173,33 @@ class MemoryEntry(Base):
     source: Mapped[str] = mapped_column(String(16), default="auto")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+    # The user's own words the note was taken from, quoted back when a later message differs
+    evidence: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class MemoryProposal(Base):
+    """A change to a note that the user is asked about first: what the note says, what they said
+    since that differs, and the note as it would read. Applied only when they say yes."""
+    __tablename__ = "memory_proposals"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    memory_id: Mapped[int | None] = mapped_column(
+        ForeignKey("memory_entries.id", ondelete="SET NULL"), nullable=True, index=True)
+    # Where it came up, so the card is shown in that conversation
+    conversation_id: Mapped[int | None] = mapped_column(
+        ForeignKey("conversations.id", ondelete="SET NULL"), nullable=True, index=True)
+    action: Mapped[str] = mapped_column(String(16))            # "update" or "delete"
+    old_text: Mapped[str] = mapped_column(Text)                # the note when this was proposed
+    old_evidence: Mapped[str | None] = mapped_column(Text, nullable=True)
+    old_saved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    new_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    said: Mapped[str] = mapped_column(Text)                    # the words that differ from the note
+    said_by: Mapped[str] = mapped_column(String(16), default="user")   # "user", or "tool" in an agent task
+    # "pending", then "accepted", "rejected", or "replaced" by a newer proposal for the same note
+    status: Mapped[str] = mapped_column(String(16), default="pending", index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class ChatFile(Base):

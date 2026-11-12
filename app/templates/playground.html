@@ -593,6 +593,24 @@ a.paper{color:var(--text);text-decoration:none}
 .mem li button{background:none;border:none;color:var(--muted);cursor:pointer;padding:0 .15rem;font-size:.85rem}
 .mem li button:hover{color:var(--text)}
 .mem .summary{white-space:pre-wrap;color:var(--text)}
+/* A change to memory, put to the user before it is made */
+.mem-asks{max-width:48rem;margin:1rem auto;display:flex;flex-direction:column;gap:.6rem}
+.mem-ask{border:1px solid var(--warning);border-left-width:4px;border-radius:10px;background:var(--card);
+         padding:.75rem .9rem;font-size:.9rem;display:flex;flex-direction:column;gap:.5rem}
+.mem-ask-head{font-weight:600}
+.mem-ask .lbl{display:block;font-size:.75rem;color:var(--muted);text-transform:uppercase;letter-spacing:.04em}
+.mem-ask q{display:block;quotes:none;white-space:pre-wrap;word-wrap:break-word}
+.mem-ask-was q{text-decoration:line-through;text-decoration-color:var(--muted);color:var(--muted)}
+.mem-ask .from{font-size:.8rem;color:var(--muted);margin-top:.15rem}
+.mem-ask .from q{display:inline;text-decoration:none;font-style:italic}
+.mem-ask-now q{color:var(--text)}
+.mem-ask-new{margin:0}
+.mem-ask-new textarea{width:100%;background:var(--input);border:1px solid var(--border);border-radius:8px;
+                      color:var(--text);padding:.45rem .6rem;font:inherit;resize:vertical}
+.mem-ask-q{margin:0}
+.mem-ask .row{gap:.5rem}
+.mem-ask-done{color:var(--muted);font-size:.85rem}
+#memoryAsks .mem-ask{margin-top:.5rem;font-size:.82rem}
 .mem .empty{color:var(--muted)}
 /* On a short screen the title and its explanation cost a fifth of the height before anything is
    shown; the page is recognisable without them. */
@@ -725,6 +743,7 @@ a.paper{color:var(--text);text-decoration:none}
         <button class="linkish" id="addNote" title="Add something to remember">+ Note</button>
       </div>
       <div class="mem" id="memory"></div>
+      <div class="mem" id="memoryAsks" hidden></div>
     </div>
 
     <details class="tuning">
@@ -1637,6 +1656,82 @@ async function loadMemory(){
   }catch(e){ return; }
   document.getElementById('memoryCard').hidden = !memory.enabled;
   renderMemory();
+  renderProposals();
+}
+
+/* A change to something already remembered is asked, not made: the note as saved and the words it
+   came from, what was said since, and the note as it would read. Shown at the end of the
+   conversation it came up in; one from any other conversation waits in the Memory panel. */
+function proposalCard(p){
+  const when = p.old_saved_at ? new Date(p.old_saved_at).toLocaleDateString(undefined, {day: 'numeric', month: 'short', year: 'numeric'}) : '';
+  const now = p.said_by === 'user' ? 'What you said now' : 'What a tool showed in this task';
+  const change = p.action === 'update'
+    ? `<label class="mem-ask-new"><span class="lbl">Change it to</span>
+         <textarea rows="2" maxlength="480">${escapeHtml(p.new_text || '')}</textarea></label>
+       <div class="row"><button class="btn btn-sm" data-answer-proposal="${p.id}" data-accept="1">Update memory</button>
+         <button class="btn btn-sm btn-secondary" data-answer-proposal="${p.id}" data-accept="0">Keep what it was</button></div>`
+    : `<p class="mem-ask-q">Remove it from memory?</p>
+       <div class="row"><button class="btn btn-sm btn-danger" data-answer-proposal="${p.id}" data-accept="1">Remove it</button>
+         <button class="btn btn-sm btn-secondary" data-answer-proposal="${p.id}" data-accept="0">Keep it</button></div>`;
+  return `<div class="mem-ask" data-proposal="${p.id}">
+    <div class="mem-ask-head">This differs from what I remember about you. Do you want to change it?</div>
+    <div class="mem-ask-was"><span class="lbl">Remembered${when ? ' since ' + escapeHtml(when) : ''}</span>
+      <q>${escapeHtml(p.old_text)}</q>
+      ${p.old_evidence ? `<div class="from">from your words: <q>${escapeHtml(p.old_evidence)}</q></div>` : ''}</div>
+    <div class="mem-ask-now"><span class="lbl">${now}</span><q>${escapeHtml(p.said)}</q></div>
+    ${change}
+  </div>`;
+}
+
+function renderProposals(){
+  chat.querySelectorAll('.mem-ask').forEach(card => card.remove());
+  const here = (memory.proposals || []).filter(p => currentId && p.conversation_id === currentId);
+  if(here.length){
+    const box = document.createElement('div');
+    box.className = 'mem-asks';
+    box.innerHTML = here.map(proposalCard).join('');
+    chat.querySelector('.mem-asks')?.remove();
+    chat.append(box);
+  }else chat.querySelector('.mem-asks')?.remove();
+  const elsewhere = (memory.proposals || []).filter(p => !here.includes(p));
+  const panel = document.getElementById('memoryAsks');
+  panel.hidden = !elsewhere.length;
+  panel.innerHTML = elsewhere.length ? '<h3>Waiting for your answer</h3>' + elsewhere.map(proposalCard).join('') : '';
+}
+
+document.addEventListener('click', async e => {
+  const button = e.target.closest('[data-answer-proposal]');
+  if(!button) return;
+  const card = button.closest('.mem-ask');
+  const accept = button.dataset.accept === '1';
+  const text = card.querySelector('textarea')?.value.trim();
+  card.querySelectorAll('button').forEach(b => b.disabled = true);
+  try{
+    await api(`/chat/memory/proposals/${button.dataset.answerProposal}`, {method: 'POST', headers: JSON_HEADERS,
+                                                                          body: JSON.stringify({accept, text: accept ? text : null})});
+    card.innerHTML = `<div class="mem-ask-done">${accept ? (card.querySelector('textarea') ? 'Memory updated.' : 'Removed from memory.')
+                                                          : 'Kept as it was.'}</div>`;
+    setTimeout(loadMemory, 1200);
+  }catch(err){
+    card.querySelectorAll('button').forEach(b => b.disabled = false);
+    showError(errorText(err));
+  }
+});
+
+/* After a turn the gateway checks it against memory in the background, which takes the notes model
+   a few seconds: the page looks for a while, and stops once a new question shows up */
+let proposalWatch = 0;
+function watchProposals(){
+  const known = new Set((memory.proposals || []).map(p => p.id));
+  const mine = ++proposalWatch;
+  let tries = 0;
+  const look = async () => {
+    if(mine !== proposalWatch || ++tries > 15) return;
+    await loadMemory();
+    if((memory.proposals || []).some(p => !known.has(p.id))) return;
+    setTimeout(look, 4000);
+  };
+  setTimeout(look, 3000);
 }
 
 function renderMemory(){
@@ -4818,7 +4913,10 @@ async function sendTurn(redo = null){
     provisional.classList.add('sending');
     followAlong();
   }
-  try{ await routeTurn(text, fresh ? null : redo.again); }
+  try{
+    await routeTurn(text, fresh ? null : redo.again);
+    if(memory.enabled && currentId) watchProposals();
+  }
   finally{
     if(provisional){
       // It never went out - stopped while being worked out, or refused before it was asked. It
