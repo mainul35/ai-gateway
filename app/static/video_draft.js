@@ -49,7 +49,7 @@
 .draft button.small{background:none;border:1px solid var(--border);border-radius:7px;color:var(--text);
   padding:.15rem .55rem;cursor:pointer;font-size:.8rem;justify-self:start;width:auto}
 .draft button.small:disabled{opacity:.4;cursor:default}
-.draft button.danger{border-color:#7f1d1d;color:#fca5a5}
+.draft button.danger{border-color:var(--bad-line);color:var(--bad-text)}
 .draft-part{display:grid;grid-template-columns:10rem repeat(var(--languages,2),minmax(0,1fr)) auto;gap:.5rem;
   align-items:start;padding:.45rem 0;border-top:1px dashed var(--border)}
 @media (max-width:900px){.draft-part{grid-template-columns:1fr}}
@@ -270,7 +270,7 @@
         <button type="button" class="btn" id="draftMake">Make the video ›</button></div>
       <div class="draft-note">Nothing has been drawn or voiced yet. Read the scenes, correct the words and who says them,
         delete or add scenes, say what each picture should show - then make the video.
-        ${video.paused ? `<br><span style="color:#f59e0b">${esc(video.paused)}</span>` : ''}</div>
+        ${video.paused ? `<br><span style="color:var(--warning)">${esc(video.paused)}</span>` : ''}</div>
       <details class="draft-cast" id="draftCast"></details>
       <div class="draft-scenes" id="draftScenes"></div>`;
     renderCast();

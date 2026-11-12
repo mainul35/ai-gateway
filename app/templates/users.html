@@ -10,7 +10,7 @@
 .users-split.open{grid-template-columns:minmax(0, 1fr) minmax(20rem, 26rem)}
 table.people td,table.people th{padding:.42rem .55rem;white-space:nowrap}
 table.people tr[data-user]{cursor:pointer}
-table.people tr[data-user]:hover td{background:rgba(255,255,255,.035)}
+table.people tr[data-user]:hover td{background:var(--hover)}
 table.people tr[data-user]:focus-visible{outline:2px solid var(--primary);outline-offset:-2px}
 table.people tr.selected td{background:rgba(99,102,241,.16)}
 table.people td.who{max-width:17rem;overflow:hidden;text-overflow:ellipsis}
@@ -94,7 +94,7 @@ table.people td.who .mail{display:block;font-size:.76rem;overflow:hidden;text-ov
   <table>
     <tr><th>Role</th><th>Can do</th></tr>
     <tr><td><span class="pill off">user</span></td><td>Use the models they are granted, the playground, and their own keys and usage.</td></tr>
-    <tr><td><span class="pill on" style="background:rgba(99,102,241,.2);color:#a5b4fc">manager</span></td>
+    <tr><td><span class="pill on" style="background:rgba(99,102,241,.2);color:var(--heading)">manager</span></td>
         <td>Everything a user can, plus grant or remove model access and keys for accounts with the user role.</td></tr>
     <tr><td><span class="pill on">admin</span></td><td>Everything, including roles, SSO settings and the llama.cpp engine. Always has every model.</td></tr>
   </table>
