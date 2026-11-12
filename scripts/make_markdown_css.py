@@ -36,14 +36,29 @@ def blocks(css):
     return [(s, b) for s, b in found if not s.startswith("@")]
 
 
-def variables(css):
-    """The dark palette, which is what the playground needs, with the light one as the base."""
-    values = {}
+DARK = 'html[data-theme="dark"]'
+COLOUR = re.compile(r"^(#[0-9a-fA-F]{3,8}|rgba?\([^)]*\))$")
+
+
+def palettes(css):
+    """MDViewer's light palette (:root) and its dark one, {--name: value} each."""
+    light, dark = {}, {}
     for selector, body in blocks(css):
-        if selector in (":root", 'html[data-theme="dark"]'):
+        if selector in (":root", DARK):
             for name, value in re.findall(r"(--[\w-]+)\s*:\s*([^;]+);", body):
-                values[name] = value.strip()
-    return values
+                (dark if selector == DARK else light)[name] = value.strip()
+    return light, dark
+
+
+def dark_colours(css):
+    """MDViewer's dark-only colours for code - {frozenset of plain selectors: colour}."""
+    found = {}
+    for selector, body in blocks(css):
+        parts = [p.strip() for p in selector.split(",")]
+        colour = re.fullmatch(r"\s*color\s*:\s*([^;]+);\s*", body)
+        if colour and all(p.startswith(DARK + " ") for p in parts):
+            found[frozenset(p[len(DARK) + 1:] for p in parts)] = colour.group(1).strip()
+    return found
 
 
 def scope(selector):
@@ -61,17 +76,39 @@ def scope(selector):
 
 # Comments sit between rules and would otherwise be read as part of the next selector
 source = re.sub(r"/\*.*?\*/", "", SOURCE.read_text(encoding="utf-8"), flags=re.S)
-palette = variables(source)
-out = ["/* The look of MDViewer's preview, for answers rendered in the playground.",
-       " * Generated from MDViewer's MainController.previewCss() by scratchpad/make_markdown_css.py;",
+light, dark = palettes(source)
+# Both themes at once: a colour is light-dark(light, dark), and the page's color-scheme (base.html,
+# set from the theme switch or the system) picks one. Anything that is not a single colour - the
+# plate's shadow - gets a dark rule of its own.
+both, dark_only = {}, {}
+for name, value in light.items():
+    other = dark.get(name, value)
+    if other == value:
+        both[name] = value
+    elif COLOUR.match(value) and COLOUR.match(other):
+        both[name] = f"light-dark({value}, {other})"
+    else:
+        both[name] = value
+        dark_only[name] = other
+out = ["/* The look of MDViewer's preview, for answers rendered in the playground, in light and dark.",
+       " * Generated from MDViewer's MainController.previewCss() by scripts/make_markdown_css.py;",
        " * every rule is scoped to .md and the page-frame rules are left out.",
        " */",
-       ".md{", *(f"  {name}:{value};" for name, value in palette.items()),
+       ".md{", *(f"  {name}:{value};" for name, value in both.items()),
        "  color:var(--ink);font-family:var(--body);",
        "}"]
+if dark_only:
+    values = " ".join(f"{name}:{value};" for name, value in dark_only.items())
+    out += [f':root[data-theme="dark"] .md{{ {values} }}',
+            f'@media (prefers-color-scheme: dark){{ :root:not([data-theme="light"]) .md{{ {values} }} }}']
+code_dark = dark_colours(source)
 for selector, body in blocks(source):
     if DROP_SELECTORS.search(selector):
         continue
+    # Code colours MDViewer changes for dark: the light rule carries both
+    night = code_dark.get(frozenset(p.strip() for p in selector.split(",")))
+    if night:
+        body = re.sub(r"color\s*:\s*(#[0-9a-fA-F]{3,8})", lambda m: f"color:light-dark({m.group(1)}, {night})", body, count=1)
     body = DROP_DECLARATIONS.sub(lambda m: f"  /* dropped: {m.group(1)} */ x-{m.group(1)}:", body)
     body = re.sub(r"\s*/\* dropped: [\w-]+ \*/ x-[\w-]+:[^;]*;", "", body)
     if not body.strip():

@@ -20,7 +20,7 @@
 .agent-guide .step-n{display:inline-flex;align-items:center;justify-content:center;width:1.45rem;height:1.45rem;border-radius:50%;background:var(--primary);color:#fff;font-size:.8rem;font-weight:700;margin-right:.45rem;vertical-align:.1em}
 /* Live panel and activity charts. One series per chart, in the accent blue; status colours only for
    a meter near its limit, and always with words beside them */
-.viz{--series:#3987e5;--series-track:rgba(57,135,229,.22);--warn:#fab219;--warn-track:rgba(250,178,25,.22);
+.viz{--series:#3987e5;--series-track:rgba(57,135,229,.22);--warn:light-dark(#9a6700,#fab219);--warn-track:rgba(250,178,25,.22);
   --crit:#d03b3b;--crit-track:rgba(208,59,59,.25);--grid:rgba(148,163,184,.18)}
 .live-head{display:flex;justify-content:space-between;align-items:baseline;flex-wrap:wrap;gap:.5rem;margin-bottom:.8rem}
 .live-head h2{margin:0}
@@ -55,7 +55,7 @@
 .chart-title{display:flex;justify-content:space-between;align-items:baseline;gap:.5rem;font-size:.85rem;margin-bottom:.4rem}
 .legend{display:flex;gap:.8rem;font-size:.75rem;color:var(--muted)}
 .legend i{display:inline-block;width:.65rem;height:.65rem;border-radius:2px;margin-right:.3rem;vertical-align:-.05rem}
-.viz-tip{position:absolute;pointer-events:none;z-index:5;background:#0b1220;border:1px solid var(--border);border-radius:6px;
+.viz-tip{position:absolute;pointer-events:none;z-index:5;background:var(--card);box-shadow:0 4px 14px var(--shadow);border:1px solid var(--border);border-radius:6px;
   padding:.3rem .5rem;font-size:.75rem;line-height:1.35;white-space:nowrap;color:var(--text);transform:translate(-50%,-100%)}
 .viz-tip .muted{font-size:.72rem}
 </style>

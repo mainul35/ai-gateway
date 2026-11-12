@@ -4,14 +4,37 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{% block title %}Model Gateway{% endblock %}</title>
+<script>
+/* Light, dark, or the system's choice (no attribute). Set before anything is drawn, so a page never
+   flashes in the other theme. mdchart reads the same attribute. */
+try{ const t = localStorage.getItem('theme'); if(t === 'light' || t === 'dark') document.documentElement.dataset.theme = t; }catch(e){}
+</script>
 <link rel="stylesheet" href="{{ static_url('markdown.css') }}">
 <style>
+/* Every colour is light-dark(light, dark): color-scheme picks one, and the browser's own controls,
+   scrollbars and pop-ups follow it too */
+:root{color-scheme: light dark}
+:root[data-theme="light"]{color-scheme: light}
+:root[data-theme="dark"]{color-scheme: dark}
 :root{
-  color-scheme: dark;
-  --bg:#0f172a; --card:#1e293b; --input:#334155; --border:#475569;
-  --text:#f1f5f9; --muted:#94a3b8; --primary:#6366f1; --primary-dark:#4f46e5;
-  --success:#10b981; --warning:#f59e0b; --danger:#ef4444;
+  --bg:light-dark(#f8fafc,#0f172a); --card:light-dark(#ffffff,#1e293b);
+  --input:light-dark(#eef2f7,#334155); --border:light-dark(#cbd5e1,#475569);
+  --text:light-dark(#0f172a,#f1f5f9); --muted:light-dark(#5b6b80,#94a3b8);
+  --primary:#6366f1; --primary-dark:#4f46e5;
+  --success:light-dark(#047857,#10b981); --warning:light-dark(#b45309,#f59e0b); --danger:light-dark(#dc2626,#ef4444);
+  /* Links, headings in cards, code blocks, a row under the pointer */
+  --link:light-dark(#4f46e5,#818cf8); --heading:light-dark(#4338ca,#a5b4fc);
+  --code-bg:light-dark(#f1f5f9,#0b1220); --hover:light-dark(rgba(15,23,42,.045),rgba(255,255,255,.035));
+  /* Text in a colour of its own: done, failed, converted, a voice */
+  --ok-text:light-dark(#15803d,#4ade80); --bad-text:light-dark(#b91c1c,#fca5a5);
+  --info-text:light-dark(#0369a1,#7dd3fc); --violet-text:light-dark(#6d28d9,#c4b5fd);
+  --bad-line:light-dark(#fca5a5,#7f1d1d);
+  --shadow:light-dark(rgba(15,23,42,.18),rgba(0,0,0,.4));
 }
+/* The theme switch in the bar at the top */
+.theme-btn{background:none;border:1px solid var(--border);border-radius:8px;color:var(--muted);
+           font:inherit;font-size:.85rem;font-weight:600;padding:.15rem .55rem;cursor:pointer}
+.theme-btn:hover{color:var(--text)}
 *{box-sizing:border-box}
 /* A page that fills the window and scrolls inside itself, rather than scrolling as a document */
 body.app{height:100vh;height:100dvh;overflow:hidden;display:flex;flex-direction:column}
@@ -19,7 +42,7 @@ body.app main{flex:1;min-height:0;max-width:none;width:100%;padding:0;margin:0}
 body.app header.nav{flex:none;padding:.6rem 1.25rem}
 body{margin:0;background:var(--bg);color:var(--text);line-height:1.6;
      font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif}
-a{color:#818cf8}
+a{color:var(--link)}
 header.nav{display:flex;align-items:center;gap:1.5rem;flex-wrap:wrap;
      padding:1rem 2rem;background:var(--card);border-bottom:1px solid var(--border)}
 .brand{font-weight:700;font-size:1.1rem;background:linear-gradient(135deg,var(--primary),#8b5cf6);
@@ -33,7 +56,7 @@ h1{font-size:1.6rem;margin:0 0 .3rem}
 p.sub{color:var(--muted);margin:0 0 1.75rem}
 .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(15rem,1fr));gap:1rem;margin-bottom:1.5rem}
 .card{background:var(--card);border-radius:12px;padding:1.25rem 1.5rem}
-.card h2{font-size:1rem;margin:0 0 .75rem;color:#a5b4fc}
+.card h2{font-size:1rem;margin:0 0 .75rem;color:var(--heading)}
 .stat{font-size:1.6rem;font-weight:700}
 .stat-label{color:var(--muted);font-size:.85rem}
 table{width:100%;border-collapse:collapse;font-size:.92rem}
@@ -41,7 +64,7 @@ th{text-align:left;color:var(--muted);font-weight:600;padding:.5rem .6rem;border
 td{padding:.55rem .6rem;border-bottom:1px solid var(--input)}
 tr:last-child td{border-bottom:none}
 code{background:var(--input);padding:.12rem .4rem;border-radius:5px;font-size:.88em;word-break:break-all}
-pre{background:#0b1220;padding:.9rem 1rem;border-radius:8px;overflow-x:auto;margin:.5rem 0 0}
+pre{background:var(--code-bg);padding:.9rem 1rem;border-radius:8px;overflow-x:auto;margin:.5rem 0 0}
 /* A snippet meant to be pasted somewhere gets a Copy button in its corner. The button sits on a
    wrapper rather than in the <pre>, which scrolls sideways and would carry the button away. */
 .copy-wrap{position:relative}
@@ -70,7 +93,7 @@ label span.hint{display:block;font-size:.8rem;color:var(--muted);margin-top:.2re
 .btn-sm{padding:.3rem .7rem;font-size:.82rem}
 .btn-danger{background:var(--danger)}
 .btn-danger:hover:not(:disabled){background:#dc2626}
-.btn-secondary{background:var(--input);border:1px solid var(--border)}
+.btn-secondary{background:var(--input);border:1px solid var(--border);color:var(--text)}
 .btn-secondary:hover:not(:disabled){background:var(--border)}
 .row{display:flex;gap:.75rem;flex-wrap:wrap;align-items:flex-end}
 .pill{display:inline-block;padding:.12rem .6rem;border-radius:20px;font-size:.78rem;font-weight:600}
@@ -117,10 +140,34 @@ label span.hint{display:block;font-size:.8rem;color:var(--muted);margin-top:.2re
   {% if user.role == 'admin' %}<a href="/models">Models</a><a href="/mcp">Tools</a><a href="/settings/sso">SSO</a><a href="/docs">API</a>{% endif %}
   <span class="spacer"></span>
   <span class="who">{{ user.name }} &middot; {{ user.role }}</span>
+  <button type="button" class="theme-btn" id="themeBtn"></button>
   <a href="/logout">Sign out</a>
 </header>
 {% endif %}
 <main>{% block content %}{% endblock %}</main>
+<script>
+/* System, Light, Dark in turn; remembered in this browser */
+(function(){
+  const btn = document.getElementById('themeBtn');
+  if(!btn) return;
+  const ORDER = ['system', 'light', 'dark'];
+  const SHOW = {system: '◐ System', light: '☀ Light', dark: '☾ Dark'};
+  const current = () => document.documentElement.dataset.theme || 'system';
+  const show = () => {
+    btn.textContent = SHOW[current()];
+    btn.title = `Theme: ${current()}. Click for ${ORDER[(ORDER.indexOf(current()) + 1) % 3]}.`;
+  };
+  btn.addEventListener('click', () => {
+    const next = ORDER[(ORDER.indexOf(current()) + 1) % 3];
+    if(next === 'system') delete document.documentElement.dataset.theme;
+    else document.documentElement.dataset.theme = next;
+    try{ next === 'system' ? localStorage.removeItem('theme') : localStorage.setItem('theme', next); }catch(e){}
+    show();
+    document.dispatchEvent(new CustomEvent('themechange', {detail: next}));
+  });
+  show();
+})();
+</script>
 <script>
 function escapeHtml(value){
   return String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
