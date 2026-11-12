@@ -1713,6 +1713,9 @@ document.addEventListener('click', async e => {
                                                           : 'Kept as it was.'}</div>`;
     setTimeout(loadMemory, 1200);
   }catch(err){
+    // Answered elsewhere, or a newer question about the same note took its place: show what is
+    // waiting now rather than an error about the old one
+    if(/already/i.test(errorText(err))){ loadMemory(); return; }
     card.querySelectorAll('button').forEach(b => b.disabled = false);
     showError(errorText(err));
   }
@@ -1728,7 +1731,8 @@ function watchProposals(){
   const look = async () => {
     if(mine !== proposalWatch || ++tries > 15) return;
     await loadMemory();
-    if((memory.proposals || []).some(p => !known.has(p.id))) return;
+    // One more look after the first question shows: the check after the turn may still be running
+    if((memory.proposals || []).some(p => !known.has(p.id))){ setTimeout(loadMemory, 15000); return; }
     setTimeout(look, 4000);
   };
   setTimeout(look, 3000);

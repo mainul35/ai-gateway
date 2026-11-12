@@ -142,6 +142,15 @@ def check_request(notes, exchange, model, waiting=()):
     }
 
 
+# The labels the notes are listed with, which models copy into the text they write for a note: seen
+# live as "names their test server zebra-beta (user's own)"
+LABEL = re.compile(r"\s*\((?:user's own|change waiting)[^)]*\)", re.I)
+
+
+def note_text(text):
+    return LABEL.sub("", str(text or "")).strip()[:NOTE_LENGTH]
+
+
 def parse_changes(text, notes_now, user_text, protected=()):
     """The model's edits, checked: each backed by the user's own words, only ids that exist, never a
     note the user wrote, no duplicates.
@@ -166,7 +175,7 @@ def parse_changes(text, notes_now, user_text, protected=()):
 
     update, said = {}, {}
     for item in raw.get("update") or ():
-        new = str(item.get("text") or "").strip()[:NOTE_LENGTH] if isinstance(item, dict) else ""
+        new = note_text(item.get("text")) if isinstance(item, dict) else ""
         key = item.get("id") if isinstance(item, dict) else None
         # An "update" to the same words is no edit; seen when the model had nothing to change
         if key in editable and new and new != notes_now[key] and backed(item, notes_now[key]):
@@ -179,7 +188,7 @@ def parse_changes(text, notes_now, user_text, protected=()):
             said[item["id"]] = str(item["user_said"]).strip()
     add, seen = [], {t.lower() for t in update.values()}
     for item in raw.get("add") or ():
-        note = str(item.get("text") or "").strip()[:NOTE_LENGTH] if backed(item) else ""
+        note = note_text(item.get("text")) if backed(item) else ""
         if note and note.lower() not in seen:
             seen.add(note.lower())
             add.append(note)
@@ -246,7 +255,7 @@ def check_tool_edit(tool, args, notes_now, seen_text, protected=()):
         return None, ("Not changed: the evidence must be words the user wrote or a tool returned this "
                       "turn, copied exactly. Notes are never changed on an assumption.")
     key = args.get("id")
-    new = str(args.get("text") or "").strip()[:NOTE_LENGTH]
+    new = note_text(args.get("text"))
     if tool == "remember":
         if not new:
             return None, "Not added: the note is empty."

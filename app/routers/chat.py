@@ -1528,12 +1528,12 @@ async def _propose(db, user_id, note, action, new_text, said, said_by="user", co
     return proposal
 
 
-async def _pending_keys(db, by_key):
-    """The keys of notes with a proposal the user has not answered."""
-    ids = set((await db.execute(select(MemoryProposal.memory_id).where(
+async def _pending(db, by_key):
+    """{key: its unanswered proposal} for the notes that have one."""
+    found = {p.memory_id: p for p in (await db.execute(select(MemoryProposal).where(
         MemoryProposal.memory_id.in_([n.id for n in by_key.values()] or [0]),
-        MemoryProposal.status == "pending"))).scalars())
-    return {key for key, note in by_key.items() if note.id in ids}
+        MemoryProposal.status == "pending"))).scalars()}
+    return {key: found[note.id] for key, note in by_key.items() if note.id in found}
 
 
 async def _user_notes(session, user):
@@ -1661,6 +1661,7 @@ async def edit_memory(entry_id: int, payload: MemoryPatch, principal: Principal 
     entry.content = payload.content.strip()
     entry.source = "manual"
     entry.updated_at = utcnow()
+    await _close_questions(session, entry_id)    # their own words now answer whatever was asked
     await session.commit()
     await session.refresh(entry)
     return _memory_json(entry)
@@ -1670,9 +1671,17 @@ async def edit_memory(entry_id: int, payload: MemoryPatch, principal: Principal 
 async def delete_memory(entry_id: int, principal: Principal = Depends(authenticate),
                         session: AsyncSession = Depends(get_session)):
     entry = await _owned_memory(session, _require_user(principal), entry_id)
+    # A question about a note that is gone would otherwise stay up, and a yes would bring it back
+    await _close_questions(session, entry_id)
     await session.delete(entry)
     await session.commit()
     return {"deleted": entry_id}
+
+
+async def _close_questions(session, memory_id):
+    for p in (await session.execute(select(MemoryProposal).where(
+            MemoryProposal.memory_id == memory_id, MemoryProposal.status == "pending"))).scalars():
+        p.status, p.resolved_at = "replaced", utcnow()
 
 
 _refreshing = set()
@@ -1781,8 +1790,10 @@ async def _memory_edit(user_id, memory, tool, args, seen_text, user_text="", con
         await db.commit()
     log.info("Agent proposed to %s a note for user %s: %r", action, user_id, entry.content)
     what = f'change it to "{text}"' if action == "update" else "forget it"
-    return (f'The user is asked whether to {what}; {key} stays as it is until they answer. For the rest '
-            "of this task go by what they said or the tool showed, not by the old note."), False
+    return (f"Not changed yet. The user is shown a question under your answer asking whether to {what}; "
+            f"{key} stays as it is until they answer. Do not tell them it is updated or forgotten: say the "
+            "question is waiting for them. For the rest of this task go by what they said or the tool "
+            "showed, not by the old note."), False
 
 
 NOTES_MIN_BILLIONS = 14     # smaller models were measured to record plans as facts and to duplicate notes
@@ -1828,14 +1839,25 @@ async def _check_notes(principal, session, user_id, conversation, model):
         MemoryEntry.user_id == user_id, MemoryEntry.scope == "user").order_by(MemoryEntry.id))).scalars())
     by_key = {f"n{i + 1}": note for i, note in enumerate(notes)}
     mine = {key for key, note in by_key.items() if note.source == "manual"}
-    waiting = await _pending_keys(session, by_key)
+    waiting = await _pending(session, by_key)
     # No note is kept out of the check: a change is only proposed, and the user decides
     changes = memory_tool.parse_changes(await _ask_helper(principal, memory_tool.check_request(
-        [(key, note.content, key in mine) for key, note in by_key.items()], exchange, model, waiting)),
+        [(key, note.content, key in mine) for key, note in by_key.items()], exchange, model, set(waiting))),
         {key: note.content for key, note in by_key.items()}, user_text)
     if not changes or not any(changes[k] for k in ("update", "delete", "add")):
         return
     said = changes["said"]
+    # Already asked about these words - by the agent during this turn, as a rule. Asking again in
+    # other words replaced the question the page was showing, and the answer to it then failed.
+    # Only the latest message counts: words from a turn before are a question already put, and new
+    # words now may differ again
+    latest = next((m.content or "" for m in reversed(conversation.messages) if m.role == "user"), "")
+    for kind in ("update", "delete"):
+        for key in [k for k in changes[kind] if k in waiting
+                    and memory_tool.said_by_user(waiting[k].said, latest)]:
+            changes[kind].pop(key) if kind == "update" else changes[kind].discard(key)
+    if not any(changes[k] for k in ("update", "delete", "add")):
+        return
     for key, text in changes["update"].items():
         await _propose(session, user_id, by_key[key], "update", text, said[key], "user", conversation.id)
     for key in changes["delete"]:
