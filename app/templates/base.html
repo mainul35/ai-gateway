@@ -31,10 +31,6 @@ try{ const t = localStorage.getItem('theme'); if(t === 'light' || t === 'dark') 
   --bad-line:light-dark(#fca5a5,#7f1d1d);
   --shadow:light-dark(rgba(15,23,42,.18),rgba(0,0,0,.4));
 }
-/* The theme switch in the bar at the top */
-.theme-btn{background:none;border:1px solid var(--border);border-radius:8px;color:var(--muted);
-           font:inherit;font-size:.85rem;font-weight:600;padding:.15rem .55rem;cursor:pointer}
-.theme-btn:hover{color:var(--text)}
 *{box-sizing:border-box}
 /* A page that fills the window and scrolls inside itself, rather than scrolling as a document */
 body.app{height:100vh;height:100dvh;overflow:hidden;display:flex;flex-direction:column}
@@ -47,10 +43,67 @@ header.nav{display:flex;align-items:center;gap:1.5rem;flex-wrap:wrap;
      padding:1rem 2rem;background:var(--card);border-bottom:1px solid var(--border)}
 .brand{font-weight:700;font-size:1.1rem;background:linear-gradient(135deg,var(--primary),#8b5cf6);
      -webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent}
-.nav a{color:var(--muted);text-decoration:none;font-weight:600;font-size:.95rem}
-.nav a:hover,.nav a.active{color:var(--text)}
+/* The menu: groups of links, then Manage and the account as drop-downs at the right */
+.brand{text-decoration:none}
+.nav-menu{display:flex;align-items:center;gap:1.5rem;flex:1;min-width:0}
+.nav-group{display:flex;align-items:center;gap:1.1rem}
+.nav-group + .nav-group{padding-left:1.5rem;border-left:1px solid var(--border)}
 .nav .spacer{margin-left:auto}
-.who{color:var(--muted);font-size:.9rem}
+.nav a,.nav summary{color:var(--muted);text-decoration:none;font-weight:600;font-size:.95rem}
+.nav a:hover,.nav summary:hover{color:var(--text)}
+/* The page you are on: brighter, with a bar under it */
+.nav-group a.active,.nav-drop > summary.active{color:var(--text);box-shadow:inset 0 -2px 0 var(--primary)}
+.nav-toggle{display:none;background:none;border:1px solid var(--border);border-radius:8px;color:var(--text);
+            font-size:1.1rem;line-height:1;padding:.3rem .55rem;cursor:pointer;margin-left:auto}
+.nav-drop{position:relative}
+.nav-drop > summary{list-style:none;cursor:pointer;display:flex;align-items:center;gap:.35rem;
+                    padding:.15rem 0;border-radius:6px}
+.nav-drop > summary::-webkit-details-marker{display:none}
+.nav-drop > summary::after{content:'';width:.4rem;height:.4rem;border:solid currentColor;border-width:0 2px 2px 0;
+                           transform:translateY(-2px) rotate(45deg);transition:transform .15s}
+.nav-drop[open] > summary::after{transform:translateY(1px) rotate(-135deg)}
+.nav-drop[open] > summary{color:var(--text)}
+.account > summary{max-width:14rem;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.nav-drop .drop{position:absolute;right:0;top:calc(100% + .6rem);z-index:50;min-width:13rem;
+                display:flex;flex-direction:column;padding:.35rem;background:var(--card);
+                border:1px solid var(--border);border-radius:10px;box-shadow:0 10px 30px var(--shadow)}
+.nav-drop .drop a{padding:.45rem .7rem;border-radius:6px;white-space:nowrap}
+.nav-drop .drop a:hover{background:var(--hover)}
+.nav-drop .drop a.active{color:var(--text);background:var(--hover);box-shadow:inset 3px 0 0 var(--primary)}
+.nav-drop hr{border:0;border-top:1px solid var(--border);margin:.35rem .2rem}
+.drop-head{padding:.4rem .7rem .2rem;font-weight:700;display:flex;flex-direction:column;word-break:break-word}
+.drop-head span,.drop-label{color:var(--muted);font-size:.8rem;font-weight:600;text-transform:capitalize}
+.drop-label{padding:.5rem .7rem .25rem}
+.theme-pick{display:flex;gap:.25rem;padding:0 .5rem .3rem}
+.theme-pick button{flex:1;background:none;border:1px solid var(--border);border-radius:7px;color:var(--muted);
+                   font:inherit;font-size:.78rem;font-weight:600;padding:.3rem .2rem;cursor:pointer;white-space:nowrap}
+.theme-pick button:hover{color:var(--text)}
+.theme-pick button[aria-checked="true"]{color:var(--text);border-color:var(--primary);background:var(--hover)}
+.nav a:focus-visible,.nav summary:focus-visible,.nav button:focus-visible{outline:2px solid var(--primary);outline-offset:2px}
+/* Tablets and narrow windows: the same bar, closer together */
+@media (max-width: 1000px){
+  header.nav{padding-left:1.25rem;padding-right:1.25rem;gap:1rem}
+  .nav-menu{gap:1rem}
+  .nav-group{gap:.8rem}
+  .nav-group + .nav-group{padding-left:1rem}
+  .account > summary{max-width:9rem}
+}
+/* Narrow windows: the brand and a menu button; the menu opens as one list under the bar */
+@media (max-width: 760px){
+  .nav-toggle{display:block}
+  .nav-menu{display:none;flex-basis:100%;flex-direction:column;align-items:stretch;gap:.25rem;
+            padding-top:.5rem;border-top:1px solid var(--border)}
+  header.nav.open .nav-menu{display:flex}
+  .nav-group{flex-direction:column;align-items:stretch;gap:0}
+  .nav-group + .nav-group{padding-left:0;border-left:0;border-top:1px solid var(--border);padding-top:.25rem}
+  .nav-menu a,.nav-drop > summary{padding:.55rem .25rem}
+  .nav-group a.active{box-shadow:inset 3px 0 0 var(--primary);padding-left:.6rem}
+  .nav-drop > summary.active{box-shadow:none}
+  .nav-drop{border-top:1px solid var(--border)}
+  .nav-drop .drop{position:static;box-shadow:none;border:0;padding:0 0 .3rem .6rem;min-width:0;background:none}
+  .account > summary{max-width:none}
+  .nav .spacer{display:none}
+}
 main{max-width:70rem;margin:0 auto;padding:2rem 1.5rem}
 h1{font-size:1.6rem;margin:0 0 .3rem}
 p.sub{color:var(--muted);margin:0 0 1.75rem}
@@ -114,7 +167,6 @@ label span.hint{display:block;font-size:.8rem;color:var(--muted);margin-top:.2re
 @media (max-width: 640px){
   header.nav{padding:.7rem 1rem;gap:.6rem 1rem}
   .nav a{font-size:.9rem}
-  .who{display:none}
   main{padding:1.25rem 1rem}
   h1{font-size:1.35rem}
   p.sub{margin-bottom:1.25rem}
@@ -130,41 +182,93 @@ label span.hint{display:block;font-size:.8rem;color:var(--muted);margin-top:.2re
 </head>
 <body class="{% block body_class %}{% endblock %}">
 {% if user %}
-<header class="nav">
-  <span class="brand">Model Gateway</span>
-  <a href="/dashboard">Dashboard</a>
-  <a href="/playground">Playground</a>
-  {% if 'video' in features_of(user) %}<a href="/videos">Videos</a>{% endif %}
-  <a href="/connect">Connect</a>
-  {% if user.role in ('manager', 'admin') %}{% if coding_on %}<a href="/tasks">Tasks</a>{% endif %}<a href="/users">Users</a>{% endif %}
-  {% if user.role == 'admin' %}<a href="/models">Models</a><a href="/mcp">Tools</a><a href="/settings/sso">SSO</a><a href="/docs">API</a>{% endif %}
-  <span class="spacer"></span>
-  <span class="who">{{ user.name }} &middot; {{ user.role }}</span>
-  <button type="button" class="theme-btn" id="themeBtn"></button>
-  <a href="/logout">Sign out</a>
+{# The menu in three parts: daily work and status on the left, the admin pages behind one Manage
+   menu, and the account (theme, sign out) at the right edge. The page you are on is marked. #}
+{% set here = request.url.path if request else '' %}
+{% macro item(href, label) %}<a href="{{ href }}"{% if here == href or here.startswith(href ~ '/') %} class="active" aria-current="page"{% endif %}>{{ label }}</a>{% endmacro %}
+{% if user.role == 'admin' %}{% set manage = [('/models', 'Models'), ('/mcp', 'Tool servers'), ('/users', 'Users & groups'), ('/settings/sso', 'Single sign-on')] %}
+{% elif user.role == 'manager' %}{% set manage = [('/users', 'Users & groups')] %}
+{% else %}{% set manage = [] %}{% endif %}
+<header class="nav" id="siteNav">
+  <a class="brand" href="/playground">Model Gateway</a>
+  <button type="button" class="nav-toggle" id="navToggle" aria-expanded="false" aria-controls="navMenu" aria-label="Menu">&#9776;</button>
+  <nav class="nav-menu" id="navMenu" aria-label="Main">
+    <div class="nav-group">
+      {{ item('/playground', 'Playground') }}
+      {% if 'video' in features_of(user) %}{{ item('/videos', 'Videos') }}{% endif %}
+      {% if coding_on and user.role in ('manager', 'admin') %}{{ item('/tasks', 'Tasks') }}{% endif %}
+    </div>
+    <div class="nav-group">
+      {{ item('/dashboard', 'Dashboard') }}
+      {{ item('/connect', 'Connect') }}
+    </div>
+    <span class="spacer"></span>
+    {% if manage %}
+    <details class="nav-drop">
+      <summary{% for href, _ in manage if here == href or here.startswith(href ~ '/') %}{% if loop.first %} class="active"{% endif %}{% endfor %}>Manage</summary>
+      <div class="drop">
+        {% for href, label in manage %}{{ item(href, label) }}{% endfor %}
+        {% if user.role == 'admin' %}<hr><a href="/docs">API reference</a>{% endif %}
+      </div>
+    </details>
+    {% endif %}
+    <details class="nav-drop account">
+      <summary title="Signed in as {{ user.name }} ({{ user.role }})">{{ user.name }}</summary>
+      <div class="drop">
+        <div class="drop-head">{{ user.name }}<span>{{ user.role }}</span></div>
+        <div class="drop-label" id="themeLabel">Theme</div>
+        <div class="theme-pick" role="radiogroup" aria-labelledby="themeLabel">
+          <button type="button" role="radio" data-theme-pick="system">&#9680; System</button>
+          <button type="button" role="radio" data-theme-pick="light">&#9728; Light</button>
+          <button type="button" role="radio" data-theme-pick="dark">&#9790; Dark</button>
+        </div>
+        <hr>
+        <a href="/logout">Sign out</a>
+      </div>
+    </details>
+  </nav>
 </header>
 {% endif %}
 <main>{% block content %}{% endblock %}</main>
 <script>
-/* System, Light, Dark in turn; remembered in this browser */
+/* The menu: one drop-down open at a time, closed by Esc or a click elsewhere; the menu button on
+   narrow windows; and the theme (System, Light or Dark), remembered in this browser */
 (function(){
-  const btn = document.getElementById('themeBtn');
-  if(!btn) return;
-  const ORDER = ['system', 'light', 'dark'];
-  const SHOW = {system: '◐ System', light: '☀ Light', dark: '☾ Dark'};
-  const current = () => document.documentElement.dataset.theme || 'system';
-  const show = () => {
-    btn.textContent = SHOW[current()];
-    btn.title = `Theme: ${current()}. Click for ${ORDER[(ORDER.indexOf(current()) + 1) % 3]}.`;
+  const header = document.getElementById('siteNav');
+  if(!header) return;
+  const drops = [...header.querySelectorAll('.nav-drop')];
+  const narrow = () => matchMedia('(max-width: 760px)').matches;
+  const closeDrops = (except) => drops.forEach(d => { if(d !== except) d.open = false; });
+  drops.forEach(d => d.addEventListener('toggle', () => { if(d.open && !narrow()) closeDrops(d); }));
+  const toggle = document.getElementById('navToggle');
+  const setMenu = (open) => {
+    header.classList.toggle('open', open);
+    toggle.setAttribute('aria-expanded', String(open));
   };
-  btn.addEventListener('click', () => {
-    const next = ORDER[(ORDER.indexOf(current()) + 1) % 3];
+  toggle.addEventListener('click', () => setMenu(!header.classList.contains('open')));
+  document.addEventListener('click', (e) => {
+    if(header.contains(e.target)) return;
+    if(!narrow()) closeDrops();
+    setMenu(false);
+  });
+  document.addEventListener('keydown', (e) => {
+    if(e.key !== 'Escape') return;
+    const open = drops.find(d => d.open);
+    if(open && !narrow()){ open.open = false; open.querySelector('summary').focus(); }
+    else if(header.classList.contains('open')){ setMenu(false); toggle.focus(); }
+  });
+
+  const picks = [...header.querySelectorAll('[data-theme-pick]')];
+  const current = () => document.documentElement.dataset.theme || 'system';
+  const show = () => picks.forEach(b => b.setAttribute('aria-checked', String(b.dataset.themePick === current())));
+  picks.forEach(b => b.addEventListener('click', () => {
+    const next = b.dataset.themePick;
     if(next === 'system') delete document.documentElement.dataset.theme;
     else document.documentElement.dataset.theme = next;
     try{ next === 'system' ? localStorage.removeItem('theme') : localStorage.setItem('theme', next); }catch(e){}
     show();
     document.dispatchEvent(new CustomEvent('themechange', {detail: next}));
-  });
+  }));
   show();
 })();
 </script>
