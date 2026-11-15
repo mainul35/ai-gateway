@@ -15,7 +15,12 @@
 #   - a command running in a terminal session (ssh, tmux) using any CPU (PROC_CPU_TTY_MIN), even
 #     with nobody typing - an idle shell, an editor or `top` left open is not work;
 #   - a download or package tool (DOWNLOAD_PROCESSES, DOWNLOAD_COMMANDS) running for 30 s or more,
-#     however slowly - a stalled download still means somebody wants it finished.
+#     however slowly - a slow download still means somebody wants it finished. One whose whole
+#     process tree has done nothing at all (no CPU, no read or write, no new child) for
+#     STALLED_MINUTES is stuck, not slow: an `apt upgrade` waiting on a question nobody is there to
+#     answer kept the machine up 9 h (2026-11-15). It stops counting and is named in the log.
+#     Suspend overrides its sleep lock (apt holds one); it resumes waiting after wake. With
+#     ACTION=poweroff a stuck apt/dpkg still counts: powering off mid-install can break packages.
 # Background services that are never idle (PROC_IGNORE: microk8s, its network, container
 # runtimes) are left out, and so is this check's own work. Each busy line names the process.
 #
@@ -52,6 +57,7 @@ CONF=${IDLE_SHUTDOWN_CONF:-/etc/default/idle-shutdown}
 : "${PROC_CPU_MIN:=10}"            # % of one core over the last interval: a process at work
 : "${PROC_CPU_TTY_MIN:=1}"         # ...for a command run in a terminal session
 : "${PROC_IO_MB_MIN:=20}"          # MB read+written a minute: a download, a copy, a build
+: "${STALLED_MINUTES:=60}"         # a download/package tool with no activity this long is stuck (0: never)
 # Never idle, never work: microk8s and its network, container runtimes, the kernel's own helpers
 : "${PROC_IGNORE:=kubelite|k8s-dqlite|calico|flanneld|containerd|dockerd|snapd|systemd-journald|multipathd}"
 # A terminal process that is not work by itself: shells, multiplexers, viewers, editors
@@ -64,6 +70,7 @@ CONF=${IDLE_SHUTDOWN_CONF:-/etc/default/idle-shutdown}
 
 LAST_BUSY=$STATE_DIR/last_busy
 LAST_CHECK=$STATE_DIR/last_check
+STALLED_FILE=$STATE_DIR/stalled   # stuck downloads/installs set aside by the last check, one a line
 mkdir -p "$STATE_DIR"
 
 log() { logger -t "$LOG_TAG" -- "$*"; }
@@ -76,6 +83,7 @@ working_processes() {
   PROC_CPU_MIN=$PROC_CPU_MIN PROC_CPU_TTY_MIN=$PROC_CPU_TTY_MIN PROC_IO_MB_MIN=$PROC_IO_MB_MIN \
   PROC_IGNORE=$PROC_IGNORE TTY_IGNORE=$TTY_IGNORE DOWNLOAD_PROCESSES=$DOWNLOAD_PROCESSES \
   DOWNLOAD_COMMANDS=$DOWNLOAD_COMMANDS BUSY_PROCESSES=$BUSY_PROCESSES \
+  STALLED_MINUTES=$STALLED_MINUTES ACTION=$ACTION STALLED_FILE=$STALLED_FILE \
   python3 - "$STATE_DIR/procs.json" "$$" <<'PY' 2>/dev/null
 import json, os, re, sys, time
 
@@ -97,15 +105,18 @@ for pid in filter(str.isdigit, os.listdir("/proc")):
             continue                                         # a kernel thread
         with open(f"/proc/{pid}/stat") as f:
             fields = f.read().rsplit(")", 1)[1].split()
-        io = 0
+        io = chars = 0
         try:
             with open(f"/proc/{pid}/io") as f:
                 counters = dict(line.split(": ") for line in f.read().splitlines())
             io = int(counters.get("read_bytes", 0)) + int(counters.get("write_bytes", 0))
+            # every read and write, sockets and terminals too: what a slow download still moves
+            chars = int(counters.get("rchar", 0)) + int(counters.get("wchar", 0))
         except (OSError, ValueError):
             pass
+        cpu = int(fields[11]) + int(fields[12])
         procs[pid] = {"ppid": int(fields[1]), "tty": int(fields[4]), "start": int(fields[19]),
-                      "cpu": int(fields[11]) + int(fields[12]), "io": io,
+                      "cpu": cpu, "io": io, "act": cpu + chars,
                       "name": os.path.basename(argv[0]), "cmd": " ".join(argv)[:160]}
     except (OSError, IndexError, ValueError):
         continue
@@ -126,19 +137,49 @@ try:
 except (OSError, ValueError):
     before = {}
 elapsed = max(1.0, time.time() - before.get("at", 0)) if before else None
-with open(state_path + ".new", "w") as f:
-    json.dump({"at": time.time(), "procs": {pid: [p["start"], p["cpu"], p["io"]] for pid, p in procs.items()}}, f)
-os.replace(state_path + ".new", state_path)
+old_procs = before.get("procs") or {}
+old_quiet = before.get("quiet") or {}
+now = time.time()
 
-reasons = []
+children = {}
+for pid, p in procs.items():
+    children.setdefault(str(p["ppid"]), []).append(pid)
+
+def tree_active(root):
+    """Did root or anything under it run, read, write or start since the last check?"""
+    todo = [root]
+    while todo:
+        pid = todo.pop()
+        p, old = procs[pid], old_procs.get(pid)
+        if not old or old[0] != p["start"] or len(old) < 4 or p["act"] != old[3]:
+            return True                                      # new, or did something
+        todo.extend(children.get(pid, []))
+    return False
+
+stalled_after = float(env.get("STALLED_MINUTES") or 0) * 60
+package_tools = set(env.get("BUSY_PROCESSES", "").split())
+quiet, stalled, reasons = {}, [], []
 for pid, p in procs.items():
     if pid in mine or (ignore and ignore.search(p["cmd"])):
         continue
     age = uptime - p["start"] / hz
     if age >= 30 and (p["name"] in downloads or (download_commands and download_commands.search(p["cmd"]))):
+        # A slow download still counts; one whose whole tree has done nothing for STALLED_MINUTES is
+        # stuck (an install waiting on a question nobody is there to answer). Not with poweroff for
+        # package tools: powering off in the middle of an install can leave packages half set up.
+        since = now
+        if elapsed and not tree_active(pid):
+            q = old_quiet.get(pid)
+            since = q[1] if q and q[0] == p["start"] else now
+        quiet[pid] = [p["start"], since]
+        idle = now - since
+        if stalled_after and idle >= stalled_after and not (
+                env.get("ACTION") == "poweroff" and p["name"] in package_tools):
+            stalled.append(f"{p['name']} idle {int(idle // 60)} min ({p['cmd'][:70]})")
+            continue
         reasons.append(f"{p['name']} running {int(age // 60)} min ({p['cmd'][:70]})")
         continue
-    old = (before.get("procs") or {}).get(pid) if elapsed else None
+    old = old_procs.get(pid) if elapsed else None
     if not old or old[0] != p["start"]:
         continue                                             # new since the last check: next time
     cpu = (p["cpu"] - old[1]) / hz / elapsed * 100
@@ -148,6 +189,13 @@ for pid, p in procs.items():
         reasons.append(f"{p['name']} running in a terminal ({cpu:.0f}% cpu: {p['cmd'][:70]})")
     elif cpu >= float(env["PROC_CPU_MIN"]) or mb >= float(env["PROC_IO_MB_MIN"]):
         reasons.append(f"{p['name']} working ({cpu:.0f}% cpu, {mb:.0f} MB/min: {p['cmd'][:70]})")
+
+with open(state_path + ".new", "w") as f:
+    json.dump({"at": now, "quiet": quiet,
+               "procs": {pid: [p["start"], p["cpu"], p["io"], p["act"]] for pid, p in procs.items()}}, f)
+os.replace(state_path + ".new", state_path)
+with open(env["STALLED_FILE"], "w") as f:
+    f.write("".join(s + "\n" for s in stalled))
 if reasons:
     print("; ".join(reasons[:3]) + (f" and {len(reasons) - 3} more" if len(reasons) > 3 else ""))
 PY
@@ -275,7 +323,8 @@ if [[ -n $busy_reason || ! -f $LAST_BUSY ]] || (( resumed )); then
 fi
 
 idle_for=$(( now - $(<"$LAST_BUSY") ))
-log "idle for $(( idle_for / 60 )) min (threshold ${IDLE_MINUTES})"
+stalled=$(paste -sd ';' "$STALLED_FILE" 2>/dev/null)
+log "idle for $(( idle_for / 60 )) min (threshold ${IDLE_MINUTES})${stalled:+; not counting stuck: $stalled}"
 
 if (( idle_for >= IDLE_MINUTES * 60 )); then
   if (( DRY_RUN )); then
@@ -298,5 +347,12 @@ if (( idle_for >= IDLE_MINUTES * 60 )); then
   fi
   echo "$now" > "$LAST_BUSY"     # so the first check after waking starts a fresh idle period
   unload_models
-  systemctl suspend
+  # A stuck install set aside above still holds its sleep lock (apt takes one), and logind refuses
+  # a plain suspend while it does. Override locks only then; anything else holding one is obeyed.
+  if [[ -s $STALLED_FILE ]]; then
+    log "suspending past the sleep locks of: $(paste -sd ';' "$STALLED_FILE")"
+    systemctl suspend --check-inhibitors=no || log "suspend failed"
+  else
+    systemctl suspend || log "suspend refused (a sleep lock? systemd-inhibit --list)"
+  fi
 fi
