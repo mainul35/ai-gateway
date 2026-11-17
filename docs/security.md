@@ -29,6 +29,18 @@ in API requests (`app/api_images.py`).
 API) are fetched by the gateway through `net.get` and sent on inline. Passed on as they were, the
 model server would have fetched them from inside the network with no check at all.
 
+## GitHub repositories given by address: `app/tools/repos.py`
+
+The agent's open_repository, list_repo_files, read_repo_file and search_repo tools clone a repository
+**bare** and shallow (`repos.explore.dir`, default `~/explore-repos`), and read it out of git itself
+(`git ls-tree`, `cat-file`, `grep`) with `workspace.HARDENING`: nothing is checked out, so no checkout
+filter, symbolic link or hook of the repository's runs or is followed here. They are the gateway's own
+tools, so managers and admins only. A public repository is read without a token and its clone is
+shared. A private one is read only with the asker's own dashboard token for that owner, or - for an
+admin, or an owner coding projects may come from - the gateway's token for it, and that clone is kept
+per person. Repositories over `repos.explore.max_mb` (1500) are refused. Starting a coding task with a
+github.com address adds it as a project by the Tasks page's own rules (`app/coding/projects.py`).
+
 ## Coding tasks: `app/coding/sandbox.py`, `app/coding/workspace.py`
 
 - **No way back to the host through git.** The worktree's `.git` pointer is mounted read-only in

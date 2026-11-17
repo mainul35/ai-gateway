@@ -35,7 +35,7 @@ from app.engine.supervisor import supervisor
 from app.routers.openai_v1 import PROXY_PATHS, forward
 from app.tools import (agent, chooser, device_files, documents, image_prompt, images, jobs, linkedin, map_plan,
                         map_web, maps, markdown, mcp_client, media, memory as memory_tool,
-                        photo, places, portrait, router as intent_router, self_tools, subtitles,
+                        photo, places, portrait, repos, router as intent_router, self_tools, subtitles,
                         turn_facts, understand, video_story, voices, web_search, written)
 
 log = logging.getLogger("playground")
@@ -2688,12 +2688,18 @@ def _to_agent(principal, payload, decision, category):
     (understand.needs_own_project), or a folder already connected to this conversation with code,
     reasoning or a long read asked for - the follow-ups to "explain my project" rarely name it again.
     """
-    if not payload.agent or decision.get("action") not in (intent_router.CHAT, intent_router.DOCUMENT):
+    if not payload.agent or decision.get("action") not in (intent_router.CHAT, intent_router.DOCUMENT,
+                                                           intent_router.SEARCH):
         return decision
     if payload.has_images or payload.attachments or principal.user is None:
         return decision
-    if not (device_files.is_enabled() and agent.is_available_to(principal)
-            and access.can_use_feature(principal, "agent")):
+    if not (agent.is_available_to(principal) and access.can_use_feature(principal, "agent")):
+        return decision
+    if repos.mentioned(payload.message) and repos.is_enabled() and self_tools.is_available_to(principal):
+        # A repository to look at is read where it is, with the tools that can, not guessed at or
+        # searched for on the web
+        return {**decision, "action": AGENT_ACTION, "agent_why": "it gives a GitHub repository to look at"}
+    if decision.get("action") == intent_router.SEARCH or not device_files.is_enabled():
         return decision
     if understand.needs_own_project(payload.message):
         why = "it needs your project's files"
@@ -4789,6 +4795,8 @@ async def run_agent(payload: AgentIn, principal: Principal = Depends(authenticat
         latest_said = next((m.content for m in reversed(payload.messages) if m.role == "user"), "")
         seen = [latest_said or ""]      # what this turn has shown: evidence a note may be changed on
         extra = [agent.about_self() if own else "",
+                 repos.GUIDE.format(server=self_tools.SERVER, sep=agent.SEPARATOR)
+                 if own and repos.is_enabled() else "",
                  device_files.guide(agent.SEPARATOR) if device else "",
                  memory_tool.tool_guide(memory["listed"](), agent.SEPARATOR) if memory else ""]
         messages = agent.with_system([{"role": m.role, "content": m.content} for m in payload.messages],
@@ -4862,6 +4870,13 @@ async def run_agent(payload: AgentIn, principal: Principal = Depends(authenticat
                                                            agent.arguments(call.get("arguments")),
                                                            "\n".join(seen), seen[0], payload.conversation_id)
                         elif server is self_tools.BUILTIN:
+                            if tool in self_tools.REPO_TOOLS and not widened:
+                                # Reading a repository is reading a project: the same room as a folder
+                                widened = True
+                                rounds = max(rounds, device_files.ROUNDS)
+                                budget.seconds = max(budget.seconds, device_files.SECONDS)
+                                room = min(device_files.CHARACTERS, int((backend.context_length or 65536) * 2))
+                                budget.characters += max(0, room - agent.MAX_TOOL_CHARS)
                             text, bad = await self_tools.call(
                                 tool, agent.arguments(call.get("arguments")),
                                 {"principal": principal, "model": payload.model,
