@@ -121,6 +121,7 @@ details.tuning label{margin-bottom:.85rem}
       border-radius:10px;padding:.45rem .7rem;white-space:pre-wrap}
 .sq-a{white-space:pre-wrap;line-height:1.55}
 .sq-a.md{white-space:normal}
+.sq-files .written{margin-top:.45rem}
 .sq-ask{flex:none;border-top:1px solid var(--border);padding:.6rem .8rem .8rem}
 .sq-ask textarea{width:100%;min-height:3.2rem;max-height:30vh;background:var(--bg);color:var(--text);
                  border:1px solid var(--border);border-radius:8px;padding:.5rem .6rem;font:inherit;resize:vertical}
@@ -2876,9 +2877,12 @@ function showTurn(tab, turn){
   answer.className = 'sq-a';
   answer.textContent = turn.answer || '';
   thread.append(asked, answer);
-  if(turn.answer) renderedHtml(turn.answer).then(html => {
-    if(html){ answer.classList.add('md'); answer.innerHTML = html; renderMath(answer); }
-  });
+  if(turn.answer){
+    renderedHtml(turn.answer).then(html => {
+      if(html){ answer.classList.add('md'); answer.innerHTML = html; renderMath(answer); }
+    });
+    offerSideFile(answer, turn.answer);
+  }
   return answer;
 }
 
@@ -2992,7 +2996,10 @@ async function answerAside(tab){
       answer.innerHTML = html;
       renderMath(answer);
     }else answer.textContent = text || '(no answer)';
-    if(text) tab.turns.push({question, asked, answer: text});
+    if(text){
+      tab.turns.push({question, asked, answer: text});
+      offerSideFile(answer, text);
+    }
   }catch(e){
     answer.textContent = e.name === 'AbortError' ? (text ? text + '\n\n(stopped)' : '(stopped)')
                                                  : 'That did not go through. ' + errorText(e);
@@ -4286,7 +4293,15 @@ function offerFiles(box, text){
   // Any answer as a file, a click away. The card that offered one waited for the question to ask
   // in the right words, and the router does not always see that a file was wanted either; the
   // answer is in the chat regardless, so turning it into a PDF or Markdown is always on offer.
-  if(text.trim().length < 40) return;
+  const row = saveAsRow(text, () => box._answerId || null, file => showWritten(box, file));
+  if(row) box.appendChild(row);
+}
+
+/* "Save as PDF / Markdown" under an answer: the conversation's own, or a side question's. made(file)
+   shows the finished file where the answer is; the file also opens beside the conversation. Nothing
+   for an answer too short to be worth a file. */
+function saveAsRow(text, messageId, made){
+  if(!text || text.trim().length < 40) return null;
   const row = document.createElement('div');
   row.className = 'as-file';
   row.innerHTML = '<span>Save as</span>' + documentKinds().map(kind =>
@@ -4300,8 +4315,8 @@ function offerFiles(box, text){
     chosen.textContent = chosen.dataset.as === 'pdf' ? 'Making the PDF\u2026' : 'Saving\u2026';
     try{
       const file = await api('/chat/written', {method: 'POST', headers: JSON_HEADERS,
-        body: JSON.stringify({text, format: chosen.dataset.as, message_id: box._answerId || null})});
-      showWritten(box, file);
+        body: JSON.stringify({text, format: chosen.dataset.as, message_id: messageId()})});
+      made(file);
       openFile(file.url, file.name, true);
     }catch(err){ showError('Could not make the file: ' + errorText(err)); }
     finally{
@@ -4309,7 +4324,7 @@ function offerFiles(box, text){
       buttons.forEach(b => { b.disabled = false; });
     }
   });
-  box.appendChild(row);
+  return row;
 }
 
 /* The question under an answer, asked about the work it did: "Did the code work?" under code,
@@ -4742,13 +4757,32 @@ async function sendDocument(text, format, again, request){
 /* The file under the answer it was written from; opening it shows it in the side panel */
 function showWritten(box, file){
   box.querySelector('.written')?.remove();
+  box.querySelector('.body').after(writtenRow(file));
+}
+
+function writtenRow(file){
   const row = document.createElement('div');
   row.className = 'written';
   row.innerHTML = `<a class="paper" data-written="1" href="${escapeHtml(file.url)}" title="Open the document">
       <span class="glyph">${paperGlyph(file)}</span>
       <span class="what"><span class="doc-name">${escapeHtml(file.name || 'document')}</span></span></a>
     <a class="linkish" href="${escapeHtml(file.url)}?download=1" download="${escapeHtml(file.name || 'document')}">Download</a>`;
-  box.querySelector('.body').after(row);
+  return row;
+}
+
+/* A side question's answer as a file: the same row as under the conversation's answers, kept with
+   that answer. Side questions are not messages of the conversation, so the file belongs to none. */
+function offerSideFile(answer, text){
+  answer.nextElementSibling?.classList.contains('sq-files') && answer.nextElementSibling.remove();
+  const row = saveAsRow(text, () => null, file => {
+    holder.querySelector('.written')?.remove();
+    holder.prepend(writtenRow(file));
+  });
+  if(!row) return;
+  const holder = document.createElement('div');
+  holder.className = 'sq-files';
+  holder.append(row);
+  answer.after(holder);
 }
 
 // --- sending ----------------------------------------------------------------
