@@ -100,7 +100,7 @@ Busy means any one of:
 | a job registered with `bin/keep-awake`, while its process lives | a job of yours that works quietly; the hold ends with the process, crashed or finished |
 | a process doing real work: `PROC_CPU_MIN` % of a core or `PROC_IO_MB_MIN` MB a minute of disk | a model generating, a download writing to disk, a build, a pipeline, a script started with `nohup` - measured from each process's CPU and disk counters between two checks |
 | a command in a terminal session (SSH, tmux) using any CPU (`PROC_CPU_TTY_MIN` %) | a long command you started, even with nobody typing; an idle shell, an editor or `top` does not count |
-| a download or install tool running 30 s or more (`DOWNLOAD_PROCESSES`, `DOWNLOAD_COMMANDS`, `BUSY_PROCESSES`) | `curl`, `wget`, `git`, `rsync`, `apt`, `ollama pull`, `docker pull`/`build`..., however slow |
+| a download or install tool running 30 s or more (`DOWNLOAD_PROCESSES`, `DOWNLOAD_COMMANDS`, `BUSY_PROCESSES`) | `curl`, `wget`, `git`, `rsync`, `apt`, `ollama pull`, `docker pull`/`build`..., however slow. Not once its whole process tree has done nothing for `STALLED_MINUTES` (60): it is stuck, like an `apt upgrade` waiting on a question nobody is there to answer. The log names it, and the suspend goes past apt's sleep lock; it carries on waiting after wake. With `ACTION=poweroff` a stuck `apt`/`dpkg` still counts |
 | 1-minute load average above `LOAD_MAX` | something CPU-heavy outside the gateway |
 | GPU above `GPU_UTIL_MAX` % (peak over 5 s) | inference or image generation not started through the gateway |
 | network above `NET_KBPS_MAX` KB/s | a download or transfer |
@@ -220,6 +220,7 @@ and ends every step with a check.
 | `NET_KBPS_MAX` | 500 | KB/s in + out on the default interface |
 | `CHECK_OLLAMA` | 0 | Ollama keeps models loaded permanently here, so a loaded model says nothing |
 | `BUSY_PROCESSES` | `apt apt-get dpkg rsync` | exact process names that count as busy |
+| `STALLED_MINUTES` | 60 | a download/install tool with no activity at all this long is stuck and stops counting; 0: never |
 | `INHIBIT_FILE` | `/run/stay-awake` | exists: never sleep |
 | `DEPLOY_LOCK` | `/tmp/gateway-deploying` | written by deploys; honoured while under 30 min old |
 
