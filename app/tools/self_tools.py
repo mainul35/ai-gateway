@@ -28,7 +28,7 @@ from app.db import session_factory
 from app.engine.profiles import load_profiles
 from app.engine.supervisor import supervisor
 from app.models import ApiKey, CodingTask, CodingTaskEvent, Project, UsageRecord, User, utcnow
-from app.tools import mcp_client
+from app.tools import mcp_client, repos
 from utils.ollama_client import ollama_host
 from utils.system_info import measure_hardware
 
@@ -333,7 +333,9 @@ TOOLS = {
                         "project. Give the task in full, as the person put it. Returns the task's number and a "
                         "link; tell the person the link. It does not wait for the task to finish."),
         "schema": {"type": "object", "properties": {
-            "project": {"type": "string", "description": "The project's name, or part of it, from coding_projects."},
+            "project": {"type": "string", "description": ("The project's name, or part of it, from coding_projects; "
+                                                          "or a github.com address, which is added as a project "
+                                                          "if it is not one yet.")},
             "task": {"type": "string", "description": "What should change, or what should be found out."}},
             "required": ["project", "task"]},
         "run": lambda args, context: start_coding_task(args, context),
@@ -347,6 +349,14 @@ TOOLS = {
         "context": True,
     },
 }
+
+
+# GitHub repositories given by address, read on the spot (app/tools/repos.py): run as the person asking,
+# because whose tokens may be used depends on who that is
+for _name, _tool in repos.TOOLS.items():
+    TOOLS[_name] = {"description": _tool["description"], "schema": _tool["schema"], "context": True,
+                    "run": (lambda run: lambda args, context: run(context.get("principal"), args))(_tool["run"])}
+REPO_TOOLS = set(repos.TOOLS)
 
 
 # --- coding tasks ------------------------------------------------------------------------------
@@ -382,6 +392,27 @@ async def _project_named(db, wanted):
     return found[0]
 
 
+async def _project_for(db, principal, wanted):
+    """(project, whether it was just added): a project by name, or a GitHub address - added as a
+    project, by the Tasks page's own rules, when it is not one yet."""
+    from app.coding import projects as coding_projects
+    found = repos.URL.search(wanted) or repos.NAME.match(wanted.strip())
+    if not found:
+        return await _project_named(db, wanted), False
+    owner, repo = found.group(1), repos._name(found.group(2))
+    name = f"{owner}/{repo}"
+    existing = (await db.execute(select(Project).where(func.lower(Project.name) == name.lower()))).scalar_one_or_none()
+    if existing is not None:
+        return existing, False
+    if not repos.URL.search(wanted):
+        return await _project_named(db, wanted), False    # owner/repo that is no project: say which there are
+    try:
+        project, _ = await coding_projects.add_git(db, principal, f"https://github.com/{owner}/{repo}")
+    except coding_projects.ProjectError as e:
+        raise PermissionError(str(e)) if e.status_code == 403 else ValueError(str(e))
+    return project, True
+
+
 async def start_coding_task(args, context):
     from app.coding import runner as coding_runner
     principal = context.get("principal")
@@ -393,7 +424,7 @@ async def start_coding_task(args, context):
     if not (model in available and "tools" in available[model].capabilities):
         model = DEFAULT_TASK_MODEL if DEFAULT_TASK_MODEL in available else model
     async with session_factory()() as db:
-        project = await _project_named(db, args.get("project"))
+        project, added = await _project_for(db, principal, str(args.get("project") or ""))
         task = await coding_runner.create(db, principal, project, str(args.get("task") or ""), model,
                                           context.get("conversation_id"), by="from a playground chat")
     link = f"{settings.public_base_url() or ''}/tasks?task={task.id}"
@@ -403,6 +434,8 @@ async def start_coding_task(args, context):
         if not remote.connection(project.id):
             note = (" The folder is not connected at the moment, so the task will stop at once: open the Tasks "
                     "page on that computer and connect it, or start the helper there, then press Continue.")
+    if added:
+        note = f" {project.name} was not a project yet, so it was added from its address." + note
     return {"task_id": task.id, "project": project.name, "model": model, "status": "queued", "link": link,
             "note": "It runs in the background; check on it with coding_task_status." + note}
 
@@ -445,7 +478,8 @@ def listing():
     return [{"server": SERVER, "name": name, "description": tool["description"], "schema": tool["schema"]}
             for name, tool in TOOLS.items()
             if (name not in KNOWLEDGE_TOOLS or knowledge.is_enabled())
-            and (name not in CODING_TOOLS or coding_runner.is_enabled())]
+            and (name not in CODING_TOOLS or coding_runner.is_enabled())
+            and (name not in REPO_TOOLS or repos.is_enabled())]
 
 
 async def call(tool, args, context=None):

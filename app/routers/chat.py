@@ -33,9 +33,9 @@ from app.models import (AnswerFeedback, ChatFile, Conversation, ConversationMess
                         SharedAccessRequest, SharedConversation, User, utcnow)
 from app.engine.supervisor import supervisor
 from app.routers.openai_v1 import PROXY_PATHS, forward
-from app.tools import (agent, chooser, device_files, documents, image_prompt, images, jobs, map_plan,
+from app.tools import (agent, chooser, device_files, documents, image_prompt, images, jobs, linkedin, map_plan,
                         map_web, maps, markdown, mcp_client, media, memory as memory_tool,
-                        photo, places, portrait, router as intent_router, self_tools, subtitles,
+                        photo, places, portrait, repos, router as intent_router, self_tools, subtitles,
                         turn_facts, understand, video_story, voices, web_search, written)
 
 log = logging.getLogger("playground")
@@ -1366,10 +1366,35 @@ async def complete(payload: CompleteIn, principal: Principal = Depends(authentic
     if payload.thinking is not None and backend.kind == "llamacpp":
         body["chat_template_kwargs"] = {"enable_thinking": payload.thinking}
     do_search = payload.web_search and web_search.is_available() and access.can_use_feature(principal, "web_search")
+    # A LinkedIn job or post pasted in the message is read whether or not web search is on: the user
+    # named the page. Same permission as search, since it is the same kind of outside fetch.
+    linked_pages = (linkedin.links(latest_words) if linkedin.is_enabled()
+                    and access.can_use_feature(principal, "web_search") else [])
 
     answer = _Answer()
 
     async def stream():
+        linked, unread = [], []
+        if linked_pages:
+            kinds = {link["kind"] for link in linked_pages}
+            what = "job" if kinds == {"job"} else "post" if kinds == {"post"} else "page"
+            yield _event("status", text=f"Reading the LinkedIn {what}{'s' if len(linked_pages) > 1 else ''}")
+            for link in linked_pages:
+                try:
+                    linked.append(linkedin.as_source(await linkedin.read(link)))
+                except linkedin.LinkedInError as e:
+                    unread.append((link["url"], str(e)))
+                    yield _event("notice", text=f"Could not read {link['url']}: {e}")
+            if unread:
+                # So the model says it could not read them, rather than inventing what they say
+                messages.insert(1 if messages and messages[0]["role"] == "system" else 0,
+                                {"role": "system", "content": linkedin.prompt([], unread)})
+            if linked and not do_search:
+                answer.sources = [{"title": r["title"], "url": r["url"]} for r in linked]
+                yield _event("sources", query=None, sources=answer.sources)
+                messages.insert(1 if messages and messages[0]["role"] == "system" else 0,
+                                {"role": "system", "content": linkedin.prompt(linked, [])})
+                yield _event("status", text="Writing the answer")
         if do_search:
             yield _event("status", text="Working out what to search for")
             latest = next((m.content for m in reversed(payload.messages) if m.role == "user"), "")
@@ -1388,6 +1413,9 @@ async def complete(payload: CompleteIn, principal: Principal = Depends(authentic
             if results:
                 yield _event("status", text=f"Reading the top {min(len(results), settings.search_fetch_pages())} pages")
                 results = await web_search.fetch_pages(results)
+            # The linked LinkedIn pages first: they are what the user pointed at
+            results = linked + [r for r in results if r["url"] not in {p["url"] for p in linked}]
+            if results:
                 answer.sources = [{"title": r["title"], "url": r["url"]} for r in results]
                 yield _event("sources", query=query, sources=answer.sources)
                 # After the user's own system prompt, if there is one, so theirs still comes first
@@ -2660,12 +2688,18 @@ def _to_agent(principal, payload, decision, category):
     (understand.needs_own_project), or a folder already connected to this conversation with code,
     reasoning or a long read asked for - the follow-ups to "explain my project" rarely name it again.
     """
-    if not payload.agent or decision.get("action") not in (intent_router.CHAT, intent_router.DOCUMENT):
+    if not payload.agent or decision.get("action") not in (intent_router.CHAT, intent_router.DOCUMENT,
+                                                           intent_router.SEARCH):
         return decision
     if payload.has_images or payload.attachments or principal.user is None:
         return decision
-    if not (device_files.is_enabled() and agent.is_available_to(principal)
-            and access.can_use_feature(principal, "agent")):
+    if not (agent.is_available_to(principal) and access.can_use_feature(principal, "agent")):
+        return decision
+    if repos.mentioned(payload.message) and repos.is_enabled() and self_tools.is_available_to(principal):
+        # A repository to look at is read where it is, with the tools that can, not guessed at or
+        # searched for on the web
+        return {**decision, "action": AGENT_ACTION, "agent_why": "it gives a GitHub repository to look at"}
+    if decision.get("action") == intent_router.SEARCH or not device_files.is_enabled():
         return decision
     if understand.needs_own_project(payload.message):
         why = "it needs your project's files"
@@ -4761,6 +4795,8 @@ async def run_agent(payload: AgentIn, principal: Principal = Depends(authenticat
         latest_said = next((m.content for m in reversed(payload.messages) if m.role == "user"), "")
         seen = [latest_said or ""]      # what this turn has shown: evidence a note may be changed on
         extra = [agent.about_self() if own else "",
+                 repos.GUIDE.format(server=self_tools.SERVER, sep=agent.SEPARATOR)
+                 if own and repos.is_enabled() else "",
                  device_files.guide(agent.SEPARATOR) if device else "",
                  memory_tool.tool_guide(memory["listed"](), agent.SEPARATOR) if memory else ""]
         messages = agent.with_system([{"role": m.role, "content": m.content} for m in payload.messages],
@@ -4834,6 +4870,13 @@ async def run_agent(payload: AgentIn, principal: Principal = Depends(authenticat
                                                            agent.arguments(call.get("arguments")),
                                                            "\n".join(seen), seen[0], payload.conversation_id)
                         elif server is self_tools.BUILTIN:
+                            if tool in self_tools.REPO_TOOLS and not widened:
+                                # Reading a repository is reading a project: the same room as a folder
+                                widened = True
+                                rounds = max(rounds, device_files.ROUNDS)
+                                budget.seconds = max(budget.seconds, device_files.SECONDS)
+                                room = min(device_files.CHARACTERS, int((backend.context_length or 65536) * 2))
+                                budget.characters += max(0, room - agent.MAX_TOOL_CHARS)
                             text, bad = await self_tools.call(
                                 tool, agent.arguments(call.get("arguments")),
                                 {"principal": principal, "model": payload.model,

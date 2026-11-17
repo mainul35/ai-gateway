@@ -16,9 +16,9 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app import github_access, knowledge, settings
+from app import github_access, knowledge
 from app.auth import Principal, require_admin, require_manager
-from app.coding import detect, remote, runner, workspace
+from app.coding import detect, projects, remote, runner, workspace
 from app.db import get_session
 from app.models import CodingTask, CodingTaskEvent, Project
 
@@ -130,24 +130,9 @@ def _require_owner(principal, project):
         raise HTTPException(status.HTTP_403_FORBIDDEN, "Only the person who added this project, or an admin, can do that")
 
 
-def allowed_owners():
-    """The GitHub owners a manager may add projects from: coding.github.owners, plus every owner the
-    gateway holds a token for (those are the repositories it is meant to work on). Admins may add any."""
-    listed = (settings.get("coding.github.owners", "CODING_GITHUB_OWNERS") or "").replace(",", " ").split()
-    return {o.lower() for o in listed} | {e["owner"].lower() for e in github_access.owners()}
-
-
 def _check_branch(name):
     if not workspace.valid_branch(name):
         raise HTTPException(status.HTTP_400_BAD_REQUEST, f"{name!r} is not a branch name")
-
-
-def _project_name(clone_url):
-    found = workspace.github_of(clone_url)
-    if found:
-        return f"{found[0]}/{found[1]}"
-    parts = [p for p in re.split(r"[/:]", clone_url.rstrip("/").removesuffix(".git")) if p]
-    return "/".join(parts[-2:]) if len(parts) >= 2 else parts[-1]
 
 
 @router.get("/projects")
@@ -160,45 +145,14 @@ async def list_projects(principal: Principal = Depends(require_manager), session
 async def add_project(payload: ProjectIn, principal: Principal = Depends(require_manager),
                       session: AsyncSession = Depends(get_session)):
     _enabled()
-    url = payload.clone_url.strip()
-    found_github = workspace.github_of(url)
-    if not found_github and not principal.is_admin:
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Give the project's GitHub address, "
-                                                          "e.g. https://github.com/owner/repo")
-    if not principal.is_admin and found_github[0].lower() not in allowed_owners():
-        raise HTTPException(status.HTTP_403_FORBIDDEN,
-                            f"Projects from {found_github[0]} are not allowed here; an admin can add them, "
-                            "or allow the owner (coding.github.owners)")
-    if payload.sandbox_network is not None and not principal.is_admin:
-        raise HTTPException(status.HTTP_403_FORBIDDEN, "Only an admin can choose whether a project gets a network")
-    if payload.base_branch:
-        _check_branch(payload.base_branch.strip())
-    if payload.deploy_command and not principal.is_admin:
-        raise HTTPException(status.HTTP_403_FORBIDDEN, "Only an admin can set a deploy command")
-    if payload.sandbox_image and not IMAGE.match(payload.sandbox_image):
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, "That is not a container image name")
-    name = _project_name(url)
-    if (await session.execute(select(Project).where(Project.name == name))).scalar_one_or_none():
-        raise HTTPException(status.HTTP_409_CONFLICT, f"{name} is already a project")
     try:
-        workspace.clone_path(name)
-        default_branch = await workspace.clone(name, url)
-    except workspace.GitError as e:
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, f"Could not clone it: {e}")
-    _check_branch((payload.base_branch or default_branch).strip())
-    found = detect.detect(detect.LocalFolder(workspace.clone_path(name)))
-    project = Project(name=name, kind="git", clone_url=url,
-                      base_branch=(payload.base_branch or default_branch).strip(),
-                      verify_command=(payload.verify_command if payload.verify_command is not None
-                                      else found["verify"]).strip(),
-                      sandbox_image=payload.sandbox_image or found["image"],
-                      sandbox_network=found["network"] if payload.sandbox_network is None else payload.sandbox_network,
-                      deploy_command=(payload.deploy_command or None),
-                      notes=payload.notes, added_by=principal.user.id if principal.user else None)
-    session.add(project)
-    await session.commit()
-    await session.refresh(project)
-    return _project_out(project, principal, detected=found["kind"])
+        project, kind = await projects.add_git(
+            session, principal, payload.clone_url, base_branch=payload.base_branch,
+            verify_command=payload.verify_command, sandbox_image=payload.sandbox_image,
+            sandbox_network=payload.sandbox_network, deploy_command=payload.deploy_command, notes=payload.notes)
+    except projects.ProjectError as e:
+        raise HTTPException(e.status_code, str(e))
+    return _project_out(project, principal, detected=kind)
 
 
 async def _local_name(session, wanted, user_id):
