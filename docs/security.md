@@ -21,7 +21,9 @@ Every URL that comes from a user, a search result, a web page or a model goes th
 - bodies are read up to a limit.
 
 Used by: web search page reading (`app/tools/web_search.py`), picture search
-(`app/tools/media.py`), and image URLs in API requests (`app/api_images.py`).
+(`app/tools/media.py`), LinkedIn jobs and posts linked in a chat message (`app/tools/linkedin.py`,
+only the www.linkedin.com page the link names, at most three a message, no login), and image URLs
+in API requests (`app/api_images.py`).
 
 **Image URLs in API requests** (`image_url` in the OpenAI API, `source.type=url` in the Messages
 API) are fetched by the gateway through `net.get` and sent on inline. Passed on as they were, the
