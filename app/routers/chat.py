@@ -1376,15 +1376,8 @@ async def complete(payload: CompleteIn, principal: Principal = Depends(authentic
     async def stream():
         linked, unread = [], []
         if linked_pages:
-            kinds = {link["kind"] for link in linked_pages}
-            what = "job" if kinds == {"job"} else "post" if kinds == {"post"} else "page"
-            yield _event("status", text=f"Reading the LinkedIn {what}{'s' if len(linked_pages) > 1 else ''}")
-            for link in linked_pages:
-                try:
-                    linked.append(linkedin.as_source(await linkedin.read(link)))
-                except linkedin.LinkedInError as e:
-                    unread.append((link["url"], str(e)))
-                    yield _event("notice", text=f"Could not read {link['url']}: {e}")
+            async for event in _read_linked_pages(linked_pages, linked, unread):
+                yield event
             if unread:
                 # So the model says it could not read them, rather than inventing what they say
                 messages.insert(1 if messages and messages[0]["role"] == "system" else 0,
@@ -4734,6 +4727,20 @@ async def _one_round(principal, body):
     return choices[0].get("message") or {}, answer.get("usage") or {}
 
 
+async def _read_linked_pages(links, linked, unread):
+    """Reads the LinkedIn pages a message names, as events to stream: what was read goes into linked
+    (as search-result sources), what could not be read into unread as (address, why)."""
+    kinds = {link["kind"] for link in links}
+    what = "job" if kinds == {"job"} else "post" if kinds == {"post"} else "page"
+    yield _event("status", text=f"Reading the LinkedIn {what}{'s' if len(links) > 1 else ''}")
+    for link in links:
+        try:
+            linked.append(linkedin.as_source(await linkedin.read(link)))
+        except linkedin.LinkedInError as e:
+            unread.append((link["url"], str(e)))
+            yield _event("notice", text=f"Could not read {link['url']}: {e}")
+
+
 @router.post("/agent")
 async def run_agent(payload: AgentIn, principal: Principal = Depends(authenticate),
                     session: AsyncSession = Depends(get_session)):
@@ -4801,6 +4808,17 @@ async def run_agent(payload: AgentIn, principal: Principal = Depends(authenticat
                  memory_tool.tool_guide(memory["listed"](), agent.SEPARATOR) if memory else ""]
         messages = agent.with_system([{"role": m.role, "content": m.content} for m in payload.messages],
                                      "\n\n".join(e for e in extra if e))
+        # A LinkedIn job or post in the message is read before the model starts, as in a plain chat:
+        # the agent has no tool that can open it, and would otherwise say it cannot
+        pages = (linkedin.links(latest_said) if linkedin.is_enabled()
+                 and access.can_use_feature(principal, "web_search") else [])
+        if pages:
+            linked, unread = [], []
+            async for event in _read_linked_pages(pages, linked, unread):
+                yield event
+            # Into the agent's own instructions: a second system message is refused by some templates
+            messages[0]["content"] += "\n\n" + linkedin.prompt(linked, unread)
+            seen.extend(page["content"] for page in linked)
         budget = agent.Budget()
         answer, finished = "", None
         # A folder on the person's computer, once they share one, makes this a turn that reads a
