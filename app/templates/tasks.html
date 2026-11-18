@@ -29,7 +29,33 @@ details.steps{margin:1rem 0}
 .app-row{display:flex;justify-content:space-between;gap:.8rem;padding:.45rem 0;border-top:1px solid var(--border)}
 .app-row:first-child{border-top:none}
 .ask-more{margin-top:1.2rem;border-top:1px solid var(--border);padding-top:1rem}
-.ask-more textarea{margin:.3rem 0 .5rem}
+.ask-more .lbl{display:block;margin-bottom:.35rem}
+/* The playground's message box: one rounded box with the words, what is attached, and its buttons */
+.composer{background:var(--card);border:1px solid var(--border);border-radius:14px;padding:.65rem .75rem}
+.composer:focus-within{border-color:var(--primary)}
+.composer.drop{border-style:dashed;border-color:var(--primary)}
+#newTask .composer textarea,.composer textarea{background:none;border:none;border-radius:0;padding:.15rem .2rem;resize:none;
+  width:100%;overflow-y:auto;min-height:3.2rem;max-height:35vh;font-size:.95rem;line-height:1.5;margin:0;
+  font-family:inherit;color:var(--text)}
+.composer textarea:focus{outline:none;border:none;box-shadow:none}
+.composer .tools{display:flex;gap:.5rem;flex-wrap:wrap;align-items:center;margin-top:.45rem}
+.composer .tools .spacer{margin-left:auto}
+.composer .tools .hint{font-size:.78rem;color:var(--muted)}
+.composer .tools select{background:none;border:none;color:var(--muted);font-size:.8rem;padding:.2rem;width:auto;cursor:pointer}
+.composer .tools select:hover{color:var(--text)}
+.icon-btn{width:1.9rem;height:1.9rem;padding:0;border-radius:50%;display:inline-flex;align-items:center;
+  justify-content:center;font-size:1.1rem;line-height:1;flex:none}
+.tiles{display:flex;flex-wrap:wrap;gap:.5rem;margin-bottom:.5rem}
+.tile{position:relative;width:4.5rem;height:4.5rem;border:1px solid var(--border);border-radius:10px;overflow:hidden;
+  background:var(--bg);font-size:.7rem;color:var(--muted)}
+.tile img{width:100%;height:100%;object-fit:cover;display:block}
+.tile.doc{display:flex;align-items:center;justify-content:center;padding:.3rem;text-align:center;word-break:break-all}
+.tile .bar{position:absolute;left:0;bottom:0;height:3px;background:var(--primary)}
+.tile.busy img{opacity:.55}
+.tile button{position:absolute;top:.15rem;right:.15rem;width:1.2rem;height:1.2rem;border-radius:50%;border:none;padding:0;
+  background:rgba(0,0,0,.65);color:#fff;font-size:.85rem;line-height:1;cursor:pointer}
+.given{display:flex;flex-wrap:wrap;gap:.5rem;margin:.2rem 0 .7rem}
+.given a.tile{display:block}
 .follows{margin:.2rem 0 .6rem}
 .follows summary{cursor:pointer;color:var(--muted);font-size:.85rem}
 details.steps>summary{cursor:pointer;font-size:1.17em;font-weight:700;margin-bottom:.6rem}
@@ -73,9 +99,16 @@ details.more summary{cursor:pointer;color:var(--muted);margin-bottom:.6rem}
     <label style="flex:1;min-width:12rem;margin:0"><span class="lbl">Model</span>
       <select id="taskModel"></select></label>
   </div>
-  <label style="margin:0"><span class="lbl">What should change</span>
-    <textarea id="taskText" rows="4" placeholder="Fix: clicking Try again three times starts three answers. Only one turn should run at a time."></textarea>
-  </label>
+  <label for="taskText" style="margin:0"><span class="lbl">What should change</span></label>
+  <div class="composer" id="newBox">
+    <div class="tiles" hidden></div>
+    <textarea id="taskText" rows="3" placeholder="Fix: clicking Try again three times starts three answers. Only one turn should run at a time."></textarea>
+    <div class="tools">
+      <button type="button" class="btn btn-secondary icon-btn" data-attach title="Attach a screenshot or document (you can also paste or drop it)">+</button>
+      <input type="file" multiple hidden accept="image/*,.pdf,.docx,.xlsx,.txt,.md,.csv,.log,.json,.yaml,.yml,.xml,.html">
+      <span class="hint">Paste or drop screenshots and documents</span>
+    </div>
+  </div>
   <div style="margin-top:.6rem"><span class="lbl">Apps it may use</span>
     <div class="app-pick" id="taskApps"><span class="muted">Loading&hellip;</span></div></div>
   <div class="row" style="margin-top:.7rem">
@@ -195,7 +228,7 @@ const LIVE = ['queued', 'running', 'approved', 'merged', 'deploying'];
 let projects = [], tasks = [], shown = null, lastEvent = 0, polling = null, acting = false;
 // The models a task can run on, and whether "What it did" was opened or closed by hand (kept while
 // the page is open, so a redraw when the task moves on does not undo it)
-let toolModels = [], stepsOpen = null;
+let toolModels = [], seeingModels = new Set(), stepsOpen = null;
 
 function showError(message){ const b = document.getElementById('error'); b.textContent = message; b.hidden = !message; }
 function showOk(message){ const b = document.getElementById('ok'); b.textContent = message; b.hidden = !message; }
@@ -456,6 +489,7 @@ async function loadModels(){
   const rank = m => { const i = preferred.indexOf(m.id); return i < 0 ? preferred.length : i; };
   data.sort((a, b) => rank(a) - rank(b));
   toolModels = data.map(m => m.id);
+  seeingModels = new Set(data.filter(m => (m.capabilities || []).includes('vision')).map(m => m.id));
   document.getElementById('taskModel').innerHTML = data.map(m => `<option>${escapeHtml(m.id)}</option>`).join('');
 }
 
@@ -569,6 +603,9 @@ async function showTask(id){
   box.innerHTML = `
     <h2 style="margin-top:0">#${t.id} ${pill(t.status)} ${t.stage ? `<span class="muted">${escapeHtml(t.stage)}</span>` : ''}</h2>
     ${asked(t.description)}
+    ${t.attached?.length ? `<div class="given">${t.attached.map(f => f.picture
+      ? `<a class="tile" href="${f.url}" target="_blank" rel="noopener" title="${escapeHtml(f.name)}"><img src="${f.url}" alt="${escapeHtml(f.name)}"></a>`
+      : `<a class="tile doc" href="${f.url}" target="_blank" rel="noopener">${escapeHtml(f.name)}</a>`).join('')}</div>` : ''}
     <p class="muted" style="font-size:.88rem">${escapeHtml(t.project)} &middot; ${escapeHtml(t.model)}
       ${t.apps?.length ? ` &middot; apps: ${t.apps.map(escapeHtml).join(', ')}` : ''}
       ${t.branch ? ` &middot; branch <code>${escapeHtml(t.branch)}</code>` : ''}
@@ -583,10 +620,21 @@ async function showTask(id){
     ${t.plan ? `<details><summary>Plan</summary>${written(t.plan, t.plan_html)}</details>` : ''}
     ${t.diff ? `<details open><summary>Changes</summary><pre class="diff">${renderDiff(t.diff)}</pre></details>` : ''}
     ${live ? '' : `<div class="ask-more">
-      <label style="margin:0"><span class="lbl">Ask more about this task or ${escapeHtml(t.project || 'its project')}</span>
-        <textarea id="askMore" rows="3" placeholder="How is the routing tested? / Now add a test for it."></textarea></label>
-      <button class="btn" data-ask-more>Ask</button>
-      <span class="muted" style="font-size:.85rem">A new task on the same project, starting from what this one found.</span></div>`}`;
+      <label for="askMore" class="lbl">Ask more about this task or ${escapeHtml(t.project || 'its project')}</label>
+      <div class="composer" id="askBox">
+        <div class="tiles" hidden></div>
+        <textarea id="askMore" rows="2" placeholder="How is the routing tested? / Now add a test for it.  (Ctrl+Enter asks)"></textarea>
+        <div class="tools">
+          <button type="button" class="btn btn-secondary icon-btn" data-attach title="Attach a screenshot or document (you can also paste or drop it)">+</button>
+      <input type="file" multiple hidden accept="image/*,.pdf,.docx,.xlsx,.txt,.md,.csv,.log,.json,.yaml,.yml,.xml,.html">
+          <span class="hint">A new task on the same project, starting from what this one found</span>
+          <span class="spacer"></span>
+          ${toolModels.length ? `<select id="askModel" title="The model the new task runs on">${toolModels.map(m =>
+            `<option ${m === (toolModels.includes(t.model) ? t.model : toolModels[0]) ? 'selected' : ''}>${escapeHtml(m)}</option>`).join('')}</select>` : ''}
+          <button class="btn" data-ask-more>Ask</button>
+        </div>
+      </div></div>`}`;
+  attached.set('askBox', []);
   document.getElementById('steps').addEventListener('toggle', e => { stepsOpen = e.target.open; });
   await pollEvents(t.status);
   if(LIVE.includes(t.status)) polling = setInterval(() => pollEvents(), 2500);
@@ -610,6 +658,139 @@ async function pollEvents(knownStatus){
   }
 }
 
+// --- attaching ---------------------------------------------------------------------------------
+// The playground's uploads: a screenshot pasted, dropped or picked goes to /chat/files straight
+// away, shows as a tile while it goes, and the task is given the file ids.
+
+const attached = new Map([['newBox', []]]);      // composer id -> [{id, url, name, picture, progress, request}]
+const isPicture = f => f.type.startsWith('image/');
+
+function drawTiles(boxId){
+  const box = document.getElementById(boxId);
+  if(!box) return;
+  const files = attached.get(boxId) || [];
+  const holder = box.querySelector('.tiles');
+  holder.hidden = !files.length;
+  holder.innerHTML = files.map((f, i) => `<div class="tile ${f.picture ? '' : 'doc'} ${f.request ? 'busy' : ''}"
+      title="${escapeHtml(f.name)}">${f.picture ? `<img src="${f.url}" alt="">` : escapeHtml(f.name)}
+      ${f.request ? `<span class="bar" style="width:${Math.round(f.progress * 100)}%"></span>` : ''}
+      <button type="button" data-unattach="${i}" title="${f.request ? 'Stop uploading' : 'Remove'}">&times;</button></div>`).join('');
+}
+
+function sendFile(file, tile, boxId){
+  return new Promise((resolve, reject) => {
+    const form = new FormData();
+    form.append('file', file, file.name || 'pasted.png');
+    const request = new XMLHttpRequest();
+    tile.request = request;
+    request.open('POST', '/chat/files');
+    request.upload.addEventListener('progress', e => {
+      if(e.lengthComputable){ tile.progress = e.loaded / e.total; drawTiles(boxId); }
+    });
+    request.addEventListener('load', () => {
+      if(request.status === 401){ location.href = '/login'; reject(new Error('signed out')); return; }
+      let body = {};
+      try{ body = JSON.parse(request.responseText); }catch(e){}
+      if(request.status >= 400) reject(new Error(body.detail || `HTTP ${request.status}`));
+      else resolve(body);
+    });
+    request.addEventListener('error', () => reject(new Error('the upload did not reach the server')));
+    request.addEventListener('abort', () => reject(new Error('cancelled')));
+    request.send(form);
+  });
+}
+
+async function attachFiles(boxId, files){
+  const list = attached.get(boxId) || [];
+  attached.set(boxId, list);
+  for(const file of files){
+    if(list.length >= 6){ showError('A task can be given at most 6 files.'); break; }
+    const picture = isPicture(file);
+    const tile = {name: file.name || (picture ? 'screenshot' : 'document'), picture, progress: 0,
+                  url: picture ? URL.createObjectURL(file) : ''};
+    list.push(tile);
+    drawTiles(boxId);
+    try{
+      const stored = await sendFile(file, tile, boxId);
+      if(tile.url) URL.revokeObjectURL(tile.url);
+      Object.assign(tile, {id: stored.id, url: stored.url, request: null,
+                           picture: picture && stored.kind !== 'document'});
+    }catch(e){
+      if(tile.url) URL.revokeObjectURL(tile.url);
+      list.splice(list.indexOf(tile), 1);
+      if(e.message !== 'cancelled') showError(`Could not attach ${tile.name}: ${e.message}`);
+    }
+    drawTiles(boxId);
+  }
+}
+
+// The ids to send, or null (with the reason shown) while something is still uploading
+function readyFiles(boxId){
+  const list = attached.get(boxId) || [];
+  if(list.some(f => f.request)){ showError('Wait for the attachments to finish uploading.'); return null; }
+  return list.map(f => f.id);
+}
+
+// A picture needs a model that can see: the chosen one, or else the first that can
+function canSee(model, boxId){
+  if(!(attached.get(boxId) || []).some(f => f.picture) || seeingModels.has(model)) return true;
+  const other = toolModels.find(m => seeingModels.has(m));
+  if(!other){ showError(`${model} cannot see pictures, and no model that can is available. Remove the pictures to go on.`); return false; }
+  const picker = boxId === 'askBox' ? document.getElementById('askModel') : document.getElementById('taskModel');
+  if(picker) picker.value = other;
+  showError(`${model} cannot see pictures, so ${other} is chosen instead. Press the button again to go on with it.`);
+  return false;
+}
+
+const boxOf = target => target?.closest?.('.composer');
+document.addEventListener('click', e => {
+  const attach = e.target.closest('[data-attach]');
+  if(attach){ boxOf(attach).querySelector('input[type=file]').click(); return; }
+  const remove = e.target.closest('[data-unattach]');
+  if(remove){
+    const boxId = boxOf(remove).id;
+    const list = attached.get(boxId) || [];
+    const tile = list[Number(remove.dataset.unattach)];
+    if(tile?.request) tile.request.abort();          // its upload's catch takes the tile away
+    else { list.splice(Number(remove.dataset.unattach), 1); drawTiles(boxId); }
+  }
+});
+document.addEventListener('change', e => {
+  if(e.target.matches('.composer input[type=file]')){
+    attachFiles(boxOf(e.target).id, [...e.target.files]);
+    e.target.value = '';
+  }
+});
+document.addEventListener('paste', e => {
+  const box = boxOf(e.target);
+  const files = [...(e.clipboardData?.files || [])];
+  if(box && files.length){ e.preventDefault(); attachFiles(box.id, files); }
+});
+document.addEventListener('dragover', e => {
+  const box = boxOf(e.target);
+  if(box && [...(e.dataTransfer?.types || [])].includes('Files')){ e.preventDefault(); box.classList.add('drop'); }
+});
+document.addEventListener('dragleave', e => { boxOf(e.target)?.classList.remove('drop'); });
+document.addEventListener('drop', e => {
+  const box = boxOf(e.target);
+  if(!box || !e.dataTransfer?.files?.length) return;
+  e.preventDefault();
+  box.classList.remove('drop');
+  attachFiles(box.id, [...e.dataTransfer.files]);
+});
+// The box grows with what is written, as the playground's does; Ctrl+Enter sends
+document.addEventListener('input', e => {
+  if(!e.target.matches('.composer textarea')) return;
+  e.target.style.height = 'auto';
+  e.target.style.height = e.target.scrollHeight + 'px';
+});
+document.addEventListener('keydown', e => {
+  if(e.key !== 'Enter' || !(e.ctrlKey || e.metaKey) || !e.target.matches('.composer textarea')) return;
+  e.preventDefault();
+  boxOf(e.target).id === 'askBox' ? document.querySelector('[data-ask-more]')?.click()
+                                   : document.getElementById('startTask').click();
+});
+
 // --- clicks ------------------------------------------------------------------------------------
 
 document.addEventListener('click', async e => {
@@ -621,13 +802,17 @@ document.addEventListener('click', async e => {
     const question = document.getElementById('askMore').value.trim();
     if(question.length < 3){ showError('Say what you want to know or have done.'); return; }
     if(acting) return;
+    const files = readyFiles('askBox');
+    if(!files) return;
     const t = tasks.find(t => t.id === shown) || {};
-    // The task's own model while it is there, the one chosen for new tasks when it is gone
-    const model = toolModels.includes(t.model) ? t.model : document.getElementById('taskModel').value;
+    // Chosen beside the box; the task's own model while it is there
+    const picker = document.getElementById('askModel');
+    const model = picker ? picker.value : (toolModels.includes(t.model) ? t.model : document.getElementById('taskModel').value);
+    if(!canSee(model, 'askBox')) return;
     acting = true; showError('');
     try{
       const next = await api(`/coding/tasks/${shown}/ask`, {method: 'POST', headers: {'Content-Type': 'application/json'},
-                                                           body: JSON.stringify({question, model})});
+                                                           body: JSON.stringify({question, model, files})});
       stepsOpen = null;
       await loadTasks(); await showTask(next.id);
     }catch(err){ showError(err.message); }
@@ -670,12 +855,16 @@ document.getElementById('startTask').addEventListener('click', async e => {
   const project_id = Number(document.getElementById('taskProject').value);
   if(!project_id){ showError('Add a project first.'); return; }
   if(description.length < 5){ showError('Say what should change.'); return; }
+  const files = readyFiles('newBox');
+  if(!files || !canSee(document.getElementById('taskModel').value, 'newBox')) return;
   acting = true; e.target.disabled = true; showError('');
   try{
     const task = await api('/coding/tasks', {method: 'POST', headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({project_id, description, model: document.getElementById('taskModel').value,
-                            apps: [...document.querySelectorAll('#taskApps input:checked')].map(i => i.value)})});
+                            apps: [...document.querySelectorAll('#taskApps input:checked')].map(i => i.value),
+                            files})});
     document.getElementById('taskText').value = '';
+    attached.set('newBox', []); drawTiles('newBox');
     stepsOpen = null;
     await loadTasks(); await showTask(task.id);
   }catch(err){ showError(err.message); }

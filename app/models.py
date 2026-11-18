@@ -300,6 +300,8 @@ class CodingTask(Base):
     state: Mapped[str | None] = mapped_column(Text, nullable=True)
     # JSON list of the outside apps (tool servers) the person let this task use; none when empty
     apps: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # JSON list of the person's uploads (ChatFile ids) given with the question: screenshots, documents
+    files: Mapped[str | None] = mapped_column(Text, nullable=True)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
     approved_by: Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
