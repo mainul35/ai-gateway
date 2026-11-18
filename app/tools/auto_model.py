@@ -12,7 +12,7 @@ import json
 import logging
 from datetime import timedelta
 
-from app import access, backends, feedback, settings, usage as usage_log
+from app import access, backends, cloud_models, feedback, settings, usage as usage_log
 from app.db import session_factory
 from app.engine.supervisor import supervisor
 from app.models import utcnow
@@ -74,8 +74,8 @@ async def choose(principal, messages, has_images=False, needs_tools=False):
     for name, backend in (await backends.available_models()).items():
         if not access.can_use_model(principal, name):
             continue
-        if backend.kind == "cloud":
-            continue        # paid per token: used when someone picks it, never picked for them
+        if not cloud_models.auto_may_pick(name):
+            continue        # a cloud model whose provider has not let auto choose it (Models page)
         if needs_tools and backend.capabilities and "tools" not in backend.capabilities:
             continue
         details = backend.details or {}

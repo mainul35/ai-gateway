@@ -12,4 +12,3 @@ wake/wake.env
 .ci-venv/
 state/
 config/engines.local.yaml
-config/cloud.yaml

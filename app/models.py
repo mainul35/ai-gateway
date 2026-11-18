@@ -458,3 +458,24 @@ class SharedAccessRequest(Base):
     requester_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
     status: Mapped[str] = mapped_column(String(16), default="pending")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class CloudProvider(Base):
+    """A cloud API whose models the gateway offers, set up on the Models page (app/cloud_models.py).
+
+    Everything about it lives here and is changed from that page: the address, the models and what
+    each can do, who may use them, whether auto may pick them. The API key is stored sealed
+    (app/secretbox.py) and never leaves the server.
+    """
+    __tablename__ = "cloud_providers"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    name: Mapped[str] = mapped_column(String(32), unique=True)        # in front of each model: <name>/<id>
+    label: Mapped[str] = mapped_column(String(60), default="")
+    base_url: Mapped[str] = mapped_column(String(300))
+    key_sealed: Mapped[str | None] = mapped_column(Text, nullable=True)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    everyone: Mapped[bool] = mapped_column(Boolean, default=False)     # not only admins
+    auto_pick: Mapped[bool] = mapped_column(Boolean, default=False)    # auto may choose its models
+    models: Mapped[str] = mapped_column(Text, default="[]")            # JSON: [{id, vision, tools, thinking, context}]
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)

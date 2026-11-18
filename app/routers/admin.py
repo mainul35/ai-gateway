@@ -1828,6 +1828,8 @@ async def check_mcp_server(payload: McpCheck, _: Principal = Depends(require_adm
 class CloudModelIn(BaseModel):
     id: str = Field(min_length=1, max_length=128)
     vision: bool = False
+    tools: bool = True
+    thinking: bool = False
     context: int | None = None
 
 
@@ -1838,19 +1840,21 @@ class CloudProviderIn(BaseModel):
     api_key: str = Field(default="", max_length=400)     # blank keeps the one set
     enabled: bool = True
     everyone: bool = False
+    auto_pick: bool = False
     models: list[CloudModelIn] = Field(default_factory=list, max_length=cloud_models.MOST_MODELS)
 
 
 @router.get("/cloud")
-async def list_cloud_providers(_: Principal = Depends(require_admin)):
+async def list_cloud_providers(_: Principal = Depends(require_admin),
+                               session: AsyncSession = Depends(get_session)):
     """Cloud providers and their models; whether each has a key, never the key."""
-    return cloud_models.everything()
+    return await cloud_models.everything(session)
 
 
-def _cloud_saved(payload, renaming_from=None):
+async def _cloud_saved(session, payload, renaming_from=None):
     entry = payload.model_dump(exclude={"api_key"})
     try:
-        saved = cloud_models.save(entry, payload.api_key, renaming_from=renaming_from)
+        saved = await cloud_models.save(session, entry, payload.api_key, renaming_from=renaming_from)
     except cloud_models.CloudError as e:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, str(e))
     backends.forget_discovery()
@@ -1858,19 +1862,22 @@ def _cloud_saved(payload, renaming_from=None):
 
 
 @router.post("/cloud", status_code=status.HTTP_201_CREATED)
-async def add_cloud_provider(payload: CloudProviderIn, _: Principal = Depends(require_admin)):
-    return _cloud_saved(payload)
+async def add_cloud_provider(payload: CloudProviderIn, _: Principal = Depends(require_admin),
+                             session: AsyncSession = Depends(get_session)):
+    return await _cloud_saved(session, payload)
 
 
 @router.put("/cloud/{name}")
-async def update_cloud_provider(name: str, payload: CloudProviderIn, _: Principal = Depends(require_admin)):
-    return _cloud_saved(payload, renaming_from=name)
+async def update_cloud_provider(name: str, payload: CloudProviderIn, _: Principal = Depends(require_admin),
+                                session: AsyncSession = Depends(get_session)):
+    return await _cloud_saved(session, payload, renaming_from=name)
 
 
 @router.delete("/cloud/{name}")
-async def remove_cloud_provider(name: str, _: Principal = Depends(require_admin)):
+async def remove_cloud_provider(name: str, _: Principal = Depends(require_admin),
+                                session: AsyncSession = Depends(get_session)):
     try:
-        cloud_models.remove(name)
+        await cloud_models.remove(session, name)
     except cloud_models.CloudError as e:
         raise HTTPException(status.HTTP_404_NOT_FOUND, str(e))
     backends.forget_discovery()
@@ -1884,9 +1891,10 @@ class CloudListIn(BaseModel):
 
 
 @router.post("/cloud/models")
-async def cloud_provider_models(payload: CloudListIn, _: Principal = Depends(require_admin)):
+async def cloud_provider_models(payload: CloudListIn, _: Principal = Depends(require_admin),
+                                session: AsyncSession = Depends(get_session)):
     """What the provider says it serves, so the admin can tick models instead of typing them."""
-    key = payload.api_key.strip() or (cloud_models.api_key(payload.name) if payload.name else "")
+    key = payload.api_key.strip() or (await cloud_models.saved_key(session, payload.name) if payload.name else "")
     try:
         return {"models": await cloud_models.offered(payload.base_url, key),
                 "base_url": cloud_models.openai_base(payload.base_url)}

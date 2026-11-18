@@ -5,6 +5,7 @@ Models come from two places:
   * config/models.yaml, for explicit entries and for overrides of discovered ones
 """
 import asyncio
+import logging
 import os
 import re
 import time
@@ -16,6 +17,7 @@ from app import cloud_models, settings
 from app.engine.profiles import load_profiles
 from utils.ollama_client import ollama_host
 
+log = logging.getLogger(__name__)
 _cache = {"expires_at": 0.0, "models": {}}
 # Ollama model digest -> what /api/show said about it; a digest never changes what it is
 _capabilities_by_digest = {}
@@ -184,7 +186,11 @@ async def available_models(force_refresh=False):
 
     models = await _discover_ollama()
     models.update(_engine_models())  # our tuned llama.cpp profiles win over the Ollama copy
-    models.update(cloud_models.backends())  # set up on the Models page (config/cloud.yaml)
+    try:
+        await cloud_models.refresh()        # set up on the Models page, kept in the database
+    except Exception as e:                  # the last providers read stay in use
+        log.warning("Could not read the cloud providers: %s", e)
+    models.update(cloud_models.backends())
     models.update(_load_model_file())  # explicit config wins over discovery
     _cache.update(expires_at=now + settings.discovery_ttl(), models=models)
     return models
