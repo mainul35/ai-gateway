@@ -31,7 +31,7 @@ from sqlalchemy import select, update
 
 from app import access, backends, knowledge, settings
 from app.auth import Principal
-from app.coding import remote, sandbox, tools as task_tools, workspace
+from app.coding import apps as task_apps, remote, sandbox, tools as task_tools, workspace
 from app.db import session_factory
 from app.models import CodingTask, CodingTaskEvent, Project, User, utcnow
 
@@ -173,7 +173,7 @@ async def check_model(principal, model):
         raise ValueError(f"{model} cannot call tools; pick one that can")
 
 
-async def create(session, principal, project, description, model, conversation_id=None, by=""):
+async def create(session, principal, project, description, model, conversation_id=None, by="", apps=None):
     """Queues a task: the one place the rules for starting one live, used by the Tasks page and by
     the playground agent. PermissionError or ValueError say why it cannot start."""
     if principal.user is None:
@@ -188,8 +188,9 @@ async def create(session, principal, project, description, model, conversation_i
     description = (description or "").strip()
     if len(description) < 5:
         raise ValueError("Say what the task should do")
+    chosen = task_apps.check(principal, apps or [])
     task = CodingTask(project_id=project.id, user_id=principal.user.id, conversation_id=conversation_id,
-                      description=description[:20_000], model=model)
+                      description=description[:20_000], model=model, apps=json.dumps(chosen) if chosen else None)
     session.add(task)
     await session.commit()
     await session.refresh(task)
@@ -600,7 +601,21 @@ async def run(task_id):
                 s["name"].endswith(repo) for s in await knowledge.list_sources())
             explore_set, edit_set = task_tools.explore_tools(indexed), task_tools.edit_tools(indexed)
 
+        # The outside apps this task was allowed, as more tools in both steps
+        app_names = ""
+        if task.apps:
+            app_tools, where, trouble = await task_apps.tools_for(principal, json.loads(task.apps))
+            for problem in trouble:
+                await event(task_id, "note", f"Leaving out {problem}")
+            if app_tools:
+                explore_set, edit_set = explore_set + app_tools, edit_set + app_tools
+                toolbox = task_apps.WithApps(toolbox, where)
+                app_names = ", ".join(sorted({server.name for server, _ in where.values()}))
+                await event(task_id, "note", f"It may use {len(app_tools)} tools of {app_names}")
+
         owner_notes = f"\nNotes about this project from its owner:\n{project.notes}" if project.notes else ""
+        if app_names:
+            owner_notes += task_apps.GUIDE.format(apps=app_names)
         if resuming:
             progress.update({k: saved[k] for k in ("stage", "messages", "summary") if k in saved})
             # The model's own notes come back with it; a task saved before notes existed starts with none

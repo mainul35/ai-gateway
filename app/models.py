@@ -298,6 +298,8 @@ class CodingTask(Base):
     # JSON: where the task had got to - its stage, the whole conversation with the model, its
     # attempts - saved after every step, so a failed or stopped task can be continued, not restarted
     state: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # JSON list of the outside apps (tool servers) the person let this task use; none when empty
+    apps: Mapped[str | None] = mapped_column(Text, nullable=True)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
     approved_by: Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)

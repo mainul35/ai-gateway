@@ -20,7 +20,18 @@ dialog input,dialog textarea,dialog select,#newTask textarea,#newTask select{wid
 .ev .k{font-size:.72rem;text-transform:uppercase;letter-spacing:.04em;color:var(--muted);margin-right:.4rem}
 .ev.stage{font-weight:600}.ev.error{color:var(--danger)}.ev.review,.ev.done,.ev.answer{color:var(--success)}
 .ev details summary{cursor:pointer;color:var(--muted)}
-details.steps{margin-top:1.2rem}
+details.steps{margin:1rem 0}
+.page-tabs{margin-top:.4rem}
+.page-tabs .count{font-weight:400;color:var(--muted);margin-left:.25rem}
+.app-pick{display:flex;flex-wrap:wrap;gap:.35rem .9rem;margin:.2rem 0 0}
+.app-pick label{display:inline-flex;align-items:center;gap:.35rem;margin:0;width:auto;font-size:.9rem}
+.app-pick input{width:auto;margin:0}
+.app-row{display:flex;justify-content:space-between;gap:.8rem;padding:.45rem 0;border-top:1px solid var(--border)}
+.app-row:first-child{border-top:none}
+.ask-more{margin-top:1.2rem;border-top:1px solid var(--border);padding-top:1rem}
+.ask-more textarea{margin:.3rem 0 .5rem}
+.follows{margin:.2rem 0 .6rem}
+.follows summary{cursor:pointer;color:var(--muted);font-size:.85rem}
 details.steps>summary{cursor:pointer;font-size:1.17em;font-weight:700;margin-bottom:.6rem}
 details.steps>summary .muted{font-size:.8rem;font-weight:400;margin-left:.4rem}
 .model-pick{display:inline-flex;align-items:center;gap:.4rem;margin:0;width:auto;font-size:.88rem}
@@ -48,7 +59,13 @@ details.more summary{cursor:pointer;color:var(--muted);margin-bottom:.6rem}
 <div id="error" class="note err" hidden></div>
 <div id="ok" class="note ok" hidden></div>
 
-<div class="card" id="newTask" style="margin-bottom:1.25rem">
+<div class="tabs page-tabs" id="pageTabs" role="tablist">
+  <button type="button" class="on" data-page="tasks">Tasks <span class="count" id="taskCount"></span></button>
+  <button type="button" data-page="new">New task</button>
+  <button type="button" data-page="connections">Connections</button>
+</div>
+
+<div class="card" id="newTask" data-page-pane="new" hidden style="margin-bottom:1.25rem">
   <h2>New task</h2>
   <div class="row" style="gap:.75rem;margin-bottom:.6rem">
     <label style="flex:1;min-width:12rem;margin:0"><span class="lbl">Project</span>
@@ -59,6 +76,8 @@ details.more summary{cursor:pointer;color:var(--muted);margin-bottom:.6rem}
   <label style="margin:0"><span class="lbl">What should change</span>
     <textarea id="taskText" rows="4" placeholder="Fix: clicking Try again three times starts three answers. Only one turn should run at a time."></textarea>
   </label>
+  <div style="margin-top:.6rem"><span class="lbl">Apps it may use</span>
+    <div class="app-pick" id="taskApps"><span class="muted">Loading&hellip;</span></div></div>
   <div class="row" style="margin-top:.7rem">
     <button class="btn" id="startTask">Start</button>
     <button class="btn btn-secondary" id="addProject">Add a project</button>
@@ -66,6 +85,15 @@ details.more summary{cursor:pointer;color:var(--muted);margin-bottom:.6rem}
   </div>
 </div>
 
+<div data-page-pane="connections" hidden>
+<div class="card" id="appsCard" style="margin-bottom:1.25rem">
+  <h2>Apps</h2>
+  <p class="muted" style="margin:.2rem 0 .8rem;font-size:.9rem">Outside applications a task can work with
+    through their tools - an issue tracker, a chat, a wiki, a database: read a ticket and fix it, then say so
+    where it was asked. A task uses only the apps ticked when it is started. What it does in an app happens at
+    once, without the review its code changes get, so it changes things there only when the task asks.</p>
+  <div id="appList" class="muted">Loading&hellip;</div>
+</div>
 {% if user.role == 'admin' %}
 <div class="card" id="githubCard" style="margin-bottom:1.25rem">
   <h2>GitHub access</h2>
@@ -85,8 +113,9 @@ details.more summary{cursor:pointer;color:var(--muted);margin-bottom:.6rem}
   </form>
 </div>
 {% endif %}
+</div>
 
-<div class="tasks-layout">
+<div class="tasks-layout" data-page-pane="tasks">
   <div>
     <h2 style="font-size:1rem">Tasks</h2>
     <div id="taskList" class="muted">Loading&hellip;</div>
@@ -430,8 +459,33 @@ async function loadModels(){
   document.getElementById('taskModel').innerHTML = data.map(m => `<option>${escapeHtml(m.id)}</option>`).join('');
 }
 
+// The tabs of the page: the tasks, starting one, and what tasks can connect to
+function showPage(page){
+  document.querySelectorAll('#pageTabs [data-page]').forEach(b => b.classList.toggle('on', b.dataset.page === page));
+  document.querySelectorAll("[data-page-pane]").forEach(p => { p.hidden = p.dataset.pagePane !== page; });
+  try{ localStorage.setItem('tasks.page', page); }catch(e){ /* only a convenience */ }
+}
+document.querySelectorAll('#pageTabs [data-page]').forEach(b => b.addEventListener('click', () => showPage(b.dataset.page)));
+
+async function loadApps(){
+  let data;
+  try{ data = await api('/coding/apps'); }
+  catch(e){ document.getElementById('appList').textContent = 'Could not load the apps: ' + e.message; return; }
+  const add = data.can_add ? ' <a href="/mcp">Add or switch on apps</a> on the Tool servers page.' : ' An admin adds them.';
+  document.getElementById('appList').innerHTML = data.apps.length
+    ? data.apps.map(a => `<div class="app-row"><span><b>${escapeHtml(a.name)}</b>
+        <span class="muted">${escapeHtml(a.description || '')}</span></span></div>`).join('')
+      + `<p class="muted" style="font-size:.85rem;margin:.6rem 0 0">${add}</p>`
+    : `<span>No apps are connected yet.${add}</span>`;
+  document.getElementById('taskApps').innerHTML = data.apps.length
+    ? data.apps.map(a => `<label title="${escapeHtml(a.description || '')}"><input type="checkbox" value="${escapeHtml(a.name)}">
+        ${escapeHtml(a.name)}</label>`).join('')
+    : `<span class="muted" style="font-size:.88rem">None connected yet - see <a href="#" data-goto="connections">Connections</a>.</span>`;
+}
+
 async function loadTasks(){
   tasks = (await api('/coding/tasks')).tasks;
+  document.getElementById('taskCount').textContent = tasks.length || '';
   document.getElementById('taskList').innerHTML = tasks.length ? tasks.map(t => `
     <button class="task-row ${shown === t.id ? 'active' : ''}" data-task="${t.id}">
       <span class="what">#${t.id} ${escapeHtml(t.description.split('\n')[0])}</span>
@@ -470,7 +524,20 @@ function written(text, html){
   return html ? `<div class="md task-md">${html}</div>` : `<p class="prose">${escapeHtml(text)}</p>`;
 }
 
+// What a task was asked; for a follow-up, the earlier task it carries folded away beneath
+const FOLLOWS = '\n\n---\nThis follows task #';
+function asked(description){
+  const at = description.indexOf(FOLLOWS);
+  if(at < 0) return `<p class="prose">${escapeHtml(description)}</p>`;
+  const earlier = description.slice(at + FOLLOWS.length);
+  const id = parseInt(earlier, 10);
+  return `<p class="prose">${escapeHtml(description.slice(0, at))}</p>
+    <details class="follows"><summary>Follows <a href="#" data-task="${id}">task #${id}</a> - what it was asked and found</summary>
+      <p class="prose muted" style="font-size:.85rem">${escapeHtml(earlier.slice(String(id).length).replace(/^, which was asked:/, 'Asked:'))}</p></details>`;
+}
+
 async function showTask(id){
+  showPage('tasks');
   shown = id; lastEvent = 0;
   clearInterval(polling);
   document.querySelectorAll('.task-row').forEach(r => r.classList.toggle('active', Number(r.dataset.task) === id));
@@ -501,19 +568,25 @@ async function showTask(id){
   const live = LIVE.includes(t.status);
   box.innerHTML = `
     <h2 style="margin-top:0">#${t.id} ${pill(t.status)} ${t.stage ? `<span class="muted">${escapeHtml(t.stage)}</span>` : ''}</h2>
-    <p class="prose">${escapeHtml(t.description)}</p>
+    ${asked(t.description)}
     <p class="muted" style="font-size:.88rem">${escapeHtml(t.project)} &middot; ${escapeHtml(t.model)}
+      ${t.apps?.length ? ` &middot; apps: ${t.apps.map(escapeHtml).join(', ')}` : ''}
       ${t.branch ? ` &middot; branch <code>${escapeHtml(t.branch)}</code>` : ''}
       ${t.pr_url ? ` &middot; <a href="${escapeHtml(t.pr_url)}" target="_blank" rel="noopener">pull request</a>` : ''}</p>
     ${t.error ? `<div class="note err">${escapeHtml(t.error)}</div>` : ''}
     ${gone ? `<div class="note warn"><b>${escapeHtml(t.model)}</b> is no longer available. Pick another model to continue or retry on.</div>` : ''}
     <div class="actions">${actions.join('')}${picker}</div>
+    <details class="steps" id="steps" ${(stepsOpen ?? live) ? 'open' : ''}>
+      <summary>Execution steps <span class="muted" id="stepCount"></span></summary>
+      <div class="events" id="events"></div></details>
     ${t.summary ? `<h3>${t.status === 'done' && !t.diff ? 'Answer' : 'Summary'}</h3>${written(t.summary, t.summary_html)}` : ''}
     ${t.plan ? `<details><summary>Plan</summary>${written(t.plan, t.plan_html)}</details>` : ''}
     ${t.diff ? `<details open><summary>Changes</summary><pre class="diff">${renderDiff(t.diff)}</pre></details>` : ''}
-    <details class="steps" id="steps" ${(stepsOpen ?? live) ? 'open' : ''}>
-      <summary>What it did <span class="muted" id="stepCount"></span></summary>
-      <div class="events" id="events"></div></details>`;
+    ${live ? '' : `<div class="ask-more">
+      <label style="margin:0"><span class="lbl">Ask more about this task or ${escapeHtml(t.project || 'its project')}</span>
+        <textarea id="askMore" rows="3" placeholder="How is the routing tested? / Now add a test for it."></textarea></label>
+      <button class="btn" data-ask-more>Ask</button>
+      <span class="muted" style="font-size:.85rem">A new task on the same project, starting from what this one found.</span></div>`}`;
   document.getElementById('steps').addEventListener('toggle', e => { stepsOpen = e.target.open; });
   await pollEvents(t.status);
   if(LIVE.includes(t.status)) polling = setInterval(() => pollEvents(), 2500);
@@ -541,7 +614,26 @@ async function pollEvents(knownStatus){
 
 document.addEventListener('click', async e => {
   const row = e.target.closest('[data-task]');
-  if(row){ showTask(Number(row.dataset.task)); return; }
+  if(row){ e.preventDefault(); showTask(Number(row.dataset.task)); return; }
+  const go = e.target.closest('[data-goto]');
+  if(go){ e.preventDefault(); showPage(go.dataset.goto); return; }
+  if(e.target.closest('[data-ask-more]')){
+    const question = document.getElementById('askMore').value.trim();
+    if(question.length < 3){ showError('Say what you want to know or have done.'); return; }
+    if(acting) return;
+    const t = tasks.find(t => t.id === shown) || {};
+    // The task's own model while it is there, the one chosen for new tasks when it is gone
+    const model = toolModels.includes(t.model) ? t.model : document.getElementById('taskModel').value;
+    acting = true; showError('');
+    try{
+      const next = await api(`/coding/tasks/${shown}/ask`, {method: 'POST', headers: {'Content-Type': 'application/json'},
+                                                           body: JSON.stringify({question, model})});
+      stepsOpen = null;
+      await loadTasks(); await showTask(next.id);
+    }catch(err){ showError(err.message); }
+    finally{ acting = false; }
+    return;
+  }
   const edit = e.target.closest('[data-edit]');
   if(edit){ e.preventDefault(); openProject(projects.find(p => p.id === Number(edit.dataset.edit))); return; }
   const again = e.target.closest('[data-reconnect]');
@@ -581,8 +673,10 @@ document.getElementById('startTask').addEventListener('click', async e => {
   acting = true; e.target.disabled = true; showError('');
   try{
     const task = await api('/coding/tasks', {method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({project_id, description, model: document.getElementById('taskModel').value})});
+      body: JSON.stringify({project_id, description, model: document.getElementById('taskModel').value,
+                            apps: [...document.querySelectorAll('#taskApps input:checked')].map(i => i.value)})});
     document.getElementById('taskText').value = '';
+    stepsOpen = null;
     await loadTasks(); await showTask(task.id);
   }catch(err){ showError(err.message); }
   finally{ acting = false; e.target.disabled = false; }
@@ -730,8 +824,11 @@ document.getElementById('helperCommand').textContent =
   `python gateway-helper.py --gateway ${location.origin} --folder "C:\\path\\to\\project" --key YOUR_API_KEY`;
 
 (async () => {
-  try{ await Promise.all([loadProjects(), loadModels(), loadTasks(), loadGithub()]); }
+  try{ await Promise.all([loadProjects(), loadModels(), loadTasks(), loadGithub(), loadApps()]); }
   catch(e){ showError('Could not load: ' + e.message); }
+  let page = null;
+  try{ page = localStorage.getItem('tasks.page'); }catch(e){ /* only a convenience */ }
+  showPage(['tasks', 'new', 'connections'].includes(page) ? page : tasks.length ? 'tasks' : 'new');
   restoreFolders();
   // A helper or another tab may connect while this page is open
   setInterval(() => loadProjects().catch(() => {}), 15000);

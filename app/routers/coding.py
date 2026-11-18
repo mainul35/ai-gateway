@@ -18,7 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app import github_access, knowledge
 from app.auth import Principal, require_admin, require_manager
-from app.coding import detect, projects, remote, runner, workspace
+from app.coding import apps as apps_of_tasks, detect, projects, remote, runner, workspace
 from app.db import get_session
 from app.models import CodingTask, CodingTaskEvent, Project
 from app.tools import markdown
@@ -63,7 +63,8 @@ def _task_out(task, project=None, full=False):
     out = {"id": task.id, "project_id": task.project_id, "project": project.name if project else None,
            "description": task.description, "model": task.model, "status": task.status, "stage": task.stage,
            "branch": task.branch, "pr_url": task.pr_url, "error": task.error,
-           "created_at": task.created_at.isoformat(), "updated_at": task.updated_at.isoformat()}
+           "created_at": task.created_at.isoformat(), "updated_at": task.updated_at.isoformat(),
+           "apps": json.loads(task.apps) if task.apps else []}
     out["can_continue"] = _can_continue(task)
     if full:
         out.update(plan=task.plan, summary=task.summary, diff=task.diff, verify_output=task.verify_output,
@@ -338,6 +339,17 @@ class TaskIn(BaseModel):
     description: str = Field(min_length=5, max_length=20_000)
     model: str = Field(max_length=256)
     conversation_id: int | None = None
+    # Outside apps (tool servers) it may use; none unless ticked
+    apps: list[str] = Field(default_factory=list, max_length=apps_of_tasks.MOST_APPS)
+
+
+async def _start(session, principal, project, description, model, conversation_id=None, apps=None):
+    try:
+        return await runner.create(session, principal, project, description, model, conversation_id, apps=apps)
+    except PermissionError as e:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, str(e))
+    except ValueError as e:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(e))
 
 
 @router.post("/tasks", status_code=status.HTTP_201_CREATED)
@@ -347,14 +359,43 @@ async def create_task(payload: TaskIn, principal: Principal = Depends(require_ma
     project = await session.get(Project, payload.project_id)
     if project is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "No such project")
-    try:
-        task = await runner.create(session, principal, project, payload.description, payload.model,
-                                   payload.conversation_id)
-    except PermissionError as e:
-        raise HTTPException(status.HTTP_403_FORBIDDEN, str(e))
-    except ValueError as e:
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(e))
+    task = await _start(session, principal, project, payload.description, payload.model,
+                        payload.conversation_id, payload.apps)
     return _task_out(task, project)
+
+
+@router.get("/apps")
+async def task_apps(principal: Principal = Depends(require_manager)):
+    """The outside apps this person may give a task, and whether more can be added (by an admin)."""
+    return {"apps": apps_of_tasks.listing(principal), "can_add": principal.is_admin}
+
+
+class AskIn(BaseModel):
+    question: str = Field(min_length=3, max_length=8_000)
+    model: str | None = Field(default=None, max_length=256)
+
+
+# How much of the earlier task a follow-up carries: its question and its answer, enough to go on from
+FOLLOW_UP_CHARS = 8_000
+
+
+@router.post("/tasks/{task_id}/ask", status_code=status.HTTP_201_CREATED)
+async def ask_more(task_id: int, payload: AskIn, principal: Principal = Depends(require_manager),
+                   session: AsyncSession = Depends(get_session)):
+    """More about a task or its project: a new task on the same project, with the same apps, that
+    starts from what this one was asked and what it found."""
+    _enabled()
+    task, project = await _task(session, task_id)
+    if project is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Its project is gone")
+    question = payload.question.strip()
+    earlier = (task.summary or task.plan or "").strip()
+    context = (f"\n\n---\nThis follows task #{task.id}, which was asked:\n{task.description.strip()[:2_000]}"
+               + (f"\n\nWhat it found:\n{earlier[:FOLLOW_UP_CHARS]}" if earlier else ""))
+    model = (payload.model or "").strip() or task.model
+    apps = json.loads(task.apps) if task.apps else []
+    follow_up = await _start(session, principal, project, question + context, model, task.conversation_id, apps)
+    return _task_out(follow_up, project)
 
 
 @router.get("/tasks")

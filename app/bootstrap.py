@@ -50,6 +50,8 @@ _ADDED_COLUMNS = (
     ("memory_entries", "evidence", "TEXT"),
     # The side questions open beside a conversation, kept so a reload does not lose them
     ("conversations", "side_questions", "TEXT"),
+    # The outside apps a coding task may use (app/coding/apps.py)
+    ("coding_tasks", "apps", "TEXT"),
 )
 
 
