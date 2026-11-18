@@ -58,6 +58,9 @@ def can_use_model(principal, model):
         return False
     if user.role == "admin":
         return True
+    from app import cloud_models
+    if cloud_models.admins_only(model):
+        return False                    # paid per token: only once its provider is opened to everyone
     mode = user.model_access or "all"
     if mode == "all":
         return True
