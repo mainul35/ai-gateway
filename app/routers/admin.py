@@ -17,7 +17,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from app import access, activity, backends, bootstrap, catalogue, fitting, knowledge, power, settings, usage as usage_log
+from app import access, activity, backends, bootstrap, catalogue, cloud_models, fitting, knowledge, power, settings, usage as usage_log
 from app import live_metrics as live, proven
 from app.tools import jobs, mcp_client, mcp_config
 from app.auth import Principal, generate_key, hash_key, require_admin, require_manager
@@ -598,6 +598,8 @@ def _deletability(backend):
     deleted from here; the rest are someone else's to remove."""
     if backend.kind in ("ollama", "llamacpp"):
         return True, ""
+    if backend.kind == "cloud":
+        return False, "A cloud model. Take it off its provider under Cloud providers."
     return False, "This one is defined in config/models.yaml. Remove the entry there."
 
 
@@ -1819,6 +1821,77 @@ async def check_mcp_server(payload: McpCheck, _: Principal = Depends(require_adm
         raise HTTPException(status.HTTP_404_NOT_FOUND,
                             f"No server called {payload.name!r} is configured")
     return await mcp_client.probe(server)
+
+
+# --- cloud providers ---------------------------------------------------------------------------
+
+class CloudModelIn(BaseModel):
+    id: str = Field(min_length=1, max_length=128)
+    vision: bool = False
+    context: int | None = None
+
+
+class CloudProviderIn(BaseModel):
+    name: str = Field(min_length=1, max_length=32)
+    label: str = Field(default="", max_length=60)
+    base_url: str = Field(min_length=8, max_length=300)
+    api_key: str = Field(default="", max_length=400)     # blank keeps the one set
+    enabled: bool = True
+    everyone: bool = False
+    models: list[CloudModelIn] = Field(default_factory=list, max_length=cloud_models.MOST_MODELS)
+
+
+@router.get("/cloud")
+async def list_cloud_providers(_: Principal = Depends(require_admin)):
+    """Cloud providers and their models; whether each has a key, never the key."""
+    return cloud_models.everything()
+
+
+def _cloud_saved(payload, renaming_from=None):
+    entry = payload.model_dump(exclude={"api_key"})
+    try:
+        saved = cloud_models.save(entry, payload.api_key, renaming_from=renaming_from)
+    except cloud_models.CloudError as e:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(e))
+    backends.forget_discovery()
+    return saved
+
+
+@router.post("/cloud", status_code=status.HTTP_201_CREATED)
+async def add_cloud_provider(payload: CloudProviderIn, _: Principal = Depends(require_admin)):
+    return _cloud_saved(payload)
+
+
+@router.put("/cloud/{name}")
+async def update_cloud_provider(name: str, payload: CloudProviderIn, _: Principal = Depends(require_admin)):
+    return _cloud_saved(payload, renaming_from=name)
+
+
+@router.delete("/cloud/{name}")
+async def remove_cloud_provider(name: str, _: Principal = Depends(require_admin)):
+    try:
+        cloud_models.remove(name)
+    except cloud_models.CloudError as e:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, str(e))
+    backends.forget_discovery()
+    return {"removed": name}
+
+
+class CloudListIn(BaseModel):
+    base_url: str = Field(min_length=8, max_length=300)
+    api_key: str = Field(default="", max_length=400)
+    name: str = Field(default="", max_length=32)         # a saved provider whose key to use
+
+
+@router.post("/cloud/models")
+async def cloud_provider_models(payload: CloudListIn, _: Principal = Depends(require_admin)):
+    """What the provider says it serves, so the admin can tick models instead of typing them."""
+    key = payload.api_key.strip() or (cloud_models.api_key(payload.name) if payload.name else "")
+    try:
+        return {"models": await cloud_models.offered(payload.base_url, key),
+                "base_url": cloud_models.openai_base(payload.base_url)}
+    except cloud_models.CloudError as e:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(e))
 
 
 # --- power -------------------------------------------------------------------------------------

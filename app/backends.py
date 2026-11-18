@@ -12,7 +12,7 @@ import time
 import httpx
 import yaml
 
-from app import settings
+from app import cloud_models, settings
 from app.engine.profiles import load_profiles
 from utils.ollama_client import ollama_host
 
@@ -32,7 +32,7 @@ class Backend:
     def __init__(self, name, kind, base_url, upstream_model, api_key=None, capabilities=(),
                  size_bytes=0, details=None, context_length=None, modified_at=None, description=""):
         self.name = name
-        self.kind = kind  # "ollama", "llamacpp" or "openai"
+        self.kind = kind  # "ollama", "llamacpp", "openai" or "cloud" (app/cloud_models.py)
         self.base_url = base_url.rstrip("/")
         self.upstream_model = upstream_model
         self.api_key = api_key
@@ -184,6 +184,7 @@ async def available_models(force_refresh=False):
 
     models = await _discover_ollama()
     models.update(_engine_models())  # our tuned llama.cpp profiles win over the Ollama copy
+    models.update(cloud_models.backends())  # set up on the Models page (config/cloud.yaml)
     models.update(_load_model_file())  # explicit config wins over discovery
     _cache.update(expires_at=now + settings.discovery_ttl(), models=models)
     return models

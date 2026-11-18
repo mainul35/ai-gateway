@@ -74,6 +74,8 @@ async def choose(principal, messages, has_images=False, needs_tools=False):
     for name, backend in (await backends.available_models()).items():
         if not access.can_use_model(principal, name):
             continue
+        if backend.kind == "cloud":
+            continue        # paid per token: used when someone picks it, never picked for them
         if needs_tools and backend.capabilities and "tools" not in backend.capabilities:
             continue
         details = backend.details or {}
