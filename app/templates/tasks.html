@@ -14,6 +14,12 @@ dialog input,dialog textarea,dialog select,#newTask textarea,#newTask select{wid
 .task-row:hover,.task-row.active{border-color:var(--accent,#6366f1)}
 .task-row .what{display:block;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .task-row .meta{font-size:.8rem;color:var(--muted)}
+.task-item{position:relative}
+.task-item .task-row{padding-right:2.2rem}
+.task-item .remove{position:absolute;top:.45rem;right:.45rem;width:1.5rem;height:1.5rem;border-radius:50%;border:none;
+  background:none;color:var(--muted);font-size:1.1rem;line-height:1;cursor:pointer;padding:0;opacity:.55}
+.task-item:hover .remove,.task-item .remove:focus-visible{opacity:1}
+.task-item .remove:hover{background:var(--border);color:var(--danger)}
 .events{max-height:28rem;overflow:auto;font-size:.88rem;border:1px solid var(--border);border-radius:10px;padding:.5rem .75rem}
 .ev{padding:.25rem 0;border-bottom:1px solid var(--border);white-space:pre-wrap;word-break:break-word}
 .ev:last-child{border-bottom:none}
@@ -226,6 +232,7 @@ details.more summary{cursor:pointer;color:var(--muted);margin-bottom:.6rem}
 <script>
 const isAdmin = {{ 'true' if user.role == 'admin' else 'false' }};
 const LIVE = ['queued', 'running', 'approved', 'merged', 'deploying'];
+const KEEP = [...LIVE, 'review'];      // cannot be removed until they finish or are decided
 let projects = [], tasks = [], shown = null, lastEvent = 0, polling = null, acting = false;
 // The models a task can run on, and whether "What it did" was opened or closed by hand (kept while
 // the page is open, so a redraw when the task moves on does not undo it)
@@ -522,10 +529,11 @@ async function loadTasks(){
   tasks = (await api('/coding/tasks')).tasks;
   document.getElementById('taskCount').textContent = tasks.length || '';
   document.getElementById('taskList').innerHTML = tasks.length ? tasks.map(t => `
-    <button class="task-row ${shown === t.id ? 'active' : ''}" data-task="${t.id}">
+    <div class="task-item"><button class="task-row ${shown === t.id ? 'active' : ''}" data-task="${t.id}">
       <span class="what">#${t.id} ${escapeHtml(t.description.split('\n')[0])}</span>
       <span class="meta">${pill(t.status)} ${escapeHtml(t.project)} &middot; ${escapeHtml(t.model)}</span>
-    </button>`).join('') : '<span class="muted">No tasks yet.</span>';
+    </button>${KEEP.includes(t.status) ? '' : `<button class="remove" data-remove-task="${t.id}"
+      title="Remove this task from the list" aria-label="Remove task #${t.id}">&times;</button>`}</div>`).join('') : '<span class="muted">No tasks yet.</span>';
 }
 
 function renderDiff(diff){
@@ -795,6 +803,26 @@ document.addEventListener('keydown', e => {
 // --- clicks ------------------------------------------------------------------------------------
 
 document.addEventListener('click', async e => {
+  const gone = e.target.closest('[data-remove-task]');
+  if(gone){
+    e.preventDefault();
+    const id = Number(gone.dataset.removeTask);
+    const t = tasks.find(t => t.id === id) || {};
+    const local = (projects.find(p => p.id === t.project_id) || {}).kind === 'local';
+    const keeps = local ? ' Any changes it made in the folder stay there.'
+                : t.pr_url || t.branch ? ' Its branch and pull request stay on GitHub.' : '';
+    if(!confirm(`Remove task #${id} and its steps from the list?${keeps}`)) return;
+    try{
+      await api(`/coding/tasks/${id}`, {method: 'DELETE'});
+      if(shown === id){
+        shown = null; clearInterval(polling);
+        document.getElementById('detail').innerHTML = '<span class="muted">Pick a task to see what it did.</span>';
+      }
+      await loadTasks();
+      if(!shown && tasks.length) showTask(tasks[0].id);
+    }catch(err){ showError(err.message); }
+    return;
+  }
   const row = e.target.closest('[data-task]');
   if(row){ e.preventDefault(); showTask(Number(row.dataset.task)); return; }
   const go = e.target.closest('[data-goto]');
