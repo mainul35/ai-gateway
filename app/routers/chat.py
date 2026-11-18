@@ -35,7 +35,7 @@ from app.engine.supervisor import supervisor
 from app.routers.openai_v1 import PROXY_PATHS, forward
 from app.tools import (agent, chooser, device_files, documents, image_prompt, images, jobs, linkedin, map_plan,
                         map_web, maps, markdown, mcp_client, media, memory as memory_tool,
-                        photo, places, portrait, repos, router as intent_router, self_tools, subtitles,
+                        photo, places, portrait, repos, router as intent_router, self_tools, subtitles, web_reader,
                         turn_facts, understand, video_story, voices, web_search, written)
 
 log = logging.getLogger("playground")
@@ -1370,6 +1370,10 @@ async def complete(payload: CompleteIn, principal: Principal = Depends(authentic
     # named the page. Same permission as search, since it is the same kind of outside fetch.
     linked_pages = (await linkedin.links_in(latest_words) if linkedin.is_enabled()
                     and access.can_use_feature(principal, "web_search") else [])
+    # Any other page it links to ("give me the content of <link>"), or the one an earlier message did
+    # when this one points back at it: read in full, where search would only show a few lines of it
+    web_links = (web_reader.links_wanted([m.content or "" for m in payload.messages if m.role == "user"])
+                 if web_reader.is_available_to(principal) else [])
 
     answer = _Answer()
 
@@ -1387,6 +1391,19 @@ async def complete(payload: CompleteIn, principal: Principal = Depends(authentic
                 yield _event("sources", query=None, sources=answer.sources)
                 messages.insert(1 if messages and messages[0]["role"] == "system" else 0,
                                 {"role": "system", "content": linkedin.prompt(linked, [])})
+                yield _event("status", text="Writing the answer")
+        if web_links:
+            pages, failed = [], []
+            async for event in _read_web_pages(web_links, pages, failed):
+                yield event
+            # The pages the user named stand on their own, ahead of any search: the model is told to
+            # give their content, not to weigh them against other sources
+            if pages or failed:
+                messages.insert(1 if messages and messages[0]["role"] == "system" else 0,
+                                {"role": "system", "content": web_reader.prompt(pages, failed)})
+            if pages and not do_search:
+                answer.sources = [{"title": r["title"], "url": r["url"]} for r in linked + pages]
+                yield _event("sources", query=None, sources=answer.sources)
                 yield _event("status", text="Writing the answer")
         if do_search:
             yield _event("status", text="Working out what to search for")
@@ -4727,6 +4744,20 @@ async def _one_round(principal, body):
     return choices[0].get("message") or {}, answer.get("usage") or {}
 
 
+async def _read_web_pages(links, pages, failed):
+    """Reads the web pages a message names, as events to stream: what was read goes into pages (as
+    sources), what could not be into failed as (address, why)."""
+    for url in links:
+        query = web_reader.search_query(url)
+        yield _event("status", text=f"Searching for “{query}” (a search engine's page cannot be read directly)"
+                     if query else f"Reading {urllib.parse.urlparse(url).hostname or url}")
+        try:
+            pages.append(web_reader.as_source(await web_reader.read(url)))
+        except web_reader.ReadError as e:
+            failed.append((url, str(e)))
+            yield _event("notice", text=f"Could not read {url}: {e}")
+
+
 async def _read_linked_pages(links, linked, unread):
     """Reads the LinkedIn pages a message names, as events to stream: what was read goes into linked
     (as search-result sources), what could not be read into unread as (address, why)."""
@@ -4781,7 +4812,8 @@ async def run_agent(payload: AgentIn, principal: Principal = Depends(authenticat
                     if mcp_client.is_enabled() else [])
             own = self_tools.is_available_to(principal)
             device = device_files.is_enabled()
-            tools, where, trouble = await agent.offered(mine, builtin=own, device=device)
+            tools, where, trouble = await agent.offered(mine, builtin=own, device=device,
+                                                        web=web_reader.is_available_to(principal))
         except Exception as e:
             yield _error(f"The tool servers could not be reached ({e.__class__.__name__}).")
             return
@@ -4805,7 +4837,8 @@ async def run_agent(payload: AgentIn, principal: Principal = Depends(authenticat
                  repos.GUIDE.format(server=self_tools.SERVER, sep=agent.SEPARATOR)
                  if own and repos.is_enabled() else "",
                  device_files.guide(agent.SEPARATOR) if device else "",
-                 memory_tool.tool_guide(memory["listed"](), agent.SEPARATOR) if memory else ""]
+                 memory_tool.tool_guide(memory["listed"](), agent.SEPARATOR) if memory else "",
+                 web_reader.GUIDE.format(sep=agent.SEPARATOR) if web_reader.is_available_to(principal) else ""]
         messages = agent.with_system([{"role": m.role, "content": m.content} for m in payload.messages],
                                      "\n\n".join(e for e in extra if e))
         # A LinkedIn job or post in the message is read before the model starts, as in a plain chat:
@@ -4887,6 +4920,8 @@ async def run_agent(payload: AgentIn, principal: Principal = Depends(authenticat
                             text, bad = await _memory_edit(user_id, memory, tool,
                                                            agent.arguments(call.get("arguments")),
                                                            "\n".join(seen), seen[0], payload.conversation_id)
+                        elif server is web_reader.BUILTIN:
+                            text, bad = await web_reader.call(tool, agent.arguments(call.get("arguments")))
                         elif server is self_tools.BUILTIN:
                             if tool in self_tools.REPO_TOOLS and not widened:
                                 # Reading a repository is reading a project: the same room as a folder
