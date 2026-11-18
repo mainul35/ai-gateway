@@ -40,8 +40,9 @@ details.steps{margin:1rem 0}
 .composer textarea:focus{outline:none;border:none;box-shadow:none}
 .composer .tools{display:flex;gap:.5rem;flex-wrap:wrap;align-items:center;margin-top:.45rem}
 .composer .tools .spacer{margin-left:auto}
-.composer .tools .hint{font-size:.78rem;color:var(--muted)}
-.composer .tools select{background:none;border:none;color:var(--muted);font-size:.8rem;padding:.2rem;width:auto;cursor:pointer}
+.composer .tools .hint{font-size:.78rem;color:var(--muted);flex:1 1 8rem;min-width:0}
+.composer .tools select{background:none;border:none;color:var(--muted);font-size:.8rem;padding:.2rem;width:auto;
+  max-width:13rem;text-overflow:ellipsis;cursor:pointer}
 .composer .tools select:hover{color:var(--text)}
 .icon-btn{width:1.9rem;height:1.9rem;padding:0;border-radius:50%;display:inline-flex;align-items:center;
   justify-content:center;font-size:1.1rem;line-height:1;flex:none}
