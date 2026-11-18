@@ -75,7 +75,8 @@ def _model(entry):
 
 def clean(entry):
     """One provider, checked and normalised, or CloudError saying what is wrong with it."""
-    name = str(entry.get("name") or "").strip().lower()
+    # "Qwen Cloud" or "qwen_cloud" mean qwen-cloud: a name goes in front of every model, so it is kept plain
+    name = re.sub(r"[\s_]+", "-", str(entry.get("name") or "").strip().lower())
     if not NAME_SHAPE.match(name):
         raise CloudError("A short name is needed, used in front of each model: lower-case letters, "
                          "digits and dashes, up to 32 characters.")

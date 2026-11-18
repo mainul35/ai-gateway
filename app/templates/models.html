@@ -62,12 +62,14 @@
   <style>
     /* The site's inputs are full width; a checkbox in this form is not */
     #cloudForm input[type=checkbox]{width:auto;flex:none;margin:0;padding:0}
+    .toast{position:fixed;right:1rem;bottom:1rem;z-index:50;max-width:min(26rem,calc(100vw - 2rem));
+           margin:0;box-shadow:0 6px 24px rgba(0,0,0,.18);background:var(--card)}
   </style>
   <form id="cloudForm" hidden autocomplete="off" style="margin-top:1rem;border-top:1px solid var(--border);padding-top:1rem">
     <div class="row">
       <label style="flex:0 0 10rem;margin:0">
         <span class="lbl">Short name</span>
-        <input id="cloudName" placeholder="qwen" maxlength="32" required>
+        <input id="cloudName" placeholder="qwen" maxlength="32" required spellcheck="false">
       </label>
       <label style="flex:1;min-width:12rem;margin:0">
         <span class="lbl">Shown as</span>
@@ -100,6 +102,7 @@
     </div>
     <div id="cloudOffered" style="margin-top:.6rem" hidden></div>
     <div id="cloudModels" style="margin-top:.6rem"></div>
+    <div id="cloudMsg" class="note err" role="alert" style="margin:1rem 0 0" hidden></div>
     <div style="display:flex;gap:.5rem;margin-top:1rem">
       <button class="btn" id="cloudSave" type="submit">Save</button>
       <button class="btn btn-secondary" id="cloudCancel" type="button">Cancel</button>
@@ -827,7 +830,7 @@ function drawCloudModels(){
       <td><code>${escapeHtml(m.id)}</code></td>
       ${['vision', 'tools', 'thinking'].map(c =>
         `<td><input type="checkbox" data-cloud-cap="${c}" data-cloud-at="${i}" ${m[c] ? 'checked' : ''}></td>`).join('')}
-      <td><input type="number" min="1024" step="1024" data-cloud-context="${i}" value="${m.context || ''}"
+      <td><input type="number" min="1024" step="1" data-cloud-context="${i}" value="${m.context || ''}"
            placeholder="unknown" style="max-width:9rem"></td>
       <td><button type="button" class="linkish" data-cloud-drop="${i}" aria-label="Take ${escapeHtml(m.id)} off">&times;</button></td>
     </tr>`).join('')}</table>` : '<span class="muted" style="font-size:.85rem">No models chosen yet.</span>';
@@ -867,6 +870,7 @@ function openCloudForm(p){
   document.getElementById('cloudEveryone').checked = p ? p.everyone : false;
   document.getElementById('cloudAuto').checked = p ? p.auto_pick : false;
   document.getElementById('cloudTyped').value = '';
+  cloudMessage('');
   drawOffered();
   drawCloudModels();
   const form = document.getElementById('cloudForm');
@@ -886,21 +890,44 @@ document.getElementById('cloudTypedAdd').addEventListener('click', () => {
 document.getElementById('cloudTyped').addEventListener('keydown', e => {
   if(e.key === 'Enter'){ e.preventDefault(); document.getElementById('cloudTypedAdd').click(); }
 });
+// What went wrong in the form, shown beside its buttons rather than at the top of the page
+function cloudMessage(text){
+  const box = document.getElementById('cloudMsg');
+  box.textContent = text || '';
+  box.hidden = !text;
+  if(text) box.scrollIntoView({behavior: 'smooth', block: 'nearest'});
+}
+
+function toast(text){
+  const box = document.createElement('div');
+  box.className = 'note ok toast';
+  box.setAttribute('role', 'status');
+  box.textContent = text;
+  document.body.appendChild(box);
+  setTimeout(() => box.remove(), 5000);
+}
+
+// The short name goes in front of every model, so it is kept to what a name there may be
+document.getElementById('cloudName').addEventListener('input', e => {
+  const clean = e.target.value.toLowerCase().replace(/[\s_]+/g, '-').replace(/[^a-z0-9-]/g, '');
+  if(clean !== e.target.value) e.target.value = clean;
+});
+
 document.getElementById('cloudFetch').addEventListener('click', async e => {
   const button = e.target;
   button.disabled = true;
   const original = button.textContent;
   button.textContent = 'Asking…';
-  showError('');
+  cloudMessage('');
   try{
     const found = await api('/admin/cloud/models', {method: 'POST', headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({base_url: document.getElementById('cloudUrl').value,
                             api_key: document.getElementById('cloudKey').value, name: cloudEditing || ''})});
     document.getElementById('cloudUrl').value = found.base_url;
     cloudOffered = found.models;
-    if(!cloudOffered.length) showError('The provider listed no models. Type their IDs in instead.');
+    if(!cloudOffered.length) cloudMessage('The provider listed no models. Type their IDs in instead.');
     drawOffered();
-  }catch(err){ showError(err.message); }
+  }catch(err){ cloudMessage(err.message); }
   finally{ button.disabled = false; button.textContent = original; }
 });
 document.getElementById('cloudForm').addEventListener('change', e => {
@@ -926,7 +953,7 @@ document.getElementById('cloudForm').addEventListener('submit', async e => {
   e.preventDefault();
   const save = document.getElementById('cloudSave');
   save.disabled = true;
-  showError('');
+  cloudMessage('');
   const body = {
     name: document.getElementById('cloudName').value.trim(),
     label: document.getElementById('cloudLabel').value.trim(),
@@ -938,13 +965,16 @@ document.getElementById('cloudForm').addEventListener('submit', async e => {
     models: cloudChosen,
   };
   try{
-    await api(cloudEditing ? `/admin/cloud/${encodeURIComponent(cloudEditing)}` : '/admin/cloud',
+    const saved = await api(cloudEditing ? `/admin/cloud/${encodeURIComponent(cloudEditing)}` : '/admin/cloud',
               {method: cloudEditing ? 'PUT' : 'POST', headers: {'Content-Type': 'application/json'},
                body: JSON.stringify(body)});
     document.getElementById('cloudForm').hidden = true;
+    const count = (saved.names || []).length;
+    toast(`Saved ${saved.label}` + (count ? ` with ${count} model${count === 1 ? '' : 's'}: ${saved.names.join(', ')}`
+                                        : '. It has no models yet.'));
     await loadCloud();
-    loadModels();
-  }catch(err){ showError(err.message); }
+    await loadModels();
+  }catch(err){ cloudMessage(err.message); }
   finally{ save.disabled = false; }
 });
 document.getElementById('cloudList').addEventListener('click', async e => {
@@ -957,6 +987,7 @@ document.getElementById('cloudList').addEventListener('click', async e => {
               + 'Nothing changes at the provider; you can add it again with its key.')) return;
   try{
     await api(`/admin/cloud/${encodeURIComponent(name)}`, {method: 'DELETE'});
+    toast(`Removed ${name} and its models.`);
     await loadCloud();
     loadModels();
   }catch(err){ showError(err.message); }

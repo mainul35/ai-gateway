@@ -56,7 +56,8 @@ def test_clean_refuses_what_would_not_work():
     good = {"name": "qwen", "base_url": "https://h/compatible-mode/v1", "models": ["a", {"id": "a"}, {"id": "b", "vision": 1}]}
     assert [m["id"] for m in cloud_models.clean(good)["models"]] == ["a", "b"]
     assert cloud_models.clean(good)["models"][1] == {"id": "b", "vision": True, "tools": True, "thinking": False}
-    for bad, why in [({**good, "name": "Has space"}, "short name"), ({**good, "base_url": "http://h"}, "https"),
+    assert cloud_models.clean({**good, "name": " Qwen Cloud_2 "})["name"] == "qwen-cloud-2"
+    for bad, why in [({**good, "name": "qwen!"}, "short name"), ({**good, "base_url": "http://h"}, "https"),
                      ({**good, "models": ["bad id!"]}, "not a model ID"),
                      ({**good, "models": [{"id": "a", "context": 10}]}, "between")]:
         with pytest.raises(cloud_models.CloudError, match=why):
