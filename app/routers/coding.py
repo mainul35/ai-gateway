@@ -18,7 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app import github_access, knowledge
 from app.auth import Principal, require_admin, require_manager
-from app.coding import apps as apps_of_tasks, detect, projects, remote, runner, workspace
+from app.coding import apps as apps_of_tasks, attachments, detect, projects, remote, runner, workspace
 from app.db import get_session
 from app.models import CodingTask, CodingTaskEvent, Project
 from app.tools import markdown
@@ -64,7 +64,8 @@ def _task_out(task, project=None, full=False):
            "description": task.description, "model": task.model, "status": task.status, "stage": task.stage,
            "branch": task.branch, "pr_url": task.pr_url, "error": task.error,
            "created_at": task.created_at.isoformat(), "updated_at": task.updated_at.isoformat(),
-           "apps": json.loads(task.apps) if task.apps else []}
+           "apps": json.loads(task.apps) if task.apps else [],
+           "files": json.loads(task.files) if task.files else []}
     out["can_continue"] = _can_continue(task)
     if full:
         out.update(plan=task.plan, summary=task.summary, diff=task.diff, verify_output=task.verify_output,
@@ -341,11 +342,14 @@ class TaskIn(BaseModel):
     conversation_id: int | None = None
     # Outside apps (tool servers) it may use; none unless ticked
     apps: list[str] = Field(default_factory=list, max_length=apps_of_tasks.MOST_APPS)
+    # Pictures and documents uploaded through /chat/files, given with the description
+    files: list[int] = Field(default_factory=list, max_length=20)
 
 
-async def _start(session, principal, project, description, model, conversation_id=None, apps=None):
+async def _start(session, principal, project, description, model, conversation_id=None, apps=None, files=None):
     try:
-        return await runner.create(session, principal, project, description, model, conversation_id, apps=apps)
+        return await runner.create(session, principal, project, description, model, conversation_id, apps=apps,
+                                   files=files)
     except PermissionError as e:
         raise HTTPException(status.HTTP_403_FORBIDDEN, str(e))
     except ValueError as e:
@@ -360,7 +364,7 @@ async def create_task(payload: TaskIn, principal: Principal = Depends(require_ma
     if project is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "No such project")
     task = await _start(session, principal, project, payload.description, payload.model,
-                        payload.conversation_id, payload.apps)
+                        payload.conversation_id, payload.apps, payload.files)
     return _task_out(task, project)
 
 
@@ -373,6 +377,7 @@ async def task_apps(principal: Principal = Depends(require_manager)):
 class AskIn(BaseModel):
     question: str = Field(min_length=3, max_length=8_000)
     model: str | None = Field(default=None, max_length=256)
+    files: list[int] = Field(default_factory=list, max_length=20)
 
 
 # How much of the earlier task a follow-up carries: its question and its answer, enough to go on from
@@ -394,7 +399,8 @@ async def ask_more(task_id: int, payload: AskIn, principal: Principal = Depends(
                + (f"\n\nWhat it found:\n{earlier[:FOLLOW_UP_CHARS]}" if earlier else ""))
     model = (payload.model or "").strip() or task.model
     apps = json.loads(task.apps) if task.apps else []
-    follow_up = await _start(session, principal, project, question + context, model, task.conversation_id, apps)
+    follow_up = await _start(session, principal, project, question + context, model, task.conversation_id, apps,
+                             payload.files)
     return _task_out(follow_up, project)
 
 
@@ -418,7 +424,9 @@ async def _task(session, task_id):
 @router.get("/tasks/{task_id}")
 async def get_task(task_id: int, _: Principal = Depends(require_manager), session: AsyncSession = Depends(get_session)):
     task, project = await _task(session, task_id)
-    return _task_out(task, project, full=True)
+    out = _task_out(task, project, full=True)
+    out["attached"] = await attachments.described(session, out["files"])
+    return out
 
 
 @router.get("/tasks/{task_id}/events")

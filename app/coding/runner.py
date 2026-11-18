@@ -31,7 +31,7 @@ from sqlalchemy import select, update
 
 from app import access, backends, knowledge, settings
 from app.auth import Principal
-from app.coding import apps as task_apps, remote, sandbox, tools as task_tools, workspace
+from app.coding import apps as task_apps, attachments, remote, sandbox, tools as task_tools, workspace
 from app.db import session_factory
 from app.models import CodingTask, CodingTaskEvent, Project, User, utcnow
 
@@ -173,7 +173,8 @@ async def check_model(principal, model):
         raise ValueError(f"{model} cannot call tools; pick one that can")
 
 
-async def create(session, principal, project, description, model, conversation_id=None, by="", apps=None):
+async def create(session, principal, project, description, model, conversation_id=None, by="", apps=None,
+                 files=None):
     """Queues a task: the one place the rules for starting one live, used by the Tasks page and by
     the playground agent. PermissionError or ValueError say why it cannot start."""
     if principal.user is None:
@@ -189,8 +190,10 @@ async def create(session, principal, project, description, model, conversation_i
     if len(description) < 5:
         raise ValueError("Say what the task should do")
     chosen = task_apps.check(principal, apps or [])
+    given = await attachments.check(session, principal.user.id, files or [], model)
     task = CodingTask(project_id=project.id, user_id=principal.user.id, conversation_id=conversation_id,
-                      description=description[:20_000], model=model, apps=json.dumps(chosen) if chosen else None)
+                      description=description[:20_000], model=model, apps=json.dumps(chosen) if chosen else None,
+                      files=json.dumps(given) if given else None)
     session.add(task)
     await session.commit()
     await session.refresh(task)
@@ -271,6 +274,7 @@ def activity():
 
 async def _ask(principal, model, messages, tools):
     from app.routers.openai_v1 import PROXY_PATHS, forward   # here, to keep the import graph acyclic
+    messages = await attachments.for_model(messages, model, principal.user.id if principal.user else None)
     body = {"model": model, "messages": messages, "tools": tools, "tool_choice": "auto",
             "stream": False, "temperature": 0.2}
     try:
@@ -636,7 +640,9 @@ async def run(task_id):
         else:
             progress["memory"] = {"base": SYSTEM.format(name=project.name, notes=owner_notes), "notes": []}
             progress["messages"] = [{"role": "system", "content": with_notes(progress["memory"])},
-                                    {"role": "user", "content": EXPLORE_ASK.format(task=task.description)}]
+                                    {"role": "user", "content": await attachments.question(
+                                        EXPLORE_ASK.format(task=task.description), attachments.listed(task),
+                                        task.user_id)}]
             progress["changed"] = set()
         messages = progress["messages"]
         memory = progress["memory"]

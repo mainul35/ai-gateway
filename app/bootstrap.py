@@ -52,6 +52,7 @@ _ADDED_COLUMNS = (
     ("conversations", "side_questions", "TEXT"),
     # The outside apps a coding task may use (app/coding/apps.py)
     ("coding_tasks", "apps", "TEXT"),
+    ("coding_tasks", "files", "TEXT"),
 )
 
 
