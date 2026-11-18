@@ -24,7 +24,7 @@ import re
 import time
 
 from app import access, settings
-from app.tools import device_files, mcp_client, self_tools
+from app.tools import device_files, mcp_client, self_tools, web_reader
 
 log = logging.getLogger("tools.agent")
 
@@ -96,11 +96,13 @@ def is_available_to(principal):
     """Whether this person has any tool server at all, which is what the Agent chip turns on."""
     if self_tools.is_available_to(principal) or (principal is not None and device_files.is_enabled()):
         return True       # the gateway's own tools, or a folder on the person's computer
+    if web_reader.is_available_to(principal):
+        return True       # the gateway's own tools, or a folder on the person's computer
     return bool(mcp_client.is_enabled()
                 and access.tool_servers_for(principal, mcp_client.available()))
 
 
-async def offered(servers=None, builtin=False, device=False):
+async def offered(servers=None, builtin=False, device=False, web=False):
     """Every tool the given servers have, and where each one came from.
 
     The servers are decided before this is called and never by anything a server says, so a tool
@@ -117,6 +119,11 @@ async def offered(servers=None, builtin=False, device=False):
         for entry in self_tools.listing():
             name = tool_name(entry["server"], entry["name"])
             where[name] = (self_tools.BUILTIN, entry["name"])
+            tools.append(_openai_tool(entry))
+    if web:               # reading pages and searching, for anyone allowed web search
+        for entry in web_reader.listing():
+            name = tool_name(entry["server"], entry["name"])
+            where[name] = (web_reader.BUILTIN, entry["name"])
             tools.append(_openai_tool(entry))
     if device:
         for entry in device_files.listing():
