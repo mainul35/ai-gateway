@@ -20,6 +20,11 @@ dialog input,dialog textarea,dialog select,#newTask textarea,#newTask select{wid
 .ev .k{font-size:.72rem;text-transform:uppercase;letter-spacing:.04em;color:var(--muted);margin-right:.4rem}
 .ev.stage{font-weight:600}.ev.error{color:var(--danger)}.ev.review,.ev.done,.ev.answer{color:var(--success)}
 .ev details summary{cursor:pointer;color:var(--muted)}
+details.steps{margin-top:1.2rem}
+details.steps>summary{cursor:pointer;font-size:1.17em;font-weight:700;margin-bottom:.6rem}
+details.steps>summary .muted{font-size:.8rem;font-weight:400;margin-left:.4rem}
+.model-pick{display:inline-flex;align-items:center;gap:.4rem;margin:0;width:auto;font-size:.88rem}
+.model-pick select{width:auto;max-width:16rem;margin:0}
 pre.diff{max-height:32rem;overflow:auto;font-size:.8rem;border:1px solid var(--border);border-radius:10px;padding:.6rem}
 pre.diff .add{color:var(--success)}pre.diff .del{color:var(--danger)}pre.diff .hunk{color:var(--muted)}
 .actions{display:flex;gap:.5rem;flex-wrap:wrap;margin:.8rem 0;align-items:center}
@@ -158,6 +163,9 @@ details.more summary{cursor:pointer;color:var(--muted);margin-bottom:.6rem}
 const isAdmin = {{ 'true' if user.role == 'admin' else 'false' }};
 const LIVE = ['queued', 'running', 'approved', 'merged', 'deploying'];
 let projects = [], tasks = [], shown = null, lastEvent = 0, polling = null, acting = false;
+// The models a task can run on, and whether "What it did" was opened or closed by hand (kept while
+// the page is open, so a redraw when the task moves on does not undo it)
+let toolModels = [], stepsOpen = null;
 
 function showError(message){ const b = document.getElementById('error'); b.textContent = message; b.hidden = !message; }
 function showOk(message){ const b = document.getElementById('ok'); b.textContent = message; b.hidden = !message; }
@@ -417,6 +425,7 @@ async function loadModels(){
   const preferred = ['qwen3.6-vllm', 'qwen3.8-27b-ud-q8_k_xl'];
   const rank = m => { const i = preferred.indexOf(m.id); return i < 0 ? preferred.length : i; };
   data.sort((a, b) => rank(a) - rank(b));
+  toolModels = data.map(m => m.id);
   document.getElementById('taskModel').innerHTML = data.map(m => `<option>${escapeHtml(m.id)}</option>`).join('');
 }
 
@@ -475,6 +484,14 @@ async function showTask(id){
   if(['failed', 'cancelled', 'rejected'].includes(t.status))
     actions.push('<button class="btn btn-secondary" data-act="retry" title="Start again from nothing">Retry from the start</button>');
   if(t.diff) actions.push(`<a class="btn btn-secondary" href="/coding/tasks/${t.id}/patch">Download patch</a>`);
+  // Continue and Retry go on with the model chosen here: the task's own while it is still there,
+  // another when it has been removed since
+  const restarts = t.can_continue || ['failed', 'cancelled', 'rejected'].includes(t.status);
+  const gone = restarts && toolModels.length && !toolModels.includes(t.model);
+  const picker = restarts && toolModels.length ? `<label class="model-pick" title="The model Continue and Retry go on with">
+      <span>on</span><select id="restartModel">${toolModels.map(m =>
+        `<option ${m === t.model ? 'selected' : ''}>${escapeHtml(m)}</option>`).join('')}</select></label>` : '';
+  const live = LIVE.includes(t.status);
   box.innerHTML = `
     <h2 style="margin-top:0">#${t.id} ${pill(t.status)} ${t.stage ? `<span class="muted">${escapeHtml(t.stage)}</span>` : ''}</h2>
     <p class="prose">${escapeHtml(t.description)}</p>
@@ -482,11 +499,15 @@ async function showTask(id){
       ${t.branch ? ` &middot; branch <code>${escapeHtml(t.branch)}</code>` : ''}
       ${t.pr_url ? ` &middot; <a href="${escapeHtml(t.pr_url)}" target="_blank" rel="noopener">pull request</a>` : ''}</p>
     ${t.error ? `<div class="note err">${escapeHtml(t.error)}</div>` : ''}
-    <div class="actions">${actions.join('')}</div>
+    ${gone ? `<div class="note warn"><b>${escapeHtml(t.model)}</b> is no longer available. Pick another model to continue or retry on.</div>` : ''}
+    <div class="actions">${actions.join('')}${picker}</div>
     ${t.summary ? `<h3>${t.status === 'done' && !t.diff ? 'Answer' : 'Summary'}</h3><p class="prose">${escapeHtml(t.summary)}</p>` : ''}
     ${t.plan ? `<details><summary>Plan</summary><p class="prose">${escapeHtml(t.plan)}</p></details>` : ''}
     ${t.diff ? `<details open><summary>Changes</summary><pre class="diff">${renderDiff(t.diff)}</pre></details>` : ''}
-    <h3>What it did</h3><div class="events" id="events"></div>`;
+    <details class="steps" id="steps" ${(stepsOpen ?? live) ? 'open' : ''}>
+      <summary>What it did <span class="muted" id="stepCount"></span></summary>
+      <div class="events" id="events"></div></details>`;
+  document.getElementById('steps').addEventListener('toggle', e => { stepsOpen = e.target.open; });
   await pollEvents(t.status);
   if(LIVE.includes(t.status)) polling = setInterval(() => pollEvents(), 2500);
 }
@@ -498,6 +519,8 @@ async function pollEvents(knownStatus){
   if(id !== shown) return;
   const list = document.getElementById('events');
   for(const e of answer.events){ list.insertAdjacentHTML('beforeend', renderEvent(e)); lastEvent = e.id; }
+  const count = list.querySelectorAll('.ev').length;
+  document.getElementById('stepCount').textContent = count ? `${count} step${count === 1 ? '' : 's'}` : '';
   if(answer.events.length) list.scrollTop = list.scrollHeight;
   // The task moved on (finished, waiting for review...): draw it again with its new buttons and diff
   if(knownStatus === undefined && !LIVE.includes(answer.status)){
@@ -531,7 +554,9 @@ document.addEventListener('click', async e => {
                                          : 'Reject this task? Its branch is left as it is.')) return;
   acting = true; act.disabled = true;
   try{
-    await api(`/coding/tasks/${shown}/${what}`, {method: 'POST'});
+    const model = ['continue', 'retry'].includes(what) ? document.getElementById('restartModel')?.value : null;
+    await api(`/coding/tasks/${shown}/${what}`, model ? {method: 'POST', headers: {'Content-Type': 'application/json'},
+                                                         body: JSON.stringify({model})} : {method: 'POST'});
     await loadTasks(); await showTask(shown);
   }catch(err){ showError(err.message); }
   finally{ acting = false; }

@@ -460,8 +460,30 @@ async def cancel_task(task_id: int, _: Principal = Depends(require_manager), ses
     return {"status": "cancelling"}
 
 
+class RestartIn(BaseModel):
+    """Another model to go on with: the one the task had may have been removed since."""
+    model: str | None = Field(default=None, max_length=256)
+
+
+async def _switch_model(task, principal, payload):
+    """Puts the task on the model asked for, if it is another one and may be used. Nothing is saved
+    until the caller commits, so a refusal leaves the task as it was."""
+    wanted = (payload.model or "").strip() if payload else ""
+    if not wanted or wanted == task.model:
+        return None
+    try:
+        await runner.check_model(principal, wanted)
+    except PermissionError as e:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, str(e))
+    except ValueError as e:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(e))
+    was, task.model = task.model, wanted
+    return f"on {wanted} (was {was})"
+
+
 @router.post("/tasks/{task_id}/retry")
-async def retry_task(task_id: int, _: Principal = Depends(require_manager), session: AsyncSession = Depends(get_session)):
+async def retry_task(task_id: int, payload: RestartIn | None = None, principal: Principal = Depends(require_manager),
+                     session: AsyncSession = Depends(get_session)):
     task, project = await _task(session, task_id)
     if task.status not in ("failed", "cancelled", "rejected"):
         raise HTTPException(status.HTTP_409_CONFLICT, f"A {task.status} task cannot be retried")
@@ -470,28 +492,30 @@ async def retry_task(task_id: int, _: Principal = Depends(require_manager), sess
     if project.kind == "local" and task.originals and task.originals != "{}" and task.status != "rejected":
         raise HTTPException(status.HTTP_409_CONFLICT, "Its earlier changes are still in the folder. Undo them "
                                                       "first, then retry.")
+    switched = await _switch_model(task, principal, payload)
     task.status, task.stage, task.error, task.pr_url, task.state = "queued", None, None, None, None
     task.branch = None if project.kind == "git" else task.branch
     if project.kind == "local":
         task.originals, task.diff = None, None
     await session.commit()
-    await runner.event(task_id, "note", "Retrying from the start")
+    await runner.event(task_id, "note", "Retrying from the start" + (f", {switched}" if switched else ""))
     runner.submit(task_id)
     return {"status": "queued"}
 
 
 @router.post("/tasks/{task_id}/continue")
-async def continue_task(task_id: int, _: Principal = Depends(require_manager),
+async def continue_task(task_id: int, payload: RestartIn | None = None, principal: Principal = Depends(require_manager),
                         session: AsyncSession = Depends(get_session)):
     """Picks a stopped task up where it stopped: same conversation, same files, same branch, with the
     reason it stopped told to the model. Retry is the one that starts again from nothing."""
     task, _project = await _task(session, task_id)
     if not _can_continue(task):
         raise HTTPException(status.HTTP_409_CONFLICT, "This task has nothing saved to continue from; use Retry")
+    switched = await _switch_model(task, principal, payload)
     state = json.loads(task.state)
     state["resume"] = True
     task.status, task.stage, task.error, task.state = "queued", None, None, json.dumps(state)
     await session.commit()
-    await runner.event(task_id, "note", "Continuing from where it stopped")
+    await runner.event(task_id, "note", "Continuing from where it stopped" + (f", {switched}" if switched else ""))
     runner.submit(task_id)
     return {"status": "queued"}
