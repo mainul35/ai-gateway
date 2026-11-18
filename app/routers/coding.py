@@ -13,7 +13,7 @@ import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel, Field
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app import github_access, knowledge
@@ -511,6 +511,30 @@ async def cancel_task(task_id: int, _: Principal = Depends(require_manager), ses
         raise HTTPException(status.HTTP_409_CONFLICT, f"A {task.status} task is not running")
     runner.cancel(task_id)
     return {"status": "cancelling"}
+
+
+# Still going, or waiting for someone to decide: these are finished first (cancelled, approved, rejected)
+NOT_REMOVABLE = ("queued", "running", "approved", "merged", "deploying", "review")
+
+
+@router.delete("/tasks/{task_id}")
+async def remove_task(task_id: int, principal: Principal = Depends(require_manager),
+                      session: AsyncSession = Depends(get_session)):
+    """Takes a finished task off the list, with its steps. Its branch and pull request, if any, are
+    left where they are; only the server's working copy of it goes."""
+    task, project = await _task(session, task_id)
+    if task.status in NOT_REMOVABLE:
+        raise HTTPException(status.HTTP_409_CONFLICT,
+                            "Review it first: approve or reject it" if task.status == "review"
+                            else f"It is {task.status}; cancel it or let it finish first")
+    if not principal.is_admin and (principal.user is None or task.user_id != principal.user.id):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Only the person who started this task, or an admin, can remove it")
+    if project is not None and project.kind != "local":
+        await workspace.discard(project, task_id)
+    await session.execute(delete(CodingTaskEvent).where(CodingTaskEvent.task_id == task_id))
+    await session.delete(task)
+    await session.commit()
+    return {"removed": task_id}
 
 
 class RestartIn(BaseModel):
