@@ -72,6 +72,43 @@ def links(text):
     return found[:MOST_LINKS]
 
 
+# LinkedIn's own short links, as its Share button and many posts give them: lnkd.in/p/<code>, lnkd.in/<code>
+SHORT = re.compile(r"https?://lnkd\.in/[A-Za-z0-9_/-]{3,60}", re.I)
+
+
+async def _expand(short):
+    """Where a short link leads: its redirects followed, one byte of the page read."""
+    async with net.client(timeout=TIMEOUT, headers={"User-Agent": web_search.USER_AGENT}) as client:
+        try:
+            page = await net.get(client, short, max_bytes=1, truncate=True, hops=3)
+        except httpx.HTTPError as e:
+            raise LinkedInError(f"the short link did not answer ({type(e).__name__})")
+        except net.Refused as e:
+            raise LinkedInError(f"the short link could not be followed: {e}")
+    return page.url
+
+
+async def links_in(text):
+    """links(), with LinkedIn's short links expanded first. A short link that leads to a job or post
+    counts as that page; one that cannot be followed is kept as a link that could not be read, with
+    why, so the model says so rather than that it cannot open links."""
+    if not isinstance(text, str):
+        return []
+    failed = []
+    for short in dict.fromkeys(m.group(0).rstrip("/.,)") for m in SHORT.finditer(text)):
+        try:
+            target = await _expand(short)
+        except LinkedInError as e:
+            failed.append({"kind": "post", "url": short, "error": str(e)})
+            continue
+        if links(target):
+            text = text.replace(short, f" {target} ")
+        else:
+            failed.append({"kind": "post", "url": short,
+                           "error": "the short link does not lead to a LinkedIn job or post"})
+    return (links(text) + failed)[:MOST_LINKS]
+
+
 async def _fetch(url):
     async with net.client(timeout=TIMEOUT, headers={"User-Agent": web_search.USER_AGENT,
                                                     "Accept": "text/html",
@@ -246,6 +283,8 @@ def parse_post(page_html, url):
 
 async def read(link):
     """One link from links() read: the job's or post's facts and text. Raises LinkedInError."""
+    if link.get("error"):
+        raise LinkedInError(link["error"])
     if link["kind"] == "job":
         page = await _fetch(f"https://www.linkedin.com/jobs-guest/jobs/api/jobPosting/{link['id']}")
         return parse_job(page.text, link["url"])
