@@ -487,6 +487,12 @@ a.paper{color:var(--text);text-decoration:none}
              display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}
 .trace .step.notice .what{font-weight:400;color:var(--warning);font-family:inherit}
 .trace .step.tools .what{font-weight:400;color:var(--muted);font-family:inherit}
+/* The steps fold away under one line once the answer is in; open while the agent works */
+.trace-box{margin:.1rem 0 .7rem;font-size:.8rem}
+.trace-box>summary{cursor:pointer;color:var(--muted);padding:.15rem 0;user-select:none}
+.trace-box>summary:hover{color:var(--text)}
+.trace-box[open]>summary{margin-bottom:.25rem}
+.trace-box>.trace{margin-bottom:0}
 /* The agent asking to read a folder on this computer: why, and the command that says yes */
 .device-ask{border:1px solid var(--primary);border-radius:10px;padding:.65rem .8rem;margin:.4rem 0 .6rem;
             background:var(--card);font-size:.85rem;white-space:normal}
@@ -4009,7 +4015,8 @@ async function sendAgent(text, again, decision = null){
   body.className = 'body agent';
   const trace = document.createElement('div');
   trace.className = 'trace';
-  box.insertBefore(trace, body);
+  const stepsBox = traceBox(trace, true);
+  box.insertBefore(stepsBox, body);
   setStatus(box, 'Starting');
 
   const steps = [];
@@ -4039,6 +4046,7 @@ async function sendAgent(text, again, decision = null){
         steps.push(event);
       }else if(event.type === 'answer') answer = event;
       else if(event.type === 'error') trouble = event.message || 'The agent stopped.';
+      countSteps(stepsBox);
       followAlong();
     });
   }catch(e){
@@ -4055,7 +4063,8 @@ async function sendAgent(text, again, decision = null){
     return;
   }
   renderAssistant(box, answer.text, null, {model, total: answer.seconds}, null, answer.html);
-  box.insertBefore(trace, box.querySelector('.body'));   // the trace stays above the answer
+  box.insertBefore(stepsBox, box.querySelector('.body'));   // the trace stays above the answer
+  stepsBox.open = false;                                    // the answer is what is read now
   if(currentId) addVerdict(box, {conversationId: currentId, startsWith: (answer.text || '').trim().slice(0, 200),
                                  kind: 'agent'});
   recordAnswer(box, answer.text, again ? again.replaceAt : null);
@@ -4127,6 +4136,24 @@ function addTrace(where, kind, title, detail, round){
   return line;
 }
 
+/* The trace in a section that opens and closes, headed by how many tools it called */
+function traceBox(trace, open){
+  const holder = document.createElement('details');
+  holder.className = 'trace-box';
+  holder.open = open;
+  holder.innerHTML = '<summary>Tool calls <span class="n"></span></summary>';
+  holder.append(trace);
+  countSteps(holder);
+  return holder;
+}
+
+function countSteps(holder){
+  const calls = holder.querySelectorAll('.step.call').length;
+  const failed = holder.querySelectorAll('.step.call.failed').length;
+  holder.querySelector('summary .n').textContent =
+    calls ? `\u00b7 ${calls}${failed ? ` (${failed} failed)` : ''}` : '';
+}
+
 function finishTrace(where, event){
   const line = [...where.querySelectorAll('.step[data-waiting]')].pop();
   if(!line) return;
@@ -4147,9 +4174,10 @@ function renderAgent(box, saved, content, html, stats){
     addTrace(trace, 'call', step.tool, step.arguments);
     finishTrace(trace, step);
   }
-  box.insertBefore(trace, box.querySelector('.body'));
+  const stepsBox = traceBox(trace, false);
+  box.insertBefore(stepsBox, box.querySelector('.body'));
   renderAssistant(box, content, null, stats, null, html);
-  box.insertBefore(trace, box.querySelector('.body'));
+  box.insertBefore(stepsBox, box.querySelector('.body'));
 }
 
 async function sendMap(text, decision, fix, again){
