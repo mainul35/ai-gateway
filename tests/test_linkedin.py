@@ -117,3 +117,29 @@ def test_prompt_numbers_pages_and_names_failures():
     assert "- https://b: the post is not public" in text
     assert "do not guess" in text
     assert linkedin.prompt([], []) == ""
+
+
+def test_short_links_are_expanded_to_the_post(monkeypatch):
+    import asyncio
+
+    async def expand(short):
+        return {"https://lnkd.in/p/abc": "https://www.linkedin.com/posts/x_y-activity-7400000000000000009-Zz?utm_source=share",
+                "https://lnkd.in/elsewhere": "https://example.com/page"}[short]
+    monkeypatch.setattr(linkedin, "_expand", expand)
+    found = asyncio.run(linkedin.links_in("about https://lnkd.in/p/abc. and https://lnkd.in/elsewhere"))
+    assert found[0] == {"kind": "post", "id": "7400000000000000009",
+                        "url": "https://www.linkedin.com/posts/x_y-activity-7400000000000000009-Zz"}
+    assert found[1]["url"] == "https://lnkd.in/elsewhere" and "does not lead" in found[1]["error"]
+    with pytest.raises(linkedin.LinkedInError, match="does not lead"):
+        asyncio.run(linkedin.read(found[1]))
+
+
+def test_a_short_link_that_cannot_be_followed_is_reported(monkeypatch):
+    import asyncio
+
+    async def expand(short):
+        raise linkedin.LinkedInError("the short link did not answer (ConnectTimeout)")
+    monkeypatch.setattr(linkedin, "_expand", expand)
+    assert asyncio.run(linkedin.links_in("https://lnkd.in/p/abc")) == [
+        {"kind": "post", "url": "https://lnkd.in/p/abc", "error": "the short link did not answer (ConnectTimeout)"}]
+    assert asyncio.run(linkedin.links_in(None)) == []

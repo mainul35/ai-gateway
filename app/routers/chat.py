@@ -1368,7 +1368,7 @@ async def complete(payload: CompleteIn, principal: Principal = Depends(authentic
     do_search = payload.web_search and web_search.is_available() and access.can_use_feature(principal, "web_search")
     # A LinkedIn job or post pasted in the message is read whether or not web search is on: the user
     # named the page. Same permission as search, since it is the same kind of outside fetch.
-    linked_pages = (linkedin.links(latest_words) if linkedin.is_enabled()
+    linked_pages = (await linkedin.links_in(latest_words) if linkedin.is_enabled()
                     and access.can_use_feature(principal, "web_search") else [])
 
     answer = _Answer()
@@ -4810,7 +4810,7 @@ async def run_agent(payload: AgentIn, principal: Principal = Depends(authenticat
                                      "\n\n".join(e for e in extra if e))
         # A LinkedIn job or post in the message is read before the model starts, as in a plain chat:
         # the agent has no tool that can open it, and would otherwise say it cannot
-        pages = (linkedin.links(latest_said) if linkedin.is_enabled()
+        pages = (await linkedin.links_in(latest_said) if linkedin.is_enabled()
                  and access.can_use_feature(principal, "web_search") else [])
         if pages:
             linked, unread = [], []
