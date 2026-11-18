@@ -21,6 +21,7 @@ from app.auth import Principal, require_admin, require_manager
 from app.coding import detect, projects, remote, runner, workspace
 from app.db import get_session
 from app.models import CodingTask, CodingTaskEvent, Project
+from app.tools import markdown
 
 def _switched_on(request: Request):
     """Every coding endpoint, not only the ones that start work, is closed while coding.enabled is off:
@@ -65,7 +66,10 @@ def _task_out(task, project=None, full=False):
            "created_at": task.created_at.isoformat(), "updated_at": task.updated_at.isoformat()}
     out["can_continue"] = _can_continue(task)
     if full:
-        out.update(plan=task.plan, summary=task.summary, diff=task.diff, verify_output=task.verify_output)
+        out.update(plan=task.plan, summary=task.summary, diff=task.diff, verify_output=task.verify_output,
+                   # The model writes them in Markdown, as in the playground, and they are drawn the same way
+                   summary_html=markdown.render(task.summary) if task.summary else None,
+                   plan_html=markdown.render(task.plan) if task.plan else None)
     return out
 
 

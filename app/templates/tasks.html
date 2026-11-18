@@ -29,6 +29,7 @@ pre.diff{max-height:32rem;overflow:auto;font-size:.8rem;border:1px solid var(--b
 pre.diff .add{color:var(--success)}pre.diff .del{color:var(--danger)}pre.diff .hunk{color:var(--muted)}
 .actions{display:flex;gap:.5rem;flex-wrap:wrap;margin:.8rem 0;align-items:center}
 .prose{white-space:pre-wrap}
+.task-md h1{font-size:1.5rem}.task-md h2{font-size:1.25rem}.task-md h3{font-size:1.08rem}
 .tabs{display:flex;gap:.4rem;margin-bottom:1rem;border-bottom:1px solid var(--border)}
 .tabs button{background:none;border:none;border-bottom:2px solid transparent;color:var(--muted);font-weight:600;
              padding:.5rem .8rem;cursor:pointer;font-size:.95rem}
@@ -463,6 +464,12 @@ function renderEvent(e){
   return `<div class="ev ${escapeHtml(e.kind)}"><span class="k">${escapeHtml(e.kind)}</span>${escapeHtml(e.text)}</div>`;
 }
 
+// What the model wrote, drawn from its Markdown by the gateway (already made safe there); the text
+// as it is when there is no drawing of it
+function written(text, html){
+  return html ? `<div class="md task-md">${html}</div>` : `<p class="prose">${escapeHtml(text)}</p>`;
+}
+
 async function showTask(id){
   shown = id; lastEvent = 0;
   clearInterval(polling);
@@ -501,8 +508,8 @@ async function showTask(id){
     ${t.error ? `<div class="note err">${escapeHtml(t.error)}</div>` : ''}
     ${gone ? `<div class="note warn"><b>${escapeHtml(t.model)}</b> is no longer available. Pick another model to continue or retry on.</div>` : ''}
     <div class="actions">${actions.join('')}${picker}</div>
-    ${t.summary ? `<h3>${t.status === 'done' && !t.diff ? 'Answer' : 'Summary'}</h3><p class="prose">${escapeHtml(t.summary)}</p>` : ''}
-    ${t.plan ? `<details><summary>Plan</summary><p class="prose">${escapeHtml(t.plan)}</p></details>` : ''}
+    ${t.summary ? `<h3>${t.status === 'done' && !t.diff ? 'Answer' : 'Summary'}</h3>${written(t.summary, t.summary_html)}` : ''}
+    ${t.plan ? `<details><summary>Plan</summary>${written(t.plan, t.plan_html)}</details>` : ''}
     ${t.diff ? `<details open><summary>Changes</summary><pre class="diff">${renderDiff(t.diff)}</pre></details>` : ''}
     <details class="steps" id="steps" ${(stepsOpen ?? live) ? 'open' : ''}>
       <summary>What it did <span class="muted" id="stepCount"></span></summary>
