@@ -59,6 +59,10 @@
     <code>provider/model</code>. Everything about them is set here and applies to the next request.
     Each request is sent to the provider and paid for per token.</p>
   <div id="cloudList" class="muted">Loading&hellip;</div>
+  <style>
+    /* The site's inputs are full width; a checkbox in this form is not */
+    #cloudForm input[type=checkbox]{width:auto;flex:none;margin:0;padding:0}
+  </style>
   <form id="cloudForm" hidden autocomplete="off" style="margin-top:1rem;border-top:1px solid var(--border);padding-top:1rem">
     <div class="row">
       <label style="flex:0 0 10rem;margin:0">
@@ -86,7 +90,7 @@
       <label style="margin:0;display:flex;gap:.4rem;align-items:center"><input type="checkbox" id="cloudEveryone">
         Everyone allowed these models may use them, not only admins</label>
       <label style="margin:0;display:flex;gap:.4rem;align-items:center"><input type="checkbox" id="cloudAuto">
-        <b>auto</b> may pick them</label>
+        <span><b>auto</b> may pick them</span></label>
     </div>
     <h3 style="margin:1rem 0 .4rem;font-size:.95rem">Models</h3>
     <div class="row">
