@@ -161,6 +161,18 @@ def is_enabled():
 # --- starting one ------------------------------------------------------------------------------
 
 
+async def check_model(principal, model):
+    """That this person may run a task on the model, and that it is there and can call tools: when a
+    task starts, and when a stopped one is continued or retried on another model."""
+    if not access.can_use_model(principal, model):
+        raise PermissionError(f"You do not have access to model '{model}'")
+    backend = await backends.resolve(model)
+    if backend is None:
+        raise ValueError(f"Model '{model}' is not available")
+    if "tools" not in backend.capabilities:
+        raise ValueError(f"{model} cannot call tools; pick one that can")
+
+
 async def create(session, principal, project, description, model, conversation_id=None, by=""):
     """Queues a task: the one place the rules for starting one live, used by the Tasks page and by
     the playground agent. PermissionError or ValueError say why it cannot start."""
@@ -172,13 +184,7 @@ async def create(session, principal, project, description, model, conversation_i
     # owner's computer, so nobody else's task should be choosing what they run
     if not principal.is_admin and project.added_by != principal.user.id:
         raise PermissionError("Only the person who added this project, or an admin, can start tasks on it")
-    if not access.can_use_model(principal, model):
-        raise PermissionError(f"You do not have access to model '{model}'")
-    backend = await backends.resolve(model)
-    if backend is None:
-        raise ValueError(f"Model '{model}' is not available")
-    if "tools" not in backend.capabilities:
-        raise ValueError(f"{model} cannot call tools; pick one that can")
+    await check_model(principal, model)
     description = (description or "").strip()
     if len(description) < 5:
         raise ValueError("Say what the task should do")
