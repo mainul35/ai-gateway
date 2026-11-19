@@ -5084,9 +5084,16 @@ async function routeTurn(text, asking){
   const usable = format && documentKinds().includes(format) ? format : null;
   const waiting = formatQuestion;
   dropFormatQuestion();
-  if(waiting && usable && !(tools.agent && caps.agent)) return sendDocument(text, usable, asking, waiting.request);
+  // A file asked for is made even with the agent on: the agent has no way to make one, and answered
+  // "make a PowerPoint about X" with the slides as chat text and nothing to download
+  if(waiting && usable) return sendDocument(text, usable, asking, waiting.request);
   let decision = await decideAction(text, turnPictures().length > 0);
   if(decision.action === 'stopped') return;
+  // PowerPoint named outright is a deck to make, even when the router read it as a question
+  if(['chat', 'agent'].includes(decision.action) && usable === 'pptx' && SAYS_POWERPOINT.test(text))
+    decision = {...decision, action: 'document'};
+  // A document, as the router read it: which kind is asked when the words do not say
+  if(decision.action === 'document') return usable ? sendChat(text, decision, asking, usable) : askDocumentFormat(text, asking);
   // The agent is a choice, not a guess: switched on, it takes the turn
   if(tools.agent && caps.agent) return sendAgent(text, asking);
   // Auto's choice when the answer needs the person's own project: only the agent can read it
@@ -5096,10 +5103,6 @@ async function routeTurn(text, asking){
     if((models[model]?.capabilities || []).includes('tools')) return sendAgent(text, asking, decision);
     decision = {...decision, action: 'chat'};
   }
-  // PowerPoint named outright is a deck to make, even when the router read it as a question
-  if(decision.action === 'chat' && usable === 'pptx' && SAYS_POWERPOINT.test(text)) decision = {...decision, action: 'document'};
-  // A document, as the router read it: which kind is asked when the words do not say
-  if(decision.action === 'document') return usable ? sendChat(text, decision, asking, usable) : askDocumentFormat(text, asking);
   if(decision.action === 'map') return sendMap(text, decision, fix, asking);
   if(decision.action === 'photos') return sendMedia(text, decision, asking);
   if(decision.action === 'clean' || decision.action === 'blur' || decision.action === 'backdrop')
