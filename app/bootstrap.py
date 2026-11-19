@@ -57,6 +57,10 @@ _ADDED_COLUMNS = (
     ("coding_tasks", "thread_id", "INTEGER"),
     # The PowerPoint template a deck the playground wrote was built on (app/tools/slides.py)
     ("chat_files", "template_id", "INTEGER"),
+    # Presentation tasks (app/coding/presentation.py)
+    ("coding_tasks", "kind", "VARCHAR(16)"),
+    ("coding_tasks", "sources", "TEXT"),
+    ("coding_tasks", "result_file_id", "INTEGER"),
 )
 
 
@@ -95,6 +99,11 @@ async def ensure_schema():
                 await connection.execute(text(f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {column} {kind}"))
         if ("coding_tasks", "thread_id") not in present:
             await _thread_follow_ups(connection)
+        # A presentation needs no project; tasks from before had to have one
+        if (await connection.execute(text(
+                "SELECT 1 FROM information_schema.columns WHERE table_schema = current_schema() "
+                "AND table_name = 'coding_tasks' AND column_name = 'project_id' AND is_nullable = 'NO'"))).first():
+            await connection.execute(text("ALTER TABLE coding_tasks ALTER COLUMN project_id DROP NOT NULL"))
         # Conversations from before they had a uid get one, and uids stay unique
         if (await connection.execute(text("SELECT 1 FROM conversations WHERE uid IS NULL LIMIT 1"))).first():
             await connection.execute(text("UPDATE conversations SET uid = gen_random_uuid()::text WHERE uid IS NULL"))

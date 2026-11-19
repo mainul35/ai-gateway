@@ -71,6 +71,21 @@ details.steps{margin:1rem 0}
 .turn .q a{color:inherit}
 .turn .prose.asked{font-weight:600;margin:.2rem 0 .5rem}
 .turn-open{border-left:3px solid var(--accent,#6366f1);padding-left:.9rem;margin-bottom:1.2rem}
+/* The kind of a new task; a presentation's slides, each a 16:9 card as in the file */
+.kind-pick{display:flex;gap:1.2rem;flex-wrap:wrap;margin:0 0 .8rem}
+.kind-pick label{display:flex;align-items:center;gap:.4rem;margin:0;font-weight:600;cursor:pointer}
+.kind-pick input{width:auto;margin:0}
+.deck{display:grid;grid-template-columns:repeat(auto-fill,minmax(18rem,1fr));gap:.8rem;margin:.6rem 0}
+.deck .slide{position:relative;aspect-ratio:16/9;overflow:auto;border:1px solid var(--border);border-radius:10px;
+             padding:.8rem 1rem;background:var(--card);font-size:.8rem}
+.deck .slide h3{margin:0 0 .4rem;padding-bottom:.25rem;border-bottom:3px solid #4f46e5;display:inline-block;font-size:.98rem}
+.deck .slide .md>:first-child{margin-top:0}
+.deck .title-slide{background:#312e81;color:#fff;display:flex;flex-direction:column;justify-content:center}
+.deck .title-slide h2{margin:0;color:#fff;font-size:1.2rem}
+.deck .title-slide p{margin:.4rem 0 0;color:#c7d2fe}
+.deck .section-slide{display:flex;align-items:center}
+.deck .slide-no{position:absolute;right:.6rem;bottom:.35rem;font-size:.7rem;color:var(--muted)}
+.deck .slide-notes{margin:.5rem 0 0;font-size:.74rem;color:var(--muted);font-style:italic}
 details.steps>summary{cursor:pointer;font-size:1.17em;font-weight:700;margin-bottom:.6rem}
 details.steps>summary .muted{font-size:.8rem;font-weight:400;margin-left:.4rem}
 .model-pick{display:inline-flex;align-items:center;gap:.4rem;margin:0;width:auto;font-size:.88rem}
@@ -106,21 +121,31 @@ details.more summary{cursor:pointer;color:var(--muted);margin-bottom:.6rem}
 
 <div class="card" id="newTask" data-page-pane="new" hidden style="margin-bottom:1.25rem">
   <h2>New task</h2>
+  <div class="kind-pick" role="radiogroup" aria-label="Kind of task">
+    <label><input type="radio" name="taskKind" value="code" checked> Change or ask about code</label>
+    <label><input type="radio" name="taskKind" value="presentation"> Make a presentation</label>
+  </div>
   <div class="row" style="gap:.75rem;margin-bottom:.6rem">
-    <label style="flex:1;min-width:12rem;margin:0"><span class="lbl">Project</span>
+    <label style="flex:1;min-width:12rem;margin:0"><span class="lbl" id="projectLabel">Project</span>
       <select id="taskProject"></select></label>
     <label style="flex:1;min-width:12rem;margin:0"><span class="lbl">Model</span>
       <select id="taskModel"></select></label>
   </div>
-  <label for="taskText" style="margin:0"><span class="lbl">What should change</span></label>
+  <label for="taskText" style="margin:0"><span class="lbl" id="taskTextLabel">What should change</span></label>
   <div class="composer" id="newBox">
     <div class="tiles" hidden></div>
     <textarea id="taskText" rows="3" placeholder="Fix: clicking Try again three times starts three answers. Only one turn should run at a time."></textarea>
     <div class="tools">
       <button type="button" class="btn btn-secondary icon-btn" data-attach title="Attach a screenshot or document (you can also paste or drop it)">+</button>
-      <input type="file" multiple hidden accept="image/*,.pdf,.docx,.xlsx,.txt,.md,.csv,.log,.json,.yaml,.yml,.xml,.html">
-      <span class="hint">Paste or drop screenshots and documents</span>
+      <input type="file" multiple hidden accept="image/*,.pdf,.docx,.xlsx,.pptx,.potx,.txt,.md,.markdown,.csv,.log,.json,.yaml,.yml,.xml,.html">
+      <span class="hint" id="attachHint">Paste or drop screenshots and documents</span>
     </div>
+  </div>
+  <div id="sourcesBox" hidden style="margin-top:.6rem">
+    <label for="taskSources" style="margin:0"><span class="lbl">Links to read (one a line)</span></label>
+    <textarea id="taskSources" rows="3" placeholder="https://your-wiki/pages/Design-overview&#10;https://github.com/owner/repo"></textarea>
+    <span class="muted" style="font-size:.82rem">Wiki pages, repositories, web pages - read the way web search reads
+      them. A page that needs signing in (a private Confluence) is read through its app, ticked below.</span>
   </div>
   <div style="margin-top:.6rem"><span class="lbl">Apps it may use</span>
     <div class="app-pick" id="taskApps"><span class="muted">Loading&hellip;</span></div></div>
@@ -468,18 +493,45 @@ async function chooseFolder(){
 
 async function loadProjects(select){
   projects = (await api('/coding/projects')).projects;
+  drawProjects(select);
+}
+
+// The kind of task the form starts: a code change on a project, or a presentation
+const taskKind = () => document.querySelector('input[name=taskKind]:checked')?.value || 'code';
+
+function drawProjects(select){
   const box = document.getElementById('taskProject');
   const keep = select || box.value;
-  box.innerHTML = projects.map(p => `<option value="${p.id}">${escapeHtml(p.name)}${p.kind === 'local' ? ' (on a computer)' : ''}</option>`).join('')
-                  || '<option value="">Add a project first</option>';
-  if(keep && projects.some(p => String(p.id) === String(keep))) box.value = keep;
+  const deck = taskKind() === 'presentation';
+  // A presentation needs no project; given one, it reads its code
+  box.innerHTML = (deck ? '<option value="">No project</option>' : '')
+    + (projects.map(p => `<option value="${p.id}">${escapeHtml(p.name)}${p.kind === 'local' ? ' (on a computer)' : ''}</option>`).join('')
+       || (deck ? '' : '<option value="">Add a project first</option>'));
+  if(keep !== undefined && [...box.options].some(o => o.value === String(keep))) box.value = keep;
   renderProjectNote();
 }
+
+function drawKind(){
+  const deck = taskKind() === 'presentation';
+  document.getElementById('projectLabel').textContent = deck ? 'Project to read (optional)' : 'Project';
+  document.getElementById('taskTextLabel').textContent = deck ? 'What the presentation is about' : 'What should change';
+  document.getElementById('taskText').placeholder = deck
+    ? 'A 10-slide overview of the new billing flow for the sales team: what changed, why, and what they need to tell customers.'
+    : 'Fix: clicking Try again three times starts three answers. Only one turn should run at a time.';
+  document.getElementById('attachHint').textContent = deck
+    ? 'Attach notes, Markdown, diagrams, and a PowerPoint template (.pptx or .potx) to build it on'
+    : 'Paste or drop screenshots and documents';
+  document.getElementById('sourcesBox').hidden = !deck;
+  document.getElementById('startTask').textContent = deck ? 'Make it' : 'Start';
+  drawProjects();
+}
+document.querySelectorAll('input[name=taskKind]').forEach(r => r.addEventListener('change', drawKind));
 
 function renderProjectNote(){
   const p = projects.find(p => String(p.id) === document.getElementById('taskProject').value);
   const note = document.getElementById('projectNote');
   if(!p){ note.innerHTML = ''; return; }
+  if(taskKind() === 'presentation'){ note.textContent = `Its files are read, not changed.`; return; }
   const checks = p.verify_command ? `checked with <code>${escapeHtml(p.verify_command)}</code>` : 'no checks set';
   let where;
   if(p.kind === 'local'){
@@ -554,8 +606,8 @@ async function loadTasks(){
     const ids = turns.map(t => t.id).join(',');
     return `
     <div class="task-item"><button class="task-row ${turns.some(t => t.id === shown) ? 'active' : ''}" data-task="${last.id}" data-ids="${ids}">
-      <span class="what">#${first.id} ${escapeHtml(first.description.split('\n')[0])}</span>
-      <span class="meta">${pill(last.status)} ${escapeHtml(first.project)} &middot; ${escapeHtml(last.model)}${more
+      <span class="what">#${first.id} ${first.kind === 'presentation' ? '<span title="A presentation">&#x1F4FD;</span> ' : ''}${escapeHtml(first.description.split('\n')[0])}</span>
+      <span class="meta">${pill(last.status)} ${escapeHtml(first.project || 'No project')} &middot; ${escapeHtml(last.model)}${more
         ? ` &middot; ${more} follow-up${more === 1 ? '' : 's'}` : ''}</span>
     </button>${turns.some(t => KEEP.includes(t.status)) ? '' : `<button class="remove" data-remove-task="${first.id}"
       data-turns="${turns.length}" title="Remove this ${more ? 'conversation' : 'task'} from the list"
@@ -606,6 +658,21 @@ function asked(description){
       <p class="prose muted" style="font-size:.85rem">${escapeHtml(earlier.slice(String(id).length).replace(/^, which was asked:/, 'Asked:'))}</p></details>`;
 }
 
+// A presentation's deck, slide by slide: a browser cannot show a .pptx, so the gateway reads its
+// slides from the Markdown it was made from, the way the file was
+async function drawSlides(id){
+  const box = document.getElementById('deckSlides');
+  try{
+    const found = await api(`/coding/tasks/${id}/slides`);
+    if(shown !== id || !box.isConnected) return;
+    box.innerHTML = found.slides.map((s, n) => s.kind === 'title'
+      ? `<section class="slide title-slide"><h2>${escapeHtml(s.title)}</h2>${s.subtitle ? `<p>${escapeHtml(s.subtitle)}</p>` : ''}</section>`
+      : `<section class="slide${s.html ? '' : ' section-slide'}"><span class="slide-no">${n + 1}</span>
+          <h3>${escapeHtml(s.title)}</h3>${s.html ? `<div class="md task-md">${s.html}</div>` : ''}
+          ${s.notes ? `<p class="slide-notes">Notes: ${escapeHtml(s.notes)}</p>` : ''}</section>`).join('');
+  }catch(e){ box.innerHTML = `<span class="muted">The slides cannot be shown here (${escapeHtml(e.message)}); download the file.</span>`; }
+}
+
 // A turn of the thread other than the one open: what was asked and what it found
 function pastTurn(turn){
   return `<div class="turn">
@@ -652,6 +719,7 @@ async function showTask(id){
       <span>on</span><select id="restartModel">${toolModels.map(m =>
         `<option ${m === t.model ? 'selected' : ''}>${escapeHtml(m)}</option>`).join('')}</select></label>` : '';
   const live = LIVE.includes(t.status);
+  const deck = t.kind === 'presentation';
   const before = turns.filter(x => x.id < t.id).map(pastTurn).join('');
   const after = turns.filter(x => x.id > t.id).map(pastTurn).join('');
   const question = turns.find(x => x.id === t.id)?.question;
@@ -661,7 +729,9 @@ async function showTask(id){
     ${t.attached?.length ? `<div class="given">${t.attached.map(f => f.picture
       ? `<a class="tile" href="${f.url}" target="_blank" rel="noopener" title="${escapeHtml(f.name)}"><img src="${f.url}" alt="${escapeHtml(f.name)}"></a>`
       : `<a class="tile doc" href="${f.url}" target="_blank" rel="noopener">${escapeHtml(f.name)}</a>`).join('')}</div>` : ''}
-    <p class="muted" style="font-size:.88rem">${escapeHtml(t.project)} &middot; ${escapeHtml(t.model)}
+    ${t.sources?.length ? `<p class="muted" style="font-size:.85rem;margin:.2rem 0">Read: ${t.sources.map(s =>
+      `<a href="${escapeHtml(s)}" target="_blank" rel="noopener noreferrer">${escapeHtml(s.replace(/^https?:\/\//, '').slice(0, 60))}</a>`).join(' &middot; ')}</p>` : ''}
+    <p class="muted" style="font-size:.88rem">${deck ? '&#x1F4FD; Presentation &middot; ' : ''}${escapeHtml(t.project || 'No project')} &middot; ${escapeHtml(t.model)}
       ${t.apps?.length ? ` &middot; apps: ${t.apps.map(escapeHtml).join(', ')}` : ''}
       ${t.branch ? ` &middot; branch <code>${escapeHtml(t.branch)}</code>` : ''}
       ${t.pr_url ? ` &middot; <a href="${escapeHtml(t.pr_url)}" target="_blank" rel="noopener">pull request</a>` : ''}</p>
@@ -671,19 +741,25 @@ async function showTask(id){
     <details class="steps" id="steps" ${(stepsOpen ?? live) ? 'open' : ''}>
       <summary>Execution steps <span class="muted" id="stepCount"></span></summary>
       <div class="events" id="events"></div></details>
-    ${t.summary ? `<h3>${t.status === 'done' && !t.diff ? 'Answer' : 'Summary'}</h3>${written(t.summary, t.summary_html)}` : ''}
+    ${deck && t.result ? `<div class="deck-result"><h3>Presentation</h3>
+        <div class="actions"><a class="btn" href="${t.result.url}?download=1">Download the PowerPoint</a></div>
+        <div class="deck" id="deckSlides"><span class="muted">Loading the slides&hellip;</span></div>
+        <details><summary>The slides as Markdown</summary>${written(t.summary, t.summary_html)}</details></div>`
+      : t.summary ? `<h3>${t.status === 'done' && !t.diff ? 'Answer' : 'Summary'}</h3>${written(t.summary, t.summary_html)}` : ''}
     ${t.plan ? `<details><summary>Plan</summary>${written(t.plan, t.plan_html)}</details>` : ''}
     ${t.diff ? `<details open><summary>Changes</summary><pre class="diff">${renderDiff(t.diff)}</pre></details>` : ''}
     </div>${after}
     ${LIVE.includes(latest.status) ? '' : `<div class="ask-more">
-      <label for="askMore" class="lbl">Ask more about this ${turns.length ? 'conversation' : 'task'} or ${escapeHtml(t.project || 'its project')}</label>
+      <label for="askMore" class="lbl">${deck ? 'Ask for changes to this presentation'
+        : `Ask more about this ${turns.length ? 'conversation' : 'task'} or ${escapeHtml(t.project || 'its project')}`}</label>
       <div class="composer" id="askBox" data-ask-on="${latest.id}">
         <div class="tiles" hidden></div>
-        <textarea id="askMore" rows="2" placeholder="How is the routing tested? / Now add a test for it.  (Ctrl+Enter asks)"></textarea>
+        <textarea id="askMore" rows="2" placeholder="${deck ? 'Make it 6 slides, and add a slide on pricing.  (Ctrl+Enter asks)'
+          : 'How is the routing tested? / Now add a test for it.  (Ctrl+Enter asks)'}"></textarea>
         <div class="tools">
           <button type="button" class="btn btn-secondary icon-btn" data-attach title="Attach a screenshot or document (you can also paste or drop it)">+</button>
-      <input type="file" multiple hidden accept="image/*,.pdf,.docx,.xlsx,.txt,.md,.csv,.log,.json,.yaml,.yml,.xml,.html">
-          <span class="hint">Answered here, below, from what this conversation found so far</span>
+      <input type="file" multiple hidden accept="image/*,.pdf,.docx,.xlsx,.pptx,.potx,.txt,.md,.markdown,.csv,.log,.json,.yaml,.yml,.xml,.html">
+          <span class="hint">${deck ? 'A new version, made from this one and what it was given' : 'Answered here, below, from what this conversation found so far'}</span>
           <span class="spacer"></span>
           ${toolModels.length ? `<select id="askModel" title="The model that answers">${toolModels.map(m =>
             `<option ${m === (toolModels.includes(latest.model) ? latest.model : toolModels[0]) ? 'selected' : ''}>${escapeHtml(m)}</option>`).join('')}</select>` : ''}
@@ -691,6 +767,7 @@ async function showTask(id){
         </div>
       </div></div>`}`;
   attached.set('askBox', []);
+  if(deck && t.result) drawSlides(t.id);
   // Opened at a later turn of a thread: the turn itself in view, the earlier ones above it
   if(opening && turns.length && turns[0].id !== t.id) document.getElementById('openTurn').scrollIntoView({block: 'start'});
   document.getElementById('steps').addEventListener('toggle', e => { stepsOpen = e.target.open; });
@@ -887,7 +964,7 @@ document.addEventListener('click', async e => {
     // Chosen beside the box; the task's own model while it is there
     const picker = document.getElementById('askModel');
     const model = picker ? picker.value : (toolModels.includes(t.model) ? t.model : document.getElementById('taskModel').value);
-    if(!canSee(model, 'askBox')) return;
+    if(t.kind !== 'presentation' && !canSee(model, 'askBox')) return;
     acting = true; showError('');
     try{
       // Asked on the latest turn of the thread, whichever turn is open
@@ -933,18 +1010,22 @@ document.getElementById('chooseFolder').addEventListener('click', chooseFolder);
 document.getElementById('startTask').addEventListener('click', async e => {
   if(acting) return;
   const description = document.getElementById('taskText').value.trim();
-  const project_id = Number(document.getElementById('taskProject').value);
-  if(!project_id){ showError('Add a project first.'); return; }
-  if(description.length < 5){ showError('Say what should change.'); return; }
+  const kind = taskKind(), deck = kind === 'presentation';
+  const project_id = Number(document.getElementById('taskProject').value) || null;
+  if(!project_id && !deck){ showError('Add a project first.'); return; }
+  if(description.length < 5){ showError(deck ? 'Say what the presentation is about.' : 'Say what should change.'); return; }
+  const sources = deck ? document.getElementById('taskSources').value.split(/\s+/).filter(Boolean) : [];
   const files = readyFiles('newBox');
-  if(!files || !canSee(document.getElementById('taskModel').value, 'newBox')) return;
+  // A presentation puts pictures on its slides; it does not need a model that can see them
+  if(!files || (!deck && !canSee(document.getElementById('taskModel').value, 'newBox'))) return;
   acting = true; e.target.disabled = true; showError('');
   try{
     const task = await api('/coding/tasks', {method: 'POST', headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({project_id, description, model: document.getElementById('taskModel').value,
                             apps: [...document.querySelectorAll('#taskApps input:checked')].map(i => i.value),
-                            files})});
+                            files, kind, sources})});
     document.getElementById('taskText').value = '';
+    document.getElementById('taskSources').value = '';
     attached.set('newBox', []); drawTiles('newBox');
     stepsOpen = null;
     await loadTasks(); await showTask(task.id);

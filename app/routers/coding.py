@@ -11,7 +11,7 @@ import re
 import httpx
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
-from fastapi.responses import PlainTextResponse
+from fastapi.responses import PlainTextResponse, Response
 from pydantic import BaseModel, Field
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -20,8 +20,8 @@ from app import github_access, knowledge
 from app.auth import Principal, require_admin, require_manager
 from app.coding import apps as apps_of_tasks, attachments, detect, projects, remote, runner, workspace
 from app.db import get_session
-from app.models import CodingTask, CodingTaskEvent, Project
-from app.tools import markdown
+from app.models import ChatFile, CodingTask, CodingTaskEvent, Project
+from app.tools import markdown, slides
 
 def _switched_on(request: Request):
     """Every coding endpoint, not only the ones that start work, is closed while coding.enabled is off:
@@ -65,7 +65,10 @@ def _task_out(task, project=None, full=False):
            "branch": task.branch, "pr_url": task.pr_url, "error": task.error,
            "created_at": task.created_at.isoformat(), "updated_at": task.updated_at.isoformat(),
            "apps": json.loads(task.apps) if task.apps else [],
-           "files": json.loads(task.files) if task.files else [], "thread_id": task.thread_id}
+           "files": json.loads(task.files) if task.files else [], "thread_id": task.thread_id,
+           "kind": task.kind or "code", "sources": json.loads(task.sources) if task.sources else [],
+           # A presentation's deck, served from this task (the file itself is its maker's own)
+           "result": {"url": f"/coding/tasks/{task.id}/presentation"} if task.result_file_id else None}
     out["can_continue"] = _can_continue(task)
     if full:
         out.update(plan=task.plan, summary=task.summary, diff=task.diff, verify_output=task.verify_output,
@@ -83,7 +86,7 @@ def _can_continue(task):
         state = json.loads(task.state)
     except ValueError:
         return False
-    return bool(state.get("messages")) and state.get("stage") in ("explore", "edit", "ship")
+    return bool(state.get("messages")) and state.get("stage") in ("explore", "edit", "ship", "gather")
 
 
 # --- projects ----------------------------------------------------------------------------------
@@ -336,7 +339,8 @@ async def remove_project(project_id: int, _: Principal = Depends(require_admin),
 
 
 class TaskIn(BaseModel):
-    project_id: int
+    # None only for a presentation made without a project
+    project_id: int | None = None
     description: str = Field(min_length=5, max_length=20_000)
     model: str = Field(max_length=256)
     conversation_id: int | None = None
@@ -344,12 +348,16 @@ class TaskIn(BaseModel):
     apps: list[str] = Field(default_factory=list, max_length=apps_of_tasks.MOST_APPS)
     # Pictures and documents uploaded through /chat/files, given with the description
     files: list[int] = Field(default_factory=list, max_length=20)
+    # "code", or "presentation": a deck made from the description, the files and these links
+    kind: str = Field(default="code", pattern="^(code|presentation)$")
+    sources: list[str] = Field(default_factory=list, max_length=20)
 
 
-async def _start(session, principal, project, description, model, conversation_id=None, apps=None, files=None):
+async def _start(session, principal, project, description, model, conversation_id=None, apps=None, files=None,
+                 **more):
     try:
         return await runner.create(session, principal, project, description, model, conversation_id, apps=apps,
-                                   files=files)
+                                   files=files, **more)
     except PermissionError as e:
         raise HTTPException(status.HTTP_403_FORBIDDEN, str(e))
     except ValueError as e:
@@ -360,11 +368,14 @@ async def _start(session, principal, project, description, model, conversation_i
 async def create_task(payload: TaskIn, principal: Principal = Depends(require_manager),
                       session: AsyncSession = Depends(get_session)):
     _enabled()
-    project = await session.get(Project, payload.project_id)
-    if project is None:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "No such project")
+    project = None
+    if payload.project_id is not None:
+        project = await session.get(Project, payload.project_id)
+        if project is None:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "No such project")
     task = await _start(session, principal, project, payload.description, payload.model,
-                        payload.conversation_id, payload.apps, payload.files)
+                        payload.conversation_id, payload.apps, payload.files,
+                        kind=payload.kind, sources=payload.sources)
     return _task_out(task, project)
 
 
@@ -433,16 +444,24 @@ async def ask_more(task_id: int, payload: AskIn, principal: Principal = Depends(
     what the thread was asked and found so far, and the Tasks page shows it under the earlier turns."""
     _enabled()
     task, project = await _task(session, task_id)
-    if project is None:
+    deck = task.kind == "presentation"
+    if project is None and (task.project_id is not None or not deck):
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Its project is gone")
     question = payload.question.strip()
     thread = await _thread(session, task)
     context = follow_up_context(task, [t for t in thread if t.id < task.id])
     model = (payload.model or "").strip() or task.model
     apps = json.loads(task.apps) if task.apps else []
+    files = payload.files
+    if deck:
+        # The next version of a deck keeps what the last was made from - its template, its pictures -
+        # with anything new added
+        kept = [i for i in (json.loads(task.files) if task.files else []) if i not in files]
+        files = (kept + list(files))[-attachments.MOST_FILES:]
     try:
         follow_up = await runner.create(session, principal, project, question + context, model, task.conversation_id,
-                                        apps=apps, files=payload.files, thread_id=task.thread_id or task.id)
+                                        apps=apps, files=files, thread_id=task.thread_id or task.id,
+                                        kind=task.kind, sources=json.loads(task.sources) if task.sources else None)
     except PermissionError as e:
         raise HTTPException(status.HTTP_403_FORBIDDEN, str(e))
     except ValueError as e:
@@ -453,7 +472,8 @@ async def ask_more(task_id: int, payload: AskIn, principal: Principal = Depends(
 @router.get("/tasks")
 async def list_tasks(project_id: int | None = None, limit: int = 50, _: Principal = Depends(require_manager),
                      session: AsyncSession = Depends(get_session)):
-    query = select(CodingTask, Project).join(Project).order_by(CodingTask.id.desc()).limit(max(1, min(limit, 200)))
+    # Outer: a presentation may have no project
+    query = select(CodingTask, Project).outerjoin(Project).order_by(CodingTask.id.desc()).limit(max(1, min(limit, 200)))
     if project_id:
         query = query.where(CodingTask.project_id == project_id)
     rows = (await session.execute(query)).all()
@@ -464,7 +484,39 @@ async def _task(session, task_id):
     task = await session.get(CodingTask, task_id)
     if task is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "No such task")
-    return task, await session.get(Project, task.project_id)
+    return task, (await session.get(Project, task.project_id) if task.project_id else None)
+
+
+async def _deck_of(session, task_id):
+    """A presentation task's deck (a ChatFile), and the task."""
+    task, _project = await _task(session, task_id)
+    stored = await session.get(ChatFile, task.result_file_id) if task.result_file_id else None
+    if stored is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "This task has no presentation")
+    return task, stored
+
+
+@router.get("/tasks/{task_id}/presentation")
+async def task_presentation(task_id: int, download: bool = False, _: Principal = Depends(require_manager),
+                            session: AsyncSession = Depends(get_session)):
+    """The deck a presentation task made, for whoever may see the task."""
+    _task_row, stored = await _deck_of(session, task_id)
+    headers = {"Cache-Control": "private, max-age=3600", "X-Content-Type-Options": "nosniff"}
+    if download:
+        from app.routers.chat import _attachment
+        headers["Content-Disposition"] = _attachment(stored.name or f"task-{task_id}.pptx")
+    return Response(stored.data, media_type=stored.mime_type, headers=headers)
+
+
+@router.get("/tasks/{task_id}/slides")
+async def task_slides(task_id: int, _: Principal = Depends(require_manager),
+                      session: AsyncSession = Depends(get_session)):
+    """The deck slide by slide, for the page: read from the Markdown it was made from."""
+    _task_row, stored = await _deck_of(session, task_id)
+    try:
+        return {"name": stored.name, "slides": await asyncio.to_thread(slides.preview, stored.prompt or "")}
+    except slides.SlidesError as e:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(e))
 
 
 @router.get("/tasks/{task_id}")
@@ -494,6 +546,13 @@ async def task_events(task_id: int, after: int = 0, _: Principal = Depends(requi
                         "at": e.created_at.isoformat()} for e in rows]}
 
 
+def _changes_something(task, project):
+    """A presentation changes nothing, so there is nothing to approve or take back."""
+    if task.kind == "presentation" or project is None:
+        raise HTTPException(status.HTTP_409_CONFLICT, "A presentation changes nothing, so there is nothing to "
+                                                      "approve or undo")
+
+
 def _may_decide(principal, project):
     """Who decides what happens to a finished task: an admin for a project on GitHub, since that
     merges and deploys; for a folder on somebody's computer, its owner too - it is their folder."""
@@ -507,6 +566,7 @@ async def approve_task(task_id: int, principal: Principal = Depends(require_mana
                        session: AsyncSession = Depends(get_session)):
     """Merges and deploys a project's task; for a local folder, keeps the changes already made."""
     task, project = await _task(session, task_id)
+    _changes_something(task, project)
     if not _may_decide(principal, project):
         raise HTTPException(status.HTTP_403_FORBIDDEN, "Only an admin can approve this")
     if task.status != "review":
@@ -527,6 +587,7 @@ async def reject_task(task_id: int, principal: Principal = Depends(require_manag
                       session: AsyncSession = Depends(get_session)):
     """Rejects a task. For a local folder that means undoing it: every file put back as it was."""
     task, project = await _task(session, task_id)
+    _changes_something(task, project)
     if task.status not in ("review", "failed", "cancelled"):
         raise HTTPException(status.HTTP_409_CONFLICT, f"A {task.status} task cannot be rejected")
     if project.kind == "local":
@@ -632,13 +693,14 @@ async def retry_task(task_id: int, payload: RestartIn | None = None, principal: 
         raise HTTPException(status.HTTP_409_CONFLICT, f"A {task.status} task cannot be retried")
     # In a folder on somebody's computer the first try's changes are still there; starting again on
     # top of them would leave Undo unable to put the folder back as it was before either
-    if project.kind == "local" and task.originals and task.originals != "{}" and task.status != "rejected":
+    kind = project.kind if project is not None else None      # None: a presentation without a project
+    if kind == "local" and task.originals and task.originals != "{}" and task.status != "rejected":
         raise HTTPException(status.HTTP_409_CONFLICT, "Its earlier changes are still in the folder. Undo them "
                                                       "first, then retry.")
     switched = await _switch_model(task, principal, payload)
     task.status, task.stage, task.error, task.pr_url, task.state = "queued", None, None, None, None
-    task.branch = None if project.kind == "git" else task.branch
-    if project.kind == "local":
+    task.branch = None if kind == "git" else task.branch
+    if kind == "local":
         task.originals, task.diff = None, None
     await session.commit()
     await runner.event(task_id, "note", "Retrying from the start" + (f", {switched}" if switched else ""))

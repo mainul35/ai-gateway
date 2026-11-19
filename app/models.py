@@ -276,11 +276,20 @@ class Project(Base):
 
 
 class CodingTask(Base):
-    """One piece of work on a project: from a description to a pull request, a merge and a deploy."""
+    """One piece of work on a project: from a description to a pull request, a merge and a deploy.
+    Or a presentation (kind "presentation"): a deck made from what it is given, on a project or none."""
     __tablename__ = "coding_tasks"
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    project_id: Mapped[int] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), index=True)
+    # None only for a presentation made without a project
+    project_id: Mapped[int | None] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), index=True,
+                                                   nullable=True)
+    # "code" (None, for tasks from before there were kinds) or "presentation"
+    kind: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    # A presentation's sources: JSON list of links to read - a wiki page, a repository, a web page
+    sources: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # The deck a presentation made (a ChatFile)
+    result_file_id: Mapped[int | None] = mapped_column(nullable=True)
     user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
     conversation_id: Mapped[int | None] = mapped_column(
         ForeignKey("conversations.id", ondelete="SET NULL"), nullable=True)

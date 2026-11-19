@@ -26,13 +26,8 @@ log = logging.getLogger("tools.slides")
 MIME = "application/vnd.openxmlformats-officedocument.presentationml.presentation"
 MOST_SLIDES = 80
 
-WRITING_PROMPT = """The user has asked for a presentation, and this system makes the PowerPoint \
-file for them: whatever you write in this reply is turned into slides and handed to them. You do not \
-make the file and need no tool, library or code for it. Never say you cannot create files, and never \
-explain how to make a presentation.
-
-Write the slides now, in Markdown:
-- Begin with one "# " title naming the presentation, and one short line under it as its subtitle.
+# How slides are written, for the playground (WRITING_PROMPT) and a presentation task alike
+SLIDE_RULES = """- Begin with one "# " title naming the presentation, and one short line under it as its subtitle.
 - Start every slide with a "## " heading: its title, a few words.
 - On each slide 3 to 6 short bullet points, a few words to one line each - a slide is read at a \
 glance, not a page of text. Use a table where things are compared, and a chart where there are \
@@ -55,6 +50,14 @@ conversation.
 - Write only the slides. No preface such as "here is your presentation", no offer at the end, no \
 questions back.
 - Write in the language the user writes in."""
+
+WRITING_PROMPT = """The user has asked for a presentation, and this system makes the PowerPoint \
+file for them: whatever you write in this reply is turned into slides and handed to them. You do not \
+make the file and need no tool, library or code for it. Never say you cannot create files, and never \
+explain how to make a presentation.
+
+Write the slides now, in Markdown:
+""" + SLIDE_RULES
 
 REMINDER = """
 
