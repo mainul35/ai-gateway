@@ -65,6 +65,12 @@ details.steps{margin:1rem 0}
 .given a.tile{display:block}
 .follows{margin:.2rem 0 .6rem}
 .follows summary{cursor:pointer;color:var(--muted);font-size:.85rem}
+/* A thread: the turns other than the one open, each a question and what it found */
+.turn{border-left:3px solid var(--border);padding:.1rem 0 .1rem .9rem;margin:0 0 1.2rem}
+.turn .q{margin:0 0 .3rem;font-size:.85rem;color:var(--muted)}
+.turn .q a{color:inherit}
+.turn .prose.asked{font-weight:600;margin:.2rem 0 .5rem}
+.turn-open{border-left:3px solid var(--accent,#6366f1);padding-left:.9rem;margin-bottom:1.2rem}
 details.steps>summary{cursor:pointer;font-size:1.17em;font-weight:700;margin-bottom:.6rem}
 details.steps>summary .muted{font-size:.8rem;font-weight:400;margin-left:.4rem}
 .model-pick{display:inline-flex;align-items:center;gap:.4rem;margin:0;width:auto;font-size:.88rem}
@@ -525,15 +531,36 @@ async function loadApps(){
     : `<span class="muted" style="font-size:.88rem">None connected yet - see <a href="#" data-goto="connections">Connections</a>.</span>`;
 }
 
+// The tasks grouped into threads, each first to last, the thread with the latest turn first. A
+// follow-up asked on a task is in its thread, so the list has one row per conversation
+function threadsOf(list){
+  const loaded = new Set(list.map(t => t.id)), threads = new Map();
+  for(const t of list){
+    const first = t.thread_id && loaded.has(t.thread_id) ? t.thread_id : t.id;
+    if(!threads.has(first)) threads.set(first, []);
+    threads.get(first).push(t);
+  }
+  return [...threads.values()].map(turns => turns.sort((a, b) => a.id - b.id))
+    .sort((a, b) => b.at(-1).id - a.at(-1).id);
+}
+
 async function loadTasks(){
   tasks = (await api('/coding/tasks')).tasks;
-  document.getElementById('taskCount').textContent = tasks.length || '';
-  document.getElementById('taskList').innerHTML = tasks.length ? tasks.map(t => `
-    <div class="task-item"><button class="task-row ${shown === t.id ? 'active' : ''}" data-task="${t.id}">
-      <span class="what">#${t.id} ${escapeHtml(t.description.split('\n')[0])}</span>
-      <span class="meta">${pill(t.status)} ${escapeHtml(t.project)} &middot; ${escapeHtml(t.model)}</span>
-    </button>${KEEP.includes(t.status) ? '' : `<button class="remove" data-remove-task="${t.id}"
-      title="Remove this task from the list" aria-label="Remove task #${t.id}">&times;</button>`}</div>`).join('') : '<span class="muted">No tasks yet.</span>';
+  const threads = threadsOf(tasks);
+  document.getElementById('taskCount').textContent = threads.length || '';
+  // A row opens its thread at the latest turn
+  document.getElementById('taskList').innerHTML = threads.length ? threads.map(turns => {
+    const first = turns[0], last = turns.at(-1), more = turns.length - 1;
+    const ids = turns.map(t => t.id).join(',');
+    return `
+    <div class="task-item"><button class="task-row ${turns.some(t => t.id === shown) ? 'active' : ''}" data-task="${last.id}" data-ids="${ids}">
+      <span class="what">#${first.id} ${escapeHtml(first.description.split('\n')[0])}</span>
+      <span class="meta">${pill(last.status)} ${escapeHtml(first.project)} &middot; ${escapeHtml(last.model)}${more
+        ? ` &middot; ${more} follow-up${more === 1 ? '' : 's'}` : ''}</span>
+    </button>${turns.some(t => KEEP.includes(t.status)) ? '' : `<button class="remove" data-remove-task="${first.id}"
+      data-turns="${turns.length}" title="Remove this ${more ? 'conversation' : 'task'} from the list"
+      aria-label="Remove task #${first.id}">&times;</button>`}</div>`;
+  }).join('') : '<span class="muted">No tasks yet.</span>';
 }
 
 function renderDiff(diff){
@@ -579,12 +606,28 @@ function asked(description){
       <p class="prose muted" style="font-size:.85rem">${escapeHtml(earlier.slice(String(id).length).replace(/^, which was asked:/, 'Asked:'))}</p></details>`;
 }
 
+// A turn of the thread other than the one open: what was asked and what it found
+function pastTurn(turn){
+  return `<div class="turn">
+    <p class="q"><a href="#" data-task="${turn.id}" title="Open this turn: its steps, changes and buttons">#${turn.id}</a>
+      ${pill(turn.status)} <span>${escapeHtml(turn.model)}</span></p>
+    <p class="prose asked">${escapeHtml(turn.question)}</p>
+    ${turn.summary ? written(turn.summary, turn.summary_html)
+      : turn.error ? `<div class="note err">${escapeHtml(turn.error)}</div>`
+      : LIVE.includes(turn.status) ? '<p class="muted">Working on it...</p>' : ''}
+    ${turn.has_diff ? `<p><a href="#" data-task="${turn.id}">See the changes it made</a></p>` : ''}</div>`;
+}
+
 async function showTask(id){
   showPage('tasks');
+  const opening = shown !== id;
   shown = id; lastEvent = 0;
   clearInterval(polling);
-  document.querySelectorAll('.task-row').forEach(r => r.classList.toggle('active', Number(r.dataset.task) === id));
+  document.querySelectorAll('.task-row').forEach(r =>
+    r.classList.toggle('active', (r.dataset.ids || r.dataset.task).split(',').map(Number).includes(id)));
   const t = await api(`/coding/tasks/${id}`);
+  const turns = t.thread || [];
+  const latest = turns.length ? turns.at(-1) : t;
   const project = projects.find(p => p.id === t.project_id) || {};
   const local = project.kind === 'local';
   const decides = isAdmin || (local && project.mine);
@@ -609,9 +652,12 @@ async function showTask(id){
       <span>on</span><select id="restartModel">${toolModels.map(m =>
         `<option ${m === t.model ? 'selected' : ''}>${escapeHtml(m)}</option>`).join('')}</select></label>` : '';
   const live = LIVE.includes(t.status);
-  box.innerHTML = `
+  const before = turns.filter(x => x.id < t.id).map(pastTurn).join('');
+  const after = turns.filter(x => x.id > t.id).map(pastTurn).join('');
+  const question = turns.find(x => x.id === t.id)?.question;
+  box.innerHTML = `${before}<div class="${turns.length ? 'turn-open' : ''}" id="openTurn">
     <h2 style="margin-top:0">#${t.id} ${pill(t.status)} ${t.stage ? `<span class="muted">${escapeHtml(t.stage)}</span>` : ''}</h2>
-    ${asked(t.description)}
+    ${question !== undefined ? `<p class="prose">${escapeHtml(question)}</p>` : asked(t.description)}
     ${t.attached?.length ? `<div class="given">${t.attached.map(f => f.picture
       ? `<a class="tile" href="${f.url}" target="_blank" rel="noopener" title="${escapeHtml(f.name)}"><img src="${f.url}" alt="${escapeHtml(f.name)}"></a>`
       : `<a class="tile doc" href="${f.url}" target="_blank" rel="noopener">${escapeHtml(f.name)}</a>`).join('')}</div>` : ''}
@@ -628,22 +674,25 @@ async function showTask(id){
     ${t.summary ? `<h3>${t.status === 'done' && !t.diff ? 'Answer' : 'Summary'}</h3>${written(t.summary, t.summary_html)}` : ''}
     ${t.plan ? `<details><summary>Plan</summary>${written(t.plan, t.plan_html)}</details>` : ''}
     ${t.diff ? `<details open><summary>Changes</summary><pre class="diff">${renderDiff(t.diff)}</pre></details>` : ''}
-    ${live ? '' : `<div class="ask-more">
-      <label for="askMore" class="lbl">Ask more about this task or ${escapeHtml(t.project || 'its project')}</label>
-      <div class="composer" id="askBox">
+    </div>${after}
+    ${LIVE.includes(latest.status) ? '' : `<div class="ask-more">
+      <label for="askMore" class="lbl">Ask more about this ${turns.length ? 'conversation' : 'task'} or ${escapeHtml(t.project || 'its project')}</label>
+      <div class="composer" id="askBox" data-ask-on="${latest.id}">
         <div class="tiles" hidden></div>
         <textarea id="askMore" rows="2" placeholder="How is the routing tested? / Now add a test for it.  (Ctrl+Enter asks)"></textarea>
         <div class="tools">
           <button type="button" class="btn btn-secondary icon-btn" data-attach title="Attach a screenshot or document (you can also paste or drop it)">+</button>
       <input type="file" multiple hidden accept="image/*,.pdf,.docx,.xlsx,.txt,.md,.csv,.log,.json,.yaml,.yml,.xml,.html">
-          <span class="hint">A new task on the same project, starting from what this one found</span>
+          <span class="hint">Answered here, below, from what this conversation found so far</span>
           <span class="spacer"></span>
-          ${toolModels.length ? `<select id="askModel" title="The model the new task runs on">${toolModels.map(m =>
-            `<option ${m === (toolModels.includes(t.model) ? t.model : toolModels[0]) ? 'selected' : ''}>${escapeHtml(m)}</option>`).join('')}</select>` : ''}
+          ${toolModels.length ? `<select id="askModel" title="The model that answers">${toolModels.map(m =>
+            `<option ${m === (toolModels.includes(latest.model) ? latest.model : toolModels[0]) ? 'selected' : ''}>${escapeHtml(m)}</option>`).join('')}</select>` : ''}
           <button class="btn" data-ask-more>Ask</button>
         </div>
       </div></div>`}`;
   attached.set('askBox', []);
+  // Opened at a later turn of a thread: the turn itself in view, the earlier ones above it
+  if(opening && turns.length && turns[0].id !== t.id) document.getElementById('openTurn').scrollIntoView({block: 'start'});
   document.getElementById('steps').addEventListener('toggle', e => { stepsOpen = e.target.open; });
   await pollEvents(t.status);
   if(LIVE.includes(t.status)) polling = setInterval(() => pollEvents(), 2500);
@@ -806,15 +855,16 @@ document.addEventListener('click', async e => {
   const gone = e.target.closest('[data-remove-task]');
   if(gone){
     e.preventDefault();
-    const id = Number(gone.dataset.removeTask);
+    const id = Number(gone.dataset.removeTask), many = Number(gone.dataset.turns || 1) > 1;
     const t = tasks.find(t => t.id === id) || {};
     const local = (projects.find(p => p.id === t.project_id) || {}).kind === 'local';
     const keeps = local ? ' Any changes it made in the folder stay there.'
-                : t.pr_url || t.branch ? ' Its branch and pull request stay on GitHub.' : '';
-    if(!confirm(`Remove task #${id} and its steps from the list?${keeps}`)) return;
+                : t.pr_url || t.branch || many ? ' Branches and pull requests stay on GitHub.' : '';
+    if(!confirm(many ? `Remove task #${id}, its ${gone.dataset.turns - 1} follow-up(s) and their steps from the list?${keeps}`
+                     : `Remove task #${id} and its steps from the list?${keeps}`)) return;
     try{
-      await api(`/coding/tasks/${id}`, {method: 'DELETE'});
-      if(shown === id){
+      const done = await api(`/coding/tasks/${id}${many ? '?thread=true' : ''}`, {method: 'DELETE'});
+      if([].concat(done.removed).includes(shown)){
         shown = null; clearInterval(polling);
         document.getElementById('detail').innerHTML = '<span class="muted">Pick a task to see what it did.</span>';
       }
@@ -840,7 +890,9 @@ document.addEventListener('click', async e => {
     if(!canSee(model, 'askBox')) return;
     acting = true; showError('');
     try{
-      const next = await api(`/coding/tasks/${shown}/ask`, {method: 'POST', headers: {'Content-Type': 'application/json'},
+      // Asked on the latest turn of the thread, whichever turn is open
+      const on = document.getElementById('askBox').dataset.askOn || shown;
+      const next = await api(`/coding/tasks/${on}/ask`, {method: 'POST', headers: {'Content-Type': 'application/json'},
                                                            body: JSON.stringify({question, model, files})});
       stepsOpen = null;
       await loadTasks(); await showTask(next.id);
