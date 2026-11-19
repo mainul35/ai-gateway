@@ -24,6 +24,7 @@ import json
 import logging
 import os
 import re
+import sys
 import time
 
 from fastapi import HTTPException
@@ -31,7 +32,7 @@ from sqlalchemy import select, update
 
 from app import access, backends, knowledge, settings
 from app.auth import Principal
-from app.coding import apps as task_apps, attachments, remote, sandbox, tools as task_tools, workspace
+from app.coding import apps as task_apps, attachments, presentation, remote, sandbox, tools as task_tools, workspace
 from app.db import session_factory
 from app.models import CodingTask, CodingTaskEvent, Project, User, utcnow
 
@@ -149,7 +150,7 @@ async def set_task(task_id, **fields):
 async def _load(task_id):
     async with session_factory()() as db:
         task = await db.get(CodingTask, task_id)
-        project = await db.get(Project, task.project_id) if task else None
+        project = await db.get(Project, task.project_id) if task and task.project_id else None
         user = await db.get(User, task.user_id) if task and task.user_id else None
     return task, project, user
 
@@ -174,27 +175,39 @@ async def check_model(principal, model):
 
 
 async def create(session, principal, project, description, model, conversation_id=None, by="", apps=None,
-                 files=None, thread_id=None):
+                 files=None, thread_id=None, kind=None, sources=None):
     """Queues a task: the one place the rules for starting one live, used by the Tasks page and by
     the playground agent. PermissionError or ValueError say why it cannot start. `thread_id` is the
-    first task of the thread a follow-up question belongs to."""
+    first task of the thread a follow-up question belongs to. `kind` "presentation" makes a deck
+    (app/coding/presentation.py), on a project or none, reading the links in `sources`."""
     if principal.user is None:
         raise ValueError("Start tasks while signed in, not with the master key")
     if not principal.is_manager:
         raise PermissionError("Only managers and admins can start coding tasks")
+    deck = kind == presentation.KIND
+    if kind not in (None, "code", presentation.KIND):
+        raise ValueError(f"{kind} is not a kind of task")
+    if project is None and not deck:
+        raise ValueError("A coding task needs a project")
     # On their own projects: a project's commands run in its sandbox, and a local one's on its
-    # owner's computer, so nobody else's task should be choosing what they run
-    if not principal.is_admin and project.added_by != principal.user.id:
+    # owner's computer, so nobody else's task should be choosing what they run. A presentation
+    # only reads: any project on GitHub, and a folder on a computer only its owner's
+    if (project is not None and not principal.is_admin and project.added_by != principal.user.id
+            and not (deck and project.kind != "local")):
         raise PermissionError("Only the person who added this project, or an admin, can start tasks on it")
     await check_model(principal, model)
     description = (description or "").strip()
     if len(description) < 5:
         raise ValueError("Say what the task should do")
     chosen = task_apps.check(principal, apps or [])
-    given = await attachments.check(session, principal.user.id, files or [], model)
-    task = CodingTask(project_id=project.id, user_id=principal.user.id, conversation_id=conversation_id,
-                      description=description[:20_000], model=model, apps=json.dumps(chosen) if chosen else None,
-                      files=json.dumps(given) if given else None, thread_id=thread_id)
+    # A presentation may be given pictures to put on its slides whatever model writes them
+    given = await attachments.check(session, principal.user.id, files or [], model, need_sight=not deck)
+    links = presentation.clean_sources(sources) if deck else []
+    task = CodingTask(project_id=project.id if project is not None else None, user_id=principal.user.id,
+                      conversation_id=conversation_id, description=description[:20_000], model=model,
+                      apps=json.dumps(chosen) if chosen else None, files=json.dumps(given) if given else None,
+                      thread_id=thread_id, kind=presentation.KIND if deck else None,
+                      sources=json.dumps(links) if links else None)
     session.add(task)
     await session.commit()
     await session.refresh(task)
@@ -412,6 +425,10 @@ async def _stage(task_id, principal, model, messages, offered, toolbox, exit_too
             if "answer" in exits and question and len(said) >= 60 and not _thinking_aloud(said):
                 messages.append({"role": "assistant", "content": said})
                 return {"answer": said}, edited
+            # A presentation written out as the reply rather than through write_slides is the slides
+            if "write_slides" in exits and len(said) >= 60 and (said.lstrip().startswith("#") or "\n## " in said):
+                messages.append({"role": "assistant", "content": said})
+                return {"slides": said}, edited
             if "submit_plan" in exits and len(said) >= 60 and not _thinking_aloud(said):
                 messages.append({"role": "assistant", "content": said})
                 return {"plan": said}, edited
@@ -549,6 +566,13 @@ async def run(task_id):
         return
     if user is None or not user.is_active:
         await set_task(task_id, status="failed", error="The person who asked for this no longer has an account.")
+        return
+    if task.kind == presentation.KIND:
+        await presentation.run(task, project, Principal(user=user), sys.modules[__name__])
+        _cancelled.discard(task_id)
+        return
+    if project is None:
+        await set_task(task_id, status="failed", error="Its project is gone.")
         return
     # A task being continued carries everything it had: the conversation, the stage, the attempts
     saved = json.loads(task.state) if task.state else {}

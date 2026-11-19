@@ -30,9 +30,10 @@ async def _files(session, user_id, ids):
     return {f.id: f for f in rows}
 
 
-async def check(session, user_id, ids, model):
+async def check(session, user_id, ids, model, need_sight=True):
     """The file ids, each one this person's own; ValueError says why not. Pictures need a model
-    that can see, or the task would start with half its question missing."""
+    that can see, or the task would start with half its question missing - unless `need_sight` is
+    False: a presentation puts them on its slides, and a model that cannot see is told they are there."""
     wanted = []
     for i in ids or []:
         if isinstance(i, bool) or not isinstance(i, int):
@@ -48,7 +49,7 @@ async def check(session, user_id, ids, model):
         raise ValueError("One of the attached files is gone; attach it again")
     if any(not _picture(f) and f.kind != "document" for f in found.values()):
         raise ValueError("Only pictures and documents can be given to a task")
-    if any(_picture(f) for f in found.values()):
+    if need_sight and any(_picture(f) for f in found.values()):
         backend = await backends.resolve(model)
         if backend is None or "vision" not in backend.capabilities:
             raise ValueError(f"{model} cannot see pictures. Pick a model that can, or leave the pictures out.")

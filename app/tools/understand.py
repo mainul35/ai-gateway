@@ -152,9 +152,10 @@ Message: "make a poster for this"
 # answer to "is it a document?" is used: everything else still comes from the reading that was
 # measured, whatever the added words do to the second one.
 DOCUMENT_WANT = """  document        - a piece of writing produced as a file to keep, download, print or send: a resume
-                    or CV, a report, a letter, minutes, notes, a handout, a guide, a proposal. Whatever
-                    the words or the language, whenever the person wants it as a PDF, Markdown, a
-                    document or a file - also "that, as a file" about something written earlier.
+                    or CV, a report, a letter, minutes, notes, a handout, a guide, a proposal, a
+                    presentation or slide deck. Whatever the words or the language, whenever the person
+                    wants it as a PDF, Markdown, PowerPoint, slides, a document or a file - also "that,
+                    as a file" about something written earlier.
                     Reading, summarising or translating an attached document is answer, and so is code
                     that makes files. A poster, a flyer to look at or any other picture is new_picture.
 """

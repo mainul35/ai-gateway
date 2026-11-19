@@ -26,6 +26,8 @@ MAX_SHEET_ROWS = 400
 
 SUFFIXES = {
     ".pdf": "pdf", ".docx": "docx", ".xlsx": "xlsx", ".xlsm": "xlsx",
+    # A presentation: read for its words, and usable as the template of a deck the playground makes
+    ".pptx": "pptx", ".potx": "pptx",
     ".txt": "text", ".md": "text", ".markdown": "text", ".csv": "text", ".tsv": "text",
     ".log": "text", ".json": "text", ".yaml": "text", ".yml": "text", ".xml": "text",
     ".html": "text", ".htm": "text", ".rst": "text", ".ini": "text", ".properties": "text",
@@ -36,6 +38,7 @@ OLD_OFFICE = (".doc", ".xls", ".ppt")
 MIME = {"pdf": "application/pdf",
         "docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
         "xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
         "text": "text/plain"}
 
 
@@ -83,7 +86,8 @@ def kind_of(name, data=b""):
     if data[:5] == b"%PDF-":
         return "pdf"
     if data[:2] == b"PK":
-        return "docx" if b"word/" in data[:4000] else ("xlsx" if b"xl/" in data[:4000] else None)
+        head = data[:4000]
+        return ("docx" if b"word/" in head else "xlsx" if b"xl/" in head else "pptx" if b"ppt/" in head else None)
     if data and _as_text(data) is not None:
         return "text"
     return None
@@ -184,6 +188,35 @@ def _from_xlsx(data):
     return "\n\n".join(sheets)
 
 
+def _from_pptx(data):
+    """Each slide's words, and its speaker notes. A deck with none - a template - is still accepted:
+    it is attached for its look."""
+    from app.tools import slides
+
+    _check_zip(data, "PowerPoint")
+    try:
+        deck = slides.opened(data, keep_slides=True)
+    except slides.SlidesError as e:
+        raise DocumentError(str(e))
+    parts = []
+    for number, slide in enumerate(deck.slides, start=1):
+        words = []
+        for shape in slide.shapes:
+            if shape.has_text_frame and shape.text_frame.text.strip():
+                words.append(shape.text_frame.text.strip())
+            elif getattr(shape, "has_table", False) and shape.has_table:
+                words.append("\n".join("\t".join(cell.text.strip() for cell in row.cells)
+                                       for row in shape.table.rows))
+        if slide.has_notes_slide and slide.notes_slide.notes_text_frame.text.strip():
+            words.append("Notes: " + slide.notes_slide.notes_text_frame.text.strip())
+        if words:
+            parts.append(f"--- slide {number} ---\n" + "\n".join(words))
+    if not parts:
+        return ("[A PowerPoint file with no words on its slides. Asked for a presentation, this "
+                "file's design is used as its template.]")
+    return "\n\n".join(parts)
+
+
 def extract(name, data):
     """The document as text. Raises DocumentError with something a person can act on."""
     kind = kind_of(name, data)
@@ -195,6 +228,8 @@ def extract(name, data):
         text = _from_docx(data)
     elif kind == "xlsx":
         text = _from_xlsx(data)
+    elif kind == "pptx":
+        text = _from_pptx(data)
     else:
         text = _as_text(data)
         if text is None:

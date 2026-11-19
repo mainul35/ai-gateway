@@ -219,6 +219,9 @@ class ChatFile(Base):
     # The prompt an image was generated from, shown under it
     prompt: Mapped[str | None] = mapped_column(Text, nullable=True)
     data: Mapped[bytes] = mapped_column(LargeBinary)
+    # A slide deck written here: the person's PowerPoint template it was built on, so it is built on
+    # it again when edited
+    template_id: Mapped[int | None] = mapped_column(nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
@@ -273,11 +276,20 @@ class Project(Base):
 
 
 class CodingTask(Base):
-    """One piece of work on a project: from a description to a pull request, a merge and a deploy."""
+    """One piece of work on a project: from a description to a pull request, a merge and a deploy.
+    Or a presentation (kind "presentation"): a deck made from what it is given, on a project or none."""
     __tablename__ = "coding_tasks"
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    project_id: Mapped[int] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), index=True)
+    # None only for a presentation made without a project
+    project_id: Mapped[int | None] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), index=True,
+                                                   nullable=True)
+    # "code" (None, for tasks from before there were kinds) or "presentation"
+    kind: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    # A presentation's sources: JSON list of links to read - a wiki page, a repository, a web page
+    sources: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # The deck a presentation made (a ChatFile)
+    result_file_id: Mapped[int | None] = mapped_column(nullable=True)
     user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
     conversation_id: Mapped[int | None] = mapped_column(
         ForeignKey("conversations.id", ondelete="SET NULL"), nullable=True)
