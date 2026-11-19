@@ -135,6 +135,19 @@ details.tuning label{margin-bottom:.85rem}
 .doc.editable .doc-view:has(iframe){overflow:hidden}
 .doc.editable .doc-view:not(:has(iframe)){padding:.9rem 1rem}
 .doc-view iframe{width:100%;height:100%;border:0;background:#fff;display:block}
+/* A deck written here, slide by slide: each a 16:9 card, as it is in the file */
+.deck{display:flex;flex-direction:column;gap:.9rem}
+.deck .slide{position:relative;aspect-ratio:16/9;overflow:auto;border:1px solid var(--border);border-radius:10px;
+             padding:.9rem 1.1rem;background:var(--card);font-size:.85rem}
+.deck .slide h3{margin:0 0 .5rem;padding-bottom:.3rem;border-bottom:3px solid #4f46e5;display:inline-block}
+.deck .slide .md>:first-child{margin-top:0}
+.deck .title-slide{background:#312e81;color:#fff;display:flex;flex-direction:column;justify-content:center}
+.deck .title-slide h2{margin:0;color:#fff}
+.deck .title-slide p{margin:.5rem 0 0;color:#c7d2fe}
+.deck .section-slide{display:flex;align-items:center}
+.deck .section-slide h3{font-size:1.3rem}
+.deck .slide-no{position:absolute;right:.7rem;bottom:.4rem;font-size:.72rem;color:var(--muted)}
+.deck .slide-notes{margin:.6rem 0 0;font-size:.78rem;color:var(--muted);font-style:italic}
 .doc-bar{flex:none;display:flex;align-items:center;gap:.6rem;padding:.4rem .7rem;border-bottom:1px solid var(--border);
          background:var(--card);flex-wrap:wrap}
 .doc-edit{flex:1;min-height:0;display:grid;grid-template-rows:minmax(0, 1fr) minmax(0, 1fr)}
@@ -865,11 +878,11 @@ a.paper{color:var(--text);text-decoration:none}
               </div>
             </span>
             <input type="file" id="fileInput" multiple hidden
-                   accept="image/*,.heic,.heif,.avif,.tif,.tiff,.bmp,.pdf,.docx,.xlsx,.xlsm,.txt,.md,.csv,.tsv,.log,.json,.yaml,.yml,.xml,.rst">
+                   accept="image/*,.heic,.heif,.avif,.tif,.tiff,.bmp,.pdf,.docx,.xlsx,.xlsm,.pptx,.potx,.txt,.md,.csv,.tsv,.log,.json,.yaml,.yml,.xml,.rst">
             <input type="file" id="pictureInput" multiple hidden
                    accept="image/*,.heic,.heif,.avif,.tif,.tiff,.bmp">
             <input type="file" id="paperInput" multiple hidden
-                   accept=".pdf,.docx,.xlsx,.xlsm,.txt,.md,.markdown,.csv,.tsv,.log,.json,.yaml,.yml,.xml,.rst,.ini,.properties">
+                   accept=".pdf,.docx,.xlsx,.xlsm,.pptx,.potx,.txt,.md,.markdown,.csv,.tsv,.log,.json,.yaml,.yml,.xml,.rst,.ini,.properties">
             <input type="file" id="cameraInput" accept="image/*" capture="environment" hidden>
             <span class="inline" id="sizeRow" hidden>Shape
               <select id="imageSize"></select>
@@ -1294,11 +1307,12 @@ document.getElementById('strength').addEventListener('input', e =>
 
 // --- attachments ------------------------------------------------------------
 
-const DOCUMENT_GLYPH = {pdf: '\u{1F4D5}', docx: '\u{1F4C4}', xlsx: '\u{1F4CA}'};
+const DOCUMENT_GLYPH = {pdf: '\u{1F4D5}', docx: '\u{1F4C4}', xlsx: '\u{1F4CA}', pptx: '\u{1F4FD}'};
 
 function paperGlyph(tile){
   const name = (tile.name || '').toLowerCase();
   if(name.endsWith('.pdf')) return DOCUMENT_GLYPH.pdf;
+  if(name.endsWith('.pptx') || name.endsWith('.potx')) return DOCUMENT_GLYPH.pptx;
   if(name.endsWith('.docx')) return DOCUMENT_GLYPH.docx;
   if(name.endsWith('.xlsx') || name.endsWith('.xlsm')) return DOCUMENT_GLYPH.xlsx;
   return '\u{1F4DD}';
@@ -1382,7 +1396,7 @@ function sendFile(file, onProgress, onStart){
 }
 
 const PICTURE = /\.(heic|heif|avif|tiff?|bmp)$/i;
-const PAPER = /\.(pdf|docx|xlsx|xlsm|txt|md|markdown|csv|tsv|log|json|ya?ml|xml|html?|rst|ini|properties)$/i;
+const PAPER = /\.(pdf|docx|xlsx|xlsm|pptx|potx|txt|md|markdown|csv|tsv|log|json|ya?ml|xml|html?|rst|ini|properties)$/i;
 const looksLikePicture = f => f.type.startsWith('image/') || PICTURE.test(f.name || '');
 const looksLikePaper = f => PAPER.test(f.name || '') || f.type === 'application/pdf';
 
@@ -3061,10 +3075,32 @@ function showFile(tab){
     view.innerHTML = `<img src="${escapeHtml(url)}" alt="${escapeHtml(name || 'image')}">`;
     return;
   }
+  // A deck written here, slide by slide: a browser cannot show a .pptx, so the gateway reads its
+  // slides from the Markdown it was made from, the way the file was
+  if(tab.editable && lower.endsWith('.pptx')){
+    view.innerHTML = '<p class="muted">Opening...</p>';
+    api(`${url}/slides`).then(found => {
+      view.innerHTML = `<div class="deck">${found.slides.map((s, n) => s.kind === 'title'
+        ? `<section class="slide title-slide"><h2>${escapeHtml(s.title)}</h2>${s.subtitle ? `<p>${escapeHtml(s.subtitle)}</p>` : ''}</section>`
+        : `<section class="slide${s.html ? '' : ' section-slide'}"><span class="slide-no">${n + 1}</span>
+            <h3>${escapeHtml(s.title)}</h3>${s.html ? `<div class="md">${s.html}</div>` : ''}
+            ${s.notes ? `<p class="slide-notes">Notes: ${escapeHtml(s.notes)}</p>` : ''}</section>`).join('')}</div>`;
+      for(const slide of view.querySelectorAll('.slide .md')) window.mdToolbar?.drawCharts(slide);
+    }).catch(e => { view.innerHTML = ''; view.appendChild(panelNote('Could not show its slides. ' + errorText(e), url)); });
+    return;
+  }
   view.innerHTML = '<p class="muted">Opening...</p>';
   api(`${url}/text`).then(async found => {
-    const html = /\.(md|markdown)$/.test(lower) ? await renderedHtml(found.text) : null;
+    const markdown = /\.(md|markdown)$/.test(lower);
+    const html = markdown ? await renderedHtml(found.text) : null;
     view.innerHTML = '';
+    // A Markdown file of the person's own, made into slides as it is
+    if(markdown && !tab.editable && documentKinds().includes('pptx')){
+      const bar = document.createElement('div');
+      bar.className = 'doc-bar';
+      bar.appendChild(deckButton(() => found.text));
+      view.appendChild(bar);
+    }
     const text = document.createElement('div');
     text.className = html ? 'doc-text md' : 'doc-text';
     if(html) text.innerHTML = html; else text.textContent = found.text;
@@ -3073,16 +3109,38 @@ function showFile(tab){
   }).catch(e => { view.innerHTML = ''; view.appendChild(panelNote('Could not open it. ' + errorText(e), url)); });
 }
 
+/* "Make a PowerPoint": the Markdown it is given made into slides as it stands - each "#" or "##"
+   heading a slide - and opened beside the conversation */
+function deckButton(textOf){
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.className = 'btn btn-sm btn-secondary';
+  button.textContent = 'Make a PowerPoint';
+  button.title = 'Slides from this Markdown as it is: each # or ## heading starts a slide';
+  button.addEventListener('click', async () => {
+    button.disabled = true;
+    button.textContent = BUSY_LABELS.pptx;
+    try{
+      const made = await api('/chat/written', {method: 'POST', headers: JSON_HEADERS,
+                                               body: JSON.stringify({text: textOf(), format: 'pptx'})});
+      openFile(made.url, made.name, true);
+    }catch(err){ showError('Could not make the PowerPoint: ' + errorText(err)); }
+    finally{ button.disabled = false; button.textContent = 'Make a PowerPoint'; }
+  });
+  return button;
+}
+
 async function editFile(tab){
   const id = (tab.href.match(/\/chat\/files\/(\d+)/) || [])[1];
   let source;
   try{ source = await api(`/chat/files/${id}/source`); }
   catch(e){ showError('This document cannot be edited: ' + errorText(e)); return; }
-  const again = source.format === 'pdf' ? 'Make the PDF again' : 'Save the Markdown again';
+  const again = {pdf: 'Make the PDF again', pptx: 'Make the PowerPoint again'}[source.format] || 'Save the Markdown again';
+  const fileKind = {pdf: 'The PDF', pptx: 'The PowerPoint'}[source.format];
   tab.body.classList.add('editing');
   tab.body.innerHTML = `<div class="doc-bar"><button class="btn btn-sm btn-secondary" type="button" data-save-edit
           title="Keep the changes, to come back to (Ctrl+S); the file is made from them with the next button" disabled>Save</button>
-      <button class="btn btn-sm" type="button" data-remake>${again}</button>
+      <button class="btn btn-sm" type="button" data-remake>${again}</button><span data-deck></span>
       <button class="btn btn-sm btn-secondary" type="button" data-stop-edit>Close</button>
       <span class="muted edit-state" style="font-size:.78rem">Select words in either half, then a tool</span></div>
     <div class="format-bar"></div>
@@ -3091,6 +3149,9 @@ async function editFile(tab){
   const area = tab.body.querySelector('textarea');
   const preview = tab.body.querySelector('.doc-preview');
   area.value = source.text;
+  // A PDF or Markdown document can become slides too, from the text as it is in the editor
+  if(source.format !== 'pptx' && documentKinds().includes('pptx'))
+    tab.body.querySelector('[data-deck]').replaceWith(deckButton(() => area.value));
   const toolbar = window.mdToolbar?.attach(tab.body.querySelector('.format-bar'), area, preview,
                                            file => sendFile(file, () => {}));
   let soon = null;
@@ -3117,7 +3178,7 @@ async function editFile(tab){
     try{
       await api(`/chat/files/${id}/source`, {method: 'PUT', headers: JSON_HEADERS, body: JSON.stringify({text})});
       saved = text;
-      showState(source.format === 'pdf' ? 'Saved. The PDF changes when it is made again.' : 'Saved. The file changes when it is saved again.');
+      showState(fileKind ? `Saved. ${fileKind} changes when it is made again.` : 'Saved. The file changes when it is saved again.');
       changed();
       return true;
     }catch(err){
@@ -3143,7 +3204,7 @@ async function editFile(tab){
   tab.body.querySelector('[data-remake]').addEventListener('click', async e => {
     const button = e.currentTarget;
     button.disabled = true;
-    button.textContent = source.format === 'pdf' ? 'Making the PDF…' : 'Saving…';
+    button.textContent = BUSY_LABELS[source.format] || 'Saving…';
     try{
       const made = await api(`/chat/files/${id}/revise`, {method: 'POST', headers: JSON_HEADERS,
                                                         body: JSON.stringify({text: area.value,
@@ -4340,7 +4401,7 @@ function saveAsRow(text, messageId, made){
     const buttons = row.querySelectorAll('button');
     const label = chosen.textContent;
     buttons.forEach(b => { b.disabled = true; });
-    chosen.textContent = chosen.dataset.as === 'pdf' ? 'Making the PDF\u2026' : 'Saving\u2026';
+    chosen.textContent = BUSY_LABELS[chosen.dataset.as] || 'Saving\u2026';
     try{
       const file = await api('/chat/written', {method: 'POST', headers: JSON_HEADERS,
         body: JSON.stringify({text, format: chosen.dataset.as, message_id: messageId()})});
@@ -4711,12 +4772,18 @@ function refreshSendButton(){
 
 // Whether a message asks for a document is the router's to read (app/tools/understand.py: what the
 // person wants back), from the meaning in any wording or language, not from sentence patterns here.
-const FORMAT_LABELS = {pdf: 'PDF', markdown: 'Markdown'};
+const FORMAT_LABELS = {pdf: 'PDF', markdown: 'Markdown', pptx: 'PowerPoint'};
+const BUSY_LABELS = {pdf: 'Making the PDF…', pptx: 'Making the PowerPoint…', markdown: 'Saving…'};
 const IN_CHAT = 'Answer in the chat instead';
 
-// Which kind of file, once a document is wanted: only the name of the kind, in English or Bangla
+// Naming PowerPoint itself is asking for the file, whatever the router made of the rest
+const SAYS_POWERPOINT = /\b(pptx?|power\s*point|slide\s*deck)\b|পাওয়ার\s*পয়েন্ট|পাওয়ারপয়েন্ট/i;
+
+// Which kind of file, once a document is wanted: only the name of the kind, in English or Bangla.
+// A presentation is a deck unless a PDF is named for it ("the presentation as a PDF").
 function formatIn(text){
   if(/\bpdf\b|পিডিএফ/i.test(text)) return 'pdf';
+  if(SAYS_POWERPOINT.test(text) || /\b(presentation|slides)\b|প্রেজেন্টেশন|স্লাইড/i.test(text)) return 'pptx';
   if(/\b(markdown|md)\b|\.md\b|মার্কডাউন/i.test(text)) return 'markdown';
   return null;
 }
@@ -5029,6 +5096,8 @@ async function routeTurn(text, asking){
     if((models[model]?.capabilities || []).includes('tools')) return sendAgent(text, asking, decision);
     decision = {...decision, action: 'chat'};
   }
+  // PowerPoint named outright is a deck to make, even when the router read it as a question
+  if(decision.action === 'chat' && usable === 'pptx' && SAYS_POWERPOINT.test(text)) decision = {...decision, action: 'document'};
   // A document, as the router read it: which kind is asked when the words do not say
   if(decision.action === 'document') return usable ? sendChat(text, decision, asking, usable) : askDocumentFormat(text, asking);
   if(decision.action === 'map') return sendMap(text, decision, fix, asking);

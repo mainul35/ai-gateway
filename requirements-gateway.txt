@@ -36,3 +36,5 @@ faster-whisper>=1.2.1
 nvidia-cublas-cu12>=12.4; sys_platform == "linux"
 # Draws the PDFs the playground writes (app/tools/written.py); needs Pango on the host (libpango-1.0-0)
 weasyprint>=66.0
+# Builds the PowerPoint decks the playground writes (app/tools/slides.py), and reads uploaded ones
+python-pptx>=1.0.2

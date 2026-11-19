@@ -35,7 +35,8 @@ from app.engine.supervisor import supervisor
 from app.routers.openai_v1 import PROXY_PATHS, forward
 from app.tools import (agent, chooser, device_files, documents, image_prompt, images, jobs, linkedin, map_plan,
                         map_web, maps, markdown, mcp_client, media, memory as memory_tool,
-                        photo, places, portrait, repos, router as intent_router, self_tools, subtitles, web_reader,
+                        photo, places, portrait, repos, router as intent_router, self_tools, slides, subtitles,
+                        web_reader,
                         turn_facts, understand, video_story, voices, web_search, written)
 
 log = logging.getLogger("playground")
@@ -728,7 +729,7 @@ async def capabilities(principal: Principal = Depends(authenticate)):
         # that this host could actually run
         "agent": agent.is_available_to(principal) and access.can_use_feature(principal, "agent"),
         # Which documents the playground can write: Markdown always, a PDF when WeasyPrint is here
-        "documents": ["pdf", "markdown"] if _pdf_available() else ["markdown"],
+        "documents": (["pdf"] if _pdf_available() else []) + ["markdown"] + (["pptx"] if _pptx_available() else []),
         # Which map the browser must draw on, and the browser key for it when that is Google's.
         # The two are never mixed: Google's terms forbid their places on anybody else's tiles.
         "maps_tiles": places.tiles() if settings.feature_enabled("maps") else "osm",
@@ -779,6 +780,65 @@ def _pdf_available():
     if _pdf_checked is None:
         _pdf_checked = written.is_pdf_available()
     return _pdf_checked
+
+
+_pptx_checked = None
+
+
+def _pptx_available():
+    global _pptx_checked
+    if _pptx_checked is None:
+        _pptx_checked = written.is_pptx_available()
+    return _pptx_checked
+
+
+async def _template(session, user, file_id):
+    """The bytes of a PowerPoint file this person uploaded, to build a deck on; None for anything else."""
+    if not file_id:
+        return None
+    found = (await session.execute(select(ChatFile).where(ChatFile.id == file_id, ChatFile.user_id == user.id))
+             ).scalar_one_or_none()
+    return found.data if found is not None and found.mime_type == documents.MIME["pptx"] else None
+
+
+async def _conversation_template(session, user, conversation_id, before_id):
+    """The id of the PowerPoint file attached most lately in a conversation, up to one of its
+    answers: what "Save as PowerPoint" under that answer builds on. None when there is none."""
+    rows = (await session.execute(
+        select(ConversationMessage.attachments).where(ConversationMessage.conversation_id == conversation_id,
+                                                      ConversationMessage.role == "user",
+                                                      ConversationMessage.id < before_id,
+                                                      ConversationMessage.attachments.is_not(None))
+        .order_by(ConversationMessage.id.desc()).limit(200))).scalars().all()
+    for attachments in rows:
+        try:
+            listed = (json.loads(attachments) or {}).get("images") or []
+        except (ValueError, AttributeError):
+            continue
+        ids = [i.get("file_id") for i in listed if isinstance(i, dict) and isinstance(i.get("file_id"), int)]
+        if not ids:
+            continue
+        decks = (await session.execute(select(ChatFile.id).where(
+            ChatFile.id.in_(ids), ChatFile.user_id == user.id,
+            ChatFile.mime_type == documents.MIME["pptx"]))).scalars().all()
+        if decks:
+            return max(decks, key=ids.index)
+    return None
+
+
+def _deck_guidance(template, pictures):
+    """What a model writing slides is told of what the person attached: the template whose design
+    the deck takes, and the pictures it can put on a slide, by their addresses."""
+    lines = []
+    if template is not None:
+        lines.append(f"The attached {template.name or 'PowerPoint file'} is the template: the slides are "
+                     "built on its design. Its own slides are not content for this presentation unless "
+                     "the user says so.")
+    if pictures:
+        lines.append("To show one of the user's pictures or diagrams on a slide, write it on that slide as "
+                     "![a short caption](its address). Their pictures:\n"
+                     + "\n".join(f"- {p.name or 'picture'}: /chat/files/{p.id}" for p in pictures))
+    return ("\n\n" + "\n".join(lines)) if lines else ""
 
 
 def _file_json(file):
@@ -868,7 +928,7 @@ async def upload_file(file: UploadFile = File(...), principal: Principal = Depen
         raise HTTPException(status.HTTP_400_BAD_REQUEST,
                             f"{name} is neither a picture nor a document this server can read. "
                             "Pictures: JPEG, PNG, HEIC, WebP, TIFF, GIF, BMP. Documents: PDF, "
-                            "Word (.docx), Excel (.xlsx), and plain text.")
+                            "Word (.docx), Excel (.xlsx), PowerPoint (.pptx, .potx), and plain text.")
     if mime in _CONVERTED:
         data, mime = await asyncio.to_thread(_to_browser_format, data, mime, name)
     else:
@@ -950,8 +1010,10 @@ async def reader(url: str, principal: Principal = Depends(authenticate)):
 
 class WrittenIn(BaseModel):
     text: str = Field(min_length=1, max_length=400_000)
-    format: str = Field(pattern="^(markdown|pdf)$")
+    format: str = Field(pattern="^(markdown|pdf|pptx)$")
     message_id: int | None = None     # the saved answer it was made from, to keep it with
+    # For a deck: a PowerPoint file the person uploaded, whose design it takes
+    template_file_id: int | None = None
 
 
 @router.post("/written")
@@ -969,11 +1031,18 @@ async def write_answer_file(payload: WrittenIn, principal: Principal = Depends(a
         _, how = await _access(session, message.conversation_id, user)
         if how == "viewer":
             message = None            # a reader may have the file, not change the conversation
+    deck = payload.format == "pptx"
+    template_id = payload.template_file_id
+    if deck and template_id is None and payload.message_id is not None and message is not None:
+        template_id = await _conversation_template(session, user, message.conversation_id, message.id)
+    template = await _template(session, user, template_id) if deck else None
+    pictures = await _document_pictures(session, user, payload.text) if deck else {}
     try:
-        name, data, mime = await asyncio.to_thread(written.make, payload.text, payload.format)
+        name, data, mime = await asyncio.to_thread(written.make, payload.text, payload.format, pictures, None, template)
     except written.WrittenError as e:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(e))
-    stored = ChatFile(user_id=user.id, kind="written", mime_type=mime, name=name, prompt=payload.text, data=data)
+    stored = ChatFile(user_id=user.id, kind="written", mime_type=mime, name=name, prompt=payload.text, data=data,
+                      template_id=template_id if template else None)
     session.add(stored)
     await session.commit()
     await session.refresh(stored)
@@ -1012,7 +1081,23 @@ async def written_source(file_id: int, principal: Principal = Depends(authentica
     text = stored.prompt or (holder.content if holder else None)
     if not text:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "The text this document was made from was not kept")
-    return {"name": stored.name, "format": "pdf" if stored.mime_type == "application/pdf" else "markdown", "text": text}
+    return {"name": stored.name, "format": written.format_of(stored.mime_type), "text": text}
+
+
+@router.get("/files/{file_id}/slides")
+async def written_slides(file_id: int, principal: Principal = Depends(authenticate),
+                         session: AsyncSession = Depends(get_session)):
+    """A deck written here, slide by slide, for the side panel: a browser cannot show a .pptx. Read
+    from the Markdown it was made from, the same way the file was."""
+    user = _require_user(principal)
+    stored, holder = await _written_file(session, user, file_id)
+    text = stored.prompt or (holder.content if holder else None)
+    if not text:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "The text this deck was made from was not kept")
+    try:
+        return {"name": stored.name, "slides": await asyncio.to_thread(slides.preview, text)}
+    except slides.SlidesError as e:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(e))
 
 
 class SourceIn(BaseModel):
@@ -1055,15 +1140,18 @@ async def revise_written(file_id: int, payload: ReviseIn, principal: Principal =
     cached of the old one is shown for it; the answer it was filed with keeps the new one instead."""
     user = _require_user(principal)
     stored, holder = await _written_file(session, user, file_id)
-    fmt = "pdf" if stored.mime_type == "application/pdf" else "markdown"
+    fmt = written.format_of(stored.mime_type)
     if any(len(chart) > 300_000 for chart in payload.charts):
         raise HTTPException(status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, "A chart is too large to draw")
-    pictures = await _document_pictures(session, user, payload.text) if fmt == "pdf" else {}
+    pictures = await _document_pictures(session, user, payload.text) if fmt in ("pdf", "pptx") else {}
+    # A deck is built on its template again, if the person still has it
+    template = await _template(session, user, stored.template_id) if fmt == "pptx" else None
     try:
-        name, data, mime = await asyncio.to_thread(written.make, payload.text, fmt, pictures, payload.charts)
+        name, data, mime = await asyncio.to_thread(written.make, payload.text, fmt, pictures, payload.charts, template)
     except written.WrittenError as e:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(e))
-    made = ChatFile(user_id=user.id, kind="written", mime_type=mime, name=name, prompt=payload.text, data=data)
+    made = ChatFile(user_id=user.id, kind="written", mime_type=mime, name=name, prompt=payload.text, data=data,
+                    template_id=stored.template_id if template else None)
     session.add(made)
     await session.commit()
     await session.refresh(made)
@@ -1217,7 +1305,7 @@ class CompleteIn(BaseModel):
     answers_to: int | None = None
     # A document to write rather than an answer: the model writes it, and it is kept as this kind of
     # file beside the answer (app/tools/written.py)
-    document: str | None = Field(default=None, pattern="^(markdown|pdf)$")
+    document: str | None = Field(default=None, pattern="^(markdown|pdf|pptx)$")
     # Run as a job even with no conversation to save to: a side question. The answer then goes on
     # in the gateway when the browser lets the connection go - the screen dims, another app is in
     # front - and the page picks it up again from /chat/jobs/<id>/stream when it is back.
@@ -1346,9 +1434,20 @@ async def complete(payload: CompleteIn, principal: Principal = Depends(authentic
         if facts:
             messages.insert(1 if messages and messages[0]["role"] == "system" else 0,
                             {"role": "system", "content": facts})
+    # A deck is built on the PowerPoint file attached most lately, if there is one, and may show the
+    # person's own pictures and diagrams
+    deck_template = deck_pictures = None
+    if payload.document == "pptx":
+        decks = [i for i in attached if i in everything and everything[i].mime_type == documents.MIME["pptx"]]
+        deck_template = everything[decks[-1]] if decks else None
+        deck_pictures = [f for i, f in everything.items() if f.kind != "document" and (f.mime_type or "").startswith("image/")]
+    # Taken now: the rows are not read again once the answer streams
+    template_bytes = deck_template.data if deck_template is not None else None
+    template_id = deck_template.id if deck_template is not None else None
     if payload.document:
         messages.insert(1 if messages and messages[0]["role"] == "system" else 0,
-                        {"role": "system", "content": written.writing_prompt(payload.document)})
+                        {"role": "system", "content": written.writing_prompt(payload.document)
+                         + (_deck_guidance(deck_template, deck_pictures) if payload.document == "pptx" else "")})
         # And again where a small model actually looks: right after the request
         for m in reversed(messages):
             if m["role"] == "user":
@@ -1448,15 +1547,22 @@ async def complete(payload: CompleteIn, principal: Principal = Depends(authentic
             yield _event("notice", text="The model wrote about making the document instead of writing it, so no "
                                         "file was made. Ask again, or pick another model.")
         elif payload.document and answer.text:
-            yield _event("status", text="Making the PDF" if payload.document == "pdf" else "Saving the document")
+            yield _event("status", text={"pdf": "Making the PDF", "pptx": "Making the PowerPoint"}.get(
+                payload.document, "Saving the document"))
+            pictures = {}
+            if payload.document == "pptx":
+                async with session_factory()() as db:
+                    pictures = await _document_pictures(db, user, answer.text)
             try:
-                name, data, mime = await asyncio.to_thread(written.make, answer.text, payload.document)
+                name, data, mime = await asyncio.to_thread(
+                    written.make, answer.text, payload.document, pictures, None, template_bytes)
             except written.WrittenError as e:
                 yield _event("notice", text=str(e))
                 return
             async with session_factory()() as db:
                 stored = ChatFile(user_id=user.id, kind="written", mime_type=mime, name=name,
-                                  prompt=answer.text, data=data)
+                                  prompt=answer.text, data=data,
+                                  template_id=template_id)
                 db.add(stored)
                 await db.commit()
                 await db.refresh(stored)

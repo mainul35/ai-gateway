@@ -3,7 +3,8 @@
 Asked for "a document", a model answers in chat with the same words it would have used anyway, and
 there is nothing to keep. So the request says which file it wants - Markdown or PDF - the model is
 told to write the document itself and nothing around it, and the answer is turned into that file:
-Markdown as it was written, a PDF drawn from the same HTML the playground shows (WeasyPrint).
+Markdown as it was written, a PDF drawn from the same HTML the playground shows (WeasyPrint), a
+PowerPoint deck built from it read as slides (app/tools/slides.py).
 
 A PDF is laid out with the fonts this server has. Bangla needs a font that has it (Noto Sans
 Bengali, from the fonts-noto-core package); without one its letters come out as empty boxes.
@@ -17,9 +18,16 @@ from app.tools import markdown
 
 log = logging.getLogger("tools.written")
 
-FORMATS = {"markdown": ("md", "text/markdown; charset=utf-8"), "pdf": ("pdf", "application/pdf")}
+FORMATS = {"markdown": ("md", "text/markdown; charset=utf-8"), "pdf": ("pdf", "application/pdf"),
+           # A slide deck, from the same Markdown read as slides (app/tools/slides.py)
+           "pptx": ("pptx", "application/vnd.openxmlformats-officedocument.presentationml.presentation")}
 
-KIND_NAMES = {"markdown": "Markdown", "pdf": "PDF"}
+KIND_NAMES = {"markdown": "Markdown", "pdf": "PDF", "pptx": "PowerPoint"}
+
+
+def format_of(mime_type):
+    """Which of FORMATS a written file is, from its media type."""
+    return next((fmt for fmt, (_, mime) in FORMATS.items() if mime == mime_type and fmt != "markdown"), "markdown")
 
 # Told twice: as the instruction for the turn, and again right after the request. Asked to "generate
 # a pdf" with this only among the system messages, a small model read the request literally, said it
@@ -45,10 +53,16 @@ for making one.)"""
 
 
 def writing_prompt(fmt):
+    if fmt == "pptx":
+        from app.tools import slides
+        return slides.WRITING_PROMPT
     return WRITING_PROMPT.format(kind=KIND_NAMES.get(fmt, "document"))
 
 
 def reminder(fmt):
+    if fmt == "pptx":
+        from app.tools import slides
+        return slides.REMINDER
     return REMINDER.format(kind=KIND_NAMES.get(fmt, "document"))
 
 
@@ -129,6 +143,11 @@ def file_name(title, extension):
     name = re.sub(r"[\\/:*?\"<>|\x00-\x1f]+", " ", name)
     name = re.sub(r"\s+", " ", name).strip(" .")[:80].strip(" .")
     return f"{name or 'document'}.{extension}"
+
+
+def is_pptx_available():
+    from app.tools import slides
+    return slides.is_available()
 
 
 def is_pdf_available():
@@ -249,11 +268,14 @@ def _with_charts(body, charts):
     return CHART_BLOCK.sub(swap, body)
 
 
-def make(text, fmt, images=None, charts=None):
-    """(file name, bytes, media type) for the document in `text`, as Markdown or as a PDF.
+def make(text, fmt, images=None, charts=None, template=None):
+    """(file name, bytes, media type) for the document in `text`, as Markdown, a PDF or a
+    PowerPoint deck.
 
-    For a PDF, `images` {file id: data URL} are the person's own pictures it shows (/chat/files/<id>),
-    put in the page so nothing is fetched, and `charts` the drawings of its ```chart blocks."""
+    For a PDF or a deck, `images` {file id: data URL} are the person's own pictures it shows
+    (/chat/files/<id>), put in so nothing is fetched. For a PDF `charts` are the drawings of its
+    ```chart blocks (a deck draws them as charts of its own); for a deck `template` is the bytes of
+    a .pptx or .potx whose design it takes."""
     if fmt not in FORMATS:
         raise WrittenError(f"{fmt} is not a kind of document this server writes.")
     extension, mime = FORMATS[fmt]
@@ -261,6 +283,16 @@ def make(text, fmt, images=None, charts=None):
     title = title_of(text)
     if fmt == "markdown":
         return file_name(title, extension), text.encode("utf-8"), mime
+    if fmt == "pptx":
+        from app.tools import slides
+        try:
+            title, data = slides.make(text, images, template)
+        except slides.SlidesError as e:
+            raise WrittenError(str(e))
+        except Exception as e:
+            log.warning("Could not make a deck: %s", e)
+            raise WrittenError("The PowerPoint file could not be made; the slides are in the answer above.")
+        return file_name(title, extension), data, mime
     try:
         from weasyprint import HTML
     except Exception as e:

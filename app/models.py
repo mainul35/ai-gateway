@@ -219,6 +219,9 @@ class ChatFile(Base):
     # The prompt an image was generated from, shown under it
     prompt: Mapped[str | None] = mapped_column(Text, nullable=True)
     data: Mapped[bytes] = mapped_column(LargeBinary)
+    # A slide deck written here: the person's PowerPoint template it was built on, so it is built on
+    # it again when edited
+    template_id: Mapped[int | None] = mapped_column(nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 

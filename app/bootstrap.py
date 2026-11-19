@@ -55,6 +55,8 @@ _ADDED_COLUMNS = (
     ("coding_tasks", "files", "TEXT"),
     # The thread a follow-up question belongs to (app/routers/coding.py, ask_more)
     ("coding_tasks", "thread_id", "INTEGER"),
+    # The PowerPoint template a deck the playground wrote was built on (app/tools/slides.py)
+    ("chat_files", "template_id", "INTEGER"),
 )
 
 
