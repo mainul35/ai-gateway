@@ -122,6 +122,12 @@ async def _fetch(url):
     if page.status_code in (429, 999):
         # 999 is LinkedIn's own "too many requests from you"
         raise LinkedInError("LinkedIn is refusing requests from this server for now; try again later")
+    if page.status_code in (401, 403):
+        # LinkedIn will not show the page to a program: it needs a sign-in, or it is
+        # blocking requests from this server. The reader has no account, so there is
+        # nothing to retry.
+        raise LinkedInError(f"LinkedIn refused to show this page to a program (it answered {page.status_code}); "
+                            "it needs a sign-in, or LinkedIn is blocking this server")
     if page.status_code == 404:
         raise LinkedInError("LinkedIn says it does not exist (removed, or the link is wrong)")
     if page.status_code != 200:
