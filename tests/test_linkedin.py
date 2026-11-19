@@ -4,6 +4,7 @@ what is read from a job's guest page, a post's structured data and an article's 
     python -m pytest -q tests/test_linkedin.py
 """
 import json
+import unittest
 
 import pytest
 
@@ -143,3 +144,27 @@ def test_a_short_link_that_cannot_be_followed_is_reported(monkeypatch):
     assert asyncio.run(linkedin.links_in("https://lnkd.in/p/abc")) == [
         {"kind": "post", "url": "https://lnkd.in/p/abc", "error": "the short link did not answer (ConnectTimeout)"}]
     assert asyncio.run(linkedin.links_in(None)) == []
+
+
+class RefusedPage(unittest.TestCase):
+    """A page LinkedIn answers 401/403 to is reported with why, not a bare status code.
+
+    A unittest.TestCase (as well as a pytest test) so `python -m unittest discover` runs it too."""
+
+    def test_a_page_linkedin_refuses_is_reported_with_why(self):
+        import asyncio
+        import httpx
+        from unittest import mock
+        from app import net
+
+        def make_get(status):
+            async def get(client, url, max_bytes, truncate=False, hops=net.HOPS, headers=None):
+                return net.Fetched(url=url, status_code=status, headers=httpx.Headers(),
+                                   content=b"", encoding="utf-8", truncated=False)
+            return get
+
+        for status in (401, 403):
+            with mock.patch.object(net, "get", make_get(status)):
+                with self.assertRaises(linkedin.LinkedInError) as caught:
+                    asyncio.run(linkedin.read({"kind": "post", "url": "https://www.linkedin.com/posts/x"}))
+                self.assertIn("refused to show this page", str(caught.exception))
