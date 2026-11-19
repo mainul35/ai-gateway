@@ -174,9 +174,10 @@ async def check_model(principal, model):
 
 
 async def create(session, principal, project, description, model, conversation_id=None, by="", apps=None,
-                 files=None):
+                 files=None, thread_id=None):
     """Queues a task: the one place the rules for starting one live, used by the Tasks page and by
-    the playground agent. PermissionError or ValueError say why it cannot start."""
+    the playground agent. PermissionError or ValueError say why it cannot start. `thread_id` is the
+    first task of the thread a follow-up question belongs to."""
     if principal.user is None:
         raise ValueError("Start tasks while signed in, not with the master key")
     if not principal.is_manager:
@@ -193,7 +194,7 @@ async def create(session, principal, project, description, model, conversation_i
     given = await attachments.check(session, principal.user.id, files or [], model)
     task = CodingTask(project_id=project.id, user_id=principal.user.id, conversation_id=conversation_id,
                       description=description[:20_000], model=model, apps=json.dumps(chosen) if chosen else None,
-                      files=json.dumps(given) if given else None)
+                      files=json.dumps(given) if given else None, thread_id=thread_id)
     session.add(task)
     await session.commit()
     await session.refresh(task)

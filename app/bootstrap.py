@@ -53,7 +53,25 @@ _ADDED_COLUMNS = (
     # The outside apps a coding task may use (app/coding/apps.py)
     ("coding_tasks", "apps", "TEXT"),
     ("coding_tasks", "files", "TEXT"),
+    # The thread a follow-up question belongs to (app/routers/coding.py, ask_more)
+    ("coding_tasks", "thread_id", "INTEGER"),
 )
+
+
+async def _thread_follow_ups(connection):
+    """Follow-ups asked before threads existed name the task they follow in their description
+    ("This follows task #12, which was asked: ..."): each is put in the thread of the first task of
+    its chain, so they show as one conversation too."""
+    await connection.execute(text(
+        "UPDATE coding_tasks t SET thread_id = p.id FROM coding_tasks p "
+        "WHERE t.thread_id IS NULL AND p.id = substring(t.description from "
+        "'This follows task #([0-9]+), which was asked')::int"))
+    for _ in range(100):        # a chain of follow-ups: point each at the first task, not its parent
+        moved = await connection.execute(text(
+            "UPDATE coding_tasks t SET thread_id = p.thread_id FROM coding_tasks p "
+            "WHERE t.thread_id = p.id AND p.thread_id IS NOT NULL"))
+        if not moved.rowcount:
+            break
 
 
 async def ensure_schema():
@@ -73,6 +91,8 @@ async def ensure_schema():
         for table, column, kind in _ADDED_COLUMNS:
             if (table, column) not in present:
                 await connection.execute(text(f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {column} {kind}"))
+        if ("coding_tasks", "thread_id") not in present:
+            await _thread_follow_ups(connection)
         # Conversations from before they had a uid get one, and uids stay unique
         if (await connection.execute(text("SELECT 1 FROM conversations WHERE uid IS NULL LIMIT 1"))).first():
             await connection.execute(text("UPDATE conversations SET uid = gen_random_uuid()::text WHERE uid IS NULL"))

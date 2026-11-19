@@ -65,7 +65,7 @@ def _task_out(task, project=None, full=False):
            "branch": task.branch, "pr_url": task.pr_url, "error": task.error,
            "created_at": task.created_at.isoformat(), "updated_at": task.updated_at.isoformat(),
            "apps": json.loads(task.apps) if task.apps else [],
-           "files": json.loads(task.files) if task.files else []}
+           "files": json.loads(task.files) if task.files else [], "thread_id": task.thread_id}
     out["can_continue"] = _can_continue(task)
     if full:
         out.update(plan=task.plan, summary=task.summary, diff=task.diff, verify_output=task.verify_output,
@@ -382,25 +382,71 @@ class AskIn(BaseModel):
 
 # How much of the earlier task a follow-up carries: its question and its answer, enough to go on from
 FOLLOW_UP_CHARS = 8_000
+# And of the turns before it in the same thread, newest first, until this much is used
+EARLIER_TURNS_CHARS = 6_000
+# What a follow-up's description carries after its question (the Tasks page folds it away)
+FOLLOWS = "\n\n---\nThis follows task #"
+
+
+def question_of(description):
+    """What a task was asked, without what a follow-up carries of the tasks before it."""
+    return (description or "").split(FOLLOWS, 1)[0].strip()
+
+
+def _found(task):
+    return (task.summary or task.plan or "").strip()
+
+
+async def _thread(session, task):
+    """Every task of the thread `task` is in, first to last: the task it started from and the
+    follow-ups asked on it."""
+    first = task.thread_id or task.id
+    return (await session.execute(select(CodingTask).where((CodingTask.id == first) | (CodingTask.thread_id == first))
+                                  .order_by(CodingTask.id))).scalars().all()
+
+
+def follow_up_context(task, earlier_turns):
+    """What a follow-up question is given of the thread so far: the task it is asked on in full, and
+    the turns before that, newest first, as far as they fit."""
+    found = _found(task)
+    context = (f"{FOLLOWS}{task.id}, which was asked:\n{question_of(task.description)[:2_000]}"
+               + (f"\n\nWhat it found:\n{found[:FOLLOW_UP_CHARS]}" if found else ""))
+    turns, used = [], 0
+    for turn in reversed(earlier_turns):
+        text = f"#{turn.id} was asked:\n{question_of(turn.description)[:1_500]}"
+        if _found(turn):
+            text += f"\nIt found:\n{_found(turn)[:2_500]}"
+        if used + len(text) > EARLIER_TURNS_CHARS:
+            break
+        turns.insert(0, text)
+        used += len(text)
+    if turns:
+        context += "\n\nEarlier in the same conversation, oldest first:\n\n" + "\n\n".join(turns)
+    return context
 
 
 @router.post("/tasks/{task_id}/ask", status_code=status.HTTP_201_CREATED)
 async def ask_more(task_id: int, payload: AskIn, principal: Principal = Depends(require_manager),
                    session: AsyncSession = Depends(get_session)):
-    """More about a task or its project: a new task on the same project, with the same apps, that
-    starts from what this one was asked and what it found."""
+    """More about a task or its project, asked in the same thread: it runs as a task of its own on
+    the same project, with the same apps (so it has its own steps, changes and review), starting from
+    what the thread was asked and found so far, and the Tasks page shows it under the earlier turns."""
     _enabled()
     task, project = await _task(session, task_id)
     if project is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Its project is gone")
     question = payload.question.strip()
-    earlier = (task.summary or task.plan or "").strip()
-    context = (f"\n\n---\nThis follows task #{task.id}, which was asked:\n{task.description.strip()[:2_000]}"
-               + (f"\n\nWhat it found:\n{earlier[:FOLLOW_UP_CHARS]}" if earlier else ""))
+    thread = await _thread(session, task)
+    context = follow_up_context(task, [t for t in thread if t.id < task.id])
     model = (payload.model or "").strip() or task.model
     apps = json.loads(task.apps) if task.apps else []
-    follow_up = await _start(session, principal, project, question + context, model, task.conversation_id, apps,
-                             payload.files)
+    try:
+        follow_up = await runner.create(session, principal, project, question + context, model, task.conversation_id,
+                                        apps=apps, files=payload.files, thread_id=task.thread_id or task.id)
+    except PermissionError as e:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, str(e))
+    except ValueError as e:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(e))
     return _task_out(follow_up, project)
 
 
@@ -426,6 +472,13 @@ async def get_task(task_id: int, _: Principal = Depends(require_manager), sessio
     task, project = await _task(session, task_id)
     out = _task_out(task, project, full=True)
     out["attached"] = await attachments.described(session, out["files"])
+    # The whole conversation it is part of, for the page to show around it
+    thread = await _thread(session, task)
+    out["thread"] = [] if len(thread) < 2 else [
+        {"id": t.id, "question": question_of(t.description), "status": t.status, "model": t.model,
+         "has_diff": bool(t.diff), "error": t.error,
+         "summary_html": markdown.render(t.summary) if t.summary else None, "summary": t.summary}
+        for t in thread]
     return out
 
 
@@ -518,23 +571,36 @@ NOT_REMOVABLE = ("queued", "running", "approved", "merged", "deploying", "review
 
 
 @router.delete("/tasks/{task_id}")
-async def remove_task(task_id: int, principal: Principal = Depends(require_manager),
+async def remove_task(task_id: int, thread: bool = False, principal: Principal = Depends(require_manager),
                       session: AsyncSession = Depends(get_session)):
-    """Takes a finished task off the list, with its steps. Its branch and pull request, if any, are
-    left where they are; only the server's working copy of it goes."""
+    """Takes a finished task off the list, with its steps - with `thread`, every task of its thread.
+    Its branch and pull request, if any, are left where they are; only the server's working copy of
+    it goes."""
     task, project = await _task(session, task_id)
-    if task.status in NOT_REMOVABLE:
-        raise HTTPException(status.HTTP_409_CONFLICT,
-                            "Review it first: approve or reject it" if task.status == "review"
-                            else f"It is {task.status}; cancel it or let it finish first")
-    if not principal.is_admin and (principal.user is None or task.user_id != principal.user.id):
-        raise HTTPException(status.HTTP_403_FORBIDDEN, "Only the person who started this task, or an admin, can remove it")
-    if project is not None and project.kind != "local":
-        await workspace.discard(project, task_id)
-    await session.execute(delete(CodingTaskEvent).where(CodingTaskEvent.task_id == task_id))
-    await session.delete(task)
+    whole = await _thread(session, task)
+    going = whole if thread else [task]
+    for each in going:
+        name = f"#{each.id} " if len(going) > 1 else ""
+        if each.status in NOT_REMOVABLE:
+            raise HTTPException(status.HTTP_409_CONFLICT,
+                                f"Review {name or 'it '}first: approve or reject it" if each.status == "review"
+                                else f"{name or 'It '}is {each.status}; cancel it or let it finish first")
+        if not principal.is_admin and (principal.user is None or each.user_id != principal.user.id):
+            raise HTTPException(status.HTTP_403_FORBIDDEN,
+                                "Only the person who started this task, or an admin, can remove it")
+    removed = {each.id for each in going}
+    # The first task of a thread going alone: the next one becomes the first, so the rest stay together
+    left = [t for t in whole if t.id not in removed]
+    if left and task.id == (task.thread_id or task.id) and not thread:
+        for t in left:
+            t.thread_id = None if t is left[0] else left[0].id
+    for each in going:
+        if project is not None and project.kind != "local":
+            await workspace.discard(project, each.id)
+        await session.execute(delete(CodingTaskEvent).where(CodingTaskEvent.task_id == each.id))
+        await session.delete(each)
     await session.commit()
-    return {"removed": task_id}
+    return {"removed": sorted(removed) if thread else task_id}
 
 
 class RestartIn(BaseModel):

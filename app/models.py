@@ -302,6 +302,9 @@ class CodingTask(Base):
     apps: Mapped[str | None] = mapped_column(Text, nullable=True)
     # JSON list of the person's uploads (ChatFile ids) given with the question: screenshots, documents
     files: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # A follow-up question asked on a finished task: the first task of that thread, which the Tasks
+    # page shows with all its follow-ups as one conversation. None for a task started on its own
+    thread_id: Mapped[int | None] = mapped_column(nullable=True)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
     approved_by: Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
