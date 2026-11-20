@@ -4175,7 +4175,7 @@ async function sendAgent(text, again, decision = null){
       temperature: parseFloat(document.getElementById('temperature').value),
       max_tokens: parseInt(document.getElementById('maxTokens').value, 10) || 8192,
       answers_to: box.dataset.turn ? Number(box.dataset.turn) : null});
-    await readEvents(response, chunk => {
+    await followStream(response, chunk => {
       const event = chunk.gateway;
       if(!event) return;
       if(event.type === 'status') setStatus(box, event.text);
@@ -4192,6 +4192,10 @@ async function sendAgent(text, again, decision = null){
       else if(event.type === 'error') trouble = event.message || 'The agent stopped.';
       countSteps(stepsBox);
       followAlong();
+    }, () => {
+      // Followed again from its first event: the steps are drawn again from the start
+      trace.replaceChildren(); steps.length = 0; answer = null; trouble = '';
+      countSteps(stepsBox); setStatus(box, 'Catching up');
     });
   }catch(e){
     if(e.name !== 'AbortError') trouble = errorText(e);
@@ -4794,13 +4798,15 @@ function answerBox(turnId, model){
 }
 
 // Reads an SSE response, calling onData for each JSON payload
-async function readEvents(response, onData){
+async function readEvents(response, onData, watch = null){
   const reader = response.body.getReader();
+  if(watch) watch.reader = reader;
   const decoder = new TextDecoder();
   let buffer = '';
   while(true){
     const {value, done} = await reader.read();
     if(done) break;
+    if(watch) watch.lastAt = Date.now();      // keep-alives count: the connection is still moving
     buffer += decoder.decode(value, {stream: true});
     const lines = buffer.split('\n');
     buffer = lines.pop();
@@ -4815,6 +4821,74 @@ async function readEvents(response, onData){
       if(chunk.error) throw Object.assign(new Error(plainError(chunk.error.message, MODEL_TROUBLE)), {fromModel: true});
       onData(chunk);
     }
+  }
+}
+
+/* Follows a job's events to its end, however often the connection is lost on the way.
+   A phone drops the connection when the page goes to the background, the tab is switched or the
+   screen locks ("Load failed" on iOS), and the job carries on in the gateway regardless. So a lost
+   connection is not the end of the turn: wait until the page is in front and online, then follow the
+   same job again. That replays it from its first event, so `restart` first clears whatever was drawn
+   from the events already seen. A connection that has carried nothing - not even the keep-alive the
+   gateway sends every 20 s - for 30 s is frozen rather than slow, and is replaced the same way. */
+async function followStream(response, onData, restart = null){
+  const jobId = response.headers.get('X-Job-Id');
+  const stopper = controller;
+  if(!jobId || !stopper) return readEvents(response, onData);
+  let current = response;
+  for(let tries = 0; ; tries++){
+    const watch = {reader: null, lastAt: Date.now(), cut: false};
+    const check = () => {
+      if(document.visibilityState === 'visible' && watch.reader && Date.now() - watch.lastAt > 30000){
+        watch.cut = true;
+        watch.reader.cancel().catch(() => {});
+      }
+    };
+    const timer = setInterval(check, 5000);
+    document.addEventListener('visibilitychange', check);
+    try{
+      await readEvents(current, onData, watch);
+      if(!watch.cut) return;            // the job's stream ended because the job did
+    }catch(e){
+      // The model failing is an answer, not a lost connection: following the job again would only
+      // show the same failure
+      if(e.fromModel || stopper.signal.aborted || tries >= 40) throw e;
+    }finally{
+      clearInterval(timer);
+      document.removeEventListener('visibilitychange', check);
+    }
+    current = null;
+    while(!current){
+      await new Promise(resolve => {
+        const ready = () => document.visibilityState === 'visible' && navigator.onLine;
+        if(ready()) return setTimeout(resolve, 1000);
+        const back = () => { if(ready() || stopper.signal.aborted){
+          document.removeEventListener('visibilitychange', back);
+          window.removeEventListener('online', back);
+          stopper.signal.removeEventListener('abort', back);
+          resolve(); } };
+        document.addEventListener('visibilitychange', back);
+        window.addEventListener('online', back);
+        stopper.signal.addEventListener('abort', back);     // Stop while waiting to get back online
+      });
+      if(stopper.signal.aborted) throw new DOMException('stopped', 'AbortError');
+      let next;
+      try{ next = await fetch(`/chat/jobs/${jobId}/stream`, {signal: stopper.signal}); }
+      catch(e){ if(stopper.signal.aborted) throw e; continue; }       // still offline
+      if(next.status === 404){
+        // Finished long enough ago to be forgotten: what it made is saved, so the conversation is
+        // opened afresh once this turn has stepped aside (nothing opens while a turn is running)
+        const id = currentId;
+        if(id) setTimeout(() => {
+          if(currentId === id && !controller){ keptConversations.delete(String(id)); openConversation(id, 'none'); }
+        }, 0);
+        throw new DOMException('shown from the conversation', 'AbortError');
+      }
+      if(next.status === 401){ location.href = '/login'; throw new Error('signed out'); }
+      if(next.ok) current = next;
+      else if(++tries >= 40) throw new Error(`HTTP ${next.status}`);
+    }
+    restart?.();
   }
 }
 
@@ -5249,7 +5323,7 @@ async function sendChat(text, decision, again, documentFormat = null){
   let trouble = '';
   try{
     const response = await postStream('/chat/complete', payload);
-    await readEvents(response, chunk => {
+    await followStream(response, chunk => {
       if(chunk.gateway){
         const event = chunk.gateway;
         if(event.type === 'status') setStatus(box, event.text);
@@ -5282,6 +5356,10 @@ async function sendChat(text, decision, again, documentFormat = null){
         body.textContent = answer;   // rendered once it is complete, below
       }
       followAlong();
+    }, () => {
+      // Followed again from its first event: the words come again from the first one
+      answer = ''; thinking = ''; usage = null; thinkBlock?.remove(); thinkBlock = null;
+      body.textContent = ''; setStatus(box, 'Catching up');
     });
   }catch(e){
     if(e.name !== 'AbortError'){ trouble = errorText(e); showError(trouble); }
@@ -5388,7 +5466,7 @@ async function sendSubtitles(text, decision, again){
     const response = await postStream('/chat/subtitles', {
       message: text, translate: !!decision.translate, conversation_id: currentId,
       answers_to: box.dataset.turn ? Number(box.dataset.turn) : null});
-    await readEvents(response, chunk => {
+    await followStream(response, chunk => {
       if(chunk.error){ trouble = chunk.error.message; return; }
       const event = chunk.gateway;
       if(!event) return;
@@ -5520,7 +5598,7 @@ async function sendPhoto(text, decision, again){
       answers_to: box.dataset.turn ? Number(box.dataset.turn) : null,
       request: text, upscale: cleaning, colour: chosenBackdrop(),
       strength: parseFloat(document.getElementById('blurStrength').value)});
-    await readEvents(response, chunk => {
+    await followStream(response, chunk => {
       const event = chunk.gateway;
       if(!event) return;
       if(event.type === 'progress'){
@@ -5585,7 +5663,7 @@ async function sendVideo(text, again){
                                                       answers_to: box.dataset.turn ? Number(box.dataset.turn) : null,
                                                       file_ids: material.slice(0, 6).map(f => f.id),
                                                       languages: videoLangs});
-    await readEvents(response, chunk => {
+    await followStream(response, chunk => {
       const event = chunk.gateway;
       if(chunk.error){ showError(chunk.error.message || 'The video could not be made'); return; }
       if(!event) return;
@@ -5901,7 +5979,7 @@ async function sendImage(text, decision, again){
                                                        source_file_id: source ? source.id : null,
                                                        reference_file_ids: references.map(f => f.id),
                                                        document_file_ids: documentsToRead.slice(0, 4).map(f => f.id)});
-    await readEvents(response, chunk => {
+    await followStream(response, chunk => {
       const event = chunk.gateway;
       if(!event) return;
       if(event.type === 'prompt'){

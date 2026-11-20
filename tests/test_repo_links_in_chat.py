@@ -81,6 +81,11 @@ def test_try_again_means_the_repository_linked_before():
 def test_a_new_question_does_not_reopen_an_old_repository():
     assert repos.wanted(["https://github.com/Org/private-repo", "What is the capital of Japan?"]) == []
     assert repos.wanted(["try again"]) == []
+    # Words about something else that happen to say "link" or "again"
+    linked = ["https://github.com/Org/private-repo"]
+    assert repos.wanted(linked + ["My username is someone. Now update the link with this username"]) == []
+    assert repos.wanted(linked + ["Make it shorter again"]) == []
+    assert repos.wanted(linked + ["Try to access it once again"]) == ["Org/private-repo"]
     # A link in the message itself wins over an earlier one
     assert repos.wanted(["https://github.com/Org/a", "now https://github.com/Org/b"]) == ["Org/b"]
 
