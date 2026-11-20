@@ -5,7 +5,10 @@ the repositories it was given. An owner can have several: one for some repositor
 the rest, or a new one beside one about to expire. They are kept in config/config.properties (not
 in the repository) as github.token.<owner> for the first and github.token.<owner>.<n> for the
 others; an owner's name cannot hold a dot, so the two never mix. For a repository, the gateway
-uses the first of its owner's tokens that can reach it (and, for coding tasks, push to it).
+uses the first of its owner's tokens that can reach it (and, for coding tasks, push to it) - unless
+the project names one of them, and then only that one is used: a token made for one project is not
+lent to another. Each token can be given a name (github.tokenname.<owner>.<n>, not a secret) so
+the person choosing one for a project knows which is which.
 
 The knowledge base reads repositories with them and coding tasks push branches and open pull
 requests with them. The older, separate settings (knowledge.github.token.<owner>,
@@ -28,11 +31,16 @@ OWNER = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$")
 TOKEN = re.compile(r"^(github_pat_[A-Za-z0-9_]{20,}|gh[pousr]_[A-Za-z0-9]{20,})$")
 ENTRY = re.compile(r"^github\.token\.([A-Za-z0-9-]+)(?:\.(\d+))?$")
 OLDER = ("knowledge.github.token.", "coding.github.token.")
+NAME = re.compile(r"^[\w .()-]{1,40}$")
 REACH_SECONDS = 600             # how long "this token reaches that repository" is trusted
 
 
 def key(owner, number=1):
     return f"github.token.{owner}" if int(number) == 1 else f"github.token.{owner}.{int(number)}"
+
+
+def name_key(owner, number=1):
+    return f"github.tokenname.{owner}.{int(number)}"
 
 
 def masked(value):
@@ -45,7 +53,9 @@ def entries(owner=None):
     for name, value in config.properties().items():
         match = ENTRY.match(name)
         if match and value and (owner is None or match[1].lower() == owner.lower()):
-            found.append({"owner": match[1], "id": int(match[2] or 1), "value": value})
+            number = int(match[2] or 1)
+            found.append({"owner": match[1], "id": number, "value": value,
+                          "name": settings.get(name_key(match[1], number)) or ""})
     return sorted(found, key=lambda e: (e["owner"].lower(), e["id"]))
 
 
@@ -69,10 +79,26 @@ def token(owner, purpose="read"):
 _reach = {}         # (token digest, "owner/repo", purpose) -> (reaches, when)
 
 
-async def repo_token(owner, repo, purpose="read"):
-    """The token to use on one repository: the first of the owner's that GitHub lets read it (and,
-    for "write", push to it). With one token, or none that is shown to reach it, the first one, so
-    git's own error says what is wrong."""
+class Missing(ValueError):
+    """The token a project names is not there any more."""
+
+
+def chosen(owner, number):
+    """One of an owner's tokens by its id: its entry, or None."""
+    return next((e for e in entries(owner) if e["id"] == int(number)), None)
+
+
+async def repo_token(owner, repo, purpose="read", pinned=None):
+    """The token to use on one repository. With pinned (a token's id, set on the project), that one
+    and no other. Otherwise the first of the owner's that GitHub lets read it (and, for "write",
+    push to it); with one token, or none that is shown to reach it, the first, so git's own error
+    says what is wrong."""
+    if pinned:
+        entry = chosen(owner, pinned)
+        if entry is None:
+            raise Missing(f"The GitHub token chosen for this project ({owner} #{pinned}) has been removed. "
+                          f"Choose another in the project's settings.")
+        return entry["value"]
     found = tokens(owner, purpose)
     if len(found) < 2 or not repo:
         return found[0] if found else ""
@@ -106,7 +132,7 @@ def owners():
     found = {}
     for entry in entries():
         row = found.setdefault(entry["owner"].lower(), {"owner": entry["owner"], "tokens": []})
-        row["tokens"].append({"id": entry["id"], "token": masked(entry["value"])})
+        row["tokens"].append({"id": entry["id"], "name": entry["name"], "token": masked(entry["value"])})
     for name, value in config.properties().items():
         for prefix in OLDER:
             if name.startswith(prefix) and value:
@@ -149,10 +175,19 @@ def _owner_of(repo):
     return (repo.get("owner") or {}).get("login") or ""
 
 
-async def save(owner, value, replace=None):
-    """Adds a token for an owner, beside any it has; with replace (a token's id), swaps that one.
-    With no owner, the owner is the one whose repositories the token sees."""
+def _clean_name(name):
+    name = " ".join((name or "").split())
+    if name and not NAME.match(name):
+        raise ValueError("A token's name can hold letters, digits, spaces and . - ( ), up to 40")
+    return name
+
+
+async def save(owner, value, replace=None, name=None):
+    """Adds a token for an owner, beside any it has; with replace (a token's id), swaps that one,
+    keeping its name unless another is given. With no owner, the owner is the one whose
+    repositories the token sees."""
     owner = (owner or "").strip()
+    name = _clean_name(name)
     if owner and not OWNER.match(owner):
         raise ValueError("That is not a GitHub user or organisation name")
     value = (value or "").strip()
@@ -178,25 +213,46 @@ async def save(owner, value, replace=None):
         # Saved under the name GitHub gives, so "Acme" and "acme" are one owner, not two
         owner = next((o for o in seen if o.lower() == owner.lower()), owner)
     have = entries(owner)
-    if any(e["value"] == value for e in have):
-        raise ValueError(f"This token is already saved for {owner}.")
+    same = next((e for e in have if e["value"] == value), None)
+    if same and not (replace and same["id"] == int(replace)):
+        raise ValueError(f"This token is already saved for {owner}"
+                         + (f" as {same['name']}" if same["name"] else f" (#{same['id']})")
+                         + ". To add another, make a new token on GitHub and paste that one.")
     if replace:
         swapped = next((e for e in have if e["id"] == int(replace)), None)
         if swapped is None:
             raise ValueError(f"{owner} has no token {replace} to replace; it may have been removed.")
         if swapped["owner"] != owner:              # the same owner, written another way before
             config_writer.remove_key(key(swapped["owner"], swapped["id"]))
+            config_writer.remove_key(name_key(swapped["owner"], swapped["id"]))
         number = swapped["id"]
+        name = name or swapped["name"]
     else:
         # Under the owner's name as first saved, so its tokens stay together
         owner = have[0]["owner"] if have else owner
         taken = {e["id"] for e in have}
         number = next(n for n in range(1, len(taken) + 2) if n not in taken)
     config_writer.write_secret(key(owner, number), value)
-    return {"owner": owner, "id": number, **found}
+    _write_name(owner, number, name)
+    return {"owner": owner, "id": number, "name": name, **found}
+
+
+def _write_name(owner, number, name):
+    if name:
+        config_writer.write_secret(name_key(owner, number), name)
+    else:
+        config_writer.remove_key(name_key(owner, number))
+
+
+def rename(owner, number, name):
+    entry = chosen(owner, number)
+    if entry is None:
+        raise ValueError(f"{owner} has no token #{number}")
+    _write_name(entry["owner"], entry["id"], _clean_name(name))
 
 
 def remove(owner, number=1):
     if not OWNER.match(owner or ""):
         raise ValueError("That is not a GitHub user or organisation name")
     config_writer.remove_key(key(owner, number))
+    config_writer.remove_key(name_key(owner, number))

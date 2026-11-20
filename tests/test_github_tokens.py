@@ -94,3 +94,28 @@ def test_removing_the_first_leaves_the_others_in_use(stored):
     github_access.remove("person", 1)
     assert github_access.token("person", "write") == USER_B
     assert save("person", USER_A)["id"] == 1                       # the free number is used again
+
+
+def test_a_token_has_a_name_that_replace_keeps(stored):
+    save("person", USER_A)
+    found = run(github_access.save("person", USER_B, name="vsd  auth server"))
+    assert found["name"] == "vsd auth server" and stored["github.tokenname.person.2"] == "vsd auth server"
+    other = "github_pat_" + "y" * 30
+    SEES[other] = ["person"]
+    save("person", other, replace=2)
+    assert github_access.chosen("person", 2)["name"] == "vsd auth server"
+    github_access.rename("person", 2, "")
+    assert "github.tokenname.person.2" not in stored
+    with pytest.raises(ValueError, match="name"):
+        run(github_access.save("person", "github_pat_" + "z" * 30, name="bad/name"))
+
+
+def test_a_project_that_names_a_token_gets_that_one_or_an_error(stored):
+    save("person", USER_A)
+    save("person", USER_B)
+    # Even for a repository the first one reaches, the project's own token is used
+    assert run(github_access.repo_token("person", "one", "write", pinned=2)) == USER_B
+    github_access.remove("person", 2)
+    with pytest.raises(github_access.Missing, match="removed"):
+        run(github_access.repo_token("person", "one", "write", pinned=2))
+    assert "github.tokenname.person.2" not in stored

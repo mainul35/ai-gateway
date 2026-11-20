@@ -31,6 +31,18 @@ def allowed_owners():
     return {o.lower() for o in listed} | {e["owner"].lower() for e in github_access.owners()}
 
 
+def check_token_choice(principal, clone_url, number):
+    """A project may name one of its owner's GitHub tokens; only an admin chooses, since only an
+    admin sees the tokens. Raises ProjectError."""
+    if not principal.is_admin:
+        raise ProjectError(403, "Only an admin can choose which GitHub token a project uses")
+    found = workspace.github_of(clone_url)
+    if not found:
+        raise ProjectError(400, "Only a project on GitHub uses a GitHub token")
+    if github_access.chosen(found[0], number) is None:
+        raise ProjectError(400, f"{found[0]} has no token #{number}")
+
+
 def name_of(clone_url):
     found = workspace.github_of(clone_url)
     if found:
@@ -40,7 +52,7 @@ def name_of(clone_url):
 
 
 async def add_git(session, principal, clone_url, base_branch=None, verify_command=None, sandbox_image=None,
-                  sandbox_network=None, deploy_command=None, notes=None):
+                  sandbox_network=None, deploy_command=None, notes=None, github_token=None):
     """Clones the repository and saves it as a project. Returns (project, what kind of project it
     looked like). Raises ProjectError."""
     url = clone_url.strip()
@@ -58,12 +70,14 @@ async def add_git(session, principal, clone_url, base_branch=None, verify_comman
         raise ProjectError(403, "Only an admin can set a deploy command")
     if sandbox_image and not IMAGE.match(sandbox_image):
         raise ProjectError(400, "That is not a container image name")
+    if github_token:
+        check_token_choice(principal, url, github_token)
     name = name_of(url)
     if (await session.execute(select(Project).where(Project.name == name))).scalar_one_or_none():
         raise ProjectError(409, f"{name} is already a project")
     try:
         workspace.clone_path(name)
-        default_branch = await workspace.clone(name, url)
+        default_branch = await workspace.clone(name, url, github_token or None)
     except workspace.GitError as e:
         raise ProjectError(400, f"Could not clone it: {e}")
     branch = (base_branch or default_branch).strip()
@@ -75,7 +89,7 @@ async def add_git(session, principal, clone_url, base_branch=None, verify_comman
                       sandbox_image=sandbox_image or found["image"],
                       sandbox_network=found["network"] if sandbox_network is None else sandbox_network,
                       deploy_command=(deploy_command or None),
-                      notes=notes, added_by=principal.user.id if principal.user else None)
+                      notes=notes, github_token=github_token or None, added_by=principal.user.id if principal.user else None)
     session.add(project)
     await session.commit()
     await session.refresh(project)

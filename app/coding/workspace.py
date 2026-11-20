@@ -50,23 +50,32 @@ def valid_branch(name):
     return bool(name) and BRANCH.match(name) is not None
 
 
-def token_for(clone_url):
-    """Whether there is a token for the project's owner at all (its first): for showing, not using."""
+def token_for(clone_url, pinned=None):
+    """Whether there is a token to use for the project (for showing, not using): the one it names,
+    or else its owner's first."""
     found = github_of(clone_url)
     if not found:
         return ""
+    if pinned:
+        entry = github_access.chosen(found[0], pinned)
+        return entry["value"] if entry else ""
     # Set on the Tasks page (GitHub access), or by hand in config.properties
     return github_access.token(found[0], "write") or settings.get("coding.github.token", "CODING_GITHUB_TOKEN") or ""
 
 
-async def repo_token(clone_url):
-    """The token to clone, push and open pull requests with: of the owner's tokens, the one that
-    can push to this repository."""
+async def repo_token(clone_url, pinned=None):
+    """The token to clone, push and open pull requests with: the one the project names, or else,
+    of the owner's tokens, the one that can push to this repository."""
     found = github_of(clone_url)
     if not found:
         return ""
-    return (await github_access.repo_token(found[0], found[1], "write")
-            or settings.get("coding.github.token", "CODING_GITHUB_TOKEN") or "")
+    try:
+        chosen = await github_access.repo_token(found[0], found[1], "write", pinned=pinned)
+    except github_access.Missing as e:
+        raise GitError(str(e))
+    if pinned:
+        return chosen                  # that one or none: a project's own token is never swapped for another
+    return chosen or settings.get("coding.github.token", "CODING_GITHUB_TOKEN") or ""
 
 
 def clone_path(name):
@@ -138,10 +147,10 @@ async def git(args, cwd=None, token="", timeout=600):
 # --- projects ----------------------------------------------------------------------------------
 
 
-async def clone(name, clone_url):
+async def clone(name, clone_url, pinned=None):
     """Clones a project if it is not here yet. Returns its default branch."""
     path = clone_path(name)
-    token = await repo_token(clone_url)
+    token = await repo_token(clone_url, pinned)
     if not os.path.isdir(os.path.join(path, ".git")):
         os.makedirs(os.path.dirname(path), exist_ok=True)
         await git(["clone", "--quiet", "--filter=blob:none", "--", clone_url, path], token=token)
@@ -162,7 +171,7 @@ def branch_name(task_id, description):
 async def start(project, task_id, branch):
     """A fresh worktree on a new branch from the base branch as GitHub has it now."""
     path, root = worktree_path(task_id), clone_path(project.name)
-    await git(["fetch", "--quiet", "origin", project.base_branch], cwd=root, token=await repo_token(project.clone_url))
+    await git(["fetch", "--quiet", "origin", project.base_branch], cwd=root, token=await repo_token(project.clone_url, project.github_token))
     if os.path.isdir(path):
         await discard(project, task_id)
     os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -198,7 +207,7 @@ async def commit(path, message, email):
 
 async def push(project, path, branch):
     await git(["push", "--quiet", "--force", "origin", f"HEAD:refs/heads/{branch}"],
-              cwd=path, token=await repo_token(project.clone_url))
+              cwd=path, token=await repo_token(project.clone_url, project.github_token))
 
 
 async def discard(project, task_id):
@@ -236,7 +245,7 @@ async def open_pull_request(project, branch, title, body):
     found = github_of(project.clone_url)
     if not found:
         return None, None
-    token = await repo_token(project.clone_url)
+    token = await repo_token(project.clone_url, project.github_token)
     if not token:
         raise GitError(f"no GitHub token to open a pull request on {found[0]}: add one on the Tasks page, "
                        f"under GitHub access")
@@ -253,7 +262,7 @@ async def open_pull_request(project, branch, title, body):
 async def merge_pull_request(project, number, message):
     """Merges with a merge commit - the --no-ff history the projects are kept in."""
     owner, repo = github_of(project.clone_url)
-    await _github("PUT", f"/repos/{owner}/{repo}/pulls/{number}/merge", await repo_token(project.clone_url),
+    await _github("PUT", f"/repos/{owner}/{repo}/pulls/{number}/merge", await repo_token(project.clone_url, project.github_token),
                   json={"merge_method": "merge", "commit_title": message[:200]})
 
 
@@ -264,7 +273,7 @@ async def merge_locally(project, branch, message, email):
     await git(["reset", "--quiet", "--hard", f"origin/{project.base_branch}"], cwd=root)
     await git(["-c", f"user.name={AUTHOR_NAME}", "-c", f"user.email={email}",
                "merge", "--quiet", "--no-ff", "-m", message, branch], cwd=root)
-    await git(["push", "--quiet", "origin", project.base_branch], cwd=root, token=await repo_token(project.clone_url))
+    await git(["push", "--quiet", "origin", project.base_branch], cwd=root, token=await repo_token(project.clone_url, project.github_token))
 
 
 def pull_number(pr_url):

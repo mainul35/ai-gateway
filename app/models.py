@@ -271,6 +271,8 @@ class Project(Base):
     # Run on this server, in the project's own clone, after an approved change is merged
     deploy_command: Mapped[str | None] = mapped_column(Text, nullable=True)
     notes: Mapped[str | None] = mapped_column(Text, nullable=True)   # told to the model with every task
+    # Which of the owner's GitHub tokens it uses (its id in github_access); None: whichever reaches it
+    github_token: Mapped[int | None] = mapped_column(Integer, nullable=True)
     added_by: Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
