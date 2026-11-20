@@ -119,3 +119,10 @@ def test_a_project_that_names_a_token_gets_that_one_or_an_error(stored):
     with pytest.raises(github_access.Missing, match="removed"):
         run(github_access.repo_token("person", "one", "write", pinned=2))
     assert "github.tokenname.person.2" not in stored
+
+
+def test_a_refused_token_is_named_as_the_cause():
+    from app.coding import workspace
+    assert workspace._refused("remote: Invalid username or password.\nfatal: Authentication failed for 'https://github.com/o/r.git/'")
+    assert workspace._refused("remote: Permission to o/r.git denied to someone.")
+    assert not workspace._refused("fatal: couldn't find remote ref feature/x")

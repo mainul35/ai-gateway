@@ -737,6 +737,10 @@ async function showTask(id){
   const picker = restarts && toolModels.length ? `<label class="model-pick" title="The model Continue and Retry go on with">
       <span>on</span><select id="restartModel">${toolModels.map(m =>
         `<option ${m === t.model ? 'selected' : ''}>${escapeHtml(m)}</option>`).join('')}</select></label>` : '';
+  const ghOwner = local ? '' : githubOwnerOf(project.clone_url);
+  const tokenPick = isAdmin && ghOwner && (restarts || t.status === 'review') && ownersTokens(ghOwner).length
+    ? `<label class="model-pick" title="The GitHub token this project pushes, opens pull requests and merges with">
+        <span>token</span><select id="taskToken" data-project="${project.id}">${tokenOptions(ghOwner, project.github_token || 0)}</select></label>` : '';
   const live = LIVE.includes(t.status);
   const deck = t.kind === 'presentation';
   const before = turns.filter(x => x.id < t.id).map(pastTurn).join('');
@@ -756,7 +760,7 @@ async function showTask(id){
       ${t.pr_url ? ` &middot; <a href="${escapeHtml(t.pr_url)}" target="_blank" rel="noopener">pull request</a>` : ''}</p>
     ${t.error ? `<div class="note err">${escapeHtml(t.error)}</div>` : ''}
     ${gone ? `<div class="note warn"><b>${escapeHtml(t.model)}</b> is no longer available. Pick another model to continue or retry on.</div>` : ''}
-    <div class="actions">${actions.join('')}${picker}</div>
+    <div class="actions">${actions.join('')}${picker}${tokenPick}</div>
     <details class="steps" id="steps" ${(stepsOpen ?? live) ? 'open' : ''}>
       <summary>Execution steps <span class="muted" id="stepCount"></span></summary>
       <div class="events" id="events"></div></details>
@@ -786,6 +790,7 @@ async function showTask(id){
         </div>
       </div></div>`}`;
   attached.set('askBox', []);
+  document.getElementById('taskToken')?.addEventListener('change', e => switchProjectToken(e.target));
   if(deck && t.result) drawSlides(t.id);
   // Opened at a later turn of a thread: the turn itself in view, the earlier ones above it
   if(opening && turns.length && turns[0].id !== t.id) document.getElementById('openTurn').scrollIntoView({block: 'start'});
@@ -1088,14 +1093,35 @@ let githubTokens = [];          // from /coding/github: [{owner, tokens: [{id, n
 function drawTokenChoice(current){
   const form = document.getElementById('projectForm'), pick = form.querySelector('[data-token-pick]');
   if(!pick) return;
-  const owner = ((form.clone_url.value.match(/github\.com\/([\w.-]+)\//) || [])[1] || '').toLowerCase();
-  const mine = (githubTokens.find(t => t.owner.toLowerCase() === owner) || {tokens: []}).tokens;
+  const owner = githubOwnerOf(form.clone_url.value);
   pick.hidden = !owner || form.querySelector('[data-git-only]').hidden;
   const wanted = current ?? Number(form.github_token.value || 0);
-  form.github_token.innerHTML = `<option value="0">Any of the owner's tokens that can push to it</option>`
-    + mine.map(k => `<option value="${k.id}">${escapeHtml(k.name || 'Token #' + k.id)} (${escapeHtml(k.token)})</option>`).join('')
-    + (wanted && !mine.some(k => k.id === wanted) ? `<option value="${wanted}">Token #${wanted} - removed</option>` : '');
+  form.github_token.innerHTML = tokenOptions(owner, wanted);
   form.github_token.value = String(wanted || 0);
+}
+
+const githubOwnerOf = url => ((url || '').match(/github\.com\/([\w.-]+)\//) || [])[1] || '';
+const ownersTokens = owner => (githubTokens.find(t => t.owner.toLowerCase() === owner.toLowerCase()) || {tokens: []}).tokens;
+
+function tokenOptions(owner, wanted){
+  const mine = ownersTokens(owner);
+  return `<option value="0">Any of the owner's tokens that can push to it</option>`
+    + mine.map(k => `<option value="${k.id}" ${k.id === wanted ? 'selected' : ''}>${escapeHtml(k.name || 'Token #' + k.id)} (${escapeHtml(k.token)})</option>`).join('')
+    + (wanted && !mine.some(k => k.id === wanted) ? `<option value="${wanted}" selected>Token #${wanted} - removed</option>` : '');
+}
+
+// From a task: the token its project pushes with, switched for the project (an expired one swapped
+// for a new one), so Continue, Retry and Approve go on with it
+async function switchProjectToken(select){
+  const id = Number(select.dataset.project), chosen = Number(select.value);
+  try{
+    await api(`/coding/projects/${id}`, {method: 'PATCH', headers: {'Content-Type': 'application/json'},
+                                         body: JSON.stringify({github_token: chosen})});
+    await loadProjects();
+    showOk(`The project now uses ${chosen ? select.selectedOptions[0].textContent : "any of its owner's tokens that can push to it"}. `
+           + 'Continue, Retry and Approve go on with it.');
+    if(isAdmin) loadGithub();
+  }catch(err){ showError(err.message); }
 }
 document.querySelector('#projectForm [name=clone_url]').addEventListener('input', () => drawTokenChoice());
 

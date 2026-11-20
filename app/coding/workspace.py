@@ -29,6 +29,17 @@ BRANCH = re.compile(r"^(?!-)(?!.*\.\.)(?!.*//)(?!.*@\{)(?!.*\.lock$)(?!.*/$)[A-Z
 AUTHOR_NAME = "AI Gateway"
 
 
+# Said after a failure GitHub put down to the token, so the way on is plain
+TOKEN_REFUSED = (" - GitHub refused the token (expired, revoked, or without access to this repository). "
+                 "Replace it under GitHub access, or choose another token for the project here, then Continue.")
+
+
+def _refused(said):
+    said = said.lower()
+    return any(s in said for s in ("authentication failed", "could not read username", "invalid username or",
+                                   "permission to", "denied to", "returned error: 401", "returned error: 403"))
+
+
 class GitError(Exception):
     pass
 
@@ -140,7 +151,8 @@ async def git(args, cwd=None, token="", timeout=600):
         process.kill()
         raise GitError(f"git {shown[0]} took longer than {timeout}s")
     if process.returncode != 0:
-        raise GitError(f"git {' '.join(shown[:2])} failed: {err.decode(errors='replace').strip()[-600:]}")
+        said = err.decode(errors='replace').strip()
+        raise GitError(f"git {' '.join(shown[:2])} failed: {said[-600:]}" + (TOKEN_REFUSED if token and _refused(said) else ""))
     return out.decode(errors="replace")
 
 
@@ -235,7 +247,8 @@ async def _github(method, path, token, **kwargs):
     async with httpx.AsyncClient(timeout=30) as client:
         response = await client.request(method, f"https://api.github.com{path}", headers=headers, **kwargs)
     if response.status_code >= 400:
-        raise GitError(f"GitHub said {response.status_code}: {response.text[:300]}")
+        raise GitError(f"GitHub said {response.status_code}: {response.text[:300]}"
+                       + (TOKEN_REFUSED if response.status_code in (401, 403) else ""))
     return response.json() if response.content else {}
 
 
