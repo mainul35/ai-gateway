@@ -1010,7 +1010,8 @@ async def reader(url: str, principal: Principal = Depends(authenticate)):
 
 class WrittenIn(BaseModel):
     text: str = Field(min_length=1, max_length=400_000)
-    format: str = Field(pattern="^(markdown|pdf|pptx)$")
+    # page_pdf: `text` is an HTML page the model wrote, drawn as a PDF in its own design
+    format: str = Field(pattern="^(markdown|pdf|pptx|page_pdf)$")
     message_id: int | None = None     # the saved answer it was made from, to keep it with
     # For a deck: a PowerPoint file the person uploaded, whose design it takes
     template_file_id: int | None = None
@@ -1023,6 +1024,19 @@ async def write_answer_file(payload: WrittenIn, principal: Principal = Depends(a
     was wanted, and the answer is in the chat either way. Made like a document asked for
     (app/tools/written.py), and kept with the answer when it is a saved one the person may write in."""
     user = _require_user(principal)
+    if payload.format == "page_pdf":
+        # A page's own design, printed. Not kept with the answer, which may hold several pages, and
+        # nothing to edit: its text is HTML, not the Markdown the editor works on (the page's
+        # "Edit as Markdown" makes that)
+        try:
+            name, data, mime = await asyncio.to_thread(written.make_page_pdf, payload.text)
+        except written.WrittenError as e:
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(e))
+        stored = ChatFile(user_id=user.id, kind="written", mime_type=mime, name=name, prompt=None, data=data)
+        session.add(stored)
+        await session.commit()
+        await session.refresh(stored)
+        return _file_json(stored)
     message = None
     if payload.message_id is not None:
         message = await session.get(ConversationMessage, payload.message_id)

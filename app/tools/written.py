@@ -324,6 +324,49 @@ def make(text, fmt, images=None, charts=None, template=None):
     return file_name(title, extension), pdf, mime
 
 
+# An A4 sheet with a margin, unless the page sets its own
+PAGE_SHEET = "@page { size: A4; margin: 12mm; }"
+
+
+def page_title(html):
+    """A page's title: its <title>, or failing that its first <h1>."""
+    for pattern in (r"<title[^>]*>(.*?)</title>", r"<h1[^>]*>(.*?)</h1>"):
+        found = re.search(pattern, html or "", re.I | re.S)
+        if found:
+            words = re.sub(r"<[^>]+>", " ", found.group(1))
+            words = re.sub(r"\s+", " ", words.replace("&amp;", "&").replace("&nbsp;", " ")).strip()
+            if words:
+                return words[:120]
+    return "Page"
+
+
+def make_page_pdf(html):
+    """(file name, bytes, media type): an HTML page the model wrote - a CV in a chosen design, say -
+    drawn as a PDF with its own styles. Nothing it points at is fetched (its web fonts fall back to
+    the server's own), and its scripts do not run, so a page that draws itself with one is refused
+    rather than printed blank."""
+    try:
+        from weasyprint import HTML
+    except Exception as e:
+        log.warning("WeasyPrint is not usable: %s", e)
+        raise WrittenError("PDFs cannot be made on this server.")
+    body = re.search(r"<body[^>]*>(.*)</body>", html, re.I | re.S)
+    visible = re.sub(r"<(script|style)[^>]*>.*?</\1>", " ", body.group(1) if body else html, flags=re.I | re.S)
+    if not re.sub(r"<[^>]+>|&nbsp;|\s", "", visible):
+        raise WrittenError("This page puts its content in with a script, which a PDF cannot run. "
+                           "Use Open in a tab and print it from there.")
+    # First in the page, so a sheet size or margin of the page's own comes after it and wins
+    head = re.search(r"<head[^>]*>", html, re.I)
+    at = head.end() if head else 0
+    page = html[:at] + f"<style>{PAGE_SHEET}</style>" + html[at:]
+    try:
+        pdf = HTML(string=page, url_fetcher=_fetcher()).write_pdf()
+    except Exception as e:
+        log.warning("Could not draw a page as a PDF: %s", e)
+        raise WrittenError("This page could not be drawn as a PDF.")
+    return file_name(page_title(html), "pdf"), pdf, "application/pdf"
+
+
 # A resume, read from the document's own headings rather than the request: a heading that is a
 # whole career-history section, and another that is education, skills or the like. Headings only, and
 # the whole heading, so a report with a "Summary" and "Projects", or an "Education budget", keeps
