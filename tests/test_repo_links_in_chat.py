@@ -53,3 +53,19 @@ def test_a_repository_that_cannot_be_opened_says_why(monkeypatch):
 def test_without_the_repository_tools_it_is_a_web_page(monkeypatch):
     pages, failed, fetched = read(["https://github.com/Org/private-repo"], monkeypatch, allowed=False)
     assert fetched == ["https://github.com/Org/private-repo"]
+
+
+def test_what_was_opened_goes_beside_the_latest_question():
+    messages = [{"role": "system", "content": "rules"}, {"role": "user", "content": "open it"},
+                {"role": "assistant", "content": "It is private and out of reach."},
+                {"role": "user", "content": "try again"}]
+    chat._on_latest(messages, chat._repo_note("Org/repo", {"repository": "Org/repo", "files": 106}))
+    assert messages[1]["content"] == "open it" and messages[2]["content"].startswith("It is private")
+    assert messages[3]["content"].startswith("try again") and "readable now" in messages[3]["content"]
+    assert '"files": 106' in messages[3]["content"]
+
+
+def test_a_message_with_pictures_gets_the_note_as_one_more_part():
+    messages = [{"role": "user", "content": [{"type": "text", "text": "look"}]}]
+    chat._on_latest(messages, chat._repo_note("Org/repo", why="no token reaches it"))
+    assert messages[0]["content"][-1]["text"].endswith("Tell the user this reason.]")
