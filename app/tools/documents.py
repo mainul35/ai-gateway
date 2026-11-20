@@ -133,6 +133,12 @@ def _from_pdf(data):
             text = page.extract_text() or ""
         except Exception:
             text = ""
+        text = text.strip()
+        links = [u for u in _pdf_links(page) if u.removeprefix("mailto:") not in text]
+        if links and text:
+            # A CV's "LinkedIn | GitHub" are words with the address behind them: without this the
+            # model sees the words only, and writes a profile address from a guess
+            text += "\n[Links on this page: " + ", ".join(links) + "]"
         if text.strip():
             pages.append(f"--- page {number} ---\n{text.strip()}")
     if not pages:
@@ -144,6 +150,31 @@ def _from_pdf(data):
     return "\n\n".join(pages)
 
 
+def _pdf_links(page):
+    """The web and mail addresses the page's clickable areas go to, in order, each once."""
+    found = []
+    try:
+        for annotation in page.get("/Annots") or []:
+            action = annotation.get_object().get("/A") or {}
+            uri = action.get_object().get("/URI") if hasattr(action, "get_object") else None
+            uri = str(uri).strip() if uri else ""
+            if uri.lower().startswith(("http://", "https://", "mailto:")) and uri not in found:
+                found.append(uri)
+    except Exception:
+        return found
+    return found
+
+
+def _docx_paragraph(paragraph):
+    """The paragraph's words, with the address of each link that does not already show it."""
+    text = paragraph.text
+    for link in getattr(paragraph, "hyperlinks", []):
+        address = (link.address or "").strip()
+        if address and address not in text:
+            text += f" [{link.text.strip() or 'link'}: {address}]"
+    return text
+
+
 def _from_docx(data):
     import docx
 
@@ -152,7 +183,7 @@ def _from_docx(data):
         document = docx.Document(io.BytesIO(data))
     except Exception as e:
         raise DocumentError(f"This Word file could not be opened ({e}).")
-    parts = [p.text.strip() for p in document.paragraphs if p.text.strip()]
+    parts = [_docx_paragraph(p).strip() for p in document.paragraphs if p.text.strip()]
     for table in document.tables:
         rows = ["\t".join(cell.text.strip() for cell in row.cells) for row in table.rows]
         if any(row.strip() for row in rows):
@@ -245,7 +276,10 @@ def context_block(documents):
     if not documents:
         return ""
     parts = ["The user has attached the following document(s). Answer from what they contain, and "
-             "say so when something they ask about is not in them."]
+             "say so when something they ask about is not in them. A link's address is written beside "
+             "its words or under the page. Never make up an address, profile link, phone number or "
+             "other contact detail: use one these documents or the conversation give, and when the "
+             "one wanted is in neither, ask the user for it."]
     for name, text in documents:
         parts.append(f"\n===== {name} =====\n{text}")
     return "\n".join(parts)
