@@ -51,7 +51,7 @@ def _env(name, default=None):
 
 
 UPSTREAM = (_env("WAKE_UPSTREAM") or "").rstrip("/")          # e.g. http://192.168.50.20:9000
-WOL_MAC = _env("WAKE_MAC", "")                                 # e.g. a8:a1:59:9d:f4:ae
+WOL_MAC = _env("WAKE_MAC", "")                                 # e.g. fc:34:97:b7:78:9d
 WOL_BROADCAST = _env("WAKE_BROADCAST", "255.255.255.255")      # e.g. 192.168.50.255
 WOL_PORT = int(_env("WAKE_WOL_PORT", "9"))
 HOLD_SECONDS = float(_env("WAKE_HOLD_SECONDS", "90"))          # under Cloudflare's 100 s

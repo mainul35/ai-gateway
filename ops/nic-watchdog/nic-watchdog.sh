@@ -2,6 +2,9 @@
 # nic-watchdog - brings homelabai's network card back when it dies, so the machine never sits on,
 # awake and unreachable. Logs: journalctl -t nic-watchdog
 #
+# Board: ASUS ROG Crosshair VIII Hero (branch hardware/asus-rog-crosshair-viii-hero). The card is its
+# Intel I211 (enp5s0), not the Realtek RTL8125 2.5G beside it (enp4s0, no cable).
+#
 # Why: the onboard Intel I211 (igb) sometimes drops off the PCIe bus when the machine wakes from
 # suspend ("igb ... enp4s0: PCIe link lost"). Nothing brought it back: on 2026-11-11 homelabai
 # woke at 03:23, lost the card, and stayed offline for 7 hours - still suspending and waking - until
@@ -21,8 +24,8 @@ set -uo pipefail
 
 CONF=${NIC_WATCHDOG_CONF:-/etc/default/nic-watchdog}
 [ -r "$CONF" ] && . "$CONF"
-NIC_MAC=${NIC_MAC:-a8:a1:59:9d:f4:ae}          # the card, by its hardware address: names change
-NIC_PCI=${NIC_PCI:-0000:04:00.0}              # where it sits, for when it has dropped off the bus
+NIC_MAC=${NIC_MAC:-fc:34:97:b7:78:9d}          # the card, by its hardware address: names change
+NIC_PCI=${NIC_PCI:-0000:05:00.0}              # where it sits, for when it has dropped off the bus
 LINK_WAIT_SEC=${LINK_WAIT_SEC:-40}            # a link takes a few seconds to negotiate after a wake
 DEAD_CHECKS_BEFORE_RESET=${DEAD_CHECKS_BEFORE_RESET:-2}    # watch: minutes dead before a reset
 DEAD_CHECKS_BEFORE_REBOOT=${DEAD_CHECKS_BEFORE_REBOOT:-5}  # watch: minutes dead before a reboot
@@ -47,6 +50,27 @@ alive() {
     local iface
     iface=$(nic_iface) || return 1
     [ "$(cat "/sys/class/net/$iface/carrier" 2>/dev/null)" = "1" ]
+}
+
+# Another wired card with a link, while ours is not in the system at all: NIC_MAC names a card this
+# machine does not have (a new mainboard), not a dead one. On 2026-11-20, after the move from the
+# ASRock X570 to the ASUS Crosshair VIII Hero, the old address made the watchdog reboot the machine
+# every 6 minutes, so it never reached its idle time and never slept.
+other_card_up() {
+    local dev
+    nic_iface >/dev/null && return 1
+    for dev in /sys/class/net/*; do
+        [ -e "$dev/device" ] || continue                  # physical cards only, not bridges or tunnels
+        [ "$(cat "$dev/carrier" 2>/dev/null)" = "1" ] && { basename "$dev"; return 0; }
+    done
+    return 1
+}
+
+# Says once per boot why it does nothing
+mismatch() {
+    [ -e /run/nic-watchdog.mismatch ] && return 0
+    touch /run/nic-watchdog.mismatch
+    log "no card with address $NIC_MAC, but $1 has a link: NIC_MAC in $CONF does not match this machine - doing nothing (ip link shows the cards)"
 }
 
 wait_alive() {
@@ -118,6 +142,7 @@ case "${1:-watch}" in
         if wait_alive "$LINK_WAIT_SEC"; then
             exit 0
         fi
+        other=$(other_card_up) && { mismatch "$other"; exit 0; }
         log "no network link ${LINK_WAIT_SEC}s after waking from sleep"
         recover
         ;;
@@ -125,6 +150,11 @@ case "${1:-watch}" in
         mkdir -p "$STATE_DIR"
         if alive; then
             rm -f "$STATE_DIR/dead"
+            exit 0
+        fi
+        if other=$(other_card_up); then
+            rm -f "$STATE_DIR/dead"
+            mismatch "$other"
             exit 0
         fi
         echo x >> "$STATE_DIR/dead"

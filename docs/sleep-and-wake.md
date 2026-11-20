@@ -235,7 +235,7 @@ and ends every step with a check.
 | Setting | Default | Meaning |
 |---|---|---|
 | `WAKE_UPSTREAM` | required | the gateway on the LAN: `http://192.168.50.146:9000` |
-| `WAKE_MAC` | required | homelabai's NIC: `a8:a1:59:9d:f4:ae` |
+| `WAKE_MAC` | required | homelabai's NIC: `fc:34:97:b7:78:9d` |
 | `WAKE_BROADCAST` | 255.255.255.255 | the LAN broadcast: `192.168.50.255` |
 | `WAKE_SESSION_SECRET` | empty | the gateway's `gateway.session.secret`, to check login cookies properly |
 | `WAKE_MASTER_KEY_SHA256` | empty | `printf %s "$KEY" \| sha256sum`, so the master key always wakes it |
