@@ -12,7 +12,7 @@ import httpx
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import PlainTextResponse, Response
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -227,6 +227,15 @@ class TokenIn(BaseModel):
     token: str = Field(min_length=20, max_length=400)
     owner: str = Field(default="", max_length=39)       # empty: found from the token
     replace: int | None = Field(default=None, ge=1)     # a token's id: swaps that one instead of adding
+
+    @field_validator("replace", mode="before")
+    @classmethod
+    def _older_page(cls, value):
+        # A Tasks page loaded before an owner could have several tokens sends true or false here:
+        # false adds, true swaps the owner's first token, as it did then
+        if isinstance(value, bool):
+            return 1 if value else None
+        return value
 
 
 async def _save_token(owner, payload):
