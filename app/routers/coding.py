@@ -225,18 +225,30 @@ async def github_tokens(_: Principal = Depends(require_admin), session: AsyncSes
 
 class TokenIn(BaseModel):
     token: str = Field(min_length=20, max_length=400)
+    owner: str = Field(default="", max_length=39)       # empty: found from the token
+    replace: bool = False                               # an owner's token is swapped only when asked
 
 
-@router.put("/github/{owner}")
-async def set_github_token(owner: str, payload: TokenIn, _: Principal = Depends(require_admin)):
-    """Checks the token with GitHub, then saves it. Never echoed back."""
+async def _save_token(owner, payload):
     try:
-        found = await github_access.save(owner, payload.token)
+        return await github_access.save(owner, payload.token, replace=payload.replace)
+    except github_access.Taken as e:
+        raise HTTPException(status.HTTP_409_CONFLICT, str(e))
     except ValueError as e:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, str(e))
     except httpx.HTTPError as e:
         raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, f"GitHub could not be reached: {e}")
-    return {"owner": owner, **found}
+
+
+@router.post("/github")
+async def add_github_token(payload: TokenIn, _: Principal = Depends(require_admin)):
+    """Checks the token with GitHub, then saves it under its owner. Never echoed back."""
+    return await _save_token(payload.owner, payload)
+
+
+@router.put("/github/{owner}")
+async def set_github_token(owner: str, payload: TokenIn, _: Principal = Depends(require_admin)):
+    return await _save_token(owner, payload)
 
 
 @router.post("/github/{owner}/check")
