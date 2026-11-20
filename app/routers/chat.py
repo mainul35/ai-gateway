@@ -1341,6 +1341,13 @@ async def _search_query(principal, payload, backend):
     return web_search.clean_query(await _ask_helper(principal, body), latest)
 
 
+def _drop_trailing_answers(messages):
+    """A turn is asked with the question last. An answer after it is the one being asked again (a
+    page from before 2026-11-20 sent it): the model took it as already said and repeated it."""
+    while len(messages) > 1 and messages[-1].role == "assistant":
+        messages.pop()
+
+
 @router.post("/complete")
 async def complete(payload: CompleteIn, principal: Principal = Depends(authenticate),
                    session: AsyncSession = Depends(get_session)):
@@ -1349,6 +1356,7 @@ async def complete(payload: CompleteIn, principal: Principal = Depends(authentic
     Streams OpenAI chunks, plus playground events ({"gateway": {...}}) for progress and sources.
     """
     user = _require_user(principal)
+    _drop_trailing_answers(payload.messages)
     if not access.can_use_model(principal, payload.model):
         raise HTTPException(status.HTTP_403_FORBIDDEN, f"You do not have access to model '{payload.model}'")
     backend = await backends.resolve(payload.model)
@@ -4959,6 +4967,7 @@ async def run_agent(payload: AgentIn, principal: Principal = Depends(authenticat
     """
     user = _require_user(principal)
     _require_feature(principal, "agent")
+    _drop_trailing_answers(payload.messages)
     if not agent.is_available_to(principal):
         raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE,
                             "You have no tool servers to use. Either none are switched on, or none "
