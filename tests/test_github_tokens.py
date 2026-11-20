@@ -105,6 +105,18 @@ def test_each_repository_gets_the_token_that_reaches_it(stored):
     assert run(github_access.repo_token("person", "three", "write")) == USER_A     # none does: the first
 
 
+def test_a_token_filed_under_a_person_serves_an_organisation_it_reaches(stored):
+    save("person", USER_A)
+    REACHES[USER_A].add("Acme/private")
+    try:
+        assert run(github_access.repo_token("Acme", "private", "read")) == USER_A
+        assert run(github_access.repo_token("Acme", "elsewhere", "read")) == ""      # GitHub says no: none
+        save("", ORG)                                   # once Acme has its own, that comes first
+        assert run(github_access.repo_token("Acme", "elsewhere", "read")) == ORG
+    finally:
+        REACHES[USER_A].discard("Acme/private")
+
+
 def test_replace_swaps_only_the_token_it_names(stored):
     save("person", USER_A)
     save("person", USER_B)
