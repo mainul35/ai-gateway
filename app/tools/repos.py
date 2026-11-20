@@ -101,10 +101,12 @@ def mentioned(text):
     return out
 
 
-# "Try again", "look at the repo once more", "check that link": a message that points back at a
-# repository named earlier, without its address
-POINTS_BACK = re.compile(r"\b(again|retry|re-?try|repo|repos|repository|code ?base|source( code)?|"
-                         r"that link|the link|that one)\b", re.I)
+# "Try again", "look at the repo once more": a message that points back at a repository named
+# earlier, without its address. It has to name the repository or ask for another try; "the link" or
+# a bare "again" is not enough - "update the link with this username" and "make it shorter again"
+# were about a CV, and went to the agent
+POINTS_BACK = re.compile(r"\b(repo|repos|repository|code ?base|source code|retry|re-try|"
+                         r"try\b.{0,20}\bagain)\b", re.I)
 LOOK_BACK = 10      # earlier messages of the person's looked through for the repository
 
 
