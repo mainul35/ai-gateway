@@ -1493,7 +1493,7 @@ async def complete(payload: CompleteIn, principal: Principal = Depends(authentic
                 yield _event("status", text="Writing the answer")
         if web_links:
             pages, failed = [], []
-            async for event in _read_web_pages(web_links, pages, failed):
+            async for event in _read_web_pages(web_links, pages, failed, principal):
                 yield event
             # The pages the user named stand on their own, ahead of any search: the model is told to
             # give their content, not to weigh them against other sources
@@ -4850,10 +4850,27 @@ async def _one_round(principal, body):
     return choices[0].get("message") or {}, answer.get("usage") or {}
 
 
-async def _read_web_pages(links, pages, failed):
+async def _read_web_pages(links, pages, failed, principal=None):
     """Reads the web pages a message names, as events to stream: what was read goes into pages (as
-    sources), what could not be into failed as (address, why)."""
+    sources), what could not be into failed as (address, why).
+
+    A GitHub repository is read from git, not from its github.com page, for someone the repository
+    tools are there for: the page of a private repository is a 404 to anyone not signed in, while
+    the clone uses the tokens that person may use (repos.open_repo)."""
     for url in links:
+        if repos.mentioned(url) and repos.is_enabled() and self_tools.is_available_to(principal):
+            yield _event("status", text=f"Opening the repository {repos.mentioned(url)[0]}")
+            try:
+                about = await repos.overview(principal, {"repository": url})
+            except repos.RepoError as e:
+                failed.append((url, str(e)))
+                yield _event("notice", text=f"Could not open {url}: {e}")
+                continue
+            about["note"] = ("This is the repository's overview: its README start, top-level folders and "
+                             "build files. To read its code, switch the Agent on and ask again.")
+            pages.append({"title": about["repository"], "url": url, "site": "github.com", "published": None,
+                          "content": json.dumps(about, ensure_ascii=False, indent=1, default=str)})
+            continue
         query = web_reader.search_query(url)
         yield _event("status", text=f"Searching for “{query}” (a search engine's page cannot be read directly)"
                      if query else f"Reading {urllib.parse.urlparse(url).hostname or url}")
