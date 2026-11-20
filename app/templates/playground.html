@@ -2391,6 +2391,13 @@ function answersTo(box){
   return turn ? allMessages(`.msg.assistant[data-turn="${turn}"]`) : [box].filter(Boolean);
 }
 
+/* The conversation as the model is to see it. Asking a question again replaces its answer, so the
+   answer being replaced is left out: sent last, after the question, the model read it as what it had
+   already said and gave it again word for word, whatever had changed since (2026-11-20). */
+function turnsToSend(again){
+  return again && again.replaceAt != null ? sentTurns.slice(0, again.replaceAt) : sentTurns;
+}
+
 function recordAnswer(box, content, at){
   // Asking again replaces the answer the model is told about, rather than reading as two replies
   const index = at != null && at < sentTurns.length ? at : sentTurns.length;
@@ -4148,7 +4155,7 @@ async function sendAgent(text, again, decision = null){
   try{
     const response = await postStream('/chat/agent', {
       model, conversation_id: currentId,
-      messages: sentTurns.map(h => ({role: h.role, content: h.content, images: []})),
+      messages: turnsToSend(again).map(h => ({role: h.role, content: h.content, images: []})),
       temperature: parseFloat(document.getElementById('temperature').value),
       max_tokens: parseInt(document.getElementById('maxTokens').value, 10) || 8192,
       answers_to: box.dataset.turn ? Number(box.dataset.turn) : null});
@@ -4904,7 +4911,7 @@ async function askDocumentFormat(text, again){
 
 // The model is chosen for the request itself, not for the one word that said which kind of file
 async function sendDocument(text, format, again, request){
-  const decision = await decideAction(request || text, turnPictures().length > 0);
+  const decision = await decideAction(request || text, turnPictures().length > 0, again);
   if(decision.action === 'stopped') return;
   return sendChat(text, {...decision, action: 'document'}, again, format);
 }
@@ -4943,7 +4950,7 @@ function offerSideFile(answer, text){
 // --- sending ----------------------------------------------------------------
 
 // With more than one tool switched on, a small model decides what this message asks for
-async function decideAction(text, hasImages){
+async function decideAction(text, hasImages, again = null){
   const searchOn = tools.web_search && caps.web_search;
   // Even with no tool to choose between, Auto still has a model to choose, and the router still
   // reads whether a document is wanted - writing one needs no tool switched on
@@ -4959,7 +4966,7 @@ async function decideAction(text, hasImages){
       maps: tools.maps && caps.maps, photo_blur: blurAllowed(),
       choose_model: choosing(), current_model: chosenModel,
       agent: !!caps.agent, conversation_id: currentId || null,
-      history: sentTurns.slice(-4).map(h => ({role: h.role, content: h.content}))})});
+      history: turnsToSend(again).slice(-4).map(h => ({role: h.role, content: h.content}))})});
     if(decision.model) chosenModel = decision.model;
     return decision;
   }catch(e){
@@ -5147,7 +5154,7 @@ async function routeTurn(text, asking){
   // A file asked for is made even with the agent on: the agent has no way to make one, and answered
   // "make a PowerPoint about X" with the slides as chat text and nothing to download
   if(waiting && usable) return sendDocument(text, usable, asking, waiting.request);
-  let decision = await decideAction(text, turnPictures().length > 0);
+  let decision = await decideAction(text, turnPictures().length > 0, asking);
   if(decision.action === 'stopped') return;
   // PowerPoint named outright is a deck to make, even when the router read it as a question
   if(['chat', 'agent'].includes(decision.action) && usable === 'pptx' && SAYS_POWERPOINT.test(text))
@@ -5207,7 +5214,7 @@ async function sendChat(text, decision, again, documentFormat = null){
 
   const messages = [];
   if(savedSystem) messages.push({role: 'system', content: savedSystem});
-  messages.push(...sentTurns.map(h => ({role: h.role, content: h.content, images: h.images || []})));
+  messages.push(...turnsToSend(again).map(h => ({role: h.role, content: h.content, images: h.images || []})));
 
   const payload = {model, messages, conversation_id: currentId,
                    // The server writes the answer down, so it is the one that has to file it

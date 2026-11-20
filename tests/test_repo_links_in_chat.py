@@ -83,3 +83,12 @@ def test_a_new_question_does_not_reopen_an_old_repository():
     assert repos.wanted(["try again"]) == []
     # A link in the message itself wins over an earlier one
     assert repos.wanted(["https://github.com/Org/a", "now https://github.com/Org/b"]) == ["Org/b"]
+
+
+def test_an_answer_sent_after_the_question_is_left_out():
+    asked = [chat.ChatMessageIn(role="user", content="open it"),
+             chat.ChatMessageIn(role="assistant", content="It is private."),
+             chat.ChatMessageIn(role="user", content="try again"),
+             chat.ChatMessageIn(role="assistant", content="It is private.")]
+    chat._drop_trailing_answers(asked)
+    assert [m.content for m in asked] == ["open it", "It is private.", "try again"]
