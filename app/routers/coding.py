@@ -226,14 +226,12 @@ async def github_tokens(_: Principal = Depends(require_admin), session: AsyncSes
 class TokenIn(BaseModel):
     token: str = Field(min_length=20, max_length=400)
     owner: str = Field(default="", max_length=39)       # empty: found from the token
-    replace: bool = False                               # an owner's token is swapped only when asked
+    replace: int | None = Field(default=None, ge=1)     # a token's id: swaps that one instead of adding
 
 
 async def _save_token(owner, payload):
     try:
         return await github_access.save(owner, payload.token, replace=payload.replace)
-    except github_access.Taken as e:
-        raise HTTPException(status.HTTP_409_CONFLICT, str(e))
     except ValueError as e:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, str(e))
     except httpx.HTTPError as e:
@@ -242,7 +240,7 @@ async def _save_token(owner, payload):
 
 @router.post("/github")
 async def add_github_token(payload: TokenIn, _: Principal = Depends(require_admin)):
-    """Checks the token with GitHub, then saves it under its owner. Never echoed back."""
+    """Checks the token with GitHub, then adds it to its owner's tokens. Never echoed back."""
     return await _save_token(payload.owner, payload)
 
 
@@ -252,25 +250,30 @@ async def set_github_token(owner: str, payload: TokenIn, _: Principal = Depends(
 
 
 @router.post("/github/{owner}/check")
-async def check_github_token(owner: str, _: Principal = Depends(require_admin)):
-    value = github_access.token(owner, "write") or github_access.token(owner, "read")
+async def check_github_token(owner: str, id: int | None = None, _: Principal = Depends(require_admin)):
+    """What one of an owner's tokens can do (its first, without an id)."""
+    if id is None:
+        value = github_access.token(owner, "write") or github_access.token(owner, "read")
+    else:
+        value = next((e["value"] for e in github_access.entries(owner) if e["id"] == id), "")
     if not value:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, f"No token for {owner}")
+        raise HTTPException(status.HTTP_404_NOT_FOUND, f"No such token for {owner}")
     try:
-        return {"owner": owner, **await github_access.check(owner, value)}
+        found = await github_access.check(owner, value)
     except ValueError as e:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, str(e))
     except httpx.HTTPError as e:
         raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, f"GitHub could not be reached: {e}")
+    return {"owner": owner, "id": id, **found}
 
 
 @router.delete("/github/{owner}")
-async def remove_github_token(owner: str, _: Principal = Depends(require_admin)):
+async def remove_github_token(owner: str, id: int = 1, _: Principal = Depends(require_admin)):
     try:
-        github_access.remove(owner)
+        github_access.remove(owner, id)
     except ValueError as e:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, str(e))
-    return {"removed": owner}
+    return {"removed": owner, "id": id}
 
 
 # --- the relay to a folder on somebody's computer ----------------------------------------------

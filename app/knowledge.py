@@ -285,12 +285,31 @@ class Source:
 
 
 async def _github_repos(client, owner, spec, token=None, required=True):
-    """Every repository of a user or an organisation that the token can see.
+    """Every repository of a user or an organisation that the token can see. With no token given,
+    every one the owner's tokens see between them: each may have been given different ones.
 
     Without a token, when that is allowed (a person who only has public repositories), GitHub's
     public listing - which shows public repositories only.
     """
-    token = token if token is not None else github_token(owner)
+    if token is None:
+        found = github_access.tokens(owner, "read")
+        general = settings.get("knowledge.github.token", "KNOWLEDGE_GITHUB_TOKEN")
+        if general and general not in found:
+            found.append(general)
+        if len(found) > 1:
+            repos, failed = {}, []
+            for each in found:
+                try:
+                    listed = await _github_repos(client, owner, spec, each, required)
+                except RuntimeError as e:           # one expired token does not hide the others' repositories
+                    failed.append(e)
+                    continue
+                for repo in listed:
+                    repos.setdefault(repo["full_name"].lower(), repo)
+            if len(failed) == len(found):
+                raise failed[0]
+            return list(repos.values())
+        token = found[0] if found else ""
     if not token and required:
         raise RuntimeError(f"no GitHub token for {owner}: add one on the Tasks page, under GitHub access")
     headers = {"Accept": "application/vnd.github+json", **({"Authorization": f"Bearer {token}"} if token else {})}
@@ -402,7 +421,9 @@ async def update_checkout(source):
     """Clones or fast-forwards a shallow copy of a repository's default branch."""
     clone = source.clone
     # A person's own token for their repositories; the configured ones for the configured
-    token = clone["token"] if "token" in clone else github_token(clone["owner"])
+    token = clone["token"] if "token" in clone else (
+        await github_access.repo_token(clone["owner"], clone["repo"], "read")
+        or settings.get("knowledge.github.token", "KNOWLEDGE_GITHUB_TOKEN") or "")
     url = f"https://github.com/{clone['owner']}/{clone['repo']}.git"
     if not os.path.isdir(os.path.join(source.root, ".git")):
         os.makedirs(os.path.dirname(source.root), exist_ok=True)
