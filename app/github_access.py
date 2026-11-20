@@ -143,6 +143,14 @@ def tokens(owner, purpose="read"):
     return found
 
 
+def spare(owner):
+    """The gateway's tokens filed under other owners. A token is filed under the owner it was added
+    for, but one person's token often reaches an organisation's repositories too (a classic token,
+    or a fine-grained one given them), so these are tried - after the owner's own, and only where
+    GitHub confirms they reach the repository."""
+    return [e["value"] for e in entries() if e["owner"].lower() != (owner or "").lower()]
+
+
 def token(owner, purpose="read"):
     """An owner's first token, or "": enough to know whether there is one at all."""
     found = tokens(owner, purpose)
@@ -173,12 +181,13 @@ async def repo_token(owner, repo, purpose="read", pinned=None):
                           f"Choose another in the project's settings.")
         return entry["value"]
     found = tokens(owner, purpose)
-    if len(found) < 2 or not repo:
+    others = [v for v in spare(owner) if v not in found] if repo else []
+    if len(found) + len(others) < 2 and (found or not others):
         return found[0] if found else ""
-    for value in found:
+    for value in found + others:
         if await _reaches(value, owner, repo, purpose):
             return value
-    return found[0]
+    return found[0] if found else ""
 
 
 async def _reaches(value, owner, repo, purpose):

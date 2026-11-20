@@ -129,6 +129,12 @@ async def tokens_for(principal, owner):
         for shared in github_access.tokens(owner, "read"):
             if shared not in found:
                 found.append(shared)
+    if principal is not None and principal.is_admin:
+        # Tokens added for another owner can reach this one's repositories too (an organisation the
+        # person belongs to); open_repo asks GitHub before using any of them
+        for shared in github_access.spare(owner):
+            if shared not in found:
+                found.append(shared)
     return found
 
 
