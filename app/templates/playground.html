@@ -3785,6 +3785,20 @@ const PAGE_BLOCKS = 'address,article,aside,blockquote,div,dl,dd,dt,fieldset,figu
                   + 'header,h1,h2,h3,h4,h5,h6,hr,li,main,ol,p,pre,section,table,ul';
 function pageAsMarkdown(html){
   const doc = new DOMParser().parseFromString(html, 'text/html');
+  // A design makes words bold with its own classes as often as with <strong>: <span class="highlight">
+  // in a CV. Those classes are read from its styles (".name" or "span.name" alone) before they go.
+  const WEIGHTY = /font-weight\s*:\s*(bold|bolder|[6-9]00)/i;
+  const boldClasses = new Set();
+  doc.querySelectorAll('style').forEach(style => {
+    for(const rule of style.textContent.matchAll(/([^{}]+)\{([^}]*)\}/g)){
+      if(!WEIGHTY.test(rule[2])) continue;
+      for(const selector of rule[1].split(',')){
+        const name = selector.trim().match(/^(?:span)?\.([\w-]+)$/);
+        if(name) boldClasses.add(name[1]);
+      }
+    }
+  });
+  const isBold = n => WEIGHTY.test(n.getAttribute('style') || '') || [...n.classList].some(c => boldClasses.has(c));
   doc.querySelectorAll('script,style,noscript,template,svg,canvas,button,input,select,textarea')
      .forEach(n => n.remove());
   const isBlock = n => n.nodeType === 1 && n.matches(PAGE_BLOCKS);
@@ -3797,7 +3811,8 @@ function pageAsMarkdown(html){
       const inner = inline(n.childNodes);
       const words = inner.trim();
       if(tag === 'br') out += '  \n';
-      else if(tag === 'strong' || tag === 'b') out += words ? ` **${words}** ` : inner;
+      else if(tag === 'strong' || tag === 'b' || (tag === 'span' && isBold(n) && !/\*\*/.test(words)))
+        out += words ? ` **${words}** ` : inner;
       else if(tag === 'em' || tag === 'i') out += words ? ` *${words}* ` : inner;
       else if(tag === 'code') out += '`' + n.textContent + '`';
       else if(tag === 'a'){
@@ -3811,7 +3826,10 @@ function pageAsMarkdown(html){
     }
     return out;
   };
-  const tidy = text => text.replace(/[ \t]+(?=  \n)/g, '').replace(/ {2,}(?!\n)/g, ' ').trim();
+  // Spaces only between words: none before a line break's two, after a line break, or between bold
+  // and the punctuation after it
+  const tidy = text => text.replace(/[ \t]+(?=  \n)/g, '').replace(/ {2,}(?!\n)/g, ' ')
+                           .replace(/\n[ \t]+/g, '\n').replace(/(\*\*?) ([,.;:!?)])/g, '$1$2').trim();
   const list = (n, depth) => [...n.children].filter(li => li.tagName === 'LI').map((li, i) => {
     const mark = n.tagName === 'OL' ? `${i + 1}.` : '-';
     const own = [...li.childNodes].filter(c => !(c.nodeType === 1 && /^(UL|OL)$/.test(c.tagName)));
