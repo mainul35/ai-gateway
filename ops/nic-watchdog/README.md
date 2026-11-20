@@ -2,6 +2,19 @@
 
 Brings homelabai's network card back when it dies, so the machine never sits awake and unreachable.
 
+**Board: ASUS ROG Crosshair VIII Hero** (branch `hardware/asus-rog-crosshair-viii-hero`, since
+2026-11-20). The card is its Intel I211: `enp5s0`, MAC `fc:34:97:b7:78:9d`, PCI `0000:05:00.0`. The
+Realtek RTL8125 2.5G beside it (`enp4s0`) has no cable. These values are in `nic-watchdog.conf`,
+`01-lan.yaml` and the wake front's `WAKE_MAC` (proxy-vm, `~/gateway-wake/wake.env`). The ASRock X570
+Phantom Gaming 4's values (`a8:a1:59:9d:f4:ae`, `0000:04:00.0`) are on branch
+`hardware/asrock-x570-phantom-gaming-4`.
+
+**After a board change.** Before this branch, the old address stayed in place. The watchdog found no
+such card, took it for dead, and rebooted every 6 minutes, so the 5-minute idle suspend never came.
+Now, if the configured card is missing while another wired card has a link, it logs the mismatch
+once and does nothing. Re-running `install.sh` writes this board's address into
+`/etc/default/nic-watchdog`.
+
 **Why.** The onboard Intel I211 (driver `igb`) sometimes drops off the PCIe bus when homelabai wakes
 from suspend: `igb 0000:04:00.0 enp4s0: PCIe link lost`. Nothing brought it back. On 2026-11-11 it
 woke at 03:23, lost the card, and stayed offline for 7 hours (still suspending and waking) until it

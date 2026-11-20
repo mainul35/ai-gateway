@@ -70,8 +70,8 @@ a sleeping machine is what produced the 1033 errors.
 
 - Let proxy-vm reach the gateway: `sudo ufw allow from <proxy-vm IP> to any port 9000 proto tcp`
 - Wake-on-LAN must work from suspend as well as from power-off:
-  `cat /sys/class/net/enp3s0/device/power/wakeup` should say `enabled`, and
-  `sudo ethtool enp3s0 | grep Wake-on` should say `g`.
+  `cat /sys/class/net/enp5s0/device/power/wakeup` should say `enabled`, and
+  `sudo ethtool enp5s0 | grep Wake-on` should say `g`.
 - Install `ops/idle-shutdown` (its README section is in the main README).
 
 ## Testing it

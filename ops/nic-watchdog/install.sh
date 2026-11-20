@@ -13,7 +13,16 @@ mkdir -p "$backup"
 
 echo "== the watchdog"
 install -m 755 nic-watchdog.sh /usr/local/sbin/nic-watchdog
-[ -e /etc/default/nic-watchdog ] || install -m 644 nic-watchdog.conf /etc/default/nic-watchdog
+if [ -e /etc/default/nic-watchdog ]; then
+    # Keep its other settings, but the card is this branch's board's: an old board's address there
+    # makes the watchdog take the card for dead
+    cp /etc/default/nic-watchdog "$backup/"
+    PCI=$(. ./nic-watchdog.conf; echo "$NIC_PCI")
+    sed -i "s/^NIC_MAC=.*/NIC_MAC=$MAC/; s/^NIC_PCI=.*/NIC_PCI=$PCI/" /etc/default/nic-watchdog
+else
+    install -m 644 nic-watchdog.conf /etc/default/nic-watchdog
+fi
+rm -f /run/nic-watchdog.mismatch /var/lib/nic-watchdog/dead
 install -m 755 nic-watchdog.sleep /usr/lib/systemd/system-sleep/nic-watchdog
 install -m 644 nic-watchdog.service nic-watchdog.timer nic-wol.service /etc/systemd/system/
 
@@ -35,7 +44,8 @@ for f in /etc/netplan/*.yaml; do
 done
 install -m 600 01-lan.yaml /etc/netplan/01-lan.yaml
 netplan generate
-# Same address as now, so an SSH session survives the reconfiguration
+# The fixed address 192.168.50.146: on a new board, where 01-lan.yaml did not match yet, the machine
+# was on a DHCP address, and an SSH session to that address drops here - use Tailscale or the console
 netplan apply
 
 echo

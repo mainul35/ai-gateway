@@ -8,7 +8,7 @@ network:
   ethernets:
     lan:
       match:
-        macaddress: "a8:a1:59:9d:f4:ae"
+        macaddress: "fc:34:97:b7:78:9d"
       wakeonlan: true
       dhcp4: false
       addresses: [192.168.50.146/24]
