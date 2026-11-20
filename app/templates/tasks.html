@@ -72,6 +72,11 @@ details.steps{margin:1rem 0}
 .turn .prose.asked{font-weight:600;margin:.2rem 0 .5rem}
 .turn-open{border-left:3px solid var(--accent,#6366f1);padding-left:.9rem;margin-bottom:1.2rem}
 /* The kind of a new task; a presentation's slides, each a 16:9 card as in the file */
+.gh-row{display:flex;flex-wrap:wrap;align-items:center;gap:.4rem .6rem;padding:.5rem 0;border-bottom:1px solid var(--border)}
+.gh-row code{overflow-wrap:anywhere}
+.gh-actions{margin-left:auto;display:flex;gap:.4rem;flex-wrap:wrap}
+.gh-access{flex-basis:100%;font-size:.88rem}
+.gh-access:empty{display:none}
 .kind-pick{display:flex;gap:1.2rem;flex-wrap:wrap;margin:0 0 .8rem}
 .kind-pick label{display:flex;align-items:center;gap:.4rem;margin:0;font-weight:600;cursor:pointer}
 .kind-pick input{width:auto;margin:0}
@@ -168,14 +173,15 @@ details.more summary{cursor:pointer;color:var(--muted);margin-bottom:.6rem}
 {% if user.role == 'admin' %}
 <div class="card" id="githubCard" style="margin-bottom:1.25rem">
   <h2>GitHub access</h2>
-  <p class="muted" style="margin:.2rem 0 .8rem;font-size:.9rem">One token per GitHub user or organisation. The
-    gateway reads their repositories with it (for the knowledge base) and pushes branches and opens pull
-    requests with it (for tasks). Make one at
-    <a href="https://github.com/settings/personal-access-tokens/new" target="_blank" rel="noopener">GitHub &rarr;
-    Fine-grained tokens</a>: choose the owner, the repositories, and <b>Contents</b> and <b>Pull requests</b>:
-    read and write. A token made for an organisation is saved under the organisation's name; leave the
-    Owner empty and it is found from the token. It is checked with GitHub before it is saved, and never
-    shown again in full. An owner's token is swapped only with <b>Replace</b>.</p>
+  <p class="muted" style="margin:.2rem 0 .8rem;font-size:.9rem">The gateway reads repositories with these
+    tokens (for the knowledge base) and pushes branches and opens pull requests with them (for tasks). Make
+    one at <a href="https://github.com/settings/personal-access-tokens/new" target="_blank" rel="noopener">GitHub
+    &rarr; Fine-grained tokens</a>: choose the resource owner, the repositories, and <b>Contents</b> and
+    <b>Pull requests</b>: read and write. <b>Owner</b> here is that resource owner - your user name, or an
+    organisation's name for a token made for the organisation; leave it empty and it is found from the
+    token. An owner can have several tokens, each for different repositories: for each repository the
+    gateway uses the one that reaches it. A token is checked with GitHub before it is saved, and never
+    shown again in full.</p>
   <div id="githubList" class="muted">Loading&hellip;</div>
   <form id="tokenForm" class="row" style="gap:.6rem;margin-top:.8rem;align-items:end">
     <label style="flex:1;min-width:10rem;margin:0"><span class="lbl">Owner</span>
@@ -544,7 +550,7 @@ function renderProjectNote(){
   } else {
     const owner = (p.name || '').split('/')[0];
     where = `into ${escapeHtml(p.base_branch)}` + (p.can_push ? '' : isAdmin
-      ? ` &middot; <b>no GitHub token</b> <a href="#" data-gh-replace="${escapeHtml(owner)}">add one</a>`
+      ? ` &middot; <b>no GitHub token</b> <a href="#" data-gh-add="${escapeHtml(owner)}">add one</a>`
       : ' &middot; <b>no GitHub token yet</b> - ask an admin');
   }
   note.innerHTML = `${where} &middot; ${checks} &middot; <a href="#" data-edit="${p.id}">settings</a>`;
@@ -1110,33 +1116,42 @@ async function loadGithub(){
   const box = document.getElementById('githubList');
   try{
     const data = await api('/coding/github');
-    const rows = data.tokens.map(t => {
+    // One row per token, so an owner with several shows each, to check, replace or remove on its own
+    const rows = data.tokens.flatMap(t => {
       const older = [t.knowledge && 'knowledge base', t.coding && 'tasks'].filter(Boolean);
-      return `<tr><td><b>${escapeHtml(t.owner)}</b></td>
-        <td><code>${escapeHtml(t.token || '')}</code>${older.length ? ` <span class="muted">also an older setting for the ${older.join(' and ')}</span>` : ''}</td>
-        <td class="muted" id="access-${escapeHtml(t.owner)}"></td>
-        <td style="text-align:right;white-space:nowrap">
-          <button class="btn btn-sm btn-secondary" data-gh-check="${escapeHtml(t.owner)}">Check</button>
-          <button class="btn btn-sm btn-secondary" data-gh-replace="${escapeHtml(t.owner)}">Replace</button>
-          ${t.token ? `<button class="btn btn-sm btn-danger" data-gh-remove="${escapeHtml(t.owner)}">Remove</button>` : ''}</td></tr>`;
+      const olderNote = older.length ? `<span class="muted">also an older setting for the ${older.join(' and ')}</span>` : '';
+      if(!t.tokens.length) return [`<div class="gh-row"><b>${escapeHtml(t.owner)}</b> ${olderNote}
+          <span class="gh-actions"><button class="btn btn-sm" data-gh-add="${escapeHtml(t.owner)}">Add a token</button></span></div>`];
+      return t.tokens.map((k, n) => {
+        const ref = `${escapeHtml(t.owner)}|${k.id}`;
+        return `<div class="gh-row"><b>${escapeHtml(t.owner)}</b> <code>${escapeHtml(k.token)}</code> ${n === 0 ? olderNote : ''}
+          <span class="gh-actions">
+            <button class="btn btn-sm btn-secondary" data-gh-check="${ref}">Check</button>
+            <button class="btn btn-sm btn-secondary" data-gh-replace="${ref}">Replace</button>
+            <button class="btn btn-sm btn-danger" data-gh-remove="${ref}">Remove</button></span>
+          <div class="muted gh-access" data-gh-access="${ref}"></div></div>`;
+      });
     }).join('');
-    const missing = data.missing.map(o => `<tr><td><b>${escapeHtml(o)}</b></td><td colspan="2" class="muted">No token yet:
-        ${escapeHtml(o)}'s repositories cannot be indexed or changed.</td>
-        <td style="text-align:right"><button class="btn btn-sm" data-gh-replace="${escapeHtml(o)}">Add a token</button></td></tr>`).join('');
-    box.innerHTML = rows || missing ? `<table>${rows}${missing}</table>` : '<span class="muted">No tokens yet.</span>';
+    const missing = data.missing.map(o => `<div class="gh-row"><b>${escapeHtml(o)}</b>
+        <span class="muted">No token yet: ${escapeHtml(o)}'s repositories cannot be indexed or changed.</span>
+        <span class="gh-actions"><button class="btn btn-sm" data-gh-add="${escapeHtml(o)}">Add a token</button></span></div>`).join('');
+    box.innerHTML = rows || missing ? rows + missing : '<span class="muted">No tokens yet.</span>';
   }catch(e){ box.textContent = 'Could not load: ' + e.message; }
 }
 
-let replacingOwner = '';     // the owner whose Replace was pressed: only that token may be swapped
+let replacing = null;       // {owner, id} of the token whose Replace was pressed; otherwise a token is added
 
-function focusToken(owner){
+function focusToken(owner, id = null){
   const form = document.getElementById('tokenForm');
-  replacingOwner = owner || '';
+  replacing = id ? {owner, id} : null;
   form.owner.value = owner || '';
   form.token.value = '';
+  document.getElementById('saveToken').textContent = replacing ? 'Check and replace' : 'Check and save';
   form.scrollIntoView({behavior: 'smooth', block: 'center'});
   (owner ? form.token : form.owner).focus();
 }
+
+const tokenRef = value => { const [owner, id] = value.split('|'); return {owner, id: Number(id)}; };
 
 if(isAdmin){
   document.getElementById('tokenForm').addEventListener('submit', async e => {
@@ -1144,34 +1159,37 @@ if(isAdmin){
     const form = e.target, button = document.getElementById('saveToken');
     if(button.disabled) return;
     const owner = form.owner.value.trim();
+    // Replace swaps only the token it was pressed on, and only while its owner is still the one written
+    const swap = replacing && owner.toLowerCase() === replacing.owner.toLowerCase() ? replacing.id : null;
     button.disabled = true; button.textContent = 'Checking with GitHub…'; showError('');
     try{
-      const replace = !!owner && owner.toLowerCase() === replacingOwner.toLowerCase();
       const found = await api('/coding/github', {method: 'POST', headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({owner, token: form.token.value.trim(), replace})});
-      form.reset(); replacingOwner = '';
-      showOk(`Saved the token for ${found.owner}. ` + describeAccess(found).replace(/<[^>]+>/g, '') + '.');
+        body: JSON.stringify({owner, token: form.token.value.trim(), replace: swap})});
+      form.reset(); replacing = null;
+      showOk(`${swap ? 'Replaced a' : 'Added a'} token for ${found.owner}. ` + describeAccess(found).replace(/<[^>]+>/g, '') + '.');
       await loadGithub(); await loadProjects();
     }catch(err){ showError(err.message); }
-    finally{ button.disabled = false; button.textContent = 'Check and save'; form.token.value = ''; }
+    finally{ button.disabled = false; button.textContent = replacing ? 'Check and replace' : 'Check and save'; form.token.value = ''; }
   });
 
   document.addEventListener('click', async e => {
     const check = e.target.closest('[data-gh-check]'), replace = e.target.closest('[data-gh-replace]');
-    const remove = e.target.closest('[data-gh-remove]');
-    if(replace){ e.preventDefault(); focusToken(replace.dataset.ghReplace); return; }
+    const remove = e.target.closest('[data-gh-remove]'), add = e.target.closest('[data-gh-add]');
+    if(add){ e.preventDefault(); focusToken(add.dataset.ghAdd); return; }
+    if(replace){ e.preventDefault(); const t = tokenRef(replace.dataset.ghReplace); focusToken(t.owner, t.id); return; }
     if(check){
-      const owner = check.dataset.ghCheck, cell = document.getElementById(`access-${owner}`);
+      const t = tokenRef(check.dataset.ghCheck);
+      const cell = [...document.querySelectorAll('[data-gh-access]')].find(c => c.dataset.ghAccess === check.dataset.ghCheck);
       check.disabled = true; cell.textContent = 'checking…';
-      try{ cell.innerHTML = describeAccess(await api(`/coding/github/${encodeURIComponent(owner)}/check`, {method: 'POST'})); }
+      try{ cell.innerHTML = describeAccess(await api(`/coding/github/${encodeURIComponent(t.owner)}/check?id=${t.id}`, {method: 'POST'})); }
       catch(err){ cell.innerHTML = `<span style="color:var(--danger)">${escapeHtml(err.message)}</span>`; }
       finally{ check.disabled = false; }
       return;
     }
     if(remove){
-      const owner = remove.dataset.ghRemove;
-      if(!confirm(`Remove the token for ${owner}? Tasks on ${owner}'s repositories will not be able to push.`)) return;
-      try{ await api(`/coding/github/${encodeURIComponent(owner)}`, {method: 'DELETE'}); await loadGithub(); await loadProjects(); }
+      const t = tokenRef(remove.dataset.ghRemove);
+      if(!confirm(`Remove this token for ${t.owner}? Repositories only it reaches can no longer be indexed or pushed to.`)) return;
+      try{ await api(`/coding/github/${encodeURIComponent(t.owner)}?id=${t.id}`, {method: 'DELETE'}); await loadGithub(); await loadProjects(); }
       catch(err){ showError(err.message); }
     }
   });

@@ -126,9 +126,9 @@ async def tokens_for(principal, owner):
         if own:
             found.append(own)
     if principal is not None and (principal.is_admin or owner.lower() in coding_projects.allowed_owners()):
-        shared = github_access.token(owner, "read")
-        if shared and shared not in found:
-            found.append(shared)
+        for shared in github_access.tokens(owner, "read"):
+            if shared not in found:
+                found.append(shared)
     return found
 
 
