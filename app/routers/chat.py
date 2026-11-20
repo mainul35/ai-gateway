@@ -1500,6 +1500,9 @@ async def complete(payload: CompleteIn, principal: Principal = Depends(authentic
             if pages or failed:
                 messages.insert(1 if messages and messages[0]["role"] == "system" else 0,
                                 {"role": "system", "content": web_reader.prompt(pages, failed)})
+            for page in pages:
+                if page.get("repository"):
+                    _on_latest(messages, _repo_note(page["repository"]["repository"], page["repository"]))
             if pages and not do_search:
                 answer.sources = [{"title": r["title"], "url": r["url"]} for r in linked + pages]
                 yield _event("sources", query=None, sources=answer.sources)
@@ -4850,6 +4853,31 @@ async def _one_round(principal, body):
     return choices[0].get("message") or {}, answer.get("usage") or {}
 
 
+def _on_latest(messages, text):
+    """Adds text to the end of the latest user message. What was fetched for this turn goes there,
+    beside the question, not only in the system message at the top: a conversation whose earlier
+    replies said "it cannot be opened" otherwise gets that reply again, word for word (2026-11-20)."""
+    for m in reversed(messages):
+        if m.get("role") != "user":
+            continue
+        if isinstance(m.get("content"), list):
+            m["content"] = [*m["content"], {"type": "text", "text": text}]
+        else:
+            m["content"] = (m.get("content") or "") + text
+        return
+
+
+def _repo_note(name, overview=None, why=None):
+    """What the model is told, beside the user's message, about a repository opened for this turn."""
+    if why:
+        return (f"\n\n[The gateway tried to open github.com/{name} just now and could not: {why}. "
+                "Tell the user this reason.]")
+    return (f"\n\n[The gateway opened github.com/{name} just now with a GitHub token saved for it, so it "
+            "is readable now: earlier replies in this conversation that said it was private or out of "
+            "reach are out of date - do not repeat them. Its overview, read this moment:\n"
+            + json.dumps(overview, ensure_ascii=False, default=str) + "]")
+
+
 async def _read_web_pages(links, pages, failed, principal=None):
     """Reads the web pages a message names, as events to stream: what was read goes into pages (as
     sources), what could not be into failed as (address, why).
@@ -4869,7 +4897,8 @@ async def _read_web_pages(links, pages, failed, principal=None):
             about["note"] = ("This is the repository's overview: its README start, top-level folders and "
                              "build files. To read its code, switch the Agent on and ask again.")
             pages.append({"title": about["repository"], "url": url, "site": "github.com", "published": None,
-                          "content": json.dumps(about, ensure_ascii=False, indent=1, default=str)})
+                          "content": json.dumps(about, ensure_ascii=False, indent=1, default=str),
+                          "repository": about})
             continue
         query = web_reader.search_query(url)
         yield _event("status", text=f"Searching for “{query}” (a search engine's page cannot be read directly)"
@@ -4975,6 +5004,20 @@ async def run_agent(payload: AgentIn, principal: Principal = Depends(authenticat
             # Into the agent's own instructions: a second system message is refused by some templates
             messages[0]["content"] += "\n\n" + linkedin.prompt(linked, unread)
             seen.extend(page["content"] for page in linked)
+        # A repository the message links to is opened before the model starts, and the outcome is put
+        # beside the question: with earlier replies saying it could not be opened, the model otherwise
+        # repeats them without calling a tool
+        wanted = repos.mentioned(latest_said or "") if own and repos.is_enabled() else []
+        if wanted:
+            yield _event("status", text=f"Opening the repository {wanted[0]}")
+            try:
+                about = await repos.overview(principal, {"repository": wanted[0]})
+                note = _repo_note(wanted[0], about) + (
+                    f"\n[Read its code with {self_tools.SERVER}{agent.SEPARATOR}list_repo_files, "
+                    f"search_repo and read_repo_file before answering.]")
+            except repos.RepoError as e:
+                note = _repo_note(wanted[0], why=str(e))
+            _on_latest(messages, note)
         budget = agent.Budget()
         answer, finished = "", None
         # A folder on the person's computer, once they share one, makes this a turn that reads a
