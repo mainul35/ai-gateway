@@ -3161,11 +3161,12 @@ function showFile(tab){
     const markdown = /\.(md|markdown)$/.test(lower);
     const html = markdown ? await renderedHtml(found.text) : null;
     view.innerHTML = '';
-    // A Markdown file of the person's own, made into slides as it is
-    if(markdown && !tab.editable && documentKinds().includes('pptx')){
+    // A Markdown file of the person's own, made into a PDF or slides as it is
+    const makers = markdown && !tab.editable ? madeFileButtons(() => found.text) : [];
+    if(makers.length){
       const bar = document.createElement('div');
       bar.className = 'doc-bar';
-      bar.appendChild(deckButton(() => found.text));
+      bar.append(...makers);
       view.appendChild(bar);
     }
     const text = document.createElement('div');
@@ -3176,25 +3177,39 @@ function showFile(tab){
   }).catch(e => { view.innerHTML = ''; view.appendChild(panelNote('Could not open it. ' + errorText(e), url)); });
 }
 
-/* "Make a PowerPoint": the Markdown it is given made into slides as it stands - each "#" or "##"
-   heading a slide - and opened beside the conversation */
-function deckButton(textOf){
+/* "Make a PDF" / "Make a PowerPoint": the Markdown it is given, as it stands - edits not saved
+   yet included - made into that file and opened beside the conversation, to look at and download.
+   For slides, each "#" or "##" heading starts one. */
+const MAKE_FILE = {
+  pdf: {label: 'Make a PDF', title: 'A PDF of this Markdown as it is now, to download', kind: 'PDF'},
+  pptx: {label: 'Make a PowerPoint', title: 'Slides from this Markdown as it is: each # or ## heading starts a slide',
+         kind: 'PowerPoint'},
+};
+
+function madeFileButton(format, textOf){
+  const what = MAKE_FILE[format];
   const button = document.createElement('button');
   button.type = 'button';
   button.className = 'btn btn-sm btn-secondary';
-  button.textContent = 'Make a PowerPoint';
-  button.title = 'Slides from this Markdown as it is: each # or ## heading starts a slide';
+  button.textContent = what.label;
+  button.title = what.title;
   button.addEventListener('click', async () => {
     button.disabled = true;
-    button.textContent = BUSY_LABELS.pptx;
+    button.textContent = BUSY_LABELS[format];
     try{
       const made = await api('/chat/written', {method: 'POST', headers: JSON_HEADERS,
-                                               body: JSON.stringify({text: textOf(), format: 'pptx'})});
+                                               body: JSON.stringify({text: textOf(), format})});
       openFile(made.url, made.name, true);
-    }catch(err){ showError('Could not make the PowerPoint: ' + errorText(err)); }
-    finally{ button.disabled = false; button.textContent = 'Make a PowerPoint'; }
+    }catch(err){ showError(`Could not make the ${what.kind}: ` + errorText(err)); }
+    finally{ button.disabled = false; button.textContent = what.label; }
   });
   return button;
+}
+
+/* The files a Markdown text can be made into here, as buttons */
+function madeFileButtons(textOf, except = null){
+  return ['pdf', 'pptx'].filter(f => f !== except && documentKinds().includes(f))
+                        .map(f => madeFileButton(f, textOf));
 }
 
 async function editFile(tab){
@@ -3216,9 +3231,10 @@ async function editFile(tab){
   const area = tab.body.querySelector('textarea');
   const preview = tab.body.querySelector('.doc-preview');
   area.value = source.text;
-  // A PDF or Markdown document can become slides too, from the text as it is in the editor
-  if(source.format !== 'pptx' && documentKinds().includes('pptx'))
-    tab.body.querySelector('[data-deck]').replaceWith(deckButton(() => area.value));
+  // The text as it is in the editor, made into the other kinds of file too: a Markdown document
+  // into a PDF or slides, a PDF into slides, a PowerPoint into a PDF
+  tab.body.querySelector('[data-deck]').replaceWith(
+    ...madeFileButtons(() => area.value, source.format === 'markdown' ? null : source.format));
   const toolbar = window.mdToolbar?.attach(tab.body.querySelector('.format-bar'), area, preview,
                                            file => sendFile(file, () => {}));
   let soon = null;
