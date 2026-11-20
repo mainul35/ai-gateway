@@ -3111,12 +3111,13 @@ async function drawPdf(view, url){
 /* A document you attached: a PDF as the browser draws it, a picture as itself, and a Word file, a
    spreadsheet or a text file as its text - the browser can show none of those three itself */
 function openFile(url, name, editable = false){
-  for(const t of tabsHere()) if(t.kind === 'file' && t.href === url){ showPanel(); selectTab(t); return; }
+  for(const t of tabsHere()) if(t.kind === 'file' && t.href === url){ showPanel(); selectTab(t); return t; }
   const body = document.createElement('div');
   body.className = 'doc';
   const tab = addTab({kind: 'file', title: name || 'Document', href: url, body, editable});
   tab.head.title = name || '';
   showFile(tab);
+  return tab;
 }
 
 /* What a file tab shows: a PDF as the browser draws it, a picture as itself, and a Word file, a
@@ -3765,6 +3766,91 @@ function withPictures(html){
               : script + html;
 }
 
+/* A button under a page that makes a file from it, busy while it does and saying why if it cannot */
+function pageFileButton(button, busyLabel, work){
+  const label = button.textContent;
+  button.addEventListener('click', async () => {
+    button.disabled = true;
+    button.textContent = busyLabel + '…';
+    try{ await work(); }
+    catch(e){ showError(`${label}: ` + errorText(e)); }
+    finally{ button.disabled = false; button.textContent = label; }
+  });
+}
+
+/* A page the model wrote, as Markdown: its headings, paragraphs, lists, tables and links, without
+   its design, for the editor. Parsed as data only: DOMParser runs none of its scripts and loads
+   nothing it points at. */
+const PAGE_BLOCKS = 'address,article,aside,blockquote,div,dl,dd,dt,fieldset,figure,figcaption,footer,'
+                  + 'header,h1,h2,h3,h4,h5,h6,hr,li,main,ol,p,pre,section,table,ul';
+function pageAsMarkdown(html){
+  const doc = new DOMParser().parseFromString(html, 'text/html');
+  doc.querySelectorAll('script,style,noscript,template,svg,canvas,button,input,select,textarea')
+     .forEach(n => n.remove());
+  const isBlock = n => n.nodeType === 1 && n.matches(PAGE_BLOCKS);
+  const inline = nodes => {
+    let out = '';
+    for(const n of nodes){
+      if(n.nodeType === 3){ out += n.textContent.replace(/\s+/g, ' '); continue; }
+      if(n.nodeType !== 1) continue;
+      const tag = n.tagName.toLowerCase();
+      const inner = inline(n.childNodes);
+      const words = inner.trim();
+      if(tag === 'br') out += '  \n';
+      else if(tag === 'strong' || tag === 'b') out += words ? ` **${words}** ` : inner;
+      else if(tag === 'em' || tag === 'i') out += words ? ` *${words}* ` : inner;
+      else if(tag === 'code') out += '`' + n.textContent + '`';
+      else if(tag === 'a'){
+        const href = (n.getAttribute('href') || '').trim();
+        out += href && /^(https?:|mailto:|tel:)/i.test(href) ? `[${words || href}](${href})` : inner;
+      }else if(tag === 'img'){
+        const src = n.getAttribute('src') || '';
+        if(/^(https?:|\/chat\/files\/)/.test(src)) out += `![${n.getAttribute('alt') || ''}](${src})`;
+      }else if(isBlock(n)) out += ` ${inner} `;     // a block inside a list item or cell: kept apart
+      else out += inner;
+    }
+    return out;
+  };
+  const tidy = text => text.replace(/[ \t]+(?=  \n)/g, '').replace(/ {2,}(?!\n)/g, ' ').trim();
+  const list = (n, depth) => [...n.children].filter(li => li.tagName === 'LI').map((li, i) => {
+    const mark = n.tagName === 'OL' ? `${i + 1}.` : '-';
+    const own = [...li.childNodes].filter(c => !(c.nodeType === 1 && /^(UL|OL)$/.test(c.tagName)));
+    const nested = [...li.children].filter(c => /^(UL|OL)$/.test(c.tagName));
+    return '  '.repeat(depth) + mark + ' ' + tidy(inline(own)) + nested.map(s => '\n' + list(s, depth + 1)).join('');
+  }).join('\n');
+  const table = t => {
+    const rows = [...t.querySelectorAll('tr')].map(r => [...r.children].map(c => tidy(inline(c.childNodes)).replace(/\|/g, '\\|')));
+    if(!rows.length) return '';
+    const width = Math.max(...rows.map(r => r.length));
+    const line = r => '| ' + Array.from({length: width}, (_, i) => r[i] || '').join(' | ') + ' |';
+    return [line(rows[0]), '|' + ' --- |'.repeat(width), ...rows.slice(1).map(line)].join('\n');
+  };
+  const blocks = [];
+  const walk = node => {
+    let run = [];
+    const flush = () => { const text = tidy(inline(run)); if(text) blocks.push(text); run = []; };
+    for(const n of node.childNodes){
+      if(!isBlock(n)){ run.push(n); continue; }
+      flush();
+      const tag = n.tagName.toLowerCase();
+      if(/^h[1-6]$/.test(tag)){ const text = tidy(inline(n.childNodes)); if(text) blocks.push('#'.repeat(+tag[1]) + ' ' + text.replace(/\*\*/g, '')); }
+      else if(tag === 'hr') blocks.push('---');
+      else if(tag === 'pre') blocks.push('```\n' + n.textContent.replace(/\n$/, '') + '\n```');
+      else if(tag === 'ul' || tag === 'ol') blocks.push(list(n, 0));
+      else if(tag === 'table') blocks.push(table(n));
+      else if(tag === 'blockquote'){
+        const from = blocks.length;
+        walk(n);
+        blocks.push(blocks.splice(from).join('\n\n').split('\n').map(l => '> ' + l).join('\n'));
+      }else if(n.querySelector(PAGE_BLOCKS)) walk(n);
+      else{ const text = tidy(inline(n.childNodes)); if(text) blocks.push(text); }
+    }
+    flush();
+  };
+  walk(doc.body);
+  return blocks.filter(Boolean).join('\n\n').replace(/\n{3,}/g, '\n\n').trim() + '\n';
+}
+
 // Shown in a sandboxed frame with no same-origin permission, so the page inside gets an opaque
 // origin of its own: it can run its own scripts, and it cannot read this page, its cookies, its
 // storage, or the conversation. A model writes this HTML, so it is treated as something a stranger
@@ -3781,6 +3867,8 @@ function preview(block, code){
       <button class="linkish" data-share>Share</button>
       <button class="linkish" data-open-tab>Open in a tab</button>
       <button class="linkish" data-show-code>Show the code</button>
+      <button class="linkish" data-page-pdf title="This page, in its own design, as a PDF to download">Save as PDF</button>
+      <button class="linkish" data-page-md title="This page's words as Markdown, to change and make into a PDF or slides">Edit as Markdown</button>
     </div>
     <div class="share-row" hidden></div>
     <iframe sandbox="allow-scripts allow-modals" referrerpolicy="no-referrer" title="preview"></iframe>`;
@@ -3809,6 +3897,20 @@ function preview(block, code){
     const url = URL.createObjectURL(blob);
     window.open(url, '_blank', 'noopener');
     setTimeout(() => URL.revokeObjectURL(url), 60000);
+  });
+  // The page as written (code.textContent), not the copy with the picture fixer put in
+  pageFileButton(frame.querySelector('[data-page-pdf]'), 'Making the PDF', async () => {
+    const made = await api('/chat/written', {method: 'POST', headers: JSON_HEADERS,
+                                             body: JSON.stringify({text: code.textContent, format: 'page_pdf'})});
+    openFile(made.url, made.name, false);
+  });
+  pageFileButton(frame.querySelector('[data-page-md]'), 'Opening', async () => {
+    const text = pageAsMarkdown(code.textContent);
+    if(!text.trim()) throw new Error('this page has no words of its own; it puts them in with a script');
+    const made = await api('/chat/written', {method: 'POST', headers: JSON_HEADERS,
+                                             body: JSON.stringify({text, format: 'markdown'})});
+    const tab = openFile(made.url, made.name, true);
+    if(tab) editFile(tab);
   });
   const toggle = frame.querySelector('[data-show-code]');
   toggle.addEventListener('click', () => {
