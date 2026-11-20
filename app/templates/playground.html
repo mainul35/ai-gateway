@@ -1075,7 +1075,7 @@ const modelSelect = document.getElementById('model');
 const systemBox = document.getElementById('system');
 const promptBox = document.getElementById('prompt');
 const JSON_HEADERS = {'Content-Type': 'application/json'};
-let history = [];        // turns sent to the model: [{role, content, images: [file ids]}]
+let sentTurns = [];        // turns sent to the model: [{role, content, images: [file ids]}]
 let models = {};         // model id -> {owned_by, capabilities}
 let conversations = [];
 let currentId = null;    // saved conversation being continued, if any
@@ -1856,13 +1856,18 @@ async function loadConversations(){
 
 // The open conversation is in the address by its random uid (/playground?c=<uuid>), never its row
 // number, which counts up and gives away how many there are. A reload, a bookmark or a copied link
-// opens it again, and Back and Forward move between conversations. window.history by name: `history`
-// on this page is the conversation sent to the model.
+// opens it again, and Back and Forward move between conversations. Nothing on this page is named
+// `history`: iOS Safari refused pushState ("Can only call History.pushState on instances of
+// History") while a page variable had that name. The address is a convenience, so if the browser
+// still refuses, the conversation opens anyway.
 function conversationInUrl(id, how = 'push'){
   const url = new URL(location.href);
   if(id) url.searchParams.set('c', id); else url.searchParams.delete('c');
   if(how === 'none' || url.href === location.href) return;
-  window.history[how === 'replace' ? 'replaceState' : 'pushState']({conversation: id || null}, '', url);
+  try{
+    if(how === 'replace') window.history.replaceState({conversation: id || null}, '', url.href);
+    else window.history.pushState({conversation: id || null}, '', url.href);
+  }catch(e){ console.warn('The address could not be updated:', e); }
 }
 
 function resetChat(how = 'push'){
@@ -1881,7 +1886,7 @@ function resetChat(how = 'push'){
     chosenModel = '';
     syncModel();
   }
-  history = [];
+  sentTurns = [];
   savedSystem = '';
   systemBox.value = '';
   pending = []; renderPending();
@@ -1905,7 +1910,7 @@ function fillTranscript(messages){
 }
 
 function fillMessages(messages){
-  history = [];
+  sentTurns = [];
   formatQuestion = null;
   // Answers filed under the same question are siblings: the last one asked for is the one
   // shown, and the arrows on it reach the ones before. Anything written before answers knew
@@ -1926,7 +1931,7 @@ function fillMessages(messages){
       lastHadPicture = attached.some(f => !f.document);
       box._messageId = m.id;
       box.dataset.message = m.id;
-      history.push({role: 'user', content: m.content, images: box._images});
+      sentTurns.push({role: 'user', content: m.content, images: box._images});
       dropFormatQuestion();
     }else{
       const turn = extra.answers_to || null;
@@ -1957,11 +1962,11 @@ function fillMessages(messages){
       if(earlier){
         // Another answer to a question already answered: it takes the place of the one before
         // it in what the model is told, and joins it behind the arrows
-        history[earlier.index] = {role: 'assistant', content: m.content};
+        sentTurns[earlier.index] = {role: 'assistant', content: m.content};
         box._historyIndex = earlier.index;
       }else{
-        box._historyIndex = history.length;
-        history.push({role: 'assistant', content: m.content});
+        box._historyIndex = sentTurns.length;
+        sentTurns.push({role: 'assistant', content: m.content});
         if(turn) answered.push({turn, index: box._historyIndex});
       }
       showAnswer(box);
@@ -2059,7 +2064,7 @@ function showConversation(conversation, how){
     document.getElementById('chatTitle').dataset.chat = conversation.title;
     showAccess(conversation);
     chat.innerHTML = '';
-    history = [];
+    sentTurns = [];
     fillTranscript(conversation.messages);
     if(!conversation.messages.length) chat.innerHTML = '<p class="muted" id="empty">Empty conversation.</p>';
     holdBackEarlier();
@@ -2355,14 +2360,14 @@ function turnsAfter(box){
    transcript itself changes, because an index into a list that has had a hole cut in it is the
    kind of bookkeeping that goes wrong quietly. */
 function rebuildHistory(){
-  history = [];
+  sentTurns = [];
   for(const box of allMessages()){
     if(box.dataset.failed) continue;           // a turn that produced nothing is not a turn
     if(box.classList.contains('user')){
-      history.push({role: 'user', content: box._text || '', images: box._images || []});
+      sentTurns.push({role: 'user', content: box._text || '', images: box._images || []});
     }else if(!box.hidden){
-      box._historyIndex = history.length;
-      history.push({role: 'assistant', content: box._text || ''});
+      box._historyIndex = sentTurns.length;
+      sentTurns.push({role: 'assistant', content: box._text || ''});
     }
   }
   // The answers waiting behind the arrows share the place of the one on screen
@@ -2386,8 +2391,8 @@ function answersTo(box){
 
 function recordAnswer(box, content, at){
   // Asking again replaces the answer the model is told about, rather than reading as two replies
-  const index = at != null && at < history.length ? at : history.length;
-  history[index] = {role: 'assistant', content};
+  const index = at != null && at < sentTurns.length ? at : sentTurns.length;
+  sentTurns[index] = {role: 'assistant', content};
   box._text = content;
   for(const sibling of answersTo(box)) sibling._historyIndex = index;
   showAnswer(box);
@@ -2397,8 +2402,8 @@ function recordAnswer(box, content, at){
 function showAnswer(box){
   const group = answersTo(box);
   for(const sibling of group) sibling.hidden = sibling !== box;
-  if(box._historyIndex != null && box._historyIndex < history.length){
-    history[box._historyIndex] = {role: 'assistant', content: box._text || ''};
+  if(box._historyIndex != null && box._historyIndex < sentTurns.length){
+    sentTurns[box._historyIndex] = {role: 'assistant', content: box._text || ''};
   }
   group.forEach((sibling, i) => {
     sibling.querySelector('.variants')?.remove();
@@ -2814,7 +2819,7 @@ function takeOverPoppedOut(){
   const key = address.searchParams.get('aside');
   if(!key) return;
   address.searchParams.delete('aside');
-  window.history.replaceState(window.history.state, '', address);
+  try{ window.history.replaceState(window.history.state, '', address.href); }catch(e){}
   let saved = null;
   try{
     saved = JSON.parse(localStorage.getItem(`playground.popout.${key}`) || 'null');
@@ -4067,7 +4072,7 @@ async function sendAgent(text, again, decision = null){
     showError(`${model} cannot call tools. Pick a model marked "calls tools" to use the agent.`);
     return;
   }
-  if(!again){ history.push({role: 'user', content: text, images: []}); }
+  if(!again){ sentTurns.push({role: 'user', content: text, images: []}); }
   const asked = await askedNow(text, [], [], null, again);
 
   const box = answerBox(again ? again.messageId : asked?._messageId, model);
@@ -4088,7 +4093,7 @@ async function sendAgent(text, again, decision = null){
   try{
     const response = await postStream('/chat/agent', {
       model, conversation_id: currentId,
-      messages: history.map(h => ({role: h.role, content: h.content, images: []})),
+      messages: sentTurns.map(h => ({role: h.role, content: h.content, images: []})),
       temperature: parseFloat(document.getElementById('temperature').value),
       max_tokens: parseInt(document.getElementById('maxTokens').value, 10) || 8192,
       answers_to: box.dataset.turn ? Number(box.dataset.turn) : null});
@@ -4249,14 +4254,14 @@ async function sendMap(text, decision, fix, again){
     showError('Could not save the conversation: ' + errorText(e));
     return;
   }
-  if(!again){ history.push({role: 'user', content: text, images: []}); }
+  if(!again){ sentTurns.push({role: 'user', content: text, images: []}); }
   const asked = await askedNow(text, [], [], null, again);
 
   const box = answerBox(again ? again.messageId : asked?._messageId, 'OpenStreetMap');
   noteDecision(box, decision);
   busy(true);
   let here = null;
-  const previous = [...history].reverse().find(h => h.role === 'user' && h.content !== text);
+  const previous = [...sentTurns].reverse().find(h => h.role === 'user' && h.content !== text);
   if(fix){
     setStatus(box, 'Asking your browser where you are');
     here = await fix;
@@ -4310,7 +4315,7 @@ async function sendMedia(text, decision, again){
     showError('Could not save the conversation: ' + errorText(e));
     return;
   }
-  if(!again){ history.push({role: 'user', content: text, images: []}); }
+  if(!again){ sentTurns.push({role: 'user', content: text, images: []}); }
   const asked = await askedNow(text, [], [], null, again);
 
   const box = answerBox(again ? again.messageId : asked?._messageId, 'Picture search');
@@ -4827,7 +4832,7 @@ async function askDocumentFormat(text, again){
   const files = turnFiles.map(f => ({id: f.id, name: f.name, document: !!f.document}));
   const images = files.map(f => f.id);
   turnFiles = [];
-  if(!again) history.push({role: 'user', content: text, images});
+  if(!again) sentTurns.push({role: 'user', content: text, images});
   const asked = await askedNow(text, images.map(fileUrl), files,
                                files.length ? {images: files.map(f => ({file_id: f.id, document: f.document, name: f.name}))} : null,
                                again);
@@ -4899,7 +4904,7 @@ async function decideAction(text, hasImages){
       maps: tools.maps && caps.maps, photo_blur: blurAllowed(),
       choose_model: choosing(), current_model: chosenModel,
       agent: !!caps.agent, conversation_id: currentId || null,
-      history: history.slice(-4).map(h => ({role: h.role, content: h.content}))})});
+      history: sentTurns.slice(-4).map(h => ({role: h.role, content: h.content}))})});
     if(decision.model) chosenModel = decision.model;
     return decision;
   }catch(e){
@@ -5069,7 +5074,7 @@ async function routeTurn(text, asking){
   // Asked here, in the same turn as the tap that called this. On iOS the permission prompt is
   // tied to a gesture, and waiting for the router to answer first spends it: by then the ask is
   // silently refused and the map is told nobody knows where you are.
-  const previous = [...history].reverse().find(h => h.role === 'user' && h.content !== text);
+  const previous = [...sentTurns].reverse().find(h => h.role === 'user' && h.content !== text);
   const fix = (tools.maps && caps.maps && needsMyLocation(text, previous ? previous.content : ''))
               ? myLocation() : Promise.resolve(null);
 
@@ -5131,7 +5136,7 @@ async function sendChat(text, decision, again, documentFormat = null){
   const files = turnFiles.map(f => ({id: f.id, name: f.name, document: !!f.document}));
   const images = files.map(f => f.id);
   turnFiles = [];
-  if(!again){ history.push({role: 'user', content: text, images}); }
+  if(!again){ sentTurns.push({role: 'user', content: text, images}); }
   const asked = await askedNow(text, images.map(fileUrl), files,
                                files.length ? {images: files.map(f => ({file_id: f.id, document: f.document, name: f.name}))} : null,
                                again);
@@ -5147,7 +5152,7 @@ async function sendChat(text, decision, again, documentFormat = null){
 
   const messages = [];
   if(savedSystem) messages.push({role: 'system', content: savedSystem});
-  messages.push(...history.map(h => ({role: h.role, content: h.content, images: h.images || []})));
+  messages.push(...sentTurns.map(h => ({role: h.role, content: h.content, images: h.images || []})));
 
   const payload = {model, messages, conversation_id: currentId,
                    // The server writes the answer down, so it is the one that has to file it
@@ -5293,7 +5298,7 @@ async function sendSubtitles(text, decision, again){
     showError('Could not save the conversation: ' + errorText(e));
     return;
   }
-  if(!again){ history.push({role: 'user', content: text, images: []}); }
+  if(!again){ sentTurns.push({role: 'user', content: text, images: []}); }
   const asked = await askedNow(text, [], [], null, again);
   const box = answerBox(again ? again.messageId : asked?._messageId, 'Subtitles');
   noteDecision(box, decision);
@@ -5418,7 +5423,7 @@ async function sendPhoto(text, decision, again){
   }
   const references = turnFiles.filter(f => f !== source);
   turnFiles = [];
-  if(!again){ history.push({role: 'user', content: text, images: []}); }
+  if(!again){ sentTurns.push({role: 'user', content: text, images: []}); }
   const asked = await askedNow(text, [source, ...references].map(f => f.url),
                                [{id: source.id, name: source.name}],
                                {mode: 'photo', images: [{file_id: source.id}]}, again, false);
@@ -5487,7 +5492,7 @@ async function sendVideo(text, again){
     return;
   }
   turnFiles = [];
-  if(!again){ history.push({role: 'user', content: text, images: []}); }
+  if(!again){ sentTurns.push({role: 'user', content: text, images: []}); }
   const asked = await askedNow(text, material.filter(f => !f.document).map(f => f.url),
                                material.map(f => ({id: f.id, name: f.name})),
                                {mode: 'image', images: material.map(f => ({file_id: f.id, document: !!f.document}))},
@@ -5797,7 +5802,7 @@ async function sendImage(text, decision, again){
   }
   turnFiles = [];
   // Image turns are kept in the transcript as text only, so a chat model later knows what was made
-  if(!again){ history.push({role: 'user', content: text, images: []}); }
+  if(!again){ sentTurns.push({role: 'user', content: text, images: []}); }
   const asked = await askedNow(text, source ? [source, ...references].map(f => f.url) : [],
                                source ? [source, ...references].map(f => ({id: f.id, name: f.name})) : [],
                                {mode: 'image', images: source ? [source, ...references].map(f => ({file_id: f.id})) : []},
