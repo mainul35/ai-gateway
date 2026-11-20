@@ -31,7 +31,9 @@ def check(paths):
         root = pathlib.Path(root)
         files = [root] if root.is_file() else [p for p in root.rglob("*") if p.suffix in SUFFIXES]
         for path in files:
-            if "__pycache__" in path.parts:
+            # Minified libraries (KaTeX, pdf.js) are copied in as published, not written here, and
+            # pdf.js keeps raw bytes in its strings on purpose
+            if "__pycache__" in path.parts or path.name.endswith(".min.js"):
                 continue
             raw = path.read_bytes()
             for index, code in enumerate(raw):
