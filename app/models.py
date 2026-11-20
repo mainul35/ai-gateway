@@ -345,6 +345,22 @@ class GitHubConnection(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
+class GatewayGitHubToken(Base):
+    """A GitHub token the gateway itself works with (app/github_access.py): set by an admin under
+    GitHub access, used for coding tasks and the configured knowledge base. Stored sealed
+    (app/secretbox.py), so the database or a dump of it holds no usable token. `number` tells an
+    owner's tokens apart and is what a project names (projects.github_token)."""
+    __tablename__ = "gateway_github_tokens"
+    __table_args__ = (UniqueConstraint("owner", "number"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    owner: Mapped[str] = mapped_column(String(40))
+    number: Mapped[int] = mapped_column(Integer)
+    name: Mapped[str] = mapped_column(String(40), default="")
+    token_sealed: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
 class ProjectNote(Base):
     """What a person's coding agents learned about one of their projects, and how it connects to others.
 

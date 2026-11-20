@@ -291,7 +291,7 @@ class TokenNameIn(BaseModel):
 @router.put("/github/{owner}/{number}/name")
 async def name_github_token(owner: str, number: int, payload: TokenNameIn, _: Principal = Depends(require_admin)):
     try:
-        github_access.rename(owner, number, payload.name)
+        await github_access.rename(owner, number, payload.name)
     except ValueError as e:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, str(e))
     return {"owner": owner, "id": number, "name": " ".join(payload.name.split())}
@@ -307,7 +307,7 @@ async def remove_github_token(owner: str, id: int = 1, _: Principal = Depends(re
         raise HTTPException(status.HTTP_409_CONFLICT, f"{', '.join(using)} use{'s' if len(using) == 1 else ''} this "
                             f"token. Choose another for {'it' if len(using) == 1 else 'them'} in the project's settings first.")
     try:
-        github_access.remove(owner, id)
+        await github_access.remove(owner, id)
     except ValueError as e:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, str(e))
     return {"removed": owner, "id": id}

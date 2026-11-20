@@ -8,7 +8,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
-from app import access, activity, bootstrap, db, istory, knowledge, settings, sso
+from app import access, activity, bootstrap, db, github_access, istory, knowledge, settings, sso
 
 # Pictures people upload, and pictures fetched from the web, are decoded in this process. A small
 # file can declare an enormous canvas (13000 x 13000 is about half a gigabyte decoded); Pillow only
@@ -35,6 +35,7 @@ async def lifespan(_: FastAPI):
     await db.create_tables()
     await bootstrap.ensure_schema()
     await bootstrap.ensure_default_admin()
+    await github_access.load()      # GitHub tokens: sealed in the database, unsealed into memory here
     async with db.session_factory()() as session:
         await access.load_groups(session)       # who is in which group, for every feature check
     log.info("Ollama backend: %s", ollama_host())
