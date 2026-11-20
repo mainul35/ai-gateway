@@ -122,7 +122,7 @@ async def _project_tools(task_id, project, event):
         offered = [t for t in task_tools.remote_tools_for("explore", connected["can_run"])
                    if t["function"]["name"] in READ_ONLY]
         return task_tools.RemoteTools(project, connected["can_run"]), offered, None
-    await workspace.clone(project.name, project.clone_url)
+    await workspace.clone(project.name, project.clone_url, project.github_token)
     worktree = await workspace.start(project, task_id, f"agent/deck-{task_id}")
     offered = [t for t in task_tools.explore_tools(False) if t["function"]["name"] in READ_ONLY]
     return task_tools.Tools(project, worktree), offered, worktree

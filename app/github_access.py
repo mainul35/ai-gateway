@@ -1,52 +1,135 @@
-"""GitHub tokens, set from the gateway rather than by editing a file on the server.
+"""GitHub tokens the gateway works with, set by an admin under GitHub access on the Tasks page.
 
 A fine-grained personal access token belongs to one owner - a user or an organisation - and reaches
 the repositories it was given. An owner can have several: one for some repositories, another for
-the rest, or a new one beside one about to expire. They are kept in config/config.properties (not
-in the repository) as github.token.<owner> for the first and github.token.<owner>.<n> for the
-others; an owner's name cannot hold a dot, so the two never mix. For a repository, the gateway
-uses the first of its owner's tokens that can reach it (and, for coding tasks, push to it).
+the rest, or a new one beside one about to expire. Each has a number among its owner's tokens and,
+if wanted, a name. For a repository, the gateway uses the first of its owner's tokens that can
+reach it (and, for coding tasks, push to it) - unless the project names one of them, and then only
+that one is used: a token made for one project is not lent to another.
 
-The knowledge base reads repositories with them and coding tasks push branches and open pull
-requests with them. The older, separate settings (knowledge.github.token.<owner>,
-coding.github.token.<owner>) still work after these, so nothing configured before stops working.
+Where they are: in the database (gateway_github_tokens), sealed with the gateway's own key
+(app/secretbox.py), so the database, a dump of it or a backup holds no usable token. They are
+unsealed into this process's memory when it starts and whenever one changes - the gateway runs as
+one process, so that copy is the only one. Tokens kept in config/config.properties before
+(github.token.<owner>[.<n>]) are moved into the database at the next start and taken out of the
+file. The older settings knowledge.github.token.<owner> and coding.github.token.<owner> are still
+read from the file after these, so nothing configured by hand stops working.
 
-A token is tried against GitHub before it is saved, and what it can do is shown: whose it is, how
-many of the owner's repositories it can read, and whether it can push to them. It is never sent
-back in full - only its first and last few characters, enough to tell two apart.
+What leaves the server: never a token. Pages and API answers get a masked form - its kind and last
+four characters, enough to tell two apart. A token travels only once, from the browser to the
+gateway when it is added, inside HTTPS; git gets it in its environment, never on its command line.
 """
 import hashlib
 import re
 import time
 
-import httpx
+import logging
 
-from app import config_writer, settings
+import httpx
+from sqlalchemy import select
+
+from app import config_writer, db, secretbox, settings
+from app.models import GatewayGitHubToken
 from utils import config
+
+log = logging.getLogger("gateway")
 
 OWNER = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$")
 TOKEN = re.compile(r"^(github_pat_[A-Za-z0-9_]{20,}|gh[pousr]_[A-Za-z0-9]{20,})$")
 ENTRY = re.compile(r"^github\.token\.([A-Za-z0-9-]+)(?:\.(\d+))?$")
 OLDER = ("knowledge.github.token.", "coding.github.token.")
+NAME = re.compile(r"^[\w .()-]{1,40}$")
 REACH_SECONDS = 600             # how long "this token reaches that repository" is trusted
 
 
-def key(owner, number=1):
-    return f"github.token.{owner}" if int(number) == 1 else f"github.token.{owner}.{int(number)}"
+def name_key(owner, number=1):
+    return f"github.tokenname.{owner}.{int(number)}"
 
 
 def masked(value):
-    return f"{value[:11]}…{value[-4:]}" if len(value) > 20 else "…" + value[-4:]
+    """What is shown of a token: its kind and its last four characters."""
+    if value.startswith("github_pat_"):
+        kind = "github_pat_"
+    elif value[:3] in ("ghp", "gho", "ghu", "ghs", "ghr"):
+        kind = value[:4]
+    else:
+        kind = ""
+    return f"{kind}••••{value[-4:]}"
+
+
+_tokens = []        # [{owner, id, name, value}]: unsealed, in this process only
 
 
 def entries(owner=None):
-    """The tokens set in the gateway: [{owner, id, value}], an owner's first one first."""
-    found = []
+    """The tokens set in the gateway: [{owner, id, name, value}], an owner's first one first."""
+    found = [e for e in _tokens if e["value"] and (owner is None or e["owner"].lower() == owner.lower())]
+    return sorted(found, key=lambda e: (e["owner"].lower(), e["id"]))
+
+
+class Store:
+    """Where the tokens are kept: sealed rows in the database. Replaced in tests."""
+
+    async def rows(self):
+        async with db.session_factory()() as session:
+            return [(r.owner, r.number, r.name or "", r.token_sealed)
+                    for r in (await session.execute(select(GatewayGitHubToken))).scalars()]
+
+    async def put(self, owner, number, name, sealed, was_owner=None):
+        """Adds or changes one; sealed None keeps the token and changes only the rest."""
+        async with db.session_factory()() as session:
+            row = (await session.execute(select(GatewayGitHubToken).where(
+                GatewayGitHubToken.owner == (was_owner or owner),
+                GatewayGitHubToken.number == number))).scalar_one_or_none()
+            if row is None:
+                row = GatewayGitHubToken(owner=owner, number=number)
+                session.add(row)
+            row.owner, row.name = owner, name
+            if sealed is not None:
+                row.token_sealed = sealed
+            await session.commit()
+
+    async def drop(self, owner, number):
+        async with db.session_factory()() as session:
+            row = (await session.execute(select(GatewayGitHubToken).where(
+                GatewayGitHubToken.owner == owner, GatewayGitHubToken.number == number))).scalar_one_or_none()
+            if row is not None:
+                await session.delete(row)
+                await session.commit()
+
+
+store = Store()
+
+
+async def load():
+    """Reads the tokens into memory, first moving any still in config.properties into the database
+    (sealed) and out of the file. Run at startup."""
+    held = {(o.lower(), n) for o, n, _, _ in await store.rows()}
     for name, value in config.properties().items():
         match = ENTRY.match(name)
-        if match and value and (owner is None or match[1].lower() == owner.lower()):
-            found.append({"owner": match[1], "id": int(match[2] or 1), "value": value})
-    return sorted(found, key=lambda e: (e["owner"].lower(), e["id"]))
+        if not match or not value:
+            continue
+        owner, number = match[1], int(match[2] or 1)
+        if (owner.lower(), number) not in held:
+            await store.put(owner, number, settings.get(name_key(owner, number)) or "", secretbox.seal(value))
+            log.info("moved the GitHub token %s #%s from config.properties into the database, sealed",
+                     owner, number)
+        # Taken out of the file only once it is safely in the database
+        config_writer.remove_key(name)
+        config_writer.remove_key(name_key(owner, number))
+    await _reload()
+
+
+async def _reload():
+    global _tokens
+    found = []
+    for owner, number, name, sealed in await store.rows():
+        try:
+            value = secretbox.unseal(sealed)
+        except ValueError:
+            log.warning("the GitHub token %s #%s cannot be unsealed (another key?): add it again", owner, number)
+            value = ""
+        found.append({"owner": owner, "id": number, "name": name, "value": value})
+    _tokens = found
 
 
 def tokens(owner, purpose="read"):
@@ -69,10 +152,26 @@ def token(owner, purpose="read"):
 _reach = {}         # (token digest, "owner/repo", purpose) -> (reaches, when)
 
 
-async def repo_token(owner, repo, purpose="read"):
-    """The token to use on one repository: the first of the owner's that GitHub lets read it (and,
-    for "write", push to it). With one token, or none that is shown to reach it, the first one, so
-    git's own error says what is wrong."""
+class Missing(ValueError):
+    """The token a project names is not there any more."""
+
+
+def chosen(owner, number):
+    """One of an owner's tokens by its id: its entry, or None."""
+    return next((e for e in entries(owner) if e["id"] == int(number)), None)
+
+
+async def repo_token(owner, repo, purpose="read", pinned=None):
+    """The token to use on one repository. With pinned (a token's id, set on the project), that one
+    and no other. Otherwise the first of the owner's that GitHub lets read it (and, for "write",
+    push to it); with one token, or none that is shown to reach it, the first, so git's own error
+    says what is wrong."""
+    if pinned:
+        entry = chosen(owner, pinned)
+        if entry is None:
+            raise Missing(f"The GitHub token chosen for this project ({owner} #{pinned}) has been removed. "
+                          f"Choose another in the project's settings.")
+        return entry["value"]
     found = tokens(owner, purpose)
     if len(found) < 2 or not repo:
         return found[0] if found else ""
@@ -106,7 +205,7 @@ def owners():
     found = {}
     for entry in entries():
         row = found.setdefault(entry["owner"].lower(), {"owner": entry["owner"], "tokens": []})
-        row["tokens"].append({"id": entry["id"], "token": masked(entry["value"])})
+        row["tokens"].append({"id": entry["id"], "name": entry["name"], "token": masked(entry["value"])})
     for name, value in config.properties().items():
         for prefix in OLDER:
             if name.startswith(prefix) and value:
@@ -149,10 +248,19 @@ def _owner_of(repo):
     return (repo.get("owner") or {}).get("login") or ""
 
 
-async def save(owner, value, replace=None):
-    """Adds a token for an owner, beside any it has; with replace (a token's id), swaps that one.
-    With no owner, the owner is the one whose repositories the token sees."""
+def _clean_name(name):
+    name = " ".join((name or "").split())
+    if name and not NAME.match(name):
+        raise ValueError("A token's name can hold letters, digits, spaces and . - ( ), up to 40")
+    return name
+
+
+async def save(owner, value, replace=None, name=None):
+    """Adds a token for an owner, beside any it has; with replace (a token's id), swaps that one,
+    keeping its name unless another is given. With no owner, the owner is the one whose
+    repositories the token sees."""
     owner = (owner or "").strip()
+    name = _clean_name(name)
     if owner and not OWNER.match(owner):
         raise ValueError("That is not a GitHub user or organisation name")
     value = (value or "").strip()
@@ -178,25 +286,41 @@ async def save(owner, value, replace=None):
         # Saved under the name GitHub gives, so "Acme" and "acme" are one owner, not two
         owner = next((o for o in seen if o.lower() == owner.lower()), owner)
     have = entries(owner)
-    if any(e["value"] == value for e in have):
-        raise ValueError(f"This token is already saved for {owner}.")
+    same = next((e for e in have if e["value"] == value), None)
+    if same and not (replace and same["id"] == int(replace)):
+        raise ValueError(f"This token is already saved for {owner}"
+                         + (f" as {same['name']}" if same["name"] else f" (#{same['id']})")
+                         + ". To add another, make a new token on GitHub and paste that one.")
     if replace:
         swapped = next((e for e in have if e["id"] == int(replace)), None)
         if swapped is None:
             raise ValueError(f"{owner} has no token {replace} to replace; it may have been removed.")
-        if swapped["owner"] != owner:              # the same owner, written another way before
-            config_writer.remove_key(key(swapped["owner"], swapped["id"]))
         number = swapped["id"]
+        name = name or swapped["name"]
+        await store.put(owner, number, name, secretbox.seal(value), was_owner=swapped["owner"])
     else:
         # Under the owner's name as first saved, so its tokens stay together
         owner = have[0]["owner"] if have else owner
-        taken = {e["id"] for e in have}
+        # Numbers in use, unreadable tokens too: a project may still name one
+        taken = {e["id"] for e in _tokens if e["owner"].lower() == owner.lower()}
         number = next(n for n in range(1, len(taken) + 2) if n not in taken)
-    config_writer.write_secret(key(owner, number), value)
-    return {"owner": owner, "id": number, **found}
+        await store.put(owner, number, name, secretbox.seal(value))
+    await _reload()
+    return {"owner": owner, "id": number, "name": name, **found}
 
 
-def remove(owner, number=1):
+async def rename(owner, number, name):
+    entry = chosen(owner, number)
+    if entry is None:
+        raise ValueError(f"{owner} has no token #{number}")
+    await store.put(entry["owner"], entry["id"], _clean_name(name), None)
+    await _reload()
+
+
+async def remove(owner, number=1):
     if not OWNER.match(owner or ""):
         raise ValueError("That is not a GitHub user or organisation name")
-    config_writer.remove_key(key(owner, number))
+    entry = next((e for e in _tokens if e["owner"].lower() == owner.lower() and e["id"] == int(number)), None)
+    if entry is not None:
+        await store.drop(entry["owner"], entry["id"])
+    await _reload()

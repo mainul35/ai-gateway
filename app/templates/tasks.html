@@ -186,8 +186,11 @@ details.more summary{cursor:pointer;color:var(--muted);margin-bottom:.6rem}
   <form id="tokenForm" class="row" style="gap:.6rem;margin-top:.8rem;align-items:end">
     <label style="flex:1;min-width:10rem;margin:0"><span class="lbl">Owner</span>
       <input name="owner" placeholder="found from the token" autocomplete="off"></label>
+    <label style="flex:1;min-width:10rem;margin:0"><span class="lbl">Name</span>
+      <input name="name" placeholder="e.g. vsd auth server" maxlength="40" autocomplete="off"></label>
     <label style="flex:3;min-width:16rem;margin:0"><span class="lbl">Token</span>
-      <input name="token" type="password" placeholder="github_pat_…" autocomplete="off" required></label>
+      <!-- new-password: a browser must not fill in a token it saved before, as if it were a password -->
+      <input name="token" type="password" placeholder="github_pat_…" autocomplete="new-password" required></label>
     <button class="btn" id="saveToken">Check and save</button>
   </form>
 </div>
@@ -235,8 +238,14 @@ details.more summary{cursor:pointer;color:var(--muted);margin-bottom:.6rem}
     <label data-git-only><span class="lbl">GitHub address</span>
       <input name="clone_url" placeholder="https://github.com/mainul35/ai-gateway" autocomplete="off" required>
       <span class="hint">That is all it needs: the rest is worked out from the project's files, and you can
-        change it afterwards. Pushing needs a write token for its owner in config.properties
-        (<code>coding.github.token.&lt;owner&gt;</code>).</span></label>
+        change it afterwards. Pushing needs a GitHub token for its owner, added under <em>GitHub access</em>
+        on the Connections tab.</span></label>
+    {% if user.role == 'admin' %}
+    <label data-token-pick><span class="lbl">GitHub token</span>
+      <select name="github_token"><option value="0">Any of the owner's tokens that can push to it</option></select>
+      <span class="hint">Choose one and the project's tasks use that token and no other: a token made for
+        one project is not lent to the rest.</span></label>
+    {% endif %}
     <details class="more" id="moreOptions">
       <summary>More options</summary>
       <label data-git-only><span class="lbl">Base branch</span>
@@ -549,7 +558,9 @@ function renderProjectNote(){
     if(!live && waitingForPermission.has(p.id)) where += ` <button class="btn btn-sm" data-reconnect="${p.id}">Reconnect</button>`;
   } else {
     const owner = (p.name || '').split('/')[0];
-    where = `into ${escapeHtml(p.base_branch)}` + (p.can_push ? '' : isAdmin
+    where = `into ${escapeHtml(p.base_branch)}`
+      + (p.github_token ? ` &middot; token <b>${escapeHtml(p.github_token_name || 'removed')}</b>` : '')
+      + (p.can_push ? '' : isAdmin
       ? ` &middot; <b>no GitHub token</b> <a href="#" data-gh-add="${escapeHtml(owner)}">add one</a>`
       : ' &middot; <b>no GitHub token yet</b> - ask an admin');
   }
@@ -726,6 +737,10 @@ async function showTask(id){
   const picker = restarts && toolModels.length ? `<label class="model-pick" title="The model Continue and Retry go on with">
       <span>on</span><select id="restartModel">${toolModels.map(m =>
         `<option ${m === t.model ? 'selected' : ''}>${escapeHtml(m)}</option>`).join('')}</select></label>` : '';
+  const ghOwner = local ? '' : githubOwnerOf(project.clone_url);
+  const tokenPick = isAdmin && ghOwner && (restarts || t.status === 'review') && ownersTokens(ghOwner).length
+    ? `<label class="model-pick" title="The GitHub token this project pushes, opens pull requests and merges with">
+        <span>token</span><select id="taskToken" data-project="${project.id}">${tokenOptions(ghOwner, project.github_token || 0)}</select></label>` : '';
   const live = LIVE.includes(t.status);
   const deck = t.kind === 'presentation';
   const before = turns.filter(x => x.id < t.id).map(pastTurn).join('');
@@ -745,7 +760,7 @@ async function showTask(id){
       ${t.pr_url ? ` &middot; <a href="${escapeHtml(t.pr_url)}" target="_blank" rel="noopener">pull request</a>` : ''}</p>
     ${t.error ? `<div class="note err">${escapeHtml(t.error)}</div>` : ''}
     ${gone ? `<div class="note warn"><b>${escapeHtml(t.model)}</b> is no longer available. Pick another model to continue or retry on.</div>` : ''}
-    <div class="actions">${actions.join('')}${picker}</div>
+    <div class="actions">${actions.join('')}${picker}${tokenPick}</div>
     <details class="steps" id="steps" ${(stepsOpen ?? live) ? 'open' : ''}>
       <summary>Execution steps <span class="muted" id="stepCount"></span></summary>
       <div class="events" id="events"></div></details>
@@ -775,6 +790,7 @@ async function showTask(id){
         </div>
       </div></div>`}`;
   attached.set('askBox', []);
+  document.getElementById('taskToken')?.addEventListener('change', e => switchProjectToken(e.target));
   if(deck && t.result) drawSlides(t.id);
   // Opened at a later turn of a thread: the turn itself in view, the earlier ones above it
   if(opening && turns.length && turns[0].id !== t.id) document.getElementById('openTurn').scrollIntoView({block: 'start'});
@@ -1066,10 +1082,48 @@ function openProject(project){
   for(const key of ['id', 'clone_url', 'base_branch', 'verify_command', 'sandbox_image', 'deploy_command', 'notes'])
     if(project && project[key] != null) form[key].value = project[key];
   form.sandbox_network.checked = !!(project && project.sandbox_network);
+  drawTokenChoice(project ? project.github_token || 0 : 0);
   showTab('git');
   document.getElementById('projectDialog').showModal();
 }
 document.getElementById('addProject').addEventListener('click', () => openProject(null));
+
+// The project's GitHub token (admins): one of its owner's, by name, or any that can push to it
+let githubTokens = [];          // from /coding/github: [{owner, tokens: [{id, name, token}]}]
+function drawTokenChoice(current){
+  const form = document.getElementById('projectForm'), pick = form.querySelector('[data-token-pick]');
+  if(!pick) return;
+  const owner = githubOwnerOf(form.clone_url.value);
+  pick.hidden = !owner || form.querySelector('[data-git-only]').hidden;
+  const wanted = current ?? Number(form.github_token.value || 0);
+  form.github_token.innerHTML = tokenOptions(owner, wanted);
+  form.github_token.value = String(wanted || 0);
+}
+
+const githubOwnerOf = url => ((url || '').match(/github\.com\/([\w.-]+)\//) || [])[1] || '';
+const ownersTokens = owner => (githubTokens.find(t => t.owner.toLowerCase() === owner.toLowerCase()) || {tokens: []}).tokens;
+
+function tokenOptions(owner, wanted){
+  const mine = ownersTokens(owner);
+  return `<option value="0">Any of the owner's tokens that can push to it</option>`
+    + mine.map(k => `<option value="${k.id}" ${k.id === wanted ? 'selected' : ''}>${escapeHtml(k.name || 'Token #' + k.id)} (${escapeHtml(k.token)})</option>`).join('')
+    + (wanted && !mine.some(k => k.id === wanted) ? `<option value="${wanted}" selected>Token #${wanted} - removed</option>` : '');
+}
+
+// From a task: the token its project pushes with, switched for the project (an expired one swapped
+// for a new one), so Continue, Retry and Approve go on with it
+async function switchProjectToken(select){
+  const id = Number(select.dataset.project), chosen = Number(select.value);
+  try{
+    await api(`/coding/projects/${id}`, {method: 'PATCH', headers: {'Content-Type': 'application/json'},
+                                         body: JSON.stringify({github_token: chosen})});
+    await loadProjects();
+    showOk(`The project now uses ${chosen ? select.selectedOptions[0].textContent : "any of its owner's tokens that can push to it"}. `
+           + 'Continue, Retry and Approve go on with it.');
+    if(isAdmin) loadGithub();
+  }catch(err){ showError(err.message); }
+}
+document.querySelector('#projectForm [name=clone_url]').addEventListener('input', () => drawTokenChoice());
 
 document.getElementById('projectForm').addEventListener('submit', async e => {
   if(e.submitter && e.submitter.value === 'cancel') return;
@@ -1084,6 +1138,7 @@ document.getElementById('projectForm').addEventListener('submit', async e => {
   if(editing || form.sandbox_network.checked) body.sandbox_network = form.sandbox_network.checked;
   if(isAdmin && (editing || form.deploy_command.value.trim())) body.deploy_command = form.deploy_command.value.trim() || null;
   if(editing && body.verify_command === null) body.verify_command = '';
+  if(form.github_token && !form.querySelector('[data-token-pick]').hidden) body.github_token = Number(form.github_token.value || 0);
   save.disabled = true; save.textContent = editing ? 'Saving…' : 'Cloning…';
   try{
     let project;
@@ -1116,6 +1171,7 @@ async function loadGithub(){
   const box = document.getElementById('githubList');
   try{
     const data = await api('/coding/github');
+    githubTokens = data.tokens;
     // One row per token, so an owner with several shows each, to check, replace or remove on its own
     const rows = data.tokens.flatMap(t => {
       const older = [t.knowledge && 'knowledge base', t.coding && 'tasks'].filter(Boolean);
@@ -1124,9 +1180,13 @@ async function loadGithub(){
           <span class="gh-actions"><button class="btn btn-sm" data-gh-add="${escapeHtml(t.owner)}">Add a token</button></span></div>`];
       return t.tokens.map((k, n) => {
         const ref = `${escapeHtml(t.owner)}|${k.id}`;
-        return `<div class="gh-row"><b>${escapeHtml(t.owner)}</b> <code>${escapeHtml(k.token)}</code> ${n === 0 ? olderNote : ''}
+        const used = projects.filter(p => p.github_token === k.id && (p.name || '').split('/')[0].toLowerCase() === t.owner.toLowerCase());
+        return `<div class="gh-row"><b>${escapeHtml(t.owner)}</b> ${k.name ? `<span>${escapeHtml(k.name)}</span>` : ''}
+          <code>${escapeHtml(k.token)}</code> ${n === 0 ? olderNote : ''}
+          ${used.length ? `<span class="muted">used by ${used.map(p => escapeHtml(p.name)).join(', ')}</span>` : ''}
           <span class="gh-actions">
             <button class="btn btn-sm btn-secondary" data-gh-check="${ref}">Check</button>
+            <button class="btn btn-sm btn-secondary" data-gh-rename="${ref}" data-name="${escapeHtml(k.name)}">Rename</button>
             <button class="btn btn-sm btn-secondary" data-gh-replace="${ref}">Replace</button>
             <button class="btn btn-sm btn-danger" data-gh-remove="${ref}">Remove</button></span>
           <div class="muted gh-access" data-gh-access="${ref}"></div></div>`;
@@ -1164,7 +1224,7 @@ if(isAdmin){
     button.disabled = true; button.textContent = 'Checking with GitHub…'; showError('');
     try{
       const found = await api('/coding/github', {method: 'POST', headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({owner, token: form.token.value.trim(), replace: swap})});
+        body: JSON.stringify({owner, token: form.token.value.trim(), replace: swap, name: form.name.value.trim()})});
       form.reset(); replacing = null;
       showOk(`${swap ? 'Replaced a' : 'Added a'} token for ${found.owner}. ` + describeAccess(found).replace(/<[^>]+>/g, '') + '.');
       await loadGithub(); await loadProjects();
@@ -1175,6 +1235,18 @@ if(isAdmin){
   document.addEventListener('click', async e => {
     const check = e.target.closest('[data-gh-check]'), replace = e.target.closest('[data-gh-replace]');
     const remove = e.target.closest('[data-gh-remove]'), add = e.target.closest('[data-gh-add]');
+    const rename = e.target.closest('[data-gh-rename]');
+    if(rename){
+      const t = tokenRef(rename.dataset.ghRename);
+      const name = prompt(`A name for this ${t.owner} token, e.g. what it is for:`, rename.dataset.name || '');
+      if(name === null) return;
+      try{
+        await api(`/coding/github/${encodeURIComponent(t.owner)}/${t.id}/name`, {method: 'PUT',
+          headers: {'Content-Type': 'application/json'}, body: JSON.stringify({name})});
+        await loadGithub(); await loadProjects();
+      }catch(err){ showError(err.message); }
+      return;
+    }
     if(add){ e.preventDefault(); focusToken(add.dataset.ghAdd); return; }
     if(replace){ e.preventDefault(); const t = tokenRef(replace.dataset.ghReplace); focusToken(t.owner, t.id); return; }
     if(check){
@@ -1201,6 +1273,7 @@ document.getElementById('helperCommand').textContent =
 (async () => {
   try{ await Promise.all([loadProjects(), loadModels(), loadTasks(), loadGithub(), loadApps()]); }
   catch(e){ showError('Could not load: ' + e.message); }
+  if(isAdmin) loadGithub();          // again, now the projects are known: each token says which use it
   let page = null;
   try{ page = localStorage.getItem('tasks.page'); }catch(e){ /* only a convenience */ }
   showPage(['tasks', 'new', 'connections'].includes(page) ? page : tasks.length ? 'tasks' : 'new');

@@ -61,6 +61,7 @@ _ADDED_COLUMNS = (
     ("coding_tasks", "kind", "VARCHAR(16)"),
     ("coding_tasks", "sources", "TEXT"),
     ("coding_tasks", "result_file_id", "INTEGER"),
+    ("projects", "github_token", "INTEGER"),
 )
 
 

@@ -53,7 +53,11 @@ def _project_out(project, principal=None, detected=None):
         out["can_run"] = bool(connected and connected["can_run"])
     else:
         out["on_github"] = workspace.github_of(project.clone_url) is not None
-        out["can_push"] = bool(workspace.token_for(project.clone_url)) or not out["on_github"]
+        out["can_push"] = bool(workspace.token_for(project.clone_url, project.github_token)) or not out["on_github"]
+        out["github_token"] = project.github_token
+        if project.github_token and out["on_github"]:
+            entry = github_access.chosen(workspace.github_of(project.clone_url)[0], project.github_token)
+            out["github_token_name"] = (entry["name"] or f"#{entry['id']}") if entry else None
     if detected:
         out["detected"] = detected
     return out
@@ -102,6 +106,7 @@ class ProjectIn(BaseModel):
     sandbox_network: bool | None = None
     deploy_command: str | None = Field(default=None, max_length=4000)
     notes: str | None = Field(default=None, max_length=8000)
+    github_token: int | None = Field(default=None, ge=0)   # one of its owner's tokens; 0 or none: any that reaches it
 
 
 class SnapshotIn(BaseModel):
@@ -125,6 +130,7 @@ class ProjectPatch(BaseModel):
     sandbox_network: bool | None = None
     deploy_command: str | None = Field(default=None, max_length=4000)
     notes: str | None = Field(default=None, max_length=8000)
+    github_token: int | None = Field(default=None, ge=0)   # 0: no longer one chosen
 
 
 def _owns(principal, project):
@@ -158,7 +164,8 @@ async def add_project(payload: ProjectIn, principal: Principal = Depends(require
         project, kind = await projects.add_git(
             session, principal, payload.clone_url, base_branch=payload.base_branch,
             verify_command=payload.verify_command, sandbox_image=payload.sandbox_image,
-            sandbox_network=payload.sandbox_network, deploy_command=payload.deploy_command, notes=payload.notes)
+            sandbox_network=payload.sandbox_network, deploy_command=payload.deploy_command, notes=payload.notes,
+            github_token=payload.github_token)
     except projects.ProjectError as e:
         raise HTTPException(e.status_code, str(e))
     return _project_out(project, principal, detected=kind)
@@ -227,6 +234,7 @@ class TokenIn(BaseModel):
     token: str = Field(min_length=20, max_length=400)
     owner: str = Field(default="", max_length=39)       # empty: found from the token
     replace: int | None = Field(default=None, ge=1)     # a token's id: swaps that one instead of adding
+    name: str = Field(default="", max_length=40)        # to tell it apart, e.g. what it is for
 
     @field_validator("replace", mode="before")
     @classmethod
@@ -240,7 +248,7 @@ class TokenIn(BaseModel):
 
 async def _save_token(owner, payload):
     try:
-        return await github_access.save(owner, payload.token, replace=payload.replace)
+        return await github_access.save(owner, payload.token, replace=payload.replace, name=payload.name)
     except ValueError as e:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, str(e))
     except httpx.HTTPError as e:
@@ -276,10 +284,30 @@ async def check_github_token(owner: str, id: int | None = None, _: Principal = D
     return {"owner": owner, "id": id, **found}
 
 
-@router.delete("/github/{owner}")
-async def remove_github_token(owner: str, id: int = 1, _: Principal = Depends(require_admin)):
+class TokenNameIn(BaseModel):
+    name: str = Field(default="", max_length=40)
+
+
+@router.put("/github/{owner}/{number}/name")
+async def name_github_token(owner: str, number: int, payload: TokenNameIn, _: Principal = Depends(require_admin)):
     try:
-        github_access.remove(owner, id)
+        await github_access.rename(owner, number, payload.name)
+    except ValueError as e:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(e))
+    return {"owner": owner, "id": number, "name": " ".join(payload.name.split())}
+
+
+@router.delete("/github/{owner}")
+async def remove_github_token(owner: str, id: int = 1, _: Principal = Depends(require_admin),
+                              session: AsyncSession = Depends(get_session)):
+    # A project that names this token would stop working without a word: say which ones first
+    using = [p.name for p in (await session.execute(select(Project).where(Project.github_token == id))).scalars()
+             if (workspace.github_of(p.clone_url) or ("",))[0].lower() == owner.lower()]
+    if using:
+        raise HTTPException(status.HTTP_409_CONFLICT, f"{', '.join(using)} use{'s' if len(using) == 1 else ''} this "
+                            f"token. Choose another for {'it' if len(using) == 1 else 'them'} in the project's settings first.")
+    try:
+        await github_access.remove(owner, id)
     except ValueError as e:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, str(e))
     return {"removed": owner, "id": id}
@@ -338,6 +366,17 @@ async def change_project(project_id: int, payload: ProjectPatch, principal: Prin
         raise HTTPException(status.HTTP_403_FORBIDDEN, "Only an admin can set a deploy command")
     if "sandbox_image" in changes and not IMAGE.match(changes["sandbox_image"] or ""):
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "That is not a container image name")
+    if "github_token" in changes:
+        chosen = changes.pop("github_token") or None
+        if chosen != project.github_token:
+            if chosen:
+                try:
+                    projects.check_token_choice(principal, project.clone_url, chosen)
+                except projects.ProjectError as e:
+                    raise HTTPException(e.status_code, str(e))
+            elif not principal.is_admin:
+                raise HTTPException(status.HTTP_403_FORBIDDEN, "Only an admin can choose which GitHub token a project uses")
+            project.github_token = chosen
     for key, value in changes.items():
         if value is None and key in ("base_branch", "sandbox_image", "verify_command", "sandbox_network"):
             continue                                    # left empty in the form: keep what is there

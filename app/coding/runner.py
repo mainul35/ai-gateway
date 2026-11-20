@@ -609,7 +609,7 @@ async def run(task_id):
             explore_set = task_tools.remote_tools_for("explore", connected["can_run"])
             edit_set = task_tools.remote_tools_for("edit", connected["can_run"])
         else:
-            await workspace.clone(project.name, project.clone_url)
+            await workspace.clone(project.name, project.clone_url, project.github_token)
             if not await sandbox.image_present(project.sandbox_image):
                 await event(task_id, "note", f"Downloading the sandbox image {project.sandbox_image}")
                 await sandbox.pull(project.sandbox_image)
@@ -895,7 +895,7 @@ async def approve(task_id, approver):
         return
     root = workspace.clone_path(project.name)
     await workspace.git(["fetch", "--quiet", "origin", project.base_branch], cwd=root,
-                        token=await workspace.repo_token(project.clone_url))
+                        token=await workspace.repo_token(project.clone_url, project.github_token))
     await workspace.git(["checkout", "--quiet", project.base_branch], cwd=root)
     await workspace.git(["reset", "--quiet", "--hard", f"origin/{project.base_branch}"], cwd=root)
     os.makedirs(deploy_dir(), exist_ok=True)
