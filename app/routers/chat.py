@@ -1473,6 +1473,11 @@ async def complete(payload: CompleteIn, principal: Principal = Depends(authentic
     # when this one points back at it: read in full, where search would only show a few lines of it
     web_links = (web_reader.links_wanted([m.content or "" for m in payload.messages if m.role == "user"])
                  if web_reader.is_available_to(principal) else [])
+    # "Try again" after a repository was linked: that repository, opened again (repos.wanted)
+    if repos.is_enabled() and self_tools.is_available_to(principal):
+        for name in repos.wanted([m.content or "" for m in payload.messages if m.role == "user"]):
+            if not any(name in repos.mentioned(link) for link in web_links):
+                web_links.append(f"https://github.com/{name}")
 
     answer = _Answer()
 
@@ -2799,7 +2804,7 @@ class RouteIn(BaseModel):
     conversation_id: int | None = None
 
 
-def _to_agent(principal, payload, decision, category):
+def _to_agent(principal, payload, decision, category, said=None):
     """The decision, sent to the agent instead when the answer needs the person's own project.
 
     Only a plain answer or a document, with nothing attached (what is attached is read already), and
@@ -2814,7 +2819,8 @@ def _to_agent(principal, payload, decision, category):
         return decision
     if not (agent.is_available_to(principal) and access.can_use_feature(principal, "agent")):
         return decision
-    if repos.mentioned(payload.message) and repos.is_enabled() and self_tools.is_available_to(principal):
+    if (repos.wanted(said or [payload.message]) and repos.is_enabled()
+            and self_tools.is_available_to(principal)):
         # A repository to look at is read where it is, with the tools that can, not guessed at or
         # searched for on the web
         return {**decision, "action": AGENT_ACTION, "agent_why": "it gives a GitHub repository to look at"}
@@ -2831,6 +2837,22 @@ def _to_agent(principal, payload, decision, category):
 
 
 AGENT_ACTION = "agent"
+
+
+async def _said(session, principal, payload):
+    """What the person has said in this conversation, oldest first, ending with this message. The
+    page sends the router only the last few turns; a "try again" can point at a repository linked
+    further back, so the conversation's earlier messages are read too when it may (repos.wanted)."""
+    said = [m.content or "" for m in payload.history if m.role == "user"] + [payload.message]
+    if (payload.conversation_id is None or principal.user is None or repos.mentioned(payload.message)
+            or not repos.POINTS_BACK.search(payload.message or "")):
+        return said
+    try:
+        conversation, _ = await _access(session, payload.conversation_id, principal.user, with_messages=True)
+    except HTTPException:
+        return said
+    earlier = [m.content or "" for m in sorted(conversation.messages, key=lambda m: m.id) if m.role == "user"]
+    return earlier[-repos.LOOK_BACK:] + [payload.message]
 
 
 @router.post("/route")
@@ -2889,7 +2911,7 @@ async def route(payload: RouteIn, principal: Principal = Depends(authenticate),
                         "decided_by": "the only tool switched on" if only else settings.router_model(),
                         "understood": reading["request"]}
             work = understand.category(reading, payload.has_images)
-            decision = _to_agent(principal, payload, decision, work)
+            decision = _to_agent(principal, payload, decision, work, await _said(session, principal, payload))
             if payload.choose_model:
                 return await _with_model(principal, session, decision, work,
                                          settings.router_model(), payload)
@@ -2937,7 +2959,8 @@ async def route(payload: RouteIn, principal: Principal = Depends(authenticate),
         decide_action(), decide_category(), look_or_change())
     action, decided_by = intent_router.settle_picture(action, decided_by, wanted, payload.message,
                                                       allowed)
-    decision = _to_agent(principal, payload, {"action": action, "decided_by": decided_by}, category)
+    decision = _to_agent(principal, payload, {"action": action, "decided_by": decided_by}, category,
+                         await _said(session, principal, payload))
     if category is None:
         return decision
     return await _with_model(principal, session, decision, category, category_by, payload)
@@ -5007,7 +5030,8 @@ async def run_agent(payload: AgentIn, principal: Principal = Depends(authenticat
         # A repository the message links to is opened before the model starts, and the outcome is put
         # beside the question: with earlier replies saying it could not be opened, the model otherwise
         # repeats them without calling a tool
-        wanted = repos.mentioned(latest_said or "") if own and repos.is_enabled() else []
+        wanted = (repos.wanted([m.content or "" for m in payload.messages if m.role == "user"])
+                  if own and repos.is_enabled() else [])
         if wanted:
             yield _event("status", text=f"Opening the repository {wanted[0]}")
             try:

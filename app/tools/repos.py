@@ -101,6 +101,29 @@ def mentioned(text):
     return out
 
 
+# "Try again", "look at the repo once more", "check that link": a message that points back at a
+# repository named earlier, without its address
+POINTS_BACK = re.compile(r"\b(again|retry|re-?try|repo|repos|repository|code ?base|source( code)?|"
+                         r"that link|the link|that one)\b", re.I)
+LOOK_BACK = 10      # earlier messages of the person's looked through for the repository
+
+
+def wanted(said):
+    """The repositories a message is about, as owner/repo: the ones it links to or, when it links
+    none and points back at one ("try again"), the ones the person's latest earlier message with a
+    repository linked. `said` is the person's messages, oldest first."""
+    if not said:
+        return []
+    latest = mentioned(said[-1])
+    if latest or not POINTS_BACK.search(said[-1] or ""):
+        return latest
+    for earlier in reversed(said[-LOOK_BACK - 1:-1]):
+        found = mentioned(earlier)
+        if found:
+            return found
+    return []
+
+
 # --- whose token -------------------------------------------------------------------------------
 
 
