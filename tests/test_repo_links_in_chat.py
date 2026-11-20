@@ -69,3 +69,17 @@ def test_a_message_with_pictures_gets_the_note_as_one_more_part():
     messages = [{"role": "user", "content": [{"type": "text", "text": "look"}]}]
     chat._on_latest(messages, chat._repo_note("Org/repo", why="no token reaches it"))
     assert messages[0]["content"][-1]["text"].endswith("Tell the user this reason.]")
+
+
+def test_try_again_means_the_repository_linked_before():
+    said = ["https://github.com/Org/private-repo what is in it?", "and the tests?", "how do I add you?",
+            "Try once again"]
+    assert repos.wanted(said) == ["Org/private-repo"]
+    assert repos.wanted(said[:-1] + ["check the repo now"]) == ["Org/private-repo"]
+
+
+def test_a_new_question_does_not_reopen_an_old_repository():
+    assert repos.wanted(["https://github.com/Org/private-repo", "What is the capital of Japan?"]) == []
+    assert repos.wanted(["try again"]) == []
+    # A link in the message itself wins over an earlier one
+    assert repos.wanted(["https://github.com/Org/a", "now https://github.com/Org/b"]) == ["Org/b"]
