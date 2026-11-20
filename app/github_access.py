@@ -50,8 +50,21 @@ def owners():
     return sorted(found.values(), key=lambda e: e["owner"].lower())
 
 
+class Taken(ValueError):
+    """The owner has a token already, and replacing it was not asked for."""
+
+
+def saved(owner):
+    """The owner's name as a token is saved under, whatever the case it is typed in; None if none is."""
+    for name in config.properties():
+        if name.startswith("github.token.") and name[len("github.token."):].lower() == owner.lower():
+            return name[len("github.token."):]
+    return None
+
+
 async def check(owner, value):
-    """What a token can do on an owner's repositories. Raises ValueError when GitHub refuses it."""
+    """What a token can do on an owner's repositories, and whose repositories it sees at all
+    ("owners"). With no owner, only the second. Raises ValueError when GitHub refuses the token."""
     headers = {"Authorization": f"Bearer {value}", "Accept": "application/vnd.github+json",
                "X-GitHub-Api-Version": "2022-11-28"}
     async with httpx.AsyncClient(timeout=20) as client:
@@ -61,30 +74,64 @@ async def check(owner, value):
         if me.status_code >= 400:
             raise ValueError(f"GitHub answered {me.status_code}: {me.text[:200]}")
         login = me.json().get("login")
-        repos = await client.get(f"https://api.github.com/orgs/{owner}/repos", headers=headers,
-                                 params={"per_page": 100, "type": "all"})
-        if repos.status_code == 404:
-            repos = await client.get("https://api.github.com/user/repos", headers=headers,
-                                     params={"per_page": 100, "affiliation": "owner,organization_member"})
-        listed = [r for r in (repos.json() if repos.status_code < 400 else [])
-                  if r.get("owner", {}).get("login", "").lower() == owner.lower()]
-    return {"login": login, "repositories": len(listed),
+        # A fine-grained token lists only the repositories it was given, so their owners are the token's
+        repos = await client.get("https://api.github.com/user/repos", headers=headers,
+                                 params={"per_page": 100,
+                                         "affiliation": "owner,collaborator,organization_member"})
+        seen = repos.json() if repos.status_code < 400 else []
+        if owner and not any(_owner_of(r).lower() == owner.lower() for r in seen):
+            # An organisation's repositories can be missing from the person's own list
+            org = await client.get(f"https://api.github.com/orgs/{owner}/repos", headers=headers,
+                                   params={"per_page": 100, "type": "all"})
+            seen += org.json() if org.status_code < 400 else []
+    owners = sorted({_owner_of(r) for r in seen if _owner_of(r)}, key=str.lower)
+    listed = [r for r in seen if owner and _owner_of(r).lower() == owner.lower()]
+    return {"login": login, "owners": owners, "repositories": len(listed),
             "can_push": any((r.get("permissions") or {}).get("push") for r in listed),
             "private": sum(1 for r in listed if r.get("private"))}
 
 
-async def save(owner, value):
-    if not OWNER.match(owner or ""):
+def _owner_of(repo):
+    return (repo.get("owner") or {}).get("login") or ""
+
+
+async def save(owner, value, replace=False):
+    """Saves a token under its owner. With no owner, the owner is the one whose repositories the
+    token sees. An owner that has a token already keeps it unless replace is asked for (Taken)."""
+    owner = (owner or "").strip()
+    if owner and not OWNER.match(owner):
         raise ValueError("That is not a GitHub user or organisation name")
     value = (value or "").strip()
     if not TOKEN.match(value):
         raise ValueError("That does not look like a GitHub token (github_pat_... or ghp_...)")
     found = await check(owner, value)
-    if not found["repositories"]:
-        raise ValueError(f"The token works (it belongs to {found['login']}) but sees none of {owner}'s "
-                         f"repositories. Give it access to them, with Contents read and write.")
+    owners = found["owners"]
+    if not owner:
+        if len(owners) != 1:
+            raise ValueError(
+                f"The token works (it belongs to {found['login']}) but sees no repositories. Give it access "
+                f"to them, with Contents read and write." if not owners else
+                f"The token sees the repositories of {', '.join(owners)}. Write which one it is for as the Owner.")
+        owner = owners[0]
+        found = await check(owner, value)
+    elif not found["repositories"]:
+        others = [o for o in owners if o.lower() != owner.lower()]
+        raise ValueError(
+            f"The token works (it belongs to {found['login']}) but sees none of {owner}'s repositories"
+            + (f": it is for {', '.join(others)}. Write that as the Owner, or leave the Owner empty."
+               if others else ". Give it access to them, with Contents read and write."))
+    else:
+        # Saved under the name GitHub gives, so "Acme" and "acme" are one owner, not two
+        owner = next((o for o in owners if o.lower() == owner.lower()), owner)
+    existing = saved(owner)
+    if existing and not replace:
+        raise Taken(f"{existing} already has a token ({masked(settings.get(key(existing)) or '')}). Press Replace "
+                    f"on its row to swap it. A token for another organisation goes under that "
+                    f"organisation's name, or leave the Owner empty to find it from the token.")
+    if existing and existing != owner:
+        config_writer.remove_key(key(existing))
     config_writer.write_secret(key(owner), value)
-    return found
+    return {"owner": owner, **found}
 
 
 def remove(owner):

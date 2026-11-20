@@ -173,11 +173,13 @@ details.more summary{cursor:pointer;color:var(--muted);margin-bottom:.6rem}
     requests with it (for tasks). Make one at
     <a href="https://github.com/settings/personal-access-tokens/new" target="_blank" rel="noopener">GitHub &rarr;
     Fine-grained tokens</a>: choose the owner, the repositories, and <b>Contents</b> and <b>Pull requests</b>:
-    read and write. It is checked with GitHub before it is saved, and never shown again in full.</p>
+    read and write. A token made for an organisation is saved under the organisation's name; leave the
+    Owner empty and it is found from the token. It is checked with GitHub before it is saved, and never
+    shown again in full. An owner's token is swapped only with <b>Replace</b>.</p>
   <div id="githubList" class="muted">Loading&hellip;</div>
   <form id="tokenForm" class="row" style="gap:.6rem;margin-top:.8rem;align-items:end">
     <label style="flex:1;min-width:10rem;margin:0"><span class="lbl">Owner</span>
-      <input name="owner" placeholder="mainul35" autocomplete="off" required></label>
+      <input name="owner" placeholder="found from the token" autocomplete="off"></label>
     <label style="flex:3;min-width:16rem;margin:0"><span class="lbl">Token</span>
       <input name="token" type="password" placeholder="github_pat_…" autocomplete="off" required></label>
     <button class="btn" id="saveToken">Check and save</button>
@@ -1125,8 +1127,11 @@ async function loadGithub(){
   }catch(e){ box.textContent = 'Could not load: ' + e.message; }
 }
 
+let replacingOwner = '';     // the owner whose Replace was pressed: only that token may be swapped
+
 function focusToken(owner){
   const form = document.getElementById('tokenForm');
+  replacingOwner = owner || '';
   form.owner.value = owner || '';
   form.token.value = '';
   form.scrollIntoView({behavior: 'smooth', block: 'center'});
@@ -1141,10 +1146,11 @@ if(isAdmin){
     const owner = form.owner.value.trim();
     button.disabled = true; button.textContent = 'Checking with GitHub…'; showError('');
     try{
-      const found = await api(`/coding/github/${encodeURIComponent(owner)}`, {method: 'PUT',
-        headers: {'Content-Type': 'application/json'}, body: JSON.stringify({token: form.token.value.trim()})});
-      form.reset();
-      showOk(`Saved the token for ${owner}. ` + describeAccess(found).replace(/<[^>]+>/g, '') + '.');
+      const replace = !!owner && owner.toLowerCase() === replacingOwner.toLowerCase();
+      const found = await api('/coding/github', {method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({owner, token: form.token.value.trim(), replace})});
+      form.reset(); replacingOwner = '';
+      showOk(`Saved the token for ${found.owner}. ` + describeAccess(found).replace(/<[^>]+>/g, '') + '.');
       await loadGithub(); await loadProjects();
     }catch(err){ showError(err.message); }
     finally{ button.disabled = false; button.textContent = 'Check and save'; form.token.value = ''; }
