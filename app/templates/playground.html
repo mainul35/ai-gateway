@@ -178,6 +178,8 @@ details.tuning label{margin-bottom:.85rem}
 .doc-edit textarea:focus{outline:none}
 .doc iframe{width:100%;height:100%;border:0;background:#fff}
 .doc img{max-width:100%;height:auto;border-radius:6px}
+.pdf-pages{display:flex;flex-direction:column;gap:.6rem}
+.pdf-pages canvas{width:100%;height:auto;display:block;background:#fff;box-shadow:0 1px 3px rgba(0,0,0,.25)}
 .doc-text{white-space:pre-wrap;line-height:1.55;font-size:.93rem;overflow-wrap:anywhere}
 .doc-text.md,.web .doc-text{white-space:normal}
 .web .doc-text p{margin:0 0 .6rem}
@@ -3047,6 +3049,58 @@ function stopAside(tab){
   tab.controller?.abort();
 }
 
+/* A PDF in a frame is drawn by the browser's own viewer, except where that viewer is no use: iOS and
+   iPadOS show only the first page of a framed PDF and it does not scroll, and Android's browsers
+   offer it as a download. There the pages are drawn here, one under another, with pdf.js, fetched
+   from this server the first time it is needed. */
+function browserShowsPdfs(){
+  const apple = /iPad|iPhone|iPod/.test(navigator.userAgent)
+    || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);   // an iPad asking as a Mac
+  return !apple && navigator.pdfViewerEnabled !== false;
+}
+
+let pdfjsLoading = null;
+function loadPdfjs(){
+  if(!pdfjsLoading){
+    pdfjsLoading = import('/static/pdfjs/pdf.min.js').then(lib => {
+      lib.GlobalWorkerOptions.workerSrc = '/static/pdfjs/pdf.worker.min.js';
+      return lib;
+    }).catch(e => { pdfjsLoading = null; throw e; });
+  }
+  return pdfjsLoading;
+}
+
+async function drawPdf(view, url){
+  view.innerHTML = '<p class="muted">Opening...</p>';
+  try{
+    const lib = await loadPdfjs();
+    const pdf = await lib.getDocument({url}).promise;
+    const pages = document.createElement('div');
+    pages.className = 'pdf-pages';
+    view.innerHTML = '';
+    view.appendChild(pages);
+    // Sharp on the screen it is shown on, but not so large a phone runs out of memory for a canvas
+    const sharpness = Math.min(window.devicePixelRatio || 1, 2);
+    for(let n = 1; n <= pdf.numPages; n++){
+      if(!view.isConnected) break;                      // the tab was closed or showed something else
+      const page = await pdf.getPage(n);
+      const width = pages.clientWidth || view.clientWidth || 600;
+      const scale = width / page.getViewport({scale: 1}).width * sharpness;
+      const viewport = page.getViewport({scale: Math.min(scale, 4)});
+      const canvas = document.createElement('canvas');
+      canvas.width = Math.floor(viewport.width);
+      canvas.height = Math.floor(viewport.height);
+      canvas.setAttribute('aria-label', `Page ${n} of ${pdf.numPages}`);
+      pages.appendChild(canvas);
+      await page.render({canvasContext: canvas.getContext('2d'), viewport}).promise;
+      page.cleanup();
+    }
+  }catch(e){
+    view.innerHTML = '';
+    view.appendChild(panelNote('Could not show this PDF here. ' + errorText(e), url));
+  }
+}
+
 /* A document you attached: a PDF as the browser draws it, a picture as itself, and a Word file, a
    spreadsheet or a text file as its text - the browser can show none of those three itself */
 function openFile(url, name, editable = false){
@@ -3071,6 +3125,7 @@ function showFile(tab){
   view.className = 'doc-view';
   body.appendChild(view);
   if(lower.endsWith('.pdf')){
+    if(!browserShowsPdfs()){ drawPdf(view, url); return; }
     // As wide as the panel, without the page thumbnails: a whole A4 page squeezed in beside them
     // is too small to read
     view.innerHTML = `<iframe src="${escapeHtml(url)}#navpanes=0&view=FitH" title="${escapeHtml(name || 'document')}"></iframe>`;
