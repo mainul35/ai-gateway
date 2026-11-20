@@ -2,6 +2,12 @@
 
 Brings homelabai's network card back when it dies, so the machine never sits awake and unreachable.
 
+**Board: ASRock X570 Phantom Gaming 4** (branch `hardware/asrock-x570-phantom-gaming-4`). The values here
+are that board's onboard Intel I211: MAC `a8:a1:59:9d:f4:ae`, PCI `0000:04:00.0`. They are in
+`nic-watchdog.conf`, `01-lan.yaml` and the wake front's `WAKE_MAC`. For the ASUS ROG Crosshair VIII
+Hero, use branch `hardware/asus-rog-crosshair-viii-hero`. On another board this setup cannot find its
+card: it takes the card for dead and reboots the machine every few minutes, so it never gets to sleep.
+
 **Why.** The onboard Intel I211 (driver `igb`) sometimes drops off the PCIe bus when homelabai wakes
 from suspend: `igb 0000:04:00.0 enp4s0: PCIe link lost`. Nothing brought it back. On 2026-11-11 it
 woke at 03:23, lost the card, and stayed offline for 7 hours (still suspending and waking) until it
