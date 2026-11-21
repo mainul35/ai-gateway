@@ -55,6 +55,15 @@ def main(paths):
             result = subprocess.run([node, "--check", f.name], capture_output=True, text=True)
         finally:
             os.unlink(f.name)
+        # Parses in node, yet the browser never runs it: in an inline script, an HTML comment marker
+        # followed by a script tag puts the HTML parser in its "double escaped" state, where the
+        # closing tag does not close (the playground, 2026-11-21: 'Unexpected token <')
+        if not path.endswith(".js") and re.search(r"<!--", code) and re.search(r"<script", code[code.index("<!--"):], re.I):
+            broken += 1
+            line = code[:code.index("<!--")].count(chr(10)) + 1
+            print(f"check_page_scripts: {os.path.relpath(path, ROOT)} has '<!--' in an inline script "
+                  f"(script line {line}), followed by a script tag: the browser would not end the script "
+                  "where it ends. Write it so the marker is not literal, e.g. /<!-{2}/ or '<!-' + '-'.")
         if result.returncode:
             broken += 1
             lines = [l for l in result.stderr.splitlines() if l.strip()][:4]
