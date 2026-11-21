@@ -574,6 +574,17 @@ a.paper{color:var(--text);text-decoration:none}
 .preview .share-row{display:flex;flex-wrap:wrap;align-items:center;gap:.5rem;padding:.4rem .6rem;
                     border-bottom:1px solid var(--border);font-size:.8rem;color:var(--muted)}
 .preview .share-row[hidden]{display:none}
+/* Editing a page: its words in place, in its own design, or its code */
+.preview .edit-row{display:flex;flex-wrap:wrap;align-items:center;gap:.5rem;padding:.4rem .6rem;
+                   border-bottom:1px solid var(--border);font-size:.8rem;color:var(--muted);background:var(--card)}
+.preview .edit-row[hidden],.preview .page-code[hidden]{display:none}
+.preview .edit-row .spacer{flex:1}
+.preview.editing .bar-top button:not([data-full]):not([data-fold]){display:none}
+.preview .page-code{display:block;width:100%;height:60vh;box-sizing:border-box;border:none;resize:vertical;
+                    padding:.6rem .8rem;font:12px/1.45 ui-monospace,Consolas,monospace;
+                    background:var(--bg);color:var(--text);white-space:pre;tab-size:2}
+.preview:fullscreen .page-code,.preview.maxed .page-code{flex:1;height:auto;resize:none}
+.preview.folded .edit-row,.preview.folded .page-code{display:none}
 .preview .share-row input{flex:1;min-width:14rem;font-size:.8rem;padding:.25rem .4rem}
 .code-tools{display:flex;gap:.4rem;justify-content:flex-end;margin:-.4rem 0 .6rem}
 /* Any answer as a file */
@@ -2914,20 +2925,26 @@ function showTurn(tab, turn){
   answer.className = 'sq-a';
   answer.textContent = turn.answer || '';
   thread.append(asked, answer);
-  if(turn.answer) drawSideAnswer(answer, turn.answer);
+  if(turn.answer) drawSideAnswer(answer, turn.answer, tab, turn);
   return answer;
 }
 
 // A finished side answer, drawn as the conversation's are: Markdown, maths, code tools, a whole HTML
 // page as the page (with its own Save as PDF), and the Save as row under it
-async function drawSideAnswer(answer, text){
-  offerSideFile(answer, text);
+async function drawSideAnswer(answer, text, tab = null, turn = null){
+  offerSideFile(answer, turn ? () => turn.answer : text);
   const html = await renderedHtml(text);
   if(!html){ answer.textContent = text || '(no answer)'; return; }
   answer.classList.add('md');
   answer.innerHTML = html;
   renderMath(answer);
-  offerCode(answer, text);
+  // A page changed in place is kept with the side question, as what was answered from then on
+  offerCode(answer, text, turn && tab ? async (before, page) => {
+    const was = pageInText(turn.answer, before);
+    if(!was) throw new Error('the page is not in this answer');
+    turn.answer = turn.answer.replace(was, () => page);
+    keepSideQuestions(tab.key);
+  } : null);
 }
 
 async function answerAside(tab){
@@ -3043,8 +3060,9 @@ async function answerAside(tab){
       say('Catching up');
     }
     if(text){
-      tab.turns.push({question, asked, answer: text});
-      await drawSideAnswer(answer, text);
+      const turn = {question, asked, answer: text};
+      tab.turns.push(turn);
+      await drawSideAnswer(answer, text, tab, turn);
     }else answer.textContent = '(no answer)';
     if(cut){
       const note = document.createElement('p');
@@ -3897,18 +3915,69 @@ function centredPage(page){
   // the whole window, so in a frame shorter than the sheet its lower part could not be reached.
   // With overflow set on html, body's hidden stays on the body (whose content fits it) and the
   // window scrolls
-  const style = '<style>html{overflow:auto!important}'
+  const style = '<style data-gw-added>html{overflow:auto!important}'
     + 'body{margin-left:auto!important;margin-right:auto!important}</style>';
   const at = /<head[^>]*>/i.exec(page) || /<html[^>]*>/i.exec(page) || /<!doctype[^>]*>/i.exec(page);
   return at ? page.slice(0, at.index + at[0].length) + style + page.slice(at.index + at[0].length) : style + page;
 }
 
-function preview(block, code){
+/* Editing a page in its own design. The page is shown with designMode on, so its words can be
+   changed, and parts deleted, where they stand; what is kept is the page as it then is. Its own
+   scripts are taken out while it is edited and put back after: a script that builds part of the
+   page would otherwise have built it into what is kept, and build it twice the next time. The
+   editor is a script of the gateway's in the page's own sandboxed frame - the frame has no access
+   to this page - and gives the page back by postMessage when asked. */
+function pageEditor(){
+  document.addEventListener('DOMContentLoaded', () => { document.designMode = 'on'; });
+  addEventListener('message', e => {
+    if(e.source !== parent || !e.data || e.data.gwEdit !== 'give') return;
+    const copy = document.documentElement.cloneNode(true);
+    copy.querySelectorAll('[data-gw-added]').forEach(n => n.remove());
+    parent.postMessage({gwEdited: copy.outerHTML}, '*');
+  });
+}
+
+const SCRIPT_TAG = /<script\b[\s\S]*?<\/script\s*>/gi;
+const SCRIPT_MARK = /<template data-gw-script="(\d+)"><\/template>/g;
+
+function pageForEditing(page){
+  const scripts = [];
+  const quiet = page.replace(SCRIPT_TAG, tag => {
+    scripts.push(tag);
+    return `<template data-gw-script="${scripts.length - 1}"></template>`;
+  });
+  const editor = `<script data-gw-added>(${pageEditor.toString()})();<\/script>`;
+  const at = /<head[^>]*>/i.exec(quiet) || /<html[^>]*>/i.exec(quiet);
+  const html = centredPage(at ? quiet.slice(0, at.index + at[0].length) + editor + quiet.slice(at.index + at[0].length)
+                              : editor + quiet);
+  // What the frame gives back, as a page again: its doctype, and its scripts where they were (at
+  // the end, for one whose place was deleted with the words around it)
+  const doctype = (/^\s*<!doctype[^>]*>/i.exec(page) || ['<!DOCTYPE html>'])[0].trim();
+  const restore = edited => {
+    const used = new Set();
+    let out = edited.replace(SCRIPT_MARK, (m, i) => { used.add(+i); return scripts[+i] || ''; });
+    const lost = scripts.filter((_, i) => !used.has(i)).join('\n');
+    if(lost) out = /<\/body>/i.test(out) ? out.replace(/<\/body>(?![\s\S]*<\/body>)/i, () => lost + '\n</body>') : out + lost;
+    return doctype + '\n' + out;
+  };
+  return {html, restore};
+}
+
+// Where a page is in an answer's text, or null when it is not there. A page as drawn may differ
+// from the fence it came from (tabs, line ends), so the answer's one whole page stands in for it.
+function pageInText(text, page){
+  if(!text) return null;
+  if(text.includes(page)) return page;
+  const whole = wholePageIn(text);
+  return whole && text.includes(whole) ? whole : null;
+}
+
+function preview(block, code, keep = null){
   // A page of a set width (an A4 sheet: body 210mm) in the middle of a wider frame - full screen,
   // a tab, a shared link - rather than against its left edge. A page that fills the width is the
   // same either way; the PDF is made from the page as written. Put in at the top, not the end: a
   // page cut off mid-tag would swallow a style added after it.
-  const html = centredPage(withPictures(code.textContent));
+  let html = centredPage(withPictures(code.textContent));
   const frame = document.createElement('div');
   frame.className = 'preview';
   frame.innerHTML = `
@@ -3920,9 +3989,17 @@ function preview(block, code){
       <button class="linkish" data-open-tab>Open in a tab</button>
       <button class="linkish" data-show-code>Show the code</button>
       <button class="linkish" data-page-pdf title="This page, in its own design, as a PDF to download">Save as PDF</button>
+      <button class="linkish" data-edit-page title="Change the words where they stand, in this page's design, or change its code">Edit the page</button>
       <button class="linkish" data-page-md title="This page's words as Markdown, to change and make into a PDF or slides">Edit as Markdown</button>
     </div>
     <div class="share-row" hidden></div>
+    <div class="edit-row" hidden>
+      <span data-edit-hint></span><span class="spacer"></span>
+      <button class="linkish" data-edit-swap></button>
+      <button class="btn btn-sm" type="button" data-edit-save>Save</button>
+      <button class="linkish" data-edit-cancel>Cancel</button>
+    </div>
+    <textarea class="page-code" hidden spellcheck="false" aria-label="The page's code"></textarea>
     <iframe sandbox="allow-scripts allow-modals" referrerpolicy="no-referrer" title="preview"></iframe>`;
   const inner = frame.querySelector('iframe');
   // Kept dark and labelled until it has painted, so that a frame which is slow, or which fails,
@@ -3965,6 +4042,99 @@ function preview(block, code){
     if(tab) editFile(tab);
   });
   const toggle = frame.querySelector('[data-show-code]');
+
+  // Editing: the words in place, or the code. Save keeps the page with its answer (keep) and draws
+  // it again; Cancel puts back the page as it was.
+  const editRow = frame.querySelector('.edit-row');
+  const codeBox = frame.querySelector('.page-code');
+  const hint = frame.querySelector('[data-edit-hint]');
+  const swap = frame.querySelector('[data-edit-swap]');
+  const saveEdit = frame.querySelector('[data-edit-save]');
+  let editing = null;          // {mode: 'page'|'code', restore}
+  const show = page => {
+    inner.style.visibility = 'hidden';
+    inner.addEventListener('load', () => { inner.style.visibility = 'visible'; }, {once: true});
+    inner.srcdoc = page;
+  };
+  const editInPage = page => {
+    const made = pageForEditing(page);
+    editing = {mode: 'page', restore: made.restore};
+    codeBox.hidden = true;
+    inner.hidden = false;
+    hint.textContent = 'Click the words to change them; select a part and press Delete to remove it.';
+    swap.textContent = 'Edit the code instead';
+    show(made.html);
+  };
+  const editCode = page => {
+    editing = {mode: 'code'};
+    codeBox.value = page;
+    codeBox.hidden = false;
+    inner.hidden = true;
+    hint.textContent = "The page's HTML: its design and its words.";
+    swap.textContent = 'Edit the words instead';
+    codeBox.focus();
+  };
+  // The page as it now is in the editor
+  const edited = () => {
+    if(editing.mode === 'code') return Promise.resolve(codeBox.value);
+    const restore = editing.restore;
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        removeEventListener('message', took);
+        reject(new Error('the page did not answer'));
+      }, 4000);
+      function took(e){
+        if(e.source !== inner.contentWindow || typeof e.data?.gwEdited !== 'string') return;
+        clearTimeout(timer);
+        removeEventListener('message', took);
+        resolve(restore(e.data.gwEdited));
+      }
+      addEventListener('message', took);
+      inner.contentWindow.postMessage({gwEdit: 'give'}, '*');
+    });
+  };
+  const stopEditing = () => {
+    editing = null;
+    frame.classList.remove('editing');
+    editRow.hidden = true;
+    codeBox.hidden = true;
+    inner.hidden = false;
+    html = centredPage(withPictures(code.textContent));
+    show(html);
+  };
+  frame.querySelector('[data-edit-page]').addEventListener('click', () => {
+    block.hidden = true;
+    toggle.textContent = 'Show the code';
+    frame.classList.remove('folded');
+    frame.querySelector('[data-fold]').textContent = 'Minimise';
+    frame.classList.add('editing');
+    editRow.hidden = false;
+    editInPage(code.textContent);
+  });
+  swap.addEventListener('click', async () => {
+    try{
+      const page = await edited();
+      if(editing.mode === 'page') editCode(page); else editInPage(page);
+    }catch(e){ showError('Could not switch: ' + errorText(e)); }
+  });
+  frame.querySelector('[data-edit-cancel]').addEventListener('click', stopEditing);
+  saveEdit.addEventListener('click', async () => {
+    saveEdit.disabled = true;
+    try{
+      const page = await edited();
+      const before = code.textContent;
+      if(page.trim() && page !== before){
+        code.textContent = page;
+        if(keep){
+          try{ await keep(before, page); }
+          catch(e){ showError('The changes are shown but could not be kept: ' + errorText(e)); }
+        }
+      }
+      stopEditing();
+    }catch(e){ showError('Could not save the changes: ' + errorText(e)); }
+    finally{ saveEdit.disabled = false; }
+  });
+
   toggle.addEventListener('click', () => {
     const showCode = block.hidden;          // hidden now means the code is what we are switching to
     block.hidden = !showCode;
@@ -4595,18 +4765,27 @@ async function sendMedia(text, decision, again){
 
 function offerFiles(box, text){
   if(!text) return;
-  offerCode(box.querySelector('.body'), text);
+  offerCode(box.querySelector('.body'), text, async (before, page) => {
+    const now = box._text || text;
+    const was = pageInText(now, before);
+    if(!was || !currentId) throw new Error('this answer is not saved yet');
+    await api(`/chat/conversations/${currentId}/pages`, {method: 'PATCH', headers: JSON_HEADERS,
+                                                         body: JSON.stringify({old: was, new: page})});
+    box._text = now.replace(was, () => page);
+    if(box._historyIndex != null && box._historyIndex < sentTurns.length)
+      sentTurns[box._historyIndex] = {role: 'assistant', content: box._text};
+  });
 
   // Any answer as a file, a click away. The card that offered one waited for the question to ask
   // in the right words, and the router does not always see that a file was wanted either; the
   // answer is in the chat regardless, so turning it into a PDF or Markdown is always on offer.
-  const row = saveAsRow(text, () => box._answerId || null, file => showWritten(box, file));
+  const row = saveAsRow(() => box._text || text, () => box._answerId || null, file => showWritten(box, file));
   if(row) box.appendChild(row);
 }
 
 /* Copy and Save over each code block of a drawn answer, and a whole HTML page shown as the page, with
    its own Save as PDF: under the conversation's answers and a side question's alike */
-function offerCode(body, text){
+function offerCode(body, text, keep = null){
   for(const block of body.querySelectorAll('pre')){
     const code = block.querySelector('code');
     const language = (code?.className.match(/language-([\w+#-]+)/) || [])[1] || '';
@@ -4628,7 +4807,7 @@ function offerCode(body, text){
     // A complete page is worth seeing as a page. A fragment is not: it would render as a scrap
     // of markup with no styles around it, which tells you less than the markup does.
     // An unlabelled block counts too: models often emit a bare fence around a whole page
-    if((suffix === 'html' || !language) && WHOLE_PAGE.test(code.textContent)) preview(block, code);
+    if((suffix === 'html' || !language) && WHOLE_PAGE.test(code.textContent)) preview(block, code, keep);
   }
 }
 
@@ -4645,8 +4824,10 @@ function wholePageIn(text){
 /* "Save as PDF / Markdown" under an answer: the conversation's own, or a side question's. made(file)
    shows the finished file where the answer is; the file also opens beside the conversation. Nothing
    for an answer too short to be worth a file. */
-function saveAsRow(text, messageId, made){
-  if(!text || text.trim().length < 40) return null;
+function saveAsRow(answerText, messageId, made){
+  const current = () => typeof answerText === 'function' ? answerText() : answerText;
+  const first = current();
+  if(!first || first.trim().length < 40) return null;
   const row = document.createElement('div');
   row.className = 'as-file';
   row.innerHTML = '<span>Save as</span>' + documentKinds().map(kind =>
@@ -4659,6 +4840,7 @@ function saveAsRow(text, messageId, made){
     buttons.forEach(b => { b.disabled = true; });
     chosen.textContent = BUSY_LABELS[chosen.dataset.as] || 'Saving\u2026';
     try{
+      const text = current();
       // An answer that is a page to print ("an A4 document", "a poster"): the PDF is that page
       const page = chosen.dataset.as === 'pdf' ? wholePageIn(text) : null;
       const file = await api('/chat/written', {method: 'POST', headers: JSON_HEADERS,
