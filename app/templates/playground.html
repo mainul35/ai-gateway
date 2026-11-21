@@ -129,6 +129,9 @@ details.tuning label{margin-bottom:.85rem}
 /* A document or a web page */
 .doc,.web{flex:1;min-height:0;overflow-y:auto;padding:.9rem 1rem}
 .doc:has(iframe){padding:0;overflow:hidden}
+/* The frame's wrapper as tall as the tab: without it, a PDF with no Edit bar above it (a page's
+   PDF) was drawn in a 150px strip, the height a frame has inside a box of no height */
+.doc:not(.editable) > .doc-view:has(iframe){height:100%}
 /* A document written here: a bar to edit it above what it shows, and the editor with its preview */
 .doc.editable{display:flex;flex-direction:column;padding:0;overflow:hidden}
 .doc.editable .doc-view{flex:1;min-height:0;overflow-y:auto}
@@ -3884,8 +3887,18 @@ function pageAsMarkdown(html){
 // origin of its own: it can run its own scripts, and it cannot read this page, its cookies, its
 // storage, or the conversation. A model writes this HTML, so it is treated as something a stranger
 // wrote - which it is.
+function centredPage(page){
+  const style = '<style>body{margin-left:auto!important;margin-right:auto!important}</style>';
+  const at = /<head[^>]*>/i.exec(page) || /<html[^>]*>/i.exec(page) || /<!doctype[^>]*>/i.exec(page);
+  return at ? page.slice(0, at.index + at[0].length) + style + page.slice(at.index + at[0].length) : style + page;
+}
+
 function preview(block, code){
-  const html = withPictures(code.textContent);
+  // A page of a set width (an A4 sheet: body 210mm) in the middle of a wider frame - full screen,
+  // a tab, a shared link - rather than against its left edge. A page that fills the width is the
+  // same either way; the PDF is made from the page as written. Put in at the top, not the end: a
+  // page cut off mid-tag would swallow a style added after it.
+  const html = centredPage(withPictures(code.textContent));
   const frame = document.createElement('div');
   frame.className = 'preview';
   frame.innerHTML = `
