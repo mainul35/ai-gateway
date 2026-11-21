@@ -1282,7 +1282,10 @@ async def audio_to_m4a(raw, out):
     source = out + ".in"
     with open(source, "wb") as f:
         f.write(raw)
-    await _run([ffmpeg(), "-y", "-i", source, "-c:a", "aac", "-b:a", "96k", "-ar", "24000", "-ac", "1", out], "converting audio")
+    # Someone's upload: ffmpeg may read the file it was given and nothing it names (a playlist can
+    # point at other files or addresses)
+    await _run([ffmpeg(), "-y", "-protocol_whitelist", "file", "-i", source,
+                "-c:a", "aac", "-b:a", "96k", "-ar", "24000", "-ac", "1", out], "converting audio")
     with wave.open(out, "rb") as w:
         seconds = w.getnframes() / w.getframerate()
     return round(seconds, 2)

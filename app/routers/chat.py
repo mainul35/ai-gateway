@@ -4785,6 +4785,24 @@ async def video_voice(message_id: int, payload: VoiceIn, principal: Principal = 
                                       "X-Job-Id": str(job.id)})
 
 
+def _audio_type(data):
+    """(mime, extension) of a recording, from its first bytes; anything else is kept as bytes to
+    download, never as something a browser would open as a page."""
+    if data[:3] == b"ID3" or (len(data) > 1 and data[0] == 0xFF and data[1] & 0xE0 == 0xE0):
+        return "audio/mpeg", "mp3"
+    if data[:4] == b"RIFF" and data[8:12] == b"WAVE":
+        return "audio/wav", "wav"
+    if data[4:8] == b"ftyp":
+        return "audio/mp4", "m4a"
+    if data[:4] == b"OggS":
+        return "audio/ogg", "ogg"
+    if data[:4] == b"fLaC":
+        return "audio/flac", "flac"
+    if data[:4] == b"\x1a\x45\xdf\xa3":
+        return "audio/webm", "webm"
+    return "application/octet-stream", "bin"
+
+
 @router.post("/video/{message_id}/upload-voice")
 async def upload_voiceover(message_id: int, audio: UploadFile = File(...), lang: str = Form(...),
                            index: int = Form(...), principal: Principal = Depends(_video_user),
@@ -4831,10 +4849,9 @@ async def upload_voiceover(message_id: int, audio: UploadFile = File(...), lang:
                 raise video_story.VideoError(f"The uploaded audio could not be processed: {e}")
             except Exception as e:
                 raise video_story.VideoError(f"The uploaded audio could not be processed; please upload an mp3, m4a, or wav file")
-            # Store the voiceover file
-            mime = audio.content_type or "audio/mpeg"
-            mime = "audio/mpeg" if mime == "audio/mp3" else mime
-            ext = audio.filename.rsplit(".", 1)[-1] if "." in audio.filename else "m4a"
+            # Store the voiceover file, as the type its bytes are: /chat/files serves a file as its
+            # stored type, on this site, and the type the browser named could be text/html
+            mime, ext = _audio_type(raw)
             async with session_factory()() as db:
                 kept = ChatFile(user_id=user_id, kind="voice", mime_type=mime,
                                 name=f"scene {index + 1} ({word}).{ext}",

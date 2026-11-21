@@ -19,6 +19,16 @@ from PIL import Image as _Image  # noqa: E402
 
 _Image.MAX_IMAGE_PIXELS = 50_000_000
 warnings.simplefilter("error", _Image.DecompressionBombWarning)
+# And only the formats photos and web pictures come in. Pillow opens some forty by default, and most
+# of its memory-safety bugs are in decoders nobody sends a gateway (FlashPix, MSP, SPIDER, XBM, EPS -
+# which runs Ghostscript - and more), while picture search opens whatever a web server returns.
+# HEIF is added later by pillow_heif, where it is needed. MPO is how Pillow opens many phone JPEGs.
+PICTURE_FORMATS = {"JPEG", "MPO", "PNG", "GIF", "WEBP", "BMP", "TIFF", "AVIF"}
+_Image.init()
+# Both lists: open() walks ID and looks each name up in OPEN, and a name missing there is an error
+_Image.ID[:] = [f for f in _Image.ID if f in PICTURE_FORMATS]
+for _format in [f for f in _Image.OPEN if f not in PICTURE_FORMATS]:
+    del _Image.OPEN[_format]
 from app.engine.supervisor import supervisor
 from app.coding import runner as coding_runner
 from app.routers import (admin, anthropic_v1, auth_sso, chat, code_sessions, coding, device, mcp_server, openai_v1, projects,

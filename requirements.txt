@@ -1,11 +1,13 @@
-flask==3.0.0
-requests==2.31.0
+# Not pinned exactly: the gateway's own environment installs this file too, and requests==2.31.0
+# held it on a version that leaks .netrc credentials (fixed in 2.32.4) and more
+flask>=3.1.3
+requests>=2.33.0
 psutil==5.9.6
 # The test suite (tests/) exercises the gateway (app/), so running it also needs the
 # gateway's libraries and pytest, not just the Flask app's three above.
-pytest>=8.0
+pytest>=9.0.3
 httpx>=0.28.1
 fastapi>=0.141.1
 sqlalchemy[asyncio]>=2.0.54
-cryptography>=44.0
+cryptography>=50.0.1
 PyYAML>=6.0.2
