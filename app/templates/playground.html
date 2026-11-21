@@ -582,10 +582,22 @@ a.paper{color:var(--text);text-decoration:none}
 .preview .edit-row .spacer{flex:1}
 .preview.editing .bar-top button:not([data-full]):not([data-fold]){display:none}
 .preview.editing.split .page-body{display:flex;height:70vh}
-.preview .page-code{flex:1 1 50%;min-width:0;box-sizing:border-box;border:none;border-right:1px solid var(--border);
-                    resize:none;margin:0;padding:.6rem .8rem;font:12px/1.5 ui-monospace,Consolas,monospace;
-                    background:var(--bg);color:var(--text);white-space:pre;overflow:auto;tab-size:2}
-.preview.editing.split .page-code,.preview.editing.split iframe{flex:1 1 0;min-width:0;height:auto!important}
+.preview .page-code{resize:none;outline:none}
+.preview.editing.split .code-wrap,.preview.editing.split iframe{flex:1 1 0;min-width:0;height:auto!important}
+.preview .code-wrap{position:relative;border-right:1px solid var(--border);background:var(--bg);overflow:hidden}
+.preview .code-wrap[hidden]{display:none}
+.preview .code-wrap .page-code,.preview .code-wrap .code-paint{position:absolute;inset:0;width:100%;height:100%;
+  margin:0;padding:.6rem .8rem;box-sizing:border-box;border:none;font:12px/1.5 ui-monospace,Consolas,monospace;
+  white-space:pre;tab-size:2;overflow:auto;letter-spacing:0;word-spacing:0}
+.preview .code-wrap .page-code{background:transparent;color:transparent;caret-color:var(--text);z-index:1}
+.preview .code-wrap .page-code::selection{background:light-dark(#bfdbfe,#334e7a);color:transparent}
+.preview .code-wrap .code-paint{color:var(--text);overflow:hidden;pointer-events:none;
+  padding-bottom:calc(.6rem + 24px);padding-right:calc(.8rem + 24px)}    /* room for the box's scrollbars */
+.code-paint .t{color:light-dark(#1d4ed8,#7aa2f7)} .code-paint .a{color:light-dark(#9a3412,#e0af68)}
+.code-paint .s{color:light-dark(#15803d,#9ece6a)} .code-paint .c{color:light-dark(#64748b,#6b7a99);font-style:italic}
+.code-paint .e{color:light-dark(#b91c1c,#f7768e)} .code-paint .k{color:light-dark(#7c3aed,#bb9af7)}
+.code-paint .n{color:light-dark(#c2410c,#ff9e64)} .code-paint .p{color:light-dark(#0e7490,#7dcfff)}
+.code-paint .x{color:light-dark(#1d4ed8,#7aa2f7)}
 .preview:fullscreen .page-body,.preview.maxed .page-body{flex:1;min-height:0;height:auto;display:flex}
 .preview.folded .edit-row,.preview.folded .page-body{display:none}
 .preview .share-row input{flex:1;min-width:14rem;font-size:.8rem;padding:.25rem .4rem}
@@ -3976,6 +3988,50 @@ function scrollKeeper(){
   addEventListener('scroll', () => parent.postMessage({gwScroll: scrollY}, '*'), {passive: true});
 }
 
+/* An HTML page's code, coloured: tags, attributes, strings, comments and entities, and the CSS in
+   its <style> and the JavaScript in its <script>. Drawn under the transparent edit box, character
+   for character, so it only has to colour, never to be exact about the language. */
+const JS_WORDS = /^(?:const|let|var|function|return|if|else|for|while|do|switch|case|break|continue|new|class|extends|import|export|from|async|await|try|catch|finally|throw|typeof|instanceof|in|of|this|null|undefined|true|false|default|yield|delete|void)$/;
+function paintCode(src){
+  const esc = t => t.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  const span = (cls, t) => t ? `<span class="${cls}">${esc(t)}</span>` : '';
+  const js = t => t.replace(/(\/\*[\s\S]*?(?:\*\/|$)|\/\/[^\n]*)|("(?:\\.|[^"\\\n])*"?|'(?:\\.|[^'\\\n])*'?|`(?:\\.|[^`\\])*`?)|(\b\d[\d._]*\b)|([A-Za-z_$][\w$]*)|([\s\S])/g,
+    (m, c, str, num, word, other) => c ? span('c', c) : str ? span('s', str) : num ? span('n', num)
+      : word ? (JS_WORDS.test(word) ? span('k', word) : esc(word)) : esc(other));
+  const css = t => t.replace(/(\/\*[\s\S]*?(?:\*\/|$))|("[^"\n]*"?|'[^'\n]*'?)|(@[\w-]+)|([\w-]+)(\s*:)(?![^{};]*\{)|(-?\d[\d.]*(?:[a-z%]+)?)|(#[0-9a-fA-F]{3,8}\b)|([\s\S])/g,
+    (m, c, str, at, prop, colon, num, hex, other) => c ? span('c', c) : str ? span('s', str) : at ? span('k', at)
+      : prop ? span('p', prop) + esc(colon) : num ? span('n', num) : hex ? span('n', hex) : esc(other));
+  const tag = t => {
+    const m = /^(<\/?)([\w:-]*)([\s\S]*?)(\/?>)?$/.exec(t);
+    if(!m) return esc(t);
+    const attrs = m[3].replace(/([^\s=/>]+)(\s*=\s*)?("[^"]*"?|'[^']*'?|[^\s>]+)?/g,
+      (a, name, eq, value) => span('a', name) + (eq ? esc(eq) : '') + (value ? span('s', value) : ''));
+    return span('x', m[1]) + span('t', m[2]) + attrs + span('x', m[4] || '');
+  };
+  let out = '', i = 0;
+  const re = /<!--[\s\S]*?(?:-->|$)|<!doctype[^>]*>?|<(script|style)\b[^>]*>?|<\/?[A-Za-z][^>]*>?|&#?\w+;/gi;
+  let m;
+  while((m = re.exec(src))){
+    out += esc(src.slice(i, m.index));
+    const t = m[0];
+    if(t.startsWith('<!--') || /^<!doctype/i.test(t)) out += span('c', t);
+    else if(t[0] === '&') out += span('e', t);
+    else if(m[1]){
+      // A script or a style: its own language up to where it closes
+      out += tag(t);
+      const close = new RegExp(`</${m[1]}\\s*>`, 'i');
+      const rest = src.slice(re.lastIndex);
+      const end = close.exec(rest);
+      const body = end ? rest.slice(0, end.index) : rest;
+      out += m[1].toLowerCase() === 'script' ? js(body) : css(body);
+      re.lastIndex += body.length;
+    }else out += tag(t);
+    i = re.lastIndex;
+  }
+  // A last line that ends in a newline is still a line, as the edit box shows it
+  return out + esc(src.slice(i)) + '\n';
+}
+
 function forLiveEditing(page){
   const keeper = `<script>(${scrollKeeper.toString()})();<\/script>`;
   const at = /<head[^>]*>/i.exec(page) || /<html[^>]*>/i.exec(page);
@@ -4021,7 +4077,11 @@ function preview(block, code, keep = null){
       <button class="linkish" data-edit-cancel>Cancel</button>
     </div>
     <div class="page-body">
-      <textarea class="page-code" hidden spellcheck="false" aria-label="The page's code"></textarea>
+      <div class="code-wrap" hidden>
+        <pre class="code-paint" aria-hidden="true"></pre>
+        <textarea class="page-code" spellcheck="false" autocomplete="off" autocapitalize="off" wrap="off"
+                  aria-label="The page's code"></textarea>
+      </div>
       <iframe sandbox="allow-scripts allow-modals" referrerpolicy="no-referrer" title="preview"></iframe>
     </div>`;
   let inner = frame.querySelector('iframe');
@@ -4072,6 +4132,18 @@ function preview(block, code, keep = null){
   // page with its answer (keep) and draws it again; Cancel puts back the page as it was.
   const editRow = frame.querySelector('.edit-row');
   const codeBox = frame.querySelector('.page-code');
+  const codeWrap = frame.querySelector('.code-wrap');
+  const paint = frame.querySelector('.code-paint');
+  // The coloured copy follows the box: its words as they are typed, and where it is scrolled to
+  const repaint = () => {
+    paint.innerHTML = paintCode(codeBox.value);
+    paint.scrollTop = codeBox.scrollTop;
+    paint.scrollLeft = codeBox.scrollLeft;
+  };
+  codeBox.addEventListener('scroll', () => {
+    paint.scrollTop = codeBox.scrollTop;
+    paint.scrollLeft = codeBox.scrollLeft;
+  });
   const hint = frame.querySelector('[data-edit-hint]');
   const swap = frame.querySelector('[data-edit-swap]');
   const saveEdit = frame.querySelector('[data-edit-save]');
@@ -4113,7 +4185,7 @@ function preview(block, code, keep = null){
     if(editing?.mode === 'code') fill(false);
     editing = {mode: 'page', restore: made.restore};
     frame.classList.remove('split');
-    codeBox.hidden = true;
+    codeWrap.hidden = true;
     hint.textContent = 'Click the words to change them; select a part and press Delete to remove it.';
     swap.textContent = 'Advanced edit';
     show(made.html);
@@ -4122,8 +4194,9 @@ function preview(block, code, keep = null){
     if(editing?.mode !== 'code') fill(true);
     editing = {mode: 'code'};
     frame.classList.add('split');
-    codeBox.hidden = false;
+    codeWrap.hidden = false;
     codeBox.value = page;
+    repaint();
     scrolled = 0;
     hint.textContent = "The page's HTML on the left; the page on the right changes as you type.";
     swap.textContent = 'Edit the words in the page';
@@ -4134,6 +4207,7 @@ function preview(block, code, keep = null){
     codeBox.scrollTop = 0;
   };
   codeBox.addEventListener('input', () => {
+    repaint();
     clearTimeout(later);
     later = setTimeout(() => { if(editing?.mode === 'code') show(forLiveEditing(codeBox.value), scrolled); }, 350);
   });
@@ -4169,7 +4243,7 @@ function preview(block, code, keep = null){
     clearTimeout(later);
     frame.classList.remove('editing', 'split');
     editRow.hidden = true;
-    codeBox.hidden = true;
+    codeWrap.hidden = true;
     html = centredPage(withPictures(code.textContent));
     show(html);
   };
