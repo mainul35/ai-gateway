@@ -570,21 +570,24 @@ a.paper{color:var(--text);text-decoration:none}
 .preview.folded iframe,.preview.folded .share-row{display:none}
 .preview:fullscreen,.preview.maxed{display:flex;flex-direction:column;border-radius:0}
 .preview.maxed{position:fixed;inset:0;z-index:1000;margin:0}
-.preview:fullscreen iframe,.preview.maxed iframe{flex:1;height:auto!important}
+.preview:fullscreen iframe,.preview.maxed iframe{flex:1;min-width:0;height:auto!important}
 .preview .share-row{display:flex;flex-wrap:wrap;align-items:center;gap:.5rem;padding:.4rem .6rem;
                     border-bottom:1px solid var(--border);font-size:.8rem;color:var(--muted)}
 .preview .share-row[hidden]{display:none}
-/* Editing a page: its words in place, in its own design, or its code */
+/* Editing a page: its words in place, in its own design; or, advanced, its code beside the page
+   it makes, drawn again as it is typed */
 .preview .edit-row{display:flex;flex-wrap:wrap;align-items:center;gap:.5rem;padding:.4rem .6rem;
                    border-bottom:1px solid var(--border);font-size:.8rem;color:var(--muted);background:var(--card)}
 .preview .edit-row[hidden],.preview .page-code[hidden]{display:none}
 .preview .edit-row .spacer{flex:1}
 .preview.editing .bar-top button:not([data-full]):not([data-fold]){display:none}
-.preview .page-code{display:block;width:100%;height:60vh;box-sizing:border-box;border:none;resize:vertical;
-                    padding:.6rem .8rem;font:12px/1.45 ui-monospace,Consolas,monospace;
-                    background:var(--bg);color:var(--text);white-space:pre;tab-size:2}
-.preview:fullscreen .page-code,.preview.maxed .page-code{flex:1;height:auto;resize:none}
-.preview.folded .edit-row,.preview.folded .page-code{display:none}
+.preview.editing.split .page-body{display:flex;height:70vh}
+.preview .page-code{flex:1 1 50%;min-width:0;box-sizing:border-box;border:none;border-right:1px solid var(--border);
+                    resize:none;margin:0;padding:.6rem .8rem;font:12px/1.5 ui-monospace,Consolas,monospace;
+                    background:var(--bg);color:var(--text);white-space:pre;overflow:auto;tab-size:2}
+.preview.editing.split .page-code,.preview.editing.split iframe{flex:1 1 0;min-width:0;height:auto!important}
+.preview:fullscreen .page-body,.preview.maxed .page-body{flex:1;min-height:0;height:auto;display:flex}
+.preview.folded .edit-row,.preview.folded .page-body{display:none}
 .preview .share-row input{flex:1;min-width:14rem;font-size:.8rem;padding:.25rem .4rem}
 .code-tools{display:flex;gap:.4rem;justify-content:flex-end;margin:-.4rem 0 .6rem}
 /* Any answer as a file */
@@ -3963,6 +3966,23 @@ function pageForEditing(page){
   return {html, restore};
 }
 
+/* Advanced editing: the page beside its code, drawn again as the code is typed. Each drawing is a
+   new document, so it would start at the top every time; this script of the gateway's, in the
+   page's own sandboxed frame, tells the editor where the page is scrolled to, and the next drawing
+   starts there (the frame's name carries it in). */
+function scrollKeeper(){
+  const y = +window.name || 0;
+  addEventListener('load', () => { if(y) scrollTo(0, y); });
+  addEventListener('scroll', () => parent.postMessage({gwScroll: scrollY}, '*'), {passive: true});
+}
+
+function forLiveEditing(page){
+  const keeper = `<script>(${scrollKeeper.toString()})();<\/script>`;
+  const at = /<head[^>]*>/i.exec(page) || /<html[^>]*>/i.exec(page);
+  return centredPage(at ? page.slice(0, at.index + at[0].length) + keeper + page.slice(at.index + at[0].length)
+                        : keeper + page);
+}
+
 // Where a page is in an answer's text, or null when it is not there. A page as drawn may differ
 // from the fence it came from (tabs, line ends), so the answer's one whole page stands in for it.
 function pageInText(text, page){
@@ -3989,7 +4009,8 @@ function preview(block, code, keep = null){
       <button class="linkish" data-open-tab>Open in a tab</button>
       <button class="linkish" data-show-code>Show the code</button>
       <button class="linkish" data-page-pdf title="This page, in its own design, as a PDF to download">Save as PDF</button>
-      <button class="linkish" data-edit-page title="Change the words where they stand, in this page's design, or change its code">Edit the page</button>
+      <button class="linkish" data-edit-page title="Change the words where they stand, in this page's design">Edit the page</button>
+      <button class="linkish" data-edit-code title="This page's code beside the page, which changes as you type">Advanced edit</button>
       <button class="linkish" data-page-md title="This page's words as Markdown, to change and make into a PDF or slides">Edit as Markdown</button>
     </div>
     <div class="share-row" hidden></div>
@@ -3999,8 +4020,10 @@ function preview(block, code, keep = null){
       <button class="btn btn-sm" type="button" data-edit-save>Save</button>
       <button class="linkish" data-edit-cancel>Cancel</button>
     </div>
-    <textarea class="page-code" hidden spellcheck="false" aria-label="The page's code"></textarea>
-    <iframe sandbox="allow-scripts allow-modals" referrerpolicy="no-referrer" title="preview"></iframe>`;
+    <div class="page-body">
+      <textarea class="page-code" hidden spellcheck="false" aria-label="The page's code"></textarea>
+      <iframe sandbox="allow-scripts allow-modals" referrerpolicy="no-referrer" title="preview"></iframe>
+    </div>`;
   let inner = frame.querySelector('iframe');
   // Kept dark and labelled until it has painted, so that a frame which is slow, or which fails,
   // never looks like a frame that rendered a blank page
@@ -4043,43 +4066,84 @@ function preview(block, code, keep = null){
   });
   const toggle = frame.querySelector('[data-show-code]');
 
-  // Editing: the words in place, or the code. Save keeps the page with its answer (keep) and draws
-  // it again; Cancel puts back the page as it was.
+  // Editing, two ways: the words in place, in the page's design ('page'); or, advanced, the code
+  // beside the page, which is drawn again a moment after each change ('code', with the window
+  // filled for room for both). Either can switch to the other, carrying the changes. Save keeps the
+  // page with its answer (keep) and draws it again; Cancel puts back the page as it was.
   const editRow = frame.querySelector('.edit-row');
   const codeBox = frame.querySelector('.page-code');
   const hint = frame.querySelector('[data-edit-hint]');
   const swap = frame.querySelector('[data-edit-swap]');
   const saveEdit = frame.querySelector('[data-edit-save]');
   let editing = null;          // {mode: 'page'|'code', restore}
+  let wasMaxed = false, scrolled = 0, drawing = null, later = null;
   // Each page in a frame of its own: Chrome stopped painting a frame that had held a page in
-  // designMode once it was given another page (seen 2026-11-21: blank, even for a plain <h1>)
-  const show = page => {
+  // designMode once it was given another page (seen 2026-11-21: blank, even for a plain <h1>).
+  // The new frame is swapped in once it has loaded, so the page never flashes empty as it is typed.
+  const show = (page, at = 0) => {
     const fresh = inner.cloneNode(false);
     fresh.removeAttribute('srcdoc');
-    fresh.style.visibility = 'hidden';
-    fresh.addEventListener('load', () => { fresh.style.visibility = 'visible'; }, {once: true});
+    fresh.name = String(at);
+    fresh.hidden = true;
+    fresh.style.visibility = 'visible';
+    if(drawing) drawing.remove();
+    drawing = fresh;
+    fresh.addEventListener('load', () => {
+      if(drawing !== fresh) return;
+      drawing = null;
+      fresh.hidden = false;
+      inner.replaceWith(fresh);
+      inner = fresh;
+    }, {once: true});
     fresh.srcdoc = page;
-    inner.replaceWith(fresh);
-    inner = fresh;
+    inner.after(fresh);
+  };
+  addEventListener('message', e => {
+    if(e.source === inner.contentWindow && typeof e.data?.gwScroll === 'number') scrolled = e.data.gwScroll;
+  });
+  const fill = on => {
+    if(on){
+      wasMaxed = frame.classList.contains('maxed') || document.fullscreenElement === frame;
+      frame.classList.add('maxed');
+    }else if(!wasMaxed) frame.classList.remove('maxed');
+    label();
   };
   const editInPage = page => {
     const made = pageForEditing(page);
+    if(editing?.mode === 'code') fill(false);
     editing = {mode: 'page', restore: made.restore};
+    frame.classList.remove('split');
     codeBox.hidden = true;
-    inner.hidden = false;
     hint.textContent = 'Click the words to change them; select a part and press Delete to remove it.';
-    swap.textContent = 'Edit the code instead';
+    swap.textContent = 'Advanced edit';
     show(made.html);
   };
   const editCode = page => {
+    if(editing?.mode !== 'code') fill(true);
     editing = {mode: 'code'};
-    codeBox.value = page;
+    frame.classList.add('split');
     codeBox.hidden = false;
-    inner.hidden = true;
-    hint.textContent = "The page's HTML: its design and its words.";
-    swap.textContent = 'Edit the words instead';
-    codeBox.focus();
+    codeBox.value = page;
+    scrolled = 0;
+    hint.textContent = "The page's HTML on the left; the page on the right changes as you type.";
+    swap.textContent = 'Edit the words in the page';
+    show(forLiveEditing(page));
+    // From the top: focus would otherwise scroll to the caret, which a new value leaves at the end
+    codeBox.setSelectionRange(0, 0);
+    codeBox.focus({preventScroll: true});
+    codeBox.scrollTop = 0;
   };
+  codeBox.addEventListener('input', () => {
+    clearTimeout(later);
+    later = setTimeout(() => { if(editing?.mode === 'code') show(forLiveEditing(codeBox.value), scrolled); }, 350);
+  });
+  // Tab indents, as in any code editor, rather than leaving the box
+  codeBox.addEventListener('keydown', e => {
+    if(e.key !== 'Tab' || e.shiftKey || e.ctrlKey || e.altKey) return;
+    e.preventDefault();
+    codeBox.setRangeText('  ', codeBox.selectionStart, codeBox.selectionEnd, 'end');
+    codeBox.dispatchEvent(new Event('input'));
+  });
   // The page as it now is in the editor
   const edited = () => {
     if(editing.mode === 'code') return Promise.resolve(codeBox.value);
@@ -4100,23 +4164,27 @@ function preview(block, code, keep = null){
     });
   };
   const stopEditing = () => {
+    if(editing?.mode === 'code') fill(false);
     editing = null;
-    frame.classList.remove('editing');
+    clearTimeout(later);
+    frame.classList.remove('editing', 'split');
     editRow.hidden = true;
     codeBox.hidden = true;
-    inner.hidden = false;
     html = centredPage(withPictures(code.textContent));
     show(html);
   };
-  frame.querySelector('[data-edit-page]').addEventListener('click', () => {
+  const startEditing = how => {
     block.hidden = true;
+    inner.hidden = false;
     toggle.textContent = 'Show the code';
     frame.classList.remove('folded');
     frame.querySelector('[data-fold]').textContent = 'Minimise';
     frame.classList.add('editing');
     editRow.hidden = false;
-    editInPage(code.textContent);
-  });
+    how(code.textContent);
+  };
+  frame.querySelector('[data-edit-page]').addEventListener('click', () => startEditing(editInPage));
+  frame.querySelector('[data-edit-code]').addEventListener('click', () => startEditing(editCode));
   swap.addEventListener('click', async () => {
     try{
       const page = await edited();
@@ -4125,6 +4193,7 @@ function preview(block, code, keep = null){
   });
   frame.querySelector('[data-edit-cancel]').addEventListener('click', stopEditing);
   saveEdit.addEventListener('click', async () => {
+    if(!editing) return;
     saveEdit.disabled = true;
     try{
       const page = await edited();
