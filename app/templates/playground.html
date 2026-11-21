@@ -4001,7 +4001,7 @@ function preview(block, code, keep = null){
     </div>
     <textarea class="page-code" hidden spellcheck="false" aria-label="The page's code"></textarea>
     <iframe sandbox="allow-scripts allow-modals" referrerpolicy="no-referrer" title="preview"></iframe>`;
-  const inner = frame.querySelector('iframe');
+  let inner = frame.querySelector('iframe');
   // Kept dark and labelled until it has painted, so that a frame which is slow, or which fails,
   // never looks like a frame that rendered a blank page
   const note = frame.querySelector('[data-preview-state]');
@@ -4051,10 +4051,16 @@ function preview(block, code, keep = null){
   const swap = frame.querySelector('[data-edit-swap]');
   const saveEdit = frame.querySelector('[data-edit-save]');
   let editing = null;          // {mode: 'page'|'code', restore}
+  // Each page in a frame of its own: Chrome stopped painting a frame that had held a page in
+  // designMode once it was given another page (seen 2026-11-21: blank, even for a plain <h1>)
   const show = page => {
-    inner.style.visibility = 'hidden';
-    inner.addEventListener('load', () => { inner.style.visibility = 'visible'; }, {once: true});
-    inner.srcdoc = page;
+    const fresh = inner.cloneNode(false);
+    fresh.removeAttribute('srcdoc');
+    fresh.style.visibility = 'hidden';
+    fresh.addEventListener('load', () => { fresh.style.visibility = 'visible'; }, {once: true});
+    fresh.srcdoc = page;
+    inner.replaceWith(fresh);
+    inner = fresh;
   };
   const editInPage = page => {
     const made = pageForEditing(page);
