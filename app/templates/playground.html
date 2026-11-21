@@ -3888,7 +3888,12 @@ function pageAsMarkdown(html){
 // storage, or the conversation. A model writes this HTML, so it is treated as something a stranger
 // wrote - which it is.
 function centredPage(page){
-  const style = '<style>body{margin-left:auto!important;margin-right:auto!important}</style>';
+  // Scrollable too: an A4 sheet sets body{height:297mm;overflow:hidden}, which a browser applies to
+  // the whole window, so in a frame shorter than the sheet its lower part could not be reached.
+  // With overflow set on html, body's hidden stays on the body (whose content fits it) and the
+  // window scrolls
+  const style = '<style>html{overflow:auto!important}'
+    + 'body{margin-left:auto!important;margin-right:auto!important}</style>';
   const at = /<head[^>]*>/i.exec(page) || /<html[^>]*>/i.exec(page) || /<!doctype[^>]*>/i.exec(page);
   return at ? page.slice(0, at.index + at[0].length) + style + page.slice(at.index + at[0].length) : style + page;
 }
