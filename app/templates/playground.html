@@ -4009,12 +4009,14 @@ function paintCode(src){
     return span('x', m[1]) + span('t', m[2]) + attrs + span('x', m[4] || '');
   };
   let out = '', i = 0;
-  const re = /<!--[\s\S]*?(?:-->|$)|<!doctype[^>]*>?|<(script|style)\b[^>]*>?|<\/?[A-Za-z][^>]*>?|&#?\w+;/gi;
+  // `<!-{2}`, not the marker written out: inside an inline <script>, the HTML parser takes that marker
+  // followed later by a script tag as nested, and the page's whole script never ran (2026-11-21)
+  const re = /<!-{2}[\s\S]*?(?:-->|$)|<!doctype[^>]*>?|<(script|style)\b[^>]*>?|<\/?[A-Za-z][^>]*>?|&#?\w+;/gi;
   let m;
   while((m = re.exec(src))){
     out += esc(src.slice(i, m.index));
     const t = m[0];
-    if(t.startsWith('<!--') || /^<!doctype/i.test(t)) out += span('c', t);
+    if(t.startsWith('<!-' + '-') || /^<!doctype/i.test(t)) out += span('c', t);
     else if(t[0] === '&') out += span('e', t);
     else if(m[1]){
       // A script or a style: its own language up to where it closes
