@@ -781,7 +781,7 @@ a.paper{color:var(--text);text-decoration:none}
         </label>
         <label style="margin-bottom:0">
           <span class="lbl">Max tokens</span>
-          <input type="number" id="maxTokens" value="8192" min="1" max="32768">
+          <input type="number" id="maxTokens" value="32768" min="1" max="32768">
         </label>
       </div>
     </details>
@@ -2989,7 +2989,7 @@ async function answerAside(tab){
     let response = await fetch('/chat/complete', {
       method: 'POST', signal: AbortSignal.any([tab.controller.signal, attempt.signal]), headers: JSON_HEADERS,
       body: JSON.stringify({model: currentModel(), messages, conversation_id: null, web_search: false,
-                            max_tokens: parseInt(document.getElementById('maxTokens').value, 10) || 8192,
+                            max_tokens: parseInt(document.getElementById('maxTokens').value, 10) || 32768,
                             vision: tools.vision && caps.vision, detach: true})});
     if(!response.ok){
       const err = await response.json().catch(() => ({}));
@@ -4304,7 +4304,7 @@ async function sendAgent(text, again, decision = null){
       model, conversation_id: currentId,
       messages: turnsToSend(again).map(h => ({role: h.role, content: h.content, images: []})),
       temperature: parseFloat(document.getElementById('temperature').value),
-      max_tokens: parseInt(document.getElementById('maxTokens').value, 10) || 8192,
+      max_tokens: parseInt(document.getElementById('maxTokens').value, 10) || 32768,
       answers_to: box.dataset.turn ? Number(box.dataset.turn) : null});
     await followStream(response, chunk => {
       const event = chunk.gateway;
@@ -5460,7 +5460,7 @@ async function sendChat(text, decision, again, documentFormat = null){
                    // under the question; without this, asking again would paint over the old one
                    answers_to: box.dataset.turn ? Number(box.dataset.turn) : null,
                    temperature: parseFloat(document.getElementById('temperature').value),
-                   max_tokens: parseInt(document.getElementById('maxTokens').value, 10) || 8192,
+                   max_tokens: parseInt(document.getElementById('maxTokens').value, 10) || 32768,
                    web_search: decision.action === 'search',
                    vision: tools.vision && caps.vision};
   if(models[model]?.owned_by === 'llamacpp') payload.thinking = document.getElementById('thinking').checked;

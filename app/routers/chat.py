@@ -26,7 +26,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from app import access, backends, feedback, istory, limits, net, settings, usage as usage_log
+from app import access, backends, context_fit, feedback, istory, limits, net, settings, usage as usage_log
 from app.auth import Principal, authenticate
 from app.db import get_session, session_factory
 from app.models import (AnswerFeedback, ChatFile, Conversation, ConversationMessage, MemoryEntry, MemoryProposal,
@@ -1562,6 +1562,13 @@ async def complete(payload: CompleteIn, principal: Principal = Depends(authentic
                 messages.insert(position, {"role": "system", "content": web_search.sources_prompt(results, query)})
             yield _event("status", text="Writing the answer")
         body["messages"] = _one_system(messages)
+        # The answer gets what the window has left, at most what was asked: the playground asks for
+        # 32K so a thinking model can reason and still finish a long document (at 8K, qwen3.8's
+        # reasoning left ~1.7K tokens and an A4 page stopped halfway, 2026-11-20), and a model with an
+        # 8K window is not refused for being asked more than it holds
+        if body.get("max_tokens") and backend.context_length:
+            room = int(backend.context_length * context_fit.SAFETY) - context_fit.estimate(body)
+            body["max_tokens"] = max(256, min(body["max_tokens"], room))
         try:
             response = await forward(principal, "chat_completions", PROXY_PATHS["chat_completions"], body)
         except HTTPException as e:
