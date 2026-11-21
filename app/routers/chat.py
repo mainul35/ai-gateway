@@ -690,6 +690,29 @@ async def edit_question(conversation_id: int, message_id: int, payload: EditedQu
     return {"removed": len(doomed)}
 
 
+class EditedPageIn(BaseModel):
+    old: str = Field(min_length=1, max_length=400_000)
+    new: str = Field(min_length=1, max_length=400_000)
+
+
+@router.patch("/conversations/{conversation_id}/pages")
+async def edit_page(conversation_id: str, payload: EditedPageIn,
+                    principal: Principal = Depends(authenticate),
+                    session: AsyncSession = Depends(get_session)):
+    """Keeps the changes made to an HTML page an answer holds: its words edited where they stand
+    in the page's design, or its code. The answer that holds the page as it was has it replaced,
+    the latest first; nothing else in the answer changes. Found by the page rather than by an id,
+    since an answer just written is on screen before the playground learns what it was filed as.
+    """
+    conversation = await _owned(session, conversation_id, _require_user(principal), with_messages=True)
+    for message in sorted(conversation.messages, key=lambda m: m.id, reverse=True):
+        if message.role == "assistant" and payload.old in (message.content or ""):
+            message.content = message.content.replace(payload.old, payload.new, 1)
+            await session.commit()
+            return {"message_id": message.id}
+    raise HTTPException(status.HTTP_404_NOT_FOUND, "That page is not in an answer of this conversation")
+
+
 def _require_feature(principal, feature):
     """403 for a feature this person has not been granted (app/access.py FEATURES)."""
     if not access.can_use_feature(principal, feature):
