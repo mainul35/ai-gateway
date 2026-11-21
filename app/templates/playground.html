@@ -2911,13 +2911,20 @@ function showTurn(tab, turn){
   answer.className = 'sq-a';
   answer.textContent = turn.answer || '';
   thread.append(asked, answer);
-  if(turn.answer){
-    renderedHtml(turn.answer).then(html => {
-      if(html){ answer.classList.add('md'); answer.innerHTML = html; renderMath(answer); }
-    });
-    offerSideFile(answer, turn.answer);
-  }
+  if(turn.answer) drawSideAnswer(answer, turn.answer);
   return answer;
+}
+
+// A finished side answer, drawn as the conversation's are: Markdown, maths, code tools, a whole HTML
+// page as the page (with its own Save as PDF), and the Save as row under it
+async function drawSideAnswer(answer, text){
+  offerSideFile(answer, text);
+  const html = await renderedHtml(text);
+  if(!html){ answer.textContent = text || '(no answer)'; return; }
+  answer.classList.add('md');
+  answer.innerHTML = html;
+  renderMath(answer);
+  offerCode(answer, text);
 }
 
 async function answerAside(tab){
@@ -2955,7 +2962,7 @@ async function answerAside(tab){
   stop.hidden = false;
   tab.controller = new AbortController();
   tab.jobId = null;
-  let text = '', finished = false, attempt = null, onBack = null;
+  let text = '', finished = false, cut = false, attempt = null, onBack = null;
   const onChunk = chunk => {
     if(chunk.gateway){
       if(chunk.gateway.type === 'status' && !text) say(chunk.gateway.text || 'Working');
@@ -2971,6 +2978,9 @@ async function answerAside(tab){
       answer.textContent = text;
     }
     if(choice.finish_reason) finished = true;
+    // Stopped by the length limit, not because it was done: a document cut off mid-page looks
+    // finished unless this says so (a thinking model's reasoning counts against the same limit)
+    if(choice.finish_reason === 'length') cut = true;
   };
   try{
     // As a job in the gateway (detach): the answer goes on when this page loses the connection -
@@ -3024,15 +3034,16 @@ async function answerAside(tab){
       answer.textContent = '';
       say('Catching up');
     }
-    const html = await renderedHtml(text);
-    if(html){
-      answer.classList.add('md');
-      answer.innerHTML = html;
-      renderMath(answer);
-    }else answer.textContent = text || '(no answer)';
     if(text){
       tab.turns.push({question, asked, answer: text});
-      offerSideFile(answer, text);
+      await drawSideAnswer(answer, text);
+    }else answer.textContent = '(no answer)';
+    if(cut){
+      const note = document.createElement('p');
+      note.className = 'note';
+      note.textContent = 'Cut off: the answer reached the length limit (Max tokens in Settings) before it was finished. '
+        + 'Ask it to continue, or raise the limit and ask again.';
+      answer.after(note);
     }
   }catch(e){
     answer.textContent = e.name === 'AbortError' ? (text ? text + '\n\n(stopped)' : '(stopped)')
@@ -4561,7 +4572,18 @@ async function sendMedia(text, decision, again){
 
 function offerFiles(box, text){
   if(!text) return;
-  const body = box.querySelector('.body');
+  offerCode(box.querySelector('.body'), text);
+
+  // Any answer as a file, a click away. The card that offered one waited for the question to ask
+  // in the right words, and the router does not always see that a file was wanted either; the
+  // answer is in the chat regardless, so turning it into a PDF or Markdown is always on offer.
+  const row = saveAsRow(text, () => box._answerId || null, file => showWritten(box, file));
+  if(row) box.appendChild(row);
+}
+
+/* Copy and Save over each code block of a drawn answer, and a whole HTML page shown as the page, with
+   its own Save as PDF: under the conversation's answers and a side question's alike */
+function offerCode(body, text){
   for(const block of body.querySelectorAll('pre')){
     const code = block.querySelector('code');
     const language = (code?.className.match(/language-([\w+#-]+)/) || [])[1] || '';
@@ -4585,12 +4607,16 @@ function offerFiles(box, text){
     // An unlabelled block counts too: models often emit a bare fence around a whole page
     if((suffix === 'html' || !language) && WHOLE_PAGE.test(code.textContent)) preview(block, code);
   }
+}
 
-  // Any answer as a file, a click away. The card that offered one waited for the question to ask
-  // in the right words, and the router does not always see that a file was wanted either; the
-  // answer is in the chat regardless, so turning it into a PDF or Markdown is always on offer.
-  const row = saveAsRow(text, () => box._answerId || null, file => showWritten(box, file));
-  if(row) box.appendChild(row);
+// The one whole HTML page an answer holds in a code block, or null for none or several: what a PDF
+// of that answer should be, drawn in its own design, rather than its source printed as text
+function wholePageIn(text){
+  // The last fence may be open: an answer cut off at the length limit mid-page still has a page
+  const pages = [...text.matchAll(/```([\w+#-]*)[^\n]*\n([\s\S]*?)(?:```|$(?![\s\S]))/g)]
+    .filter(m => (!m[1] || /^html?$/i.test(m[1])) && WHOLE_PAGE.test(m[2]))
+    .map(m => m[2]);
+  return pages.length === 1 ? pages[0] : null;
 }
 
 /* "Save as PDF / Markdown" under an answer: the conversation's own, or a side question's. made(file)
@@ -4610,10 +4636,13 @@ function saveAsRow(text, messageId, made){
     buttons.forEach(b => { b.disabled = true; });
     chosen.textContent = BUSY_LABELS[chosen.dataset.as] || 'Saving\u2026';
     try{
+      // An answer that is a page to print ("an A4 document", "a poster"): the PDF is that page
+      const page = chosen.dataset.as === 'pdf' ? wholePageIn(text) : null;
       const file = await api('/chat/written', {method: 'POST', headers: JSON_HEADERS,
-        body: JSON.stringify({text, format: chosen.dataset.as, message_id: messageId()})});
+        body: JSON.stringify(page ? {text: page, format: 'page_pdf'}
+                                  : {text, format: chosen.dataset.as, message_id: messageId()})});
       made(file);
-      openFile(file.url, file.name, true);
+      openFile(file.url, file.name, !page);     // a page's PDF has no Markdown behind it to edit
     }catch(err){ showError('Could not make the file: ' + errorText(err)); }
     finally{
       chosen.textContent = label;
