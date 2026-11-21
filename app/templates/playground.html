@@ -586,13 +586,22 @@ a.paper{color:var(--text);text-decoration:none}
 .preview.editing.split .code-wrap,.preview.editing.split iframe{flex:1 1 0;min-width:0;height:auto!important}
 .preview .code-wrap{position:relative;border-right:1px solid var(--border);background:var(--bg);overflow:hidden}
 .preview .code-wrap[hidden]{display:none}
-.preview .code-wrap .page-code,.preview .code-wrap .code-paint{position:absolute;inset:0;width:100%;height:100%;
+.preview .code-wrap .page-code,.preview .code-wrap .code-paint,.preview .code-wrap .code-marks{position:absolute;inset:0;width:100%;height:100%;
   margin:0;padding:.6rem .8rem;box-sizing:border-box;border:none;font:12px/1.5 ui-monospace,Consolas,monospace;
   white-space:pre;tab-size:2;overflow:auto;letter-spacing:0;word-spacing:0}
 .preview .code-wrap .page-code{background:transparent;color:transparent;caret-color:var(--text);z-index:1}
-.preview .code-wrap .page-code::selection{background:light-dark(#bfdbfe,#334e7a);color:transparent}
-.preview .code-wrap .code-paint{color:var(--text);overflow:hidden;pointer-events:none;
+/* The selection is drawn in the highlights, under the coloured code: Chrome paints a text box's own
+   selection solid over a transparent box, hiding the code (2026-11-21) */
+.preview .code-wrap .page-code::selection{background:transparent;color:transparent}
+.preview .code-wrap .code-paint,.preview .code-wrap .code-marks{overflow:hidden;pointer-events:none;background:transparent;
   padding-bottom:calc(.6rem + 24px);padding-right:calc(.8rem + 24px)}    /* room for the box's scrollbars */
+.preview .code-wrap .code-paint{color:var(--text)}
+.preview .code-wrap .code-marks{color:transparent}
+.code-marks mark{color:transparent;background:none;border-radius:2px}
+.code-marks mark.mb{background:light-dark(rgba(37,99,235,.06),rgba(122,162,247,.08))}
+.code-marks mark.mt{background:light-dark(rgba(37,99,235,.2),rgba(122,162,247,.3));box-shadow:0 0 0 1px light-dark(rgba(37,99,235,.45),rgba(122,162,247,.55))}
+.code-marks mark.mw{background:light-dark(rgba(234,179,8,.35),rgba(224,175,104,.32))}
+.code-marks mark.ms{background:light-dark(rgba(37,99,235,.24),rgba(122,162,247,.34))}
 .code-paint .t{color:light-dark(#1d4ed8,#7aa2f7)} .code-paint .a{color:light-dark(#9a3412,#e0af68)}
 .code-paint .s{color:light-dark(#15803d,#9ece6a)} .code-paint .c{color:light-dark(#64748b,#6b7a99);font-style:italic}
 .code-paint .e{color:light-dark(#b91c1c,#f7768e)} .code-paint .k{color:light-dark(#7c3aed,#bb9af7)}
@@ -4034,6 +4043,53 @@ function paintCode(src){
   return out + esc(src.slice(i)) + '\n';
 }
 
+/* A page's tags with the one each closes or is closed by (pair), for showing a block's two ends.
+   Comments and what is inside a script or a style are skipped, as are tags that never close. */
+const VOID_TAGS = /^(?:area|base|br|col|embed|hr|img|input|link|meta|param|source|track|wbr)$/;
+function tagPairs(src){
+  const re = /<!-{2}[\s\S]*?(?:-->|$)|<!doctype[^>]*>?|<(\/?)([A-Za-z][\w:-]*)[^>]*>?/gi;
+  const tags = [], open = [];
+  let m;
+  while((m = re.exec(src))){
+    if(!m[2]) continue;
+    const tag = {start: m.index, end: re.lastIndex, name: m[2].toLowerCase(), close: !!m[1], pair: null};
+    tags.push(tag);
+    if(tag.close){
+      for(let i = open.length - 1; i >= 0; i--){
+        if(open[i].name !== tag.name) continue;
+        open[i].pair = tag;
+        tag.pair = open[i];
+        open.length = i;
+        break;
+      }
+    }else if(!VOID_TAGS.test(tag.name) && !/\/>$/.test(m[0])){
+      open.push(tag);
+      if(tag.name === 'script' || tag.name === 'style'){
+        const shut = new RegExp('<\\/' + tag.name + '\\s*>', 'ig');
+        shut.lastIndex = re.lastIndex;
+        const found = shut.exec(src);
+        re.lastIndex = found ? found.index : src.length;
+      }
+    }
+  }
+  return tags;
+}
+
+// The code again, transparent, with ranges marked ([start, end, class]): drawn under the coloured
+// code, so a mark is a background behind those characters. Overlapping ranges share a <mark>.
+function markedCode(src, ranges){
+  const esc = t => t.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  const cuts = [...new Set([0, src.length, ...ranges.flatMap(r => [r[0], r[1]])])].sort((a, b) => a - b);
+  let out = '';
+  for(let i = 0; i < cuts.length - 1; i++){
+    const [a, b] = [cuts[i], cuts[i + 1]];
+    if(a >= b) continue;
+    const kinds = [...new Set(ranges.filter(r => r[0] <= a && r[1] >= b).map(r => r[2]))];
+    out += kinds.length ? `<mark class="${kinds.join(' ')}">${esc(src.slice(a, b))}</mark>` : esc(src.slice(a, b));
+  }
+  return out + '\n';
+}
+
 function forLiveEditing(page){
   const keeper = `<script>(${scrollKeeper.toString()})();<\/script>`;
   const at = /<head[^>]*>/i.exec(page) || /<html[^>]*>/i.exec(page);
@@ -4080,6 +4136,7 @@ function preview(block, code, keep = null){
     </div>
     <div class="page-body">
       <div class="code-wrap" hidden>
+        <pre class="code-marks" aria-hidden="true"></pre>
         <pre class="code-paint" aria-hidden="true"></pre>
         <textarea class="page-code" spellcheck="false" autocomplete="off" autocapitalize="off" wrap="off"
                   aria-label="The page's code"></textarea>
@@ -4136,16 +4193,99 @@ function preview(block, code, keep = null){
   const codeBox = frame.querySelector('.page-code');
   const codeWrap = frame.querySelector('.code-wrap');
   const paint = frame.querySelector('.code-paint');
-  // The coloured copy follows the box: its words as they are typed, and where it is scrolled to
+  const marks = frame.querySelector('.code-marks');
+  // The coloured copy and the highlights follow the box: its words as they are typed, and where it
+  // is scrolled to
+  const follow = () => {
+    for(const layer of [paint, marks]){
+      layer.scrollTop = codeBox.scrollTop;
+      layer.scrollLeft = codeBox.scrollLeft;
+    }
+  };
+  let tags = [], hovered = null, markTimer = null;
   const repaint = () => {
     paint.innerHTML = paintCode(codeBox.value);
-    paint.scrollTop = codeBox.scrollTop;
-    paint.scrollLeft = codeBox.scrollLeft;
+    tags = tagPairs(codeBox.value);
+    remark();
+    follow();
   };
-  codeBox.addEventListener('scroll', () => {
-    paint.scrollTop = codeBox.scrollTop;
-    paint.scrollLeft = codeBox.scrollLeft;
+  codeBox.addEventListener('scroll', follow);
+
+  // What is highlighted: the two ends of the tag the caret is in, and the block between them; and
+  // every other place of the word under the mouse - or, with the mouse elsewhere, at the caret - so
+  // a class shows where it is styled and where it is used, a property where else it is set
+  const WORD = /[\w-]/;
+  const wordAt = at => {
+    const text = codeBox.value;
+    if(at == null || !(WORD.test(text[at] || '') || WORD.test(text[at - 1] || ''))) return null;
+    let a = at, b = at;
+    while(a > 0 && WORD.test(text[a - 1])) a--;
+    while(b < text.length && WORD.test(text[b])) b++;
+    const word = text.slice(a, b);
+    return /[A-Za-z]/.test(word) && word.length > 1 ? word : null;
+  };
+  const remark = () => {
+    const text = codeBox.value, ranges = [];
+    const [from, to] = [codeBox.selectionStart, codeBox.selectionEnd];
+    let tag = null;
+    if(from === to){
+      tag = tags.find(t => from > t.start && from < t.end);
+      if(tag?.pair){
+        const [first, last] = tag.close ? [tag.pair, tag] : [tag, tag.pair];
+        ranges.push([first.start, last.end, 'mb'], [first.start, first.end, 'mt'], [last.start, last.end, 'mt']);
+      }
+    }else if(document.activeElement === codeBox) ranges.push([from, to, 'ms']);
+    // The tag's own name at the caret is left out: every <div> lit up would drown the pair
+    let word = hovered ?? (from === to ? wordAt(from) : null);
+    if(!hovered && tag?.pair && word === tag.name) word = null;
+    if(word){
+      const find = new RegExp(`(?<![\\w-])${word.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?![\\w-])`, 'g');
+      let m, count = 0;
+      while((m = find.exec(text)) && count++ < 2000) ranges.push([m.index, m.index + word.length, 'mw']);
+      if(count < 2) ranges.splice(ranges.length - count, count);     // nowhere else: nothing to show
+    }
+    marks.innerHTML = markedCode(text, ranges);
+    follow();
+  };
+  const remarkSoon = () => { clearTimeout(markTimer); markTimer = setTimeout(remark, 30); };
+  for(const event of ['click', 'keyup', 'select', 'focus', 'blur']) codeBox.addEventListener(event, remarkSoon);
+  // The selection as it is dragged or moved with the keys, at once rather than after the pause
+  let selecting = 0;
+  const reselect = () => {
+    if(selecting) return;
+    selecting = requestAnimationFrame(() => { selecting = 0; remark(); });
+  };
+  document.addEventListener('selectionchange', () => { if(document.activeElement === codeBox) reselect(); });
+  codeBox.addEventListener('mousemove', e => { if(e.buttons) reselect(); });
+
+  // Which character the mouse is over: the code is one size of monospace, so it is the row and the
+  // column, counting a tab as reaching the next stop of two
+  const charAt = (x, y) => {
+    const style = getComputedStyle(codeBox);
+    const measure = charAt.canvas || (charAt.canvas = document.createElement('canvas').getContext('2d'));
+    measure.font = `${style.fontSize} ${style.fontFamily}`;
+    const width = measure.measureText('M'.repeat(40)).width / 40;
+    const height = parseFloat(style.lineHeight);
+    const box = codeBox.getBoundingClientRect();
+    const row = Math.floor((y - box.top - parseFloat(style.paddingTop) + codeBox.scrollTop) / height);
+    const left = x - box.left - parseFloat(style.paddingLeft) + codeBox.scrollLeft;
+    if(row < 0 || left < 0) return null;
+    const lines = codeBox.value.split('\n');
+    if(row >= lines.length) return null;
+    let offset = lines.slice(0, row).reduce((n, l) => n + l.length + 1, 0), column = 0;
+    for(const ch of lines[row]){
+      const next = ch === '\t' ? column + 2 - (column % 2) : column + 1;
+      if(left < next * width) return offset;
+      column = next;
+      offset += ch.length;
+    }
+    return null;
+  };
+  codeBox.addEventListener('mousemove', e => {
+    const word = e.buttons ? null : wordAt(charAt(e.clientX, e.clientY));
+    if(word !== hovered){ hovered = word; remarkSoon(); }
   });
+  codeBox.addEventListener('mouseleave', () => { if(hovered){ hovered = null; remarkSoon(); } });
   const hint = frame.querySelector('[data-edit-hint]');
   const swap = frame.querySelector('[data-edit-swap]');
   const saveEdit = frame.querySelector('[data-edit-save]');
