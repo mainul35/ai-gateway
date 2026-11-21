@@ -2989,11 +2989,16 @@ async function answerAside(tab){
     // As a job in the gateway (detach): the answer goes on when this page loses the connection -
     // the screen dims, another app comes to the front - and is picked up again below
     attempt = new AbortController();
+    const model = currentModel();
+    const asking = {model, messages, conversation_id: null, web_search: false,
+                    max_tokens: parseInt(document.getElementById('maxTokens').value, 10) || 32768,
+                    vision: tools.vision && caps.vision, detach: true};
+    // Thinking mode as the conversation has it: off, a thinking model spends the answer's whole
+    // allowance on the answer - what "write me this document" wants
+    if(models[model]?.owned_by === 'llamacpp') asking.thinking = document.getElementById('thinking').checked;
     let response = await fetch('/chat/complete', {
       method: 'POST', signal: AbortSignal.any([tab.controller.signal, attempt.signal]), headers: JSON_HEADERS,
-      body: JSON.stringify({model: currentModel(), messages, conversation_id: null, web_search: false,
-                            max_tokens: parseInt(document.getElementById('maxTokens').value, 10) || 32768,
-                            vision: tools.vision && caps.vision, detach: true})});
+      body: JSON.stringify(asking)});
     if(!response.ok){
       const err = await response.json().catch(() => ({}));
       throw new Error((typeof err.detail === 'string' && err.detail) || err.error?.message || `HTTP ${response.status}`);
